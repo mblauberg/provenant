@@ -482,6 +482,9 @@ fn mcp_results_validate_by_tag_and_allow_unknown_members() {
     let run = mcp::run_result_schema();
     let id = "5".repeat(32);
     let mut attempt = serde_json::to_value(row()).unwrap();
+    attempt["key"] = json!({
+        "project": "9".repeat(32), "graph": "graph", "node": "node", "attempt": 1
+    });
     attempt["provider_seconds"] = json!(1.5);
     attempt["future_member"] = json!(true);
     for value in [
@@ -509,25 +512,17 @@ fn mcp_results_validate_by_tag_and_allow_unknown_members() {
 
     let out = mcp::output_result_schema();
     let target = json!({"attempt": id, "host": null});
-    let mut chunk = json!({
+    let chunk = json!({
         "kind": "chunk", "target": target, "part": "result", "state": "terminal", "reason": null,
         "offset": 0, "next_offset": 2, "eof": true, "digest": "sha256:00",
         "bytes": {"encoding": "utf8", "data": "ok"}
     });
-    chunk
-        .as_object_mut()
-        .unwrap()
-        .extend(attempt.as_object().unwrap().clone());
     validate(&out, &chunk).unwrap();
     let mut artifact = json!({
         "kind": "artifact", "target": target, "digest": "sha256:00",
         "artifact": {"path": {"kind":"relative", "relative":{"encoding":"utf8", "path":"result.md"}}, "digest": null},
         "bytes": {"encoding": "base64", "data": "AA=="}
     });
-    artifact
-        .as_object_mut()
-        .unwrap()
-        .extend(attempt.as_object().unwrap().clone());
     validate(&out, &artifact).unwrap();
     artifact["bytes"]["data"] = json!("%%%");
     rejected(&out, artifact);

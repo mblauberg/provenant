@@ -458,9 +458,10 @@ fn graph_submission_pins_the_integration_base_across_replay()
         "graph-attempt-operation",
         &run.checkpoint.nodes[0].attempts[0].key,
     )?;
-    let operation = store
-        .operation(&operation, &owner.call(&cancel))?
-        .ok_or("graph run not admitted")?;
+    assert!(
+        store.operation(&operation, &owner.call(&cancel))?.is_some(),
+        "graph run not admitted"
+    );
     let index_call = provenant_fabric_runtime::chairs::Request {
         clock: &factory.clock,
         cancel: &cancel,
@@ -471,7 +472,7 @@ fn graph_submission_pins_the_integration_base_across_replay()
     )?
     .read(
         factory.context.identity.project,
-        operation.run_id,
+        &run.checkpoint.nodes[0].attempts[0].key.graph_id,
         &index_call,
     )?
     .ok_or("graph index missing")?;

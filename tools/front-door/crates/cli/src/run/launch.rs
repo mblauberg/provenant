@@ -410,6 +410,46 @@ pub(super) fn with_chair_index<T>(
         })
 }
 
+/// Resolve the graph label for a run at the CLI boundary. The run store still
+/// exposes its short-lived run adapter in a few launch APIs; chair records use
+/// the attempt's canonical work key.
+pub(super) fn graph_for_run(
+    session: &Session,
+    run: RunId,
+    call: &run::Request<'_>,
+) -> Result<String, Fail> {
+    let page = session.store.lanes(
+        &run::LaneQuery {
+            targets: vec![run::LaneTarget {
+                run,
+                task: None,
+                attempt: None,
+            }],
+            all: true,
+            limit: 1,
+            after: 0,
+            newest_first: false,
+            owner: None,
+            unseen_after: None,
+        },
+        call,
+    )?;
+    let attempt = page.lanes.first().ok_or(run::RunError::NotFound)?;
+    Ok(session
+        .store
+        .work_key(attempt.attempt_id, call)?
+        .graph()
+        .to_owned())
+}
+
+fn graph_for_attempt(
+    session: &Session,
+    attempt: AttemptId,
+    call: &run::Request<'_>,
+) -> Result<String, Fail> {
+    Ok(session.store.work_key(attempt, call)?.graph().to_owned())
+}
+
 pub(super) fn seal_launch_task(
     request_digest: provenant_core::Digest,
     task: &run::TaskRequest,
@@ -470,10 +510,7 @@ pub(super) fn launch_on_host_with_wait(
     let request_digest = request.digest().map_err(run::RunError::from)?;
 
     {
-        let operation = match request.parent {
-            Some(_) => Some(session.store.run(run, call)?.operation_id),
-            None => None,
-        };
+        let graph = graph_for_run(session, run, call)?;
         with_chair_index(edge.roots, call, |index, index_call| {
             if let Some(prior) = request.parent {
                 let parent = session.store.record(prior, call).map_err(|_| {
@@ -482,28 +519,24 @@ pub(super) fn launch_on_host_with_wait(
                 let original = session.store.request(parent.run_id, call).map_err(|_| {
                     provenant_fabric_runtime::chairs::Error::Invalid("continuation request")
                 })?;
-                let operation =
-                    operation
-                        .as_ref()
-                        .ok_or(provenant_fabric_runtime::chairs::Error::Invalid(
-                            "continuation operation",
-                        ))?;
+                let parent_graph = graph_for_attempt(session, prior, call).map_err(|_| {
+                    provenant_fabric_runtime::chairs::Error::Invalid("continuation work key")
+                })?;
                 index.inherit(
                     session.context.project_id,
-                    (parent.run_id, original.digest()?),
-                    run,
-                    provenant_fabric_runtime::chairs::Admission::HostRoot(operation),
+                    (&parent_graph, original.digest()?),
+                    &graph,
                     request,
                     index_call,
                 )
             } else {
-                match index.read(session.context.project_id, run, index_call)? {
+                match index.read(session.context.project_id, &graph, index_call)? {
                     Some(value) if value.request_digest != request_digest => {
                         Err(provenant_fabric_runtime::chairs::Error::Conflict)
                     }
                     // Only the host root's immutable request may repair an
                     // interrupted submission, including owned-worktree replay.
-                    None => index.submit(session.context.project_id, run, request, index_call),
+                    None => index.submit(session.context.project_id, &graph, request, index_call),
                     _ => Ok(()),
                 }
             }

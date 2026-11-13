@@ -1,5 +1,5 @@
 use crate::{BillingKind, Categories, PriceError, PriceIdentity, PriceTable};
-use provenant_core::{AttemptId, ProjectId, TaskId, WallTime};
+use provenant_core::{AttemptId, ProjectId, WallTime};
 use provenant_records::{AttemptFact, AttemptOutcome, RouteFact, Usage};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
@@ -752,7 +752,7 @@ fn stats_inner(
     let mut daily = BTreeMap::<(String, RouteFact), Accumulator>::new();
     let mut attempts = BTreeSet::<AttemptId>::new();
     let mut numbers = BTreeSet::new();
-    let mut latest = BTreeMap::<(ProjectId, TaskId), (u64, AttemptOutcome)>::new();
+    let mut latest = BTreeMap::<(ProjectId, String), (u64, AttemptOutcome)>::new();
     let mut coverage = Coverage::default();
     let mut budget = GroupBudget::default();
     for mut fact in facts {
@@ -772,8 +772,26 @@ fn stats_inner(
                 "time order or zero attempt number",
             ));
         }
+        let node = fact
+            .context
+            .as_ref()
+            .and_then(|context| context.graph_id.as_ref().zip(context.node_id.as_ref()));
+        let (work_label, work_attempt) = match node {
+            Some((graph, node)) => (
+                format!("{graph}/{node}"),
+                fact.context
+                    .as_ref()
+                    .and_then(|context| context.attempt)
+                    .map(u64::from)
+                    .unwrap_or(fact.attempt_number),
+            ),
+            // Older records have no WorkKey in AttemptFact. Keep their stable
+            // opaque task label for grouping until the records adaptor exposes
+            // the key; never present the label as a graph or node identity.
+            None => (fact.task_id.to_string(), fact.attempt_number),
+        };
         if !attempts.insert(fact.attempt_id)
-            || !numbers.insert((fact.project_id, fact.task_id, fact.attempt_number))
+            || !numbers.insert((fact.project_id, work_label.clone(), work_attempt))
         {
             return Err(TelemetryError::InvalidFact(
                 "duplicate attempt ID or task/attempt number",
@@ -956,10 +974,10 @@ fn stats_inner(
             )?;
         }
         let current = latest
-            .entry((fact.project_id, fact.task_id))
+            .entry((fact.project_id, work_label))
             .or_insert((0, fact.terminal_state));
-        if fact.attempt_number > current.0 {
-            *current = (fact.attempt_number, fact.terminal_state);
+        if work_attempt > current.0 {
+            *current = (work_attempt, fact.terminal_state);
         }
         total.record(&fact, cost.numerator, cost.missing_cost, cost.subscription)?;
     }

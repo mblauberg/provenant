@@ -225,18 +225,24 @@ fn open_host(roots: &Roots) -> provenant_fabric_store::Result<Option<HostStore>>
 /// frozen in the row. `PROVENANT_SESSION_ID` (recorded with the chair at
 /// dispatch) comes first; otherwise the session the chair saved, confirmed
 /// against canonical discovery ownership.
-fn resolve(reaction: &mut Reaction, roots: &Roots) -> Result<(), Error> {
+fn resolve(
+    reaction: &mut Reaction,
+    roots: &Roots,
+    store: &provenant_run::RunStore,
+    call: &provenant_run::Request<'_>,
+) -> Result<(), Error> {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let request = Request {
         clock: &clock,
         cancel: &cancel,
     };
+    let key = store.work_key(reaction.attempt, call)?;
     // Lane-dispatched lanes carry no chair binding, which keeps their
     // settlements quiet.
     let chair = match open_host(roots) {
         Ok(Some(host)) => host
-            .run_chair(reaction.project, reaction.run, &request)?
+            .graph_chair(reaction.project, key.graph(), &request)?
             .and_then(|found| found.chair),
         Ok(None) | Err(provenant_fabric_store::Error::NotFound) => None,
         Err(error) => return Err(error.into()),
@@ -296,7 +302,7 @@ fn drain_run_with_prices(
             save,
             Effects {
                 graph: &mut *graph,
-                resolve: &mut |reaction| resolve(reaction, &roots),
+                resolve: &mut |reaction| resolve(reaction, &roots, &store, &call),
                 ledger: &mut |reaction| record_usage(reaction, &store, assets, &roots),
             },
             &settings,
@@ -325,13 +331,9 @@ fn record_usage(
         cancel: &cancel,
     };
     let fact = store.attempt(reaction.attempt, &call)?;
+    let key = store.work_key(reaction.attempt, &call)?;
     let prices = crate::fabric::load_graph_prices(assets)?;
-    let row = provenant_telemetry::ledger::row(
-        &fact,
-        Some(reaction.run),
-        provenant_telemetry::ledger::Source::Settlement,
-        Some(&prices),
-    )?;
+    let row = provenant_telemetry::ledger::row(&fact, &key, Some(&prices))?;
     provenant_telemetry::ledger::append(roots.state.as_path(), &[row], &clock, &cancel)?;
     Ok(())
 }

@@ -7,7 +7,7 @@ pub(super) fn placement(
     target: &Target,
     allow_run: bool,
 ) -> Result<Option<remote::Placement>, Fail> {
-    remote::find_target(edge.roots, target, allow_run)
+    remote::find_target(edge, target, allow_run)
 }
 
 pub(super) fn local(
@@ -324,7 +324,7 @@ pub(super) fn resolve(
     }
     let context = super::execution_context(edge)?;
     let exact = selection.len() == 32 && !selection.contains('/');
-    let peers = remote::target_candidates(edge.roots)?;
+    let peers = remote::target_candidates(edge)?;
     let mut candidates = index(&context, &selection, allow_run)?;
     if exact
         && candidates
@@ -419,14 +419,6 @@ pub(super) fn open_resolved(
         run::RunStore::open(&context, call)?.with_writer_registry(edge.roots.state.as_path());
     Ok((Session { store, context }, candidate.target))
 }
-/// A run selection also accepts an attempt and uses its owning run.
-pub(super) fn run_id(edge: &Edge<'_>, target: &Target) -> Result<provenant_core::RunId, Fail> {
-    resolve(edge, target, true)?
-        .target
-        .run
-        .ok_or_else(|| run::RunError::NotFound.into())
-}
-
 pub(super) fn read_resolved(
     edge: &Edge<'_>,
     candidate: Candidate,

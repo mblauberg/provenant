@@ -39,7 +39,7 @@ fn fact(number: u64, input: Option<u64>) -> AttemptFact {
     AttemptFact {
         context: None,
         attempt_id: AttemptId::from_bytes(u128::from(number).to_be_bytes()),
-        task_id: TaskId::from_bytes([1; 16]),
+        task_id: provenant_core::TaskId::from_bytes([1; 16]),
         attempt_number: number,
         operation_id: OperationId::parse("test-operation").unwrap(),
         project_id: ProjectId::from_bytes([2; 16]),
@@ -1472,7 +1472,6 @@ fn lane_context_fixture_joins_existing_chair_and_graph() -> Result<(), Box<dyn s
     // Real persisted trace wire format; every value and identity is invented.
     lane.trace = serde_json::from_value(json!({
         "attempt": lane.attempt_id,
-        "run": "11111111111111111111111111111111",
         "telemetry_context": {
             "provenant_version": {"value": "0.0.1", "source": "compiled_package", "effective_at": "1970-01-01T00:00:00.000000Z", "scope": "provenant-run package"},
             "provenant_digest": {"value": {"sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bytes": 400}, "source": "current_exe", "effective_at": "1970-01-01T00:00:00.000000Z", "scope": "complete host executable bytes"},
@@ -1491,10 +1490,7 @@ fn lane_context_fixture_joins_existing_chair_and_graph() -> Result<(), Box<dyn s
         TelemetryContext::from_trace(&restored),
         TelemetryContext::from_trace(&lane.trace)
     );
-    let chairs = BTreeMap::from([(
-        lane.trace.run.ok_or("fixture run")?,
-        "fixture-chair".to_owned(),
-    )]);
+    let chairs = BTreeMap::from([("fixture-graph".to_owned(), "fixture-chair".to_owned())]);
     let report = crate::context::report(&[&lane], &chairs, &prices(Some(1_000_000)))?;
     assert_eq!(report.attempts[0].attempt, lane.attempt_id);
     assert_eq!(
@@ -1521,6 +1517,7 @@ fn lane_context_fixture_joins_existing_chair_and_graph() -> Result<(), Box<dyn s
     // A pre-enrichment pending trace still decodes, without backfilling history.
     let legacy: provenant_records::Trace = serde_json::from_str("{}")?;
     lane.trace = legacy;
+    lane.context = None;
     let historical = crate::context::report(&[&lane], &chairs, &prices(None))?;
     assert!(historical.attempts[0].lane.cost.complete.is_none());
     assert_eq!(historical.attempts[0].lane.cost.missing_attempts, 1);

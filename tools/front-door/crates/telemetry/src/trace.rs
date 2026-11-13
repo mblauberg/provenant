@@ -16,8 +16,8 @@ pub struct Hosts {
 /// One process per host and one thread per attempt; `ts` and `dur` are
 /// microseconds. The local host comes first. A flow arrow joins an attempt to
 /// the parent it descends from when the export holds both, on this host or
-/// across hosts. Attempt facts carry no run ID, so the run filter is applied by
-/// the store.
+/// across hosts. Attempt facts carry no work key, so a graph filter is applied
+/// by the store.
 pub fn trace(facts: &[AttemptFact], hosts: &Hosts, since: Option<WallTime>) -> Value {
     let mut facts: Vec<&AttemptFact> = facts
         .iter()
@@ -44,13 +44,23 @@ pub fn trace(facts: &[AttemptFact], hosts: &Hosts, since: Option<WallTime>) -> V
     let mut placed: BTreeMap<AttemptId, (u64, u64, i64, i64)> = BTreeMap::new();
     for (tid, fact) in (1u64..).zip(&facts) {
         let pid = pids[&host_of(fact)];
+        let graph = fact
+            .context
+            .as_ref()
+            .and_then(|context| context.graph_id.as_deref())
+            .unwrap_or("unknown graph");
+        let node = fact
+            .context
+            .as_ref()
+            .and_then(|context| context.node_id.as_deref())
+            .unwrap_or("unknown node");
         events.push(meta(
             "thread_name",
             pid,
             tid,
             format!(
-                "task {} attempt {} ({})",
-                fact.task_id, fact.attempt_number, fact.attempt_id
+                "{graph}/{node} attempt {} ({})",
+                fact.attempt_number, fact.attempt_id
             ),
         ));
         let start = fact.started_at.unwrap_or(fact.queued_at).as_micros();
@@ -63,7 +73,8 @@ pub fn trace(facts: &[AttemptFact], hosts: &Hosts, since: Option<WallTime>) -> V
             "name": outcome, "cat": "attempt", "ph": "X", "pid": pid, "tid": tid,
             "ts": start, "dur": end - start,
             "args": {
-                "task": fact.task_id,
+                "graph": fact.context.as_ref().and_then(|context| context.graph_id.as_deref()),
+                "node": fact.context.as_ref().and_then(|context| context.node_id.as_deref()),
                 "provider": route.and_then(|r| r.provider.as_ref()),
                 "model": route.and_then(|r| r.model.as_ref()),
                 "account": route.and_then(|r| r.account_label.as_ref()),

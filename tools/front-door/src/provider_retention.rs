@@ -304,14 +304,16 @@ pub(crate) fn provider_state_gc_sweeps_host_and_refuses_replaced_roots()
         clock: &clock,
         cancel: &cancel,
     };
+    let key = store.work_key(attempt, &call)?;
+    let graph = key.graph().to_owned();
     let index = provenant_fabric_runtime::chairs::ChairIndex::open(&roots.state, &index_call)?;
     index.submit(
         context.project_id,
-        run,
+        &graph,
         &store.request(run, &call)?,
         &index_call,
     )?;
-    let association = index.read(context.project_id, run, &index_call)?;
+    let association = index.read(context.project_id, &graph, &index_call)?;
     drop(store);
     let temporary = candidate
         .parent()
@@ -343,13 +345,14 @@ pub(crate) fn provider_state_gc_sweeps_host_and_refuses_replaced_roots()
     assert!(!temporary.exists());
     assert!(!candidate.exists());
     let reader = RunStore::open_disk_read_only(&context, &call)?.ok_or("run store")?;
+    let retained_key = reader.work_key(attempt, &call)?;
     assert_eq!(
-        reader.run(run, &call)?.run_id,
-        run,
-        "payload GC retains run metadata"
+        reader.attempt_by_key(&retained_key, &call)?.attempt_id,
+        attempt,
+        "payload GC retains the attempt under its work key"
     );
     assert_eq!(
-        index.read(context.project_id, run, &index_call)?,
+        index.read(context.project_id, &graph, &index_call)?,
         association,
         "retained runs keep chair associations"
     );

@@ -1195,16 +1195,6 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
     digest: &str,
 ) -> Result<(), GraphError<R, J>> {
     if checkpoint
-        .instance_id
-        .as_ref()
-        .is_some_and(|id| id.parse::<provenant_core::RunId>().is_err())
-    {
-        return Err(GraphError::BadCheckpoint {
-            node: plan.graph_id.clone(),
-            invariant: "instance identity must be a run ID",
-        });
-    }
-    if checkpoint
         .bound_review_base
         .iter()
         .chain(checkpoint.bound_integration_base.iter())

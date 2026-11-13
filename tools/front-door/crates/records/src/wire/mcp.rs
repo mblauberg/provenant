@@ -13,10 +13,24 @@ use serde_json::Value;
 pub fn mcp_attempt_schema() -> Value {
     let mut schema = super::lane::lane_row_schema();
     schema["additionalProperties"] = true.into();
+    schema["properties"]["key"] = work_key_schema();
     if let Some(required) = schema["required"].as_array_mut() {
         required.push("provider_seconds".into());
+        required.push("key".into());
     }
     schema
+}
+
+fn work_key_schema() -> Value {
+    open(
+        &[
+            ("project", string()),
+            ("graph", string()),
+            ("node", string()),
+            ("attempt", unsigned()),
+        ],
+        &[],
+    )
 }
 
 fn tagged(tag: &str, name: &str, required: &[(&str, Value)]) -> Value {
@@ -30,9 +44,8 @@ pub fn run_result_schema() -> Value {
     let lane = super::lane::lane_row_schema();
     let summary = open(
         &[
+            ("key", work_key_schema()),
             ("attempt_id", string()),
-            ("run_id", string()),
-            ("task_id", string()),
             ("state", lane["properties"]["state"].clone()),
             ("reason", lane["properties"]["reason"].clone()),
             ("exit_code", lane["properties"]["exit_code"].clone()),
@@ -94,32 +107,10 @@ fn bytes() -> Value {
     ])
 }
 
-/// `structuredContent` of `fabric_output`, tagged by `kind`.
-fn with_lane(mut schema: Value) -> Value {
-    let lane = mcp_attempt_schema();
-    if let (Some(properties), Some(fields)) = (
-        schema["properties"].as_object_mut(),
-        lane["properties"].as_object(),
-    ) {
-        properties.extend(fields.clone());
-    }
-    if let (Some(required), Some(fields)) = (
-        schema["required"].as_array_mut(),
-        lane["required"].as_array(),
-    ) {
-        for field in fields {
-            if !required.contains(field) {
-                required.push(field.clone());
-            }
-        }
-    }
-    schema
-}
-
 pub fn output_result_schema() -> Value {
     let target = open(&[("attempt", string())], &[("host", nullable(string()))]);
     one_of(vec![
-        with_lane(tagged(
+        tagged(
             "kind",
             "chunk",
             &[
@@ -133,8 +124,8 @@ pub fn output_result_schema() -> Value {
                 ("digest", string()),
                 ("bytes", bytes()),
             ],
-        )),
-        with_lane(tagged(
+        ),
+        tagged(
             "kind",
             "artifact",
             &[
@@ -152,6 +143,6 @@ pub fn output_result_schema() -> Value {
                 ("digest", string()),
                 ("bytes", bytes()),
             ],
-        )),
+        ),
     ])
 }

@@ -54,7 +54,7 @@ pub(super) fn cache_kpi_rows(
 /// cannot count them: they have no finish time yet.
 pub(super) fn unfinished_attempts(
     store: Option<&run::RunStore>,
-    run_id: Option<RunId>,
+    target: Option<&crate::target::Target>,
     call: &run::Request<'_>,
 ) -> Result<u64, Fail> {
     let Some(store) = store else {
@@ -65,15 +65,7 @@ pub(super) fn unfinished_attempts(
     loop {
         let page = store.lanes(
             &run::LaneQuery {
-                targets: run_id
-                    .map(|run| {
-                        vec![run::LaneTarget {
-                            run,
-                            task: None,
-                            attempt: None,
-                        }]
-                    })
-                    .unwrap_or_default(),
+                targets: vec![],
                 all: false,
                 limit: 100,
                 after,
@@ -83,12 +75,12 @@ pub(super) fn unfinished_attempts(
             },
             call,
         )?;
-        // A run selection also returns its terminal lanes, so filter on state.
-        count += page
-            .lanes
-            .iter()
-            .filter(|lane| !matches!(lane.state, run::AttemptState::Terminal { .. }))
-            .count() as u64;
+        for lane in &page.lanes {
+            let key = store.work_key(lane.attempt_id, call)?;
+            if target.is_none_or(|target| super::work_key_matches(&key, target)) {
+                count += 1;
+            }
+        }
         match page.next {
             Some(next) => after = next,
             None => return Ok(count),
@@ -148,10 +140,10 @@ pub(super) fn stats_inner(
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
     let (context, store) = open_read_only(edge, &call)?;
-    let selected_run = command
+    let selected_graph = command
         .run_id
         .as_ref()
-        .map(|target| targets::run_id(edge, target))
+        .map(super::graph_selector)
         .transpose()?;
     let window = provenant_telemetry::Window {
         since: instant(command.since)?,
@@ -159,22 +151,28 @@ pub(super) fn stats_inner(
         project: Some(context.project_id),
         detail: command.detail,
     };
-    let facts = store
+    let mut facts = store
         .as_ref()
         .map(|store| {
             store
-                .attempts(
-                    run::AttemptFilter {
-                        run_id: selected_run,
-                        task_id: None,
-                    },
-                    &call,
-                )?
+                .attempts(run::AttemptFilter::default(), &call)?
                 .collect::<Result<Vec<_>, _>>()
         })
         .transpose()?
         .unwrap_or_default();
-    let unfinished = unfinished_attempts(store.as_ref(), selected_run, &call)?;
+    if let (Some(target), Some(store)) = (selected_graph.as_ref(), store.as_ref()) {
+        let mut matched = Vec::with_capacity(facts.len());
+        for fact in facts {
+            let key = store.work_key(fact.attempt_id, &call)?;
+            if super::work_key_matches(&key, target) {
+                matched.push(fact);
+            }
+        }
+        facts = matched;
+    } else if selected_graph.is_some() {
+        facts.clear();
+    }
+    let unfinished = unfinished_attempts(store.as_ref(), selected_graph.as_ref(), &call)?;
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
         .map_err(|error| Fail::config(Status::Invalid, error))?;
     let selected: Vec<_> = facts
@@ -203,11 +201,25 @@ pub(super) fn stats_inner(
             let request = requests
                 .entry(record.run_id)
                 .or_insert_with(|| store.request(record.run_id, &call).ok());
+            let key = store.work_key(record.attempt_id, &call).ok()?;
+            let request = request.as_ref()?;
             let task = request
-                .as_ref()?
                 .tasks
                 .iter()
-                .find(|task| task.task_id == fact.task_id)?;
+                .find(|task| {
+                    task.context.as_ref().is_some_and(|context| {
+                        context.graph_id.as_deref() == Some(key.graph())
+                            && context.node_id.as_deref() == Some(key.node())
+                    })
+                })
+                // `CanonicalRequest` is still the lower run adapter and plain
+                // requests have no graph context. Keep this lookup at that edge.
+                .or_else(|| {
+                    request
+                        .tasks
+                        .iter()
+                        .find(|task| task.task_id == fact.task_id)
+                })?;
             Some(
                 if task.writer.is_some() {
                     "worktree-write"
@@ -249,13 +261,17 @@ pub(super) fn stats_inner(
             clock: call.clock,
             cancel: call.cancel,
         };
-        let runs: std::collections::BTreeSet<_> =
-            selected.iter().filter_map(|fact| fact.trace.run).collect();
-        for run in runs {
-            if let Ok(Some(binding)) = index.read(context.project_id, run, &index_call)
+        let mut graphs = std::collections::BTreeSet::new();
+        if let Some(store) = store.as_ref() {
+            for fact in &selected {
+                graphs.insert(store.work_key(fact.attempt_id, &call)?.graph().to_owned());
+            }
+        }
+        for graph in graphs {
+            if let Ok(Some(binding)) = index.read(context.project_id, &graph, &index_call)
                 && let Some(session) = binding.chair.and_then(|chair| chair.session)
             {
-                chair_bindings.insert(run, session);
+                chair_bindings.insert(graph, session);
             }
         }
     }
@@ -455,7 +471,7 @@ pub(super) fn stats_inner(
     }
     // Native rows are a host-wide breakdown of chair usage already included
     // above; expose the attribution without adding it to totals a second time.
-    if selected_run.is_none() {
+    if selected_graph.is_none() {
         let native = provenant_telemetry::native_attempts::read(edge.roots);
         let mut rows = provenant_telemetry::ingest::read_rows(
             edge.roots,

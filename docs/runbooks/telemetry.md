@@ -9,14 +9,13 @@ this page holds the steps and sharp edges. Cost is an API-equivalent estimate,
 not a bill, and an unknown cost is never zero: unpriced attempts make a total a
 lower bound.
 
-## Backfill the usage ledger once per host
+## Usage ledger retention
 
 Settled attempts are recorded in `<state>/usage-ledger/`, which outlives the run
-store. After installing 1.8.0 run `provenant telemetry backfill` once on each
-host to copy attempts settled before the upgrade; a later release removes run
-history, and the ledger is then the only record of earlier lane usage. Repeating
-it adds nothing. Unreadable ledger lines are reported by segment and line and
-kept, not repaired.
+store. The ledger keeps new graph and node identities with each priced
+settlement. Historical 1.x `run` and `task` labels remain opaque text and are
+read as stored; they are not reconstructed from run history. Unreadable ledger
+lines are reported by segment and line and kept, not repaired.
 
 ## Native session ingest
 

@@ -999,9 +999,12 @@ mod wire_parity {
         let mut record = json!({
             "schema_version": 1,
             "attempt_id": AttemptId::from_bytes([1; 16]),
-            "run_id": provenant_core::RunId::from_bytes([2; 16]),
+            "run_id": "02020202020202020202020202020202",
+            "task_id": "04040404040404040404040404040404",
+            "key": provenant_records::WorkKey::new(
+                provenant_core::ProjectId::from_bytes([3; 16]), "graph", "node", 1
+            ).unwrap(),
             "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
-            "task_id": provenant_core::TaskId::from_bytes([4; 16]),
             "operation_id": "wire-parity",
             "attempt_number": 1, "revision": 1, "generation": 0,
             "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
@@ -1038,8 +1041,9 @@ mod wire_parity {
             let value = check("fabric_run", &value);
             assert_eq!(value["attempt"]["provider_seconds"], seconds);
             assert_eq!(value["attempt"]["state"], "running");
-            assert_eq!(value["attempt"]["run_id"], record.run_id.to_string());
-            assert_eq!(value["attempt"]["task_id"], record.task_id.to_string());
+            assert_eq!(value["attempt"]["key"]["graph"], "graph");
+            assert_eq!(value["attempt"]["key"]["node"], "node");
+            assert_eq!(value["attempt"]["key"]["attempt"], 1);
             assert_eq!(
                 value["attempt"]["attempt_id"],
                 record.attempt_id.to_string()
@@ -1055,7 +1059,7 @@ mod wire_parity {
                 extra: Default::default(),
                 page: AttemptPage {
                     extra: Default::default(),
-                    items: vec![AttemptSummary::from(record.clone())],
+                    items: vec![AttemptSummary::try_from(record.clone()).unwrap()],
                     next_after: None,
                     truncated: false,
                 },
@@ -1186,18 +1190,7 @@ mod wire_parity {
                 digest: Digest::from_bytes([0; 32]),
                 bytes,
             };
-            let mut value = serde_json::to_value(&chunk).unwrap();
-            let mut lane = serde_json::to_value(provenant_records::wire::LaneRow::project(
-                &attempt(None),
-                Default::default(),
-            ))
-            .unwrap();
-            lane["provider_seconds"] = Value::Null;
-            value
-                .as_object_mut()
-                .unwrap()
-                .extend(lane.as_object().unwrap().clone());
-            check("fabric_output", &value);
+            check("fabric_output", &chunk);
         }
     }
 

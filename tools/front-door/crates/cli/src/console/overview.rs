@@ -151,7 +151,10 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
                     running += usize::from(active);
                     attention += usize::from(needs_attention);
                     if active || needs_attention {
-                        lanes.push(json!({"project_id":item.project_id,"project_label":label,"run_id":row.run_id,"task_id":row.task_id,"attempt_id":row.attempt_id,"task_label":item.title,"state":row.state,"cause":row.cause,"retry_of":row.retry_of,"superseded_by":row.superseded_by,"attention":needs_attention}));
+                        let Some(key) = item.record.key.as_ref() else {
+                            return Err(Error::Encode);
+                        };
+                        lanes.push(json!({"project_id":item.project_id,"project_label":label,"key":key,"attempt_id":row.attempt_id,"task_label":item.title,"state":row.state,"cause":row.cause,"retry_of":row.retry_of,"superseded_by":row.superseded_by,"attention":needs_attention}));
                     }
                 }
                 if batch.truncated {

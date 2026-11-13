@@ -633,6 +633,8 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
         .ok_or("refused launch lost its admitted operation")?;
     assert_eq!(operation.state, run::OperationState::Terminal);
     let first = session.store.run(operation.run_id, &call)?;
+    let graph =
+        launch::graph_for_run(&session, first.run_id, &call).map_err(|failure| failure.message)?;
     assert!(
         session.store.request(first.run_id, &call)?.tasks[0]
             .profile
@@ -640,7 +642,7 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
     );
     with_chair_index(&roots, &call, |index, index_call| {
         let binding = index
-            .read(session.context.project_id, first.run_id, index_call)?
+            .read(session.context.project_id, &graph, index_call)?
             .unwrap();
         assert_eq!(binding.chair, chair);
         assert_eq!(
@@ -662,7 +664,7 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
     let mut forged = session.store.request(first.run_id, &call)?;
     forged.concurrency = 2;
     with_chair_index(&roots, &call, |index, c| {
-        index.submit(session.context.project_id, first.run_id, &forged, c)
+        index.submit(session.context.project_id, &graph, &forged, c)
     })
     .map_err(|f| f.message)?;
     assert_eq!(
@@ -697,7 +699,7 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
     with_chair_index(&roots, &call, |index, call| {
         assert_eq!(
             index
-                .read(session.context.project_id, first.run_id, call)?
+                .read(session.context.project_id, &graph, call)?
                 .unwrap()
                 .chair,
             chair
