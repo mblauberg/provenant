@@ -208,12 +208,12 @@ fn prepare(
             }
         }
     }
-    if input.sandboxed() || input.account.is_some() {
-        let selected_home = if input.sandboxed() {
-            codex_home.as_path()
-        } else {
-            input.account.unwrap().directory()
-        };
+    let selected_home = if input.sandboxed() {
+        Some(codex_home.as_path())
+    } else {
+        input.account.map(|account| account.directory())
+    };
+    if let Some(selected_home) = selected_home {
         env.retain(|(key, _)| key != "CODEX_HOME");
         env.push(("CODEX_HOME".into(), selected_home.into()));
     }
