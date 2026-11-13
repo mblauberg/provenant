@@ -78,31 +78,33 @@ path from it. A narrowed network always sandboxes the lane.
 
 ## Lane sandbox mode
 
-Each macOS attempt resolves whether it runs under Seatbelt. In order:
+Each macOS attempt resolves whether it runs under Seatbelt. By default, every lane kind
+(writers and read-only lanes alike) runs unsandboxed. In precedence order:
 
-1. **Floors** that no override removes: a lane started by a lane that was
-   itself sandboxed by its route, its parent or the knob (`parent`), a route id
-   (`adapter/model`, or `command/NAME`) starting with an entry of
-   `[domains.run] sandboxed_routes` (`route`; default `["opencode/opencode/"]`,
-   the OpenCode Zen tier, so `opencode/opencode-go/` is not listed), and an
-   effective network of `provider` or `local` (`network`). "Started by"
-   covers `run` from inside a lane and every graph node a lane or planner
-   adds or replaces: admission names the admitting node in
-   `attempt.admitted_by`, overwriting any value the author wrote. A sandbox
-   that only enforces read-only access or a narrowed network does not pass
-   on, so a read-only planner's writers stay unsandboxed. An unreadable
-   record, or an admitting attempt on another host, counts as sandboxed.
-2. **The `lanes.sandbox` knob** (`auto|on|off`): `run --sandbox` /
-   `--no-sandbox`, graph and template `attempt.sandbox`, or host `[knobs]`.
-   `on` and `off` decide (`knob`).
-3. **Under `auto`**, read-only lanes are sandboxed (`read_only`), because only
-   the sandbox keeps them read-only; writers are not (`default`). Set host
-   `[knobs] "lanes.sandbox" = "off"` to run read-only lanes unsandboxed too.
+1. **Unsupported backend:** Off macOS every lane resolves as sandboxed (`platform`),
+   so Linux keeps refusing lane launch.
+2. **Inherited OS sandbox:** A process already running inside an operating-system sandbox
+   (e.g. Seatbelt) cannot remove it. An inherited OS sandbox is always reported honestly as
+   effective (`parent`), even if unsandboxed execution was requested.
+3. **Explicit knob:**
+   - `on` / `--sandbox` explicitly sandboxes the lane (`knob`).
+   - `off` / `--no-sandbox` explicitly runs the lane unsandboxed (`knob`). An explicit
+     `off` takes precedence over route floors (`sandboxed_routes`), narrowed-network
+     floors, and parent floors where Provenant decides them, emitting a one-line warning
+     naming each restriction dropped.
+4. **Default (under `auto` or unset knob):**
+   - Floors apply when configured: a lane started by a lane that was itself sandboxed
+     by distrust (`parent`), a route id matching `[domains.run] sandboxed_routes` (`route`;
+     empty by default), or an effective network of `provider` or `local` (`network`). "Started by"
+     covers `run` from inside a lane and every graph node a lane or planner adds or replaces:
+     admission names the admitting node in `attempt.admitted_by`, overwriting any value the author
+     wrote. A sandbox that only enforces read-only access or a narrowed network does not pass
+     on, so a read-only planner's writers stay unsandboxed. An unreadable record, or an admitting
+     attempt on another host, counts as sandboxed.
+   - When no floor applies, every lane kind runs unsandboxed (`default`).
 
 The lane sees `PROVENANT_SANDBOX=on|off`; the receipt's
-`applied_route.sandbox` and `status` record the mode and its source. Off
-macOS every lane resolves as sandboxed (`platform`), so Linux keeps refusing
-lane launch.
+`applied_route.sandbox` and `status` record requested and effective mode and its source.
 
 `[domains.run] sandbox_cache_reads` (absolute directories, replaced per project
 by `[domains.run.projects."ID"] sandbox_cache_reads`) gives sandboxed lanes

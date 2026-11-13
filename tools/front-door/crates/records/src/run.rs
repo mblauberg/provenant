@@ -1498,7 +1498,8 @@ fn sandbox_floors_children(sandbox: Option<&serde_json::Value>) -> bool {
         return true;
     };
     match sandbox
-        .get("sandboxed")
+        .get("effective")
+        .or_else(|| sandbox.get("sandboxed"))
         .and_then(serde_json::Value::as_bool)
     {
         Some(false) => false,

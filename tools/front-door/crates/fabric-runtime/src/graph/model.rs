@@ -247,10 +247,9 @@ pub struct AttemptSpec {
     /// `delivery` (default) keeps the delivery receipt; `none` withholds it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipts: Option<String>,
-    /// `on` sandboxes this node's lane, `off` does not, and `auto` sandboxes
-    /// it only when read-only. Sets the `lanes.sandbox` knob for this node
-    /// alone. A route in `domains.run.sandboxed_routes`, a sandboxed parent
-    /// and a narrowed network always sandbox.
+    /// `on` sandboxes this node's lane, `off` runs unsandboxed (overriding route,
+    /// network and parent floors), and `auto` (default) runs unsandboxed for every
+    /// lane kind. Sets the `lanes.sandbox` knob for this node alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<String>,
     /// The node whose lane or plan added or replaced this one, set by patch
