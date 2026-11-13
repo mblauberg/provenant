@@ -1159,7 +1159,6 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
             };
             assert_eq!(env("HOME"), expected_home.as_ref());
             for (key, expected) in [
-                ("GIT_CONFIG_NOSYSTEM", "1"),
                 ("XDG_CONFIG_HOME", "/fixture/state/config"),
                 ("XDG_DATA_HOME", "/fixture/state/data"),
                 ("XDG_CACHE_HOME", "/fixture/state/cache"),
@@ -1173,6 +1172,15 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
                     .collect();
                 assert_eq!(values, [std::ffi::OsStr::new(expected)], "{key}");
             }
+            // Repository context may omit this optional selector. When present,
+            // it must be unambiguous.
+            assert!(
+                spec.env
+                    .iter()
+                    .filter(|(key, _)| key == "GIT_CONFIG_NOSYSTEM")
+                    .count()
+                    <= 1
+            );
             let globals: Vec<_> = spec
                 .env
                 .iter()
