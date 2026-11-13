@@ -1554,7 +1554,6 @@ pub struct AdmissionTicket {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     pub schema_version: u64,
-    pub operation_id: OperationId,
     pub attempt_id: AttemptId,
     pub project_id: ProjectId,
     pub sequence: u64,

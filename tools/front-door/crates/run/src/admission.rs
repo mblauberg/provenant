@@ -1,6 +1,6 @@
 //! Host admission. Each attempt waits inside its own guardian, before spawn;
 //! there is no scheduler daemon. Resource samples are taken outside the store
-//! transaction, which then rechecks run concurrency and leases host capacity
+//! transaction, which then leases host capacity
 //! and spacing from the host ledger while claiming.
 use crate::{
     db::{bytes, decode, sql_int},
@@ -26,17 +26,14 @@ pub(crate) struct AppliedWriteGrants {
     pub git_grants_digest: Option<provenant_core::Digest>,
 }
 
-/// Upper bounds for explicit lane-count settings, independent of batch
-/// concurrency. Writer caps are configurable below these
+/// Upper bounds for explicit lane-count settings. Writer caps are configurable below these
 /// (`domains.fabric.lanes.max_writer_lanes` and
 /// `max_project_writer_lanes`, both disabled by default).
 pub const HOST_ACTIVE: u64 = provenant_config::WRITER_LANES_CEILING;
 pub const PROJECT_ACTIVE: u64 = provenant_config::PROJECT_WRITER_LANES_CEILING;
 pub const HOST_QUEUED: u64 = 256;
 
-/// Floors and windows recorded on each ticket at submission. A task queued
-/// behind its own run's concurrency gets one provider timeout per earlier
-/// wave on top of the admission window, so deep batches are not refused.
+/// Floors and windows recorded on each ticket at submission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AdmissionPolicy {
     pub memory_floor_basis_points: u64,
@@ -197,12 +194,6 @@ impl Resources for SystemResources {
     }
 }
 
-/// How long a lane may wait to start, and then run.
-#[derive(Clone, Copy)]
-pub(crate) struct Allowance {
-    pub queue_seconds: u64,
-    pub runtime_seconds: u64,
-}
 
 impl RunStore {
     /// Yield admission while waiting on children, or try to reclaim it before
@@ -251,13 +242,7 @@ impl RunStore {
             } else {
                 // The ledger may have committed a yield before a failed store
                 // commit. Always recheck it, even if this ticket says active.
-                let active: i64 = tx.query_row(
-                    "SELECT COUNT(*) FROM admission WHERE active=1 AND run=?1 AND attempt<>?2",
-                    params![old.run_id.to_string(), id.to_string()],
-                    |r| r.get(0),
-                )?;
-                let reclaimed = active < sql_int(ticket.run_concurrency)?
-                    && crate::ledger::lease(
+                let reclaimed = crate::ledger::lease(
                         &ledger,
                         self.context.state_root.as_path(),
                         &ticket,
@@ -298,8 +283,7 @@ impl RunStore {
         tx: &Connection,
         attempt: &AttemptRecord,
         class: LaneClass,
-        concurrency: u64,
-        allowance: Allowance,
+        runtime_seconds: u64,
         disk_floor_bytes: u64,
     ) -> Result<()> {
         let sequence: i64 = tx.query_row(
@@ -310,7 +294,6 @@ impl RunStore {
         let ticket = AdmissionTicket {
             extra: Default::default(),
             schema_version: 1,
-            operation_id: attempt.operation_id.clone(),
             attempt_id: attempt.attempt_id,
             project_id: attempt.project_id,
             sequence: u64::try_from(sequence).map_err(|_| RunError::Conflict)?,
@@ -324,22 +307,15 @@ impl RunStore {
                 .start_spacing_ms
                 .unwrap_or_else(|| self.policy.spacing_ms(class)),
             lane_class: class,
-            run_concurrency: concurrency,
             quota_permit: None,
-            admission_deadline: deadline(
-                attempt.queued_at,
-                self.policy
-                    .admission_seconds
-                    .saturating_add(allowance.queue_seconds),
-            )?,
-            runtime_seconds: allowance.runtime_seconds,
+            admission_deadline: deadline(attempt.queued_at, self.policy.admission_seconds)?,
+            runtime_seconds,
         };
         tx.execute(
-            "INSERT INTO admission(attempt,project,run,active,record) VALUES (?1,?2,?3,0,?4)",
+            "INSERT INTO admission(attempt,project,active,record) VALUES (?1,?2,0,?3)",
             params![
                 attempt.attempt_id.to_string(),
                 attempt.project_id.to_string(),
-                attempt.run_id.to_string(),
                 bytes(&ticket)?
             ],
         )?;
@@ -347,8 +323,8 @@ impl RunStore {
     }
     /// What each queued or starting lane in `lanes` is waiting for, in order.
     /// It reads this store and the host ledger without taking a lock, so it
-    /// names a wait only when it can see one: run concurrency, then startup
-    /// spacing, then the shared host and project caps and resource floors.
+    /// names a wait only when it can see one: startup spacing, then the
+    /// shared host and project caps and resource floors.
     pub fn lane_waits(&self, lanes: &[AttemptRecord], call: &Request<'_>) -> Vec<LaneWait> {
         self.lane_waits_with_resources(lanes, call, &SystemResources)
     }
@@ -379,18 +355,12 @@ impl RunStore {
         );
         let cap = self.lane_cap_hit(&ticket, call);
         let caps = self.lane_caps();
-        let active: rusqlite::Result<i64> = self.db.query_row(
-            "SELECT COUNT(*) FROM admission WHERE active=1 AND run=?1",
-            [lane.run_id.to_string()],
-            |row| row.get(0),
-        );
         Ok(format!(
-            "memory={memory:?}, floor={} basis points; disk={disk:?}, floor={floor:?} bytes; pressure={pressure:?}, threshold={:?}; process budget={budget:?}, reserved headroom={:?}; startup spacing remaining={spacing:?} ms (window={} ms); run active={active:?}, limit={}; writer cap={cap:?}, host limit={}, project limit={}",
+            "memory={memory:?}, floor={} basis points; disk={disk:?}, floor={floor:?} bytes; pressure={pressure:?}, threshold={:?}; process budget={budget:?}, reserved headroom={:?}; startup spacing remaining={spacing:?} ms (window={} ms); writer cap={cap:?}, host limit={}, project limit={}",
             ticket.memory_floor_basis_points,
             settings.map(|settings| settings.memory_pressure_threshold()),
             budget.as_ref().ok().map(|budget| budget.headroom()),
             ticket.startup_spacing_ms,
-            ticket.run_concurrency,
             caps.host_writers,
             caps.project_writers,
         ))
@@ -447,7 +417,7 @@ impl RunStore {
                                 .map(provenant_records::run::provider_silence_reason)
                         })?
                 } else if matches!(lane.state, AttemptState::Queued { .. }) {
-                    self.recovery_process_wait(lane.run_id, call)
+                    self.recovery_process_wait(lane.attempt_id, call)
                         .unwrap_or_else(|| match process_budget.get_or_init(|| resources.process_budget()) {
                             Ok(budget) if !budget.has_room() => format!(
                                 "host capacity: user process count {} of {}",
@@ -472,14 +442,6 @@ impl RunStore {
                 {
                     "launch preparation: seeding the Cargo cache".to_owned()
                 } else {
-                    let active: i64 = self
-                        .db
-                        .query_row(
-                            "SELECT COUNT(*) FROM admission WHERE active=1 AND run=?1",
-                            [lane.run_id.to_string()],
-                            |r| r.get(0),
-                        )
-                        .ok()?;
                     let spacing = ticket.startup_spacing_ms;
                     let left = crate::ledger::spacing_left(
                         &self.writer_registry,
@@ -487,12 +449,7 @@ impl RunStore {
                         spacing,
                         call.clock,
                     );
-                    if active >= i64::try_from(ticket.run_concurrency).ok()? {
-                        format!(
-                            "run concurrency: {active} of {} lanes of this run are active",
-                            ticket.run_concurrency
-                        )
-                    } else if let Some(left) = left.filter(|left| *left > 0) {
+                    if let Some(left) = left.filter(|left| *left > 0) {
                         format!(
                             "{} startup spacing: {} s left of {} s",
                             class_name(class),
@@ -1115,19 +1072,6 @@ impl RunStore {
         call: &Request<'_>,
         resources: &dyn Resources,
     ) -> Result<Option<AttemptRecord>> {
-        // Avoid the ledger and store write locks when this run is already full.
-        // The transaction below repeats the count to decide the claim.
-        if let (Ok(record), Ok(ticket)) = (self.record(id, call), self.ticket(&self.db, id))
-            && matches!(record.state, AttemptState::Starting { .. })
-            && let Ok(active) = self.db.query_row(
-                "SELECT COUNT(*) FROM admission WHERE active=1 AND run=?1",
-                [record.run_id.to_string()],
-                |row| row.get::<_, i64>(0),
-            )
-            && active >= sql_int(ticket.run_concurrency)?
-        {
-            return Ok(None);
-        }
         let ledger = crate::ledger::open(&self.writer_registry, call)?;
         let caps = self.lane_caps();
         let owner = crate::ledger::prepare_lease(
@@ -1144,14 +1088,6 @@ impl RunStore {
                 return Err(RunError::Refused);
             }
             let mut ticket = self.ticket(tx, id)?;
-            let run: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM admission WHERE active=1 AND run=?1",
-                [old.run_id.to_string()],
-                |r| r.get(0),
-            )?;
-            if run >= sql_int(ticket.run_concurrency)? {
-                return Ok(None);
-            }
             // Host and project counts and spacing span every execution
             // namespace, so they live in the host ledger, not this store.
             // The ledger reads the clock under its own lock; the lane starts at

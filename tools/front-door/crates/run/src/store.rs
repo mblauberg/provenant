@@ -3,7 +3,7 @@ use crate::{
     db::{bytes, decode, sql_int},
     *,
 };
-use provenant_core::{AttemptId, OperationId, RunId, TaskId, WallTime};
+use provenant_core::{AttemptId, OperationId, WallTime};
 use provenant_os::{exec::Termination, fs::LockMode};
 use provenant_records::{AttemptFile, CanonicalV1};
 use provenant_supervisor::custody::ExitObservation;
@@ -52,17 +52,13 @@ pub(crate) fn import_cancelled(
         .is_some_and(|request| request.requests_stop(scope, owner)))
 }
 
-pub struct NewAttempt {
-    pub attempt_id: AttemptId,
-    pub task_id: TaskId,
-    /// Exact, already scanned prompt bytes. Store never opens a source file.
-    pub prompt: String,
-}
+/// One launch: exactly one attempt, its request and its scanned prompt.
 pub struct PreparedRun {
-    pub run_id: RunId,
+    pub attempt_id: AttemptId,
     pub operation_id: OperationId,
     pub request: CanonicalRequest,
-    pub attempts: Vec<NewAttempt>,
+    /// Exact, already scanned prompt bytes. Store never opens a source file.
+    pub prompt: String,
     pub created_at: WallTime,
 }
 /// The work key a first attempt records: the graph, node and attempt number
@@ -82,29 +78,6 @@ pub(crate) fn work_key(
     let (graph, node, attempt) = named.ok_or(RunError::Validation("task names no work key"))?;
     provenant_records::WorkKey::new(project, graph, node, attempt)
         .map_err(|_| RunError::Validation("work key"))
-}
-/// A plain lane is a one-node graph. Until callers name their graph, the
-/// edge that builds the request gives it one derived from its task id; a
-/// context that already names its key is kept. Adaptor until C2 supplies names.
-impl PreparedRun {
-    /// Name the key of every task that names none, as `lane_context` does.
-    pub fn name_lane_keys(&mut self) {
-        for task in &mut self.request.tasks {
-            task.context = Some(lane_context(task.context.take(), task.task_id));
-        }
-    }
-}
-pub(crate) fn lane_context(
-    context: Option<provenant_records::run::WorkContext>,
-    task: TaskId,
-) -> provenant_records::run::WorkContext {
-    let mut context = context.unwrap_or_default();
-    if context.graph_id.is_none() || context.node_id.is_none() || context.attempt.is_none() {
-        context.graph_id = Some(format!("lane-{task}"));
-        context.node_id = Some("lane".into());
-        context.attempt = Some(1);
-    }
-    context
 }
 /// Result and route material is supplied by the trusted provider/confinement
 /// composition edge, after secret scanning. This storage API never launches.
@@ -168,7 +141,6 @@ impl RunStore {
             if current.project_id != self.context.project_id
                 || current.actor_id != self.context.actor_id
                 || current.operation_id != expected.operation_id
-                || current.run_id != expected.run_id
                 || current.kind != expected.kind
                 || current.state != OperationState::Refused
                 || current.request_digest != expected.request_digest
@@ -231,12 +203,7 @@ impl RunStore {
         }
         let digest = input.request.digest()?;
         let mut extra = provenant_records::ExtraFields::default();
-        if let Some(notice) = input
-            .request
-            .tasks
-            .first()
-            .and_then(|task| task.profile.knobs.get("chair.refusal_notice"))
-        {
+        if let Some(notice) = input.request.task.profile.knobs.get("chair.refusal_notice") {
             extra.insert("refusal_notice".into(), notice.clone());
         }
         if let Some(digest) = context.intent_digest {
@@ -254,7 +221,6 @@ impl RunStore {
                 OperationKind::Dispatch
             },
             request_digest: digest,
-            run_id: input.run_id,
             state: OperationState::Refused,
             blocked_reason: None,
             refusal: Some(diagnostic),
@@ -265,45 +231,29 @@ impl RunStore {
                 .clone()
                 .or_else(|| input.request.chair.clone()),
         };
-        let first = input
-            .attempts
-            .first()
-            .ok_or(RunError::Validation("refused request has no attempt"))?;
-        let context = input
-            .request
-            .tasks
-            .iter()
-            .find(|task| task.task_id == first.task_id)
-            .and_then(|task| task.context.as_ref());
-        let key = work_key(self.context.project_id, context)?;
-        self.insert_refusal_row(
-            key,
-            first.attempt_id.to_string(),
-            first.task_id.to_string(),
-            operation,
-            call,
-        )
+        let key = work_key(self.context.project_id, input.request.task.context.as_ref())?;
+        self.insert_refusal_row(key, input.attempt_id, operation, call)
     }
 
     /// Commit a trusted owner's preflight refusal before canonical admission.
     /// The caller supplies only an already projected, safe diagnostic. The first
     /// record wins; replays may not change its scope, kind or request identity.
-    /// A refusal that never reached a task is a one-node lane keyed by its
-    /// run; callers that know the key use `insert_refusal_under`.
+    /// A refusal that never reached a node is a one-node lane under a fresh
+    /// name; callers that know the key use `insert_refusal_under`.
     pub fn insert_refusal(
         &self,
         operation: OperationRecord,
         call: &Request<'_>,
     ) -> Result<OperationRecord> {
-        let run = operation.run_id.to_string();
+        let id = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
         let key = provenant_records::WorkKey::new(
             self.context.project_id,
-            format!("lane-{run}"),
+            format!("lane-{id}"),
             "lane",
             1,
         )
         .map_err(|_| RunError::Validation("work key"))?;
-        self.insert_refusal_row(key, run.clone(), run, operation, call)
+        self.insert_refusal_row(key, id, operation, call)
     }
     /// Commit a preflight refusal under the work key the caller would have
     /// admitted. The refused row keeps the key, so it is never reused.
@@ -313,14 +263,13 @@ impl RunStore {
         operation: OperationRecord,
         call: &Request<'_>,
     ) -> Result<OperationRecord> {
-        let run = operation.run_id.to_string();
-        self.insert_refusal_row(key.clone(), run.clone(), run, operation, call)
+        let id = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
+        self.insert_refusal_row(key.clone(), id, operation, call)
     }
     fn insert_refusal_row(
         &self,
         key: provenant_records::WorkKey,
-        id: String,
-        task: String,
+        id: AttemptId,
         operation: OperationRecord,
         call: &Request<'_>,
     ) -> Result<OperationRecord> {
@@ -379,10 +328,10 @@ impl RunStore {
                 return decode(&raw);
             }
             tx.execute(
-                "INSERT INTO attempts(id,project,graph,node,attempt,digest,actor,operation,run,task,number,refused,operation_record,revision,terminal,record,tmp_retained) \
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,1,?11,0,1,NULL,0)",
+                "INSERT INTO attempts(id,project,graph,node,attempt,digest,actor,operation,number,refused,operation_record,revision,terminal,record,tmp_retained) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,1,1,?9,0,1,NULL,0)",
                 params![
-                    id,
+                    id.to_string(),
                     self.context.project_id.to_string(),
                     key.graph(),
                     key.node(),
@@ -390,8 +339,6 @@ impl RunStore {
                     digest.to_string(),
                     self.context.actor_id.to_string(),
                     operation.operation_id.as_str(),
-                    operation.run_id.to_string(),
-                    task,
                     bytes(&operation)?
                 ],
             )?;
@@ -768,63 +715,38 @@ impl RunStore {
         );
         Ok(())
     }
-    /// Reserve records first, seal the exact request/prompts, then acknowledge.
-    /// Repeating a prepared operation repairs a publication gap with the same
-    /// request. No scheduler, admission or launch is implied by acceptance here.
-    pub fn create(&self, input: &PreparedRun, call: &Request<'_>) -> Result<RunRecord> {
+    /// Reserve the record first, seal the exact request and prompt, then
+    /// acknowledge. Repeating a prepared operation repairs a publication gap
+    /// with the same request. No scheduler, admission or launch is implied by
+    /// acceptance here.
+    pub fn create(&self, input: &PreparedRun, call: &Request<'_>) -> Result<AttemptRecord> {
         validate_request(input)?;
         // A crash before sealing left the operation prepared under its own
-        // IDs; a replay with fresh IDs adopts them rather than conflicting.
+        // attempt ID; a replay with a fresh ID adopts it rather than conflicting.
         if let Some(op) = self.operation(&input.operation_id, call)?
             && op.state == OperationState::Prepared
             && op.request_digest == input.request.digest()?
-            && op.run_id != input.run_id
         {
-            return self.create_exact(&self.adopt(op.run_id, input, call)?, call);
+            let attempt_id = self.operation_attempt(&input.operation_id, call)?;
+            if attempt_id != input.attempt_id {
+                return self.create_exact(
+                    &PreparedRun {
+                        attempt_id,
+                        operation_id: input.operation_id.clone(),
+                        request: input.request.clone(),
+                        prompt: input.prompt.clone(),
+                        created_at: input.created_at,
+                    },
+                    call,
+                );
+            }
         }
         self.create_exact(input, call)
     }
-    fn adopt(&self, run: RunId, input: &PreparedRun, call: &Request<'_>) -> Result<PreparedRun> {
-        call.check()?;
-        let ids: Vec<(String, String)> = {
-            let mut query = self.db.prepare(
-                "SELECT task,id FROM attempts WHERE run=?1 AND project=?2 AND refused=0",
-            )?;
-            let rows = query.query_map(
-                params![run.to_string(), self.context.project_id.to_string()],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            rows.collect::<std::result::Result<_, _>>()?
-        };
-        let attempts = input
-            .attempts
-            .iter()
-            .map(|new| {
-                let (_, id) = ids
-                    .iter()
-                    .find(|(task, _)| *task == new.task_id.to_string())
-                    .ok_or(RunError::Conflict)?;
-                Ok(NewAttempt {
-                    attempt_id: AttemptId::parse(id)
-                        .map_err(|_| RunError::Validation("attempt index ID"))?,
-                    task_id: new.task_id,
-                    prompt: new.prompt.clone(),
-                })
-            })
-            .collect::<Result<_>>()?;
-        Ok(PreparedRun {
-            run_id: run,
-            operation_id: input.operation_id.clone(),
-            request: input.request.clone(),
-            attempts,
-            created_at: input.created_at,
-        })
-    }
-    fn create_exact(&self, input: &PreparedRun, call: &Request<'_>) -> Result<RunRecord> {
+    fn create_exact(&self, input: &PreparedRun, call: &Request<'_>) -> Result<AttemptRecord> {
         let digest = input.request.digest()?;
         let context = &self.context;
-        let existing = self.operation(&input.operation_id, call)?;
-        if let Some(op) = &existing {
+        if let Some(op) = self.operation(&input.operation_id, call)? {
             if op.request_digest != digest {
                 return Err(RunError::OperationConflict);
             }
@@ -835,10 +757,11 @@ impl RunStore {
                         .ok_or(RunError::Validation("refusal diagnostic missing"))?,
                 )));
             }
+            let admitted = self.operation_attempt(&input.operation_id, call)?;
             if op.state != OperationState::Prepared {
-                return self.run(op.run_id, call);
+                return self.record(admitted, call);
             }
-            if op.run_id != input.run_id {
+            if admitted != input.attempt_id {
                 return Err(RunError::Conflict);
             }
         }
@@ -846,30 +769,8 @@ impl RunStore {
         // but a stored refusal replays without depending on current host state.
         let disk_floor_bytes = provenant_config::GcSettings::read(&self.writer_registry)?
             .free_floor_bytes(&self.writer_registry)?;
-        let telemetry_contexts: Vec<_> = input
-            .request
-            .tasks
-            .iter()
-            .map(|task| crate::telemetry_context::capture(task, input.created_at))
-            .collect();
-        let run = RunRecord {
-            extra: Default::default(),
-            schema_version: 1,
-            run_id: input.run_id,
-            project_id: context.project_id,
-            actor_id: context.actor_id,
-            operation_id: input.operation_id.clone(),
-            request_digest: digest,
-            task_ids: input.request.tasks.iter().map(|t| t.task_id).collect(),
-            parent: input.request.parent,
-            parent_attempt: input.request.parent_attempt,
-            children: vec![],
-            revision: 1,
-            generation: 0,
-            created_at: input.created_at,
-            closed_at: None,
-            closure: Closure::Open,
-        };
+        let task = &input.request.task;
+        let telemetry_context = crate::telemetry_context::capture(task, input.created_at);
         let mut operation_extra = provenant_records::ExtraFields::default();
         if let Some(parent) = input.request.parent_attempt {
             operation_extra.insert("parent_attempt".into(), serde_json::json!(parent));
@@ -886,7 +787,6 @@ impl RunStore {
                 OperationKind::Dispatch
             },
             request_digest: digest,
-            run_id: input.run_id,
             state: OperationState::Prepared,
             blocked_reason: None,
             refusal: None,
@@ -895,94 +795,79 @@ impl RunStore {
             refusal_chair: None,
         };
         let admitted = self.write(call, |tx| {
-            // The operation ID is the caller's replay handle until work keys
-            // replace it; the work key is the attempt's identity.
-            let prior: Option<Vec<u8>> = tx.query_row("SELECT operation_record FROM attempts WHERE project=?1 AND actor=?2 AND operation=?3 ORDER BY sequence LIMIT 1", params![context.project_id.to_string(), context.actor_id.to_string(), input.operation_id.as_str()], |r| r.get(0)).optional()?;
-            if let Some(prior) = prior {
+            // The operation ID is the caller's replay handle; the work key is
+            // the attempt's identity.
+            let prior: Option<(Vec<u8>, String)> = tx.query_row("SELECT operation_record,id FROM attempts WHERE project=?1 AND actor=?2 AND operation=?3 ORDER BY sequence LIMIT 1", params![context.project_id.to_string(), context.actor_id.to_string(), input.operation_id.as_str()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            if let Some((prior, id)) = prior {
                 let prior: OperationRecord = decode(&prior)?;
                 if prior.request_digest != digest { return Err(RunError::OperationConflict); }
                 if prior.state == OperationState::Refused {
                     return Err(RunError::RecordedRefusal(Box::new(prior.refusal.ok_or(RunError::Validation("refusal diagnostic missing"))?)));
                 }
-                if prior.run_id != input.run_id { return Err(RunError::Conflict); }
+                if id != input.attempt_id.to_string() { return Err(RunError::Conflict); }
                 return Ok(None);
             }
-            // A continuation is the next attempt of the prior task, and each
-            // terminal attempt is continued at most once.
             // A continuation is the next attempt of its parent's node: it
             // takes the node's key with the following attempt number, and
             // each terminal attempt is continued at most once. Any other
             // launch names its own key in its task context.
-            let keys = match input.request.parent {
-                None => input.request.tasks.iter().map(|task| work_key(context.project_id, task.context.as_ref())).collect::<Result<Vec<_>>>()?,
+            let key = match input.request.parent {
+                None => work_key(context.project_id, task.context.as_ref())?,
                 Some(target) => {
-                    let (task, graph, node, number): (String, String, String, u32) = tx.query_row("SELECT task,graph,node,attempt FROM attempts WHERE id=?1 AND project=?2 AND refused=0", params![target.to_string(), context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?.ok_or(RunError::NotFound)?;
-                    if input.request.tasks.iter().any(|t| t.task_id.to_string() != task) { return Err(RunError::Validation("continuation must keep its task")); }
+                    let (graph, node, number): (String, String, u32) = tx.query_row("SELECT graph,node,attempt FROM attempts WHERE id=?1 AND project=?2 AND refused=0", params![target.to_string(), context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?.ok_or(RunError::NotFound)?;
                     let taken: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM attempts WHERE continues=?1)", [target.to_string()], |r| r.get(0))?;
                     if taken { return Err(RunError::Conflict); }
                     let next = number.checked_add(1).ok_or(RunError::Validation("attempt number"))?;
-                    let key = provenant_records::WorkKey::new(context.project_id, graph, node, next).map_err(|_| RunError::Validation("work key"))?;
-                    input.request.tasks.iter().map(|_| key.clone()).collect()
+                    provenant_records::WorkKey::new(context.project_id, graph, node, next).map_err(|_| RunError::Validation("work key"))?
                 }
             };
-            if keys.iter().enumerate().any(|(index, key)| keys[..index].contains(key)) {
-                return Err(RunError::Validation("work key repeats within a request"));
-            }
             // Concurrent submissions of one key serialise on this write; the
             // first admits it and the rest replay or conflict.
-            for key in &keys {
-                let existing: Option<(String, bool, Vec<u8>, String)> = tx.query_row("SELECT digest,refused,operation_record,run FROM attempts WHERE project=?1 AND graph=?2 AND node=?3 AND attempt=?4", params![key.project().to_string(), key.graph(), key.node(), key.attempt()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
-                if let Some((prior_digest, refused, raw, run)) = existing {
-                    if prior_digest != digest.to_string() { return Err(RunError::OperationConflict); }
-                    if refused {
-                        let prior: OperationRecord = decode(&raw)?;
-                        return Err(RunError::RecordedRefusal(Box::new(prior.refusal.ok_or(RunError::Validation("refusal diagnostic missing"))?)));
-                    }
-                    return Ok(Some(RunId::parse(&run).map_err(|_| RunError::Validation("run index ID"))?));
+            let existing: Option<(String, bool, Vec<u8>, String)> = tx.query_row("SELECT digest,refused,operation_record,id FROM attempts WHERE project=?1 AND graph=?2 AND node=?3 AND attempt=?4", params![key.project().to_string(), key.graph(), key.node(), key.attempt()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
+            if let Some((prior_digest, refused, raw, id)) = existing {
+                if prior_digest != digest.to_string() { return Err(RunError::OperationConflict); }
+                if refused {
+                    let prior: OperationRecord = decode(&raw)?;
+                    return Err(RunError::RecordedRefusal(Box::new(prior.refusal.ok_or(RunError::Validation("refusal diagnostic missing"))?)));
                 }
+                return Ok(Some(AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?));
             }
             let queued: i64 = tx.query_row("SELECT COUNT(*) FROM admission WHERE active=0", [], |r| r.get(0))?;
-            let local_tasks = input.request.tasks.len();
-            if queued + local_tasks as i64 > sql_int(crate::admission::HOST_QUEUED)? { return Err(RunError::Capacity); }
-            let operation_bytes = bytes(&operation)?;
-            for (index, (task, key)) in input.request.tasks.iter().zip(&keys).enumerate() {
-                let new = input.attempts.iter().find(|a| a.task_id == task.task_id).ok_or(RunError::Validation("missing task prompt"))?;
-                let attempt = AttemptRecord {extra: Default::default(),
-                    key: Some(key.clone()),
-                    context: task.context.clone(),
-                    title: task.title.clone(),
-                    continuation: input.request.fresh_continuation.as_ref().map(|_| "fresh".into()),
-                    profile: task.profile.clone(),
-                    limits: None,
-                    schema_version: 2, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: u64::from(key.attempt()), revision: 1, generation: 0,
-                    delivery_id: task.delivery_id, retry_of: input.request.parent, superseded_by: None, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, granted_tracking_ref: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, verified_owner: Some(context.actor_id), session: None,
+            if queued >= sql_int(crate::admission::HOST_QUEUED)? { return Err(RunError::Capacity); }
+            let attempt_id = input.attempt_id;
+            let attempt = AttemptRecord {extra: Default::default(),
+                key: key.clone(),
+                context: task.context.clone(),
+                title: task.title.clone(),
+                continuation: input.request.fresh_continuation.as_ref().map(|_| "fresh".into()),
+                profile: task.profile.clone(),
+                limits: None,
+                schema_version: 2, attempt_id, project_id: context.project_id, attempt_number: u64::from(key.attempt()), revision: 1, generation: 0,
+                delivery_id: task.delivery_id, retry_of: input.request.parent, superseded_by: None, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, granted_tracking_ref: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, verified_owner: Some(context.actor_id), session: None,
                 queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, provider_silent_for_ms: provenant_records::run::Transient(None), process_observation_valid: provenant_records::run::Transient(false), provider_silence_suppressed: provenant_records::run::Transient(false), provider_launched: None, preparation_failure: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
-                    terminal_evidence: None, settlement_reason: None, cancellation_disposition: None, settlement_receipts: None, custody_pending: None,
-                    prompt: ArtifactRecord {extra: Default::default(),  path: artifact_path(new.attempt_id, AttemptFile::Prompt.name())?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
-                    trace: provenant_records::Trace {extra: telemetry_contexts[index].clone(),
-                        host: self.host,
-                        project: Some(run.project_id),
-                        run: Some(run.run_id),
-                        attempt: Some(new.attempt_id),
-                        operation: Some(run.operation_id.clone()),
-                        actor: Some(run.actor_id),
-                        parent: input.request.parent.or(input.request.parent_attempt),
-                    },
-                };
-                tx.execute("INSERT INTO attempts(id,project,graph,node,attempt,digest,actor,operation,run,task,number,continues,operation_record,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1,0,?14)", params![attempt.attempt_id.to_string(), run.project_id.to_string(), key.graph(), key.node(), key.attempt(), digest.to_string(), context.actor_id.to_string(), input.operation_id.as_str(), run.run_id.to_string(), task.task_id.to_string(), i64::from(key.attempt()), input.request.parent.map(|target| target.to_string()), operation_bytes, crate::db::attempt_bytes(&attempt)?])?;
-                insert_event(tx, &attempt)?;
-                let waves = index as u64 / input.request.concurrency.max(1);
-                let class = Service::lane_class(task.writer.is_some(), &task.access.write_roots, &[]);
-                self.queue_ticket(tx, &attempt, class, input.request.concurrency, crate::admission::Allowance { queue_seconds: waves.saturating_mul(task.provider_timeout_seconds), runtime_seconds: task.provider_timeout_seconds }, disk_floor_bytes)?;
-            }
+                terminal_evidence: None, settlement_reason: None, cancellation_disposition: None, settlement_receipts: None, custody_pending: None,
+                prompt: ArtifactRecord {extra: Default::default(),  path: artifact_path(attempt_id, AttemptFile::Prompt.name())?, digest: task.prompt_digest, bytes: input.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
+                trace: provenant_records::Trace {extra: telemetry_context,
+                    host: self.host,
+                    project: Some(context.project_id),
+                    attempt: Some(attempt_id),
+                    operation: Some(input.operation_id.clone()),
+                    actor: Some(context.actor_id),
+                    parent: input.request.parent.or(input.request.parent_attempt),
+                },
+            };
+            tx.execute("INSERT INTO attempts(id,project,graph,node,attempt,digest,actor,operation,number,continues,operation_record,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,1,0,?12)", params![attempt_id.to_string(), context.project_id.to_string(), key.graph(), key.node(), key.attempt(), digest.to_string(), context.actor_id.to_string(), input.operation_id.as_str(), i64::from(key.attempt()), input.request.parent.map(|target| target.to_string()), bytes(&operation)?, crate::db::attempt_bytes(&attempt)?])?;
+            insert_event(tx, &attempt)?;
+            let class = Service::lane_class(task.writer.is_some(), &task.access.write_roots, &[]);
+            self.queue_ticket(tx, &attempt, class, task.provider_timeout_seconds, disk_floor_bytes)?;
             Ok(None)
         })?;
         if let Some(existing) = admitted {
-            return self.run(existing, call);
+            return self.record(existing, call);
         }
         // Reserve first: a conflicting or replayed work key must not leave an
-        // unindexed run directory. Publication still serialises per admitted run.
-        let dir = self.run_dir(input.run_id, true)?;
+        // unindexed attempt directory.
+        let dir = self.attempt_dir(input.attempt_id, true)?;
         let _writer = dir.lock(
             OsStr::new("publication.lock"),
             LockMode::Exclusive,
@@ -997,33 +882,16 @@ impl RunStore {
         #[cfg(test)]
         crate::tests::crash_at("reserved");
         seal(&dir, "request.json", &bytes(&input.request)?, RECORD_LIMIT)?;
-        for attempt in &input.attempts {
-            let recorded = self.record(attempt.attempt_id, call)?;
-            if recorded.run_id != input.run_id
-                || recorded.task_id != attempt.task_id
-                || recorded.prompt.digest != CanonicalV1::file_digest(attempt.prompt.as_bytes())
-            {
-                return Err(RunError::Conflict);
-            }
-            let attempt_dir = self.attempt_dir(attempt.attempt_id, true)?;
-            seal(
-                &attempt_dir,
-                AttemptFile::Prompt.name(),
-                attempt.prompt.as_bytes(),
-                RECORD_LIMIT,
-            )?;
-            // Publication serialises per attempt: every attempt directory
-            // holds its own lock. The first attempt's is held above.
-            if attempt.attempt_id != self.run_anchor(input.run_id)? {
-                drop(attempt_dir.lock(
-                    OsStr::new("publication.lock"),
-                    LockMode::Exclusive,
-                    call.lock_budget(),
-                    call.cancel,
-                    call.clock,
-                )?);
-            }
+        let recorded = self.record(input.attempt_id, call)?;
+        if recorded.prompt.digest != CanonicalV1::file_digest(input.prompt.as_bytes()) {
+            return Err(RunError::Conflict);
         }
+        seal(
+            &dir,
+            AttemptFile::Prompt.name(),
+            input.prompt.as_bytes(),
+            RECORD_LIMIT,
+        )?;
         self.write(call, |tx| {
             let mut accepted = operation.clone();
             accepted.state = OperationState::Accepted;
@@ -1038,7 +906,7 @@ impl RunStore {
             )?;
             Ok(())
         })?;
-        self.run(input.run_id, call)
+        self.record(input.attempt_id, call)
     }
     pub fn publish_terminal(
         &self,
