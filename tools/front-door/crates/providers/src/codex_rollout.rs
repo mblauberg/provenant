@@ -70,10 +70,26 @@ pub fn observe(home: &Path, thread: &str) -> Result<Turn, ProviderError> {
             else {
                 continue;
             };
+            // The bound applies per folder: each day is its own bounded scan.
+            scan.visited = 0;
             scan_day(&day, thread, &suffix, &mut scan)?;
         }
-        return scan.found.ok_or(ProviderError::UnknownIdentity);
+        if scan.matched {
+            return scan.found.ok_or(ProviderError::UnknownIdentity);
+        }
+        // A rollout filed outside the window falls back to the bounded scan.
+        // Past the bound the rollout is not found, not malformed.
+        return scan_all(&sessions, thread, &suffix).map_err(|error| match error {
+            ProviderError::Overflow => ProviderError::UnknownIdentity,
+            error => error,
+        });
     }
+    scan_all(&sessions, thread, &suffix)
+}
+
+/// Bounded walk of every day folder, for ids without a creation date.
+fn scan_all(sessions: &Directory, thread: &str, suffix: &str) -> Result<Turn, ProviderError> {
+    let mut scan = Scan::default();
     for year in sessions
         .entries()
         .map_err(|_| ProviderError::UnknownIdentity)?
@@ -107,7 +123,7 @@ pub fn observe(home: &Path, thread: &str) -> Result<Turn, ProviderError> {
                 let day = month
                     .open_verified_directory(&day)
                     .map_err(|_| ProviderError::UnknownIdentity)?;
-                scan_day(&day, thread, &suffix, &mut scan)?;
+                scan_day(&day, thread, suffix, &mut scan)?;
             }
         }
     }

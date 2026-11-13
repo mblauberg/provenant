@@ -581,7 +581,7 @@ fn codex_rollout_finds_a_v7_thread_by_date_in_a_large_home() {
     for year in 0..4100 {
         std::fs::create_dir_all(home.join(format!("sessions/{:04}", 3000 + year))).unwrap();
     }
-    // Created 2026-11-13T06:45Z; a zone east of UTC+17:15 would file it a day later.
+    // Created 2026-11-13T06:45Z and filed under the next day, the window's edge.
     let thread = "01a1d3a7-96ef-7032-a58f-5d1770a43b6e";
     let day = home.join("sessions/2026/11/14");
     std::fs::create_dir_all(&day).unwrap();
