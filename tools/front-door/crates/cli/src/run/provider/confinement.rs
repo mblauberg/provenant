@@ -1032,18 +1032,15 @@ pub(super) fn publishing_requested(
 }
 
 pub(super) fn publishing_executable(
-    home: &Path,
     locate: &impl Fn(&str) -> Result<PathBuf, String>,
-    host_token: Option<&std::ffi::OsStr>,
-) -> Option<PathBuf> {
-    if !host_token.is_some_and(super::gh_auth::valid_host_token)
-        && !home.join(".config/gh").is_dir()
-    {
-        return None;
-    }
+) -> Result<PathBuf, String> {
     // Resolve links before adding exact executable grants or writing wrappers.
-    let executable = canonical(&locate("gh").ok()?).ok()?;
-    (executable.is_file() && provenant_os::sys::is_executable(&executable)).then_some(executable)
+    let executable = canonical(&locate("gh")?)?;
+    if executable.is_file() && provenant_os::sys::is_executable(&executable) {
+        Ok(executable)
+    } else {
+        Err("host gh is not an executable file".into())
+    }
 }
 
 pub(crate) fn resolve_executable(name: &str) -> Result<PathBuf, String> {

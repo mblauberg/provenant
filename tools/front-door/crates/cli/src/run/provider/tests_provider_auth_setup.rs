@@ -400,33 +400,59 @@ fn default_launch_requests_publishing_unless_switched_off() {
 }
 
 #[test]
-fn publishing_is_optional_without_gh_configuration() -> Result<(), Box<dyn std::error::Error>> {
+fn cleared_preparation_injects_host_recorded_github_credentials()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Isolate environment clearing from the rest of the test process.
+    const CHILD: &str = "PROVENANT_TEST_CLEARED_GITHUB";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                std::thread::current().name().unwrap(),
+                "--nocapture",
+            ])
+            .env_clear()
+            .env(CHILD, "1")
+            .status()?;
+        assert!(status.success());
+        return Ok(());
+    }
+    use std::os::unix::fs::PermissionsExt;
+    assert!(std::env::var_os("PATH").is_none());
+    assert!(std::env::var_os("HOME").is_none());
+    assert!(std::env::var_os("GH_TOKEN").is_none());
     let temp = tempfile::tempdir()?;
     let home = temp.path().canonicalize()?;
-    let executable = std::env::current_exe()?.canonicalize()?;
-    assert_eq!(
-        publishing_executable(&home, &|_| Ok(executable.clone()), None),
-        None
+    let config = home.join("relocated-gh");
+    std::fs::create_dir(&config)?;
+    std::fs::write(config.join("fixture-token"), "fixture-secret")?;
+    let gh = home.join("gh");
+    std::fs::write(
+        &gh,
+        "#!/bin/sh\n[ \"$1\" = auth ] && [ \"$2\" = token ] || exit 1\n/bin/cat \"$GH_CONFIG_DIR/fixture-token\"\n",
+    )?;
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700))?;
+    let mut host = run::HostLaunchContext::from_environment(&home, &home, "/usr/bin/git".into());
+    host.executable_search_path = vec![home.clone()];
+    host.provider_path_environment
+        .insert("GH_CONFIG_DIR".into(), config.clone().into_os_string());
+    let gh = publishing_executable(&|name| {
+        super::preparation::preparation_executable(Some(&host), false, name)
+    })?;
+    let executor = provenant_os::exec::SystemExecutor::new(1)?;
+    let mut environment = Vec::new();
+    let warning = super::gh_auth::inject(
+        &executor,
+        &gh,
+        &home,
+        &|key| host.provider_path_environment.get(key).cloned(),
+        &provenant_core::CancelToken::new(),
+        &mut None,
+        &mut environment,
     );
-    assert!(!home.join(".config/gh").exists());
-    assert_eq!(
-        publishing_executable(
-            &home,
-            &|_| Ok(executable.clone()),
-            Some(std::ffi::OsStr::new("fixture-token"))
-        ),
-        Some(executable.clone())
-    );
-    for invalid in ["", "token\n", "token with spaces"] {
-        assert_eq!(
-            publishing_executable(
-                &home,
-                &|_| Ok(executable.clone()),
-                Some(std::ffi::OsStr::new(invalid))
-            ),
-            None
-        );
-    }
+    assert!(warning.is_none(), "{warning:?}");
+    assert!(environment.contains(&("GH_TOKEN".into(), "fixture-secret".into())));
+    assert!(environment.contains(&("GH_CONFIG_DIR".into(), config.into_os_string())));
     Ok(())
 }
 
@@ -440,18 +466,15 @@ fn publishing_canonicalises_symlinked_gh_and_ignores_missing_tools()
     let gh = home.join("gh");
     std::os::unix::fs::symlink(&executable, &gh)?;
     assert_eq!(
-        publishing_executable(&home, &|_| Ok(gh.clone()), None),
+        publishing_executable(&|_| Ok(gh.clone())).ok(),
         Some(executable)
     );
     assert_eq!(
-        publishing_executable(&home, &|_| Err("not installed".into()), None),
+        publishing_executable(&|_| Err("not installed".into())).ok(),
         None
     );
     std::fs::remove_file(&gh)?;
-    assert_eq!(
-        publishing_executable(&home, &|_| Ok(gh.clone()), None),
-        None
-    );
+    assert_eq!(publishing_executable(&|_| Ok(gh.clone())).ok(), None);
     Ok(())
 }
 
