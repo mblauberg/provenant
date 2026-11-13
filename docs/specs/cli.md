@@ -262,7 +262,7 @@ These spellings exit 2 with one line naming the replacement. The table in
 | Spelling | Replacement |
 |---|---|
 | `dispatch`, `review`, `run --use` | `run TEMPLATE BRIEF` |
-| `lanes`, `fabric graph` | `status` |
+| `lanes` | `status` |
 | `resume`, `redo`, `retry --node` | `retry NAME/NODE` |
 | `continue` | `retry NAME/NODE#N` |
 | `cancel`, `stop --operation-id` | `stop NAME` |

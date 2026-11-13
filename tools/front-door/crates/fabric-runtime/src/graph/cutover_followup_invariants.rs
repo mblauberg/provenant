@@ -366,14 +366,17 @@ fn depletion_keeps_the_pinned_account_and_refuses_a_higher_tier_candidate() {
     }));
 }
 
-fn review_shape_minimum(with: Value) -> usize {
+fn review_shape_minima(with: Value) -> std::collections::BTreeMap<String, usize> {
     use std::collections::BTreeMap;
     let library = template::TemplateLibrary::bundled();
     let resolvers = BTreeMap::from([
         ("review-frame".to_owned(), vec!["false".to_owned()]),
-        ("review-verify".to_owned(), vec!["false".to_owned()]),
+        ("review-verify".to_owned(), vec!["true".to_owned()]),
         ("review-synthesis".to_owned(), vec!["false".to_owned()]),
-        ("review-verifiers".to_owned(), vec!["1".to_owned()]),
+        (
+            "review-verifiers".to_owned(),
+            vec!["1".to_owned(), "2".to_owned()],
+        ),
         (
             "review-panel".to_owned(),
             vec!["security".to_owned(), "tests".to_owned()],
@@ -391,18 +394,19 @@ fn review_shape_minimum(with: Value) -> usize {
         .unwrap()
         .nodes
         .into_iter()
-        .find(|node| node.id == "lenses")
-        .unwrap()
-        .composite
-        .unwrap()
-        .min_successful
-        .unwrap()
+        .filter(|node| matches!(node.id.as_str(), "lenses" | "verify"))
+        .map(|node| (node.id, node.composite.unwrap().min_successful.unwrap()))
+        .collect()
 }
 
 #[test]
 fn review_minimum_is_an_input_with_the_existing_default() {
-    assert_eq!(review_shape_minimum(json!({})), 1);
-    assert_eq!(review_shape_minimum(json!({"min_ok": 2})), 2);
+    for (with, minimum) in [(json!({}), 1), (json!({"min_ok": 2}), 2)] {
+        let minima = review_shape_minima(with);
+        for stage in ["lenses", "verify"] {
+            assert_eq!(minima.get(stage), Some(&minimum));
+        }
+    }
 }
 
 fn decide_node(id: &str) -> Value {
