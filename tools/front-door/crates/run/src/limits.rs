@@ -41,7 +41,7 @@ pub fn lane_limits(
         .context
         .as_ref()
         .and_then(|context| context.tier.as_deref())
-        .or_else(|| match &task.route {
+        .or(match &task.route {
             RequestedRoute::Named { name, .. } | RequestedRoute::Review { name, .. } => {
                 Some(name.as_str())
             }
@@ -159,14 +159,15 @@ pub fn writer_budget_limits(
         .and_then(|wrap| wrap.get("remaining"))
         .and_then(serde_json::Value::as_u64)
     {
-        budget = Some(Limit::new(
-            remaining,
-            budget
-                .as_ref()
-                .map_or(LimitSource::Launch, |budget| budget.source),
-            LimitStrength::Default,
-        ));
+        let mut allowance = Limit::new(remaining, LimitSource::Launch, LimitStrength::Default);
+        if let Some(target) = budget {
+            allowance
+                .extra
+                .insert("wrap_up_target".into(), serde_json::json!(target));
+        }
+        budget = Some(allowance);
         policy.action = BudgetAction::Stop;
+        policy.action_source = LimitSource::Launch;
     }
     (budget.filter(|budget| budget.value > 0), policy)
 }

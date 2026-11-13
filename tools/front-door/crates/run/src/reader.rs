@@ -927,26 +927,40 @@ impl RunStore {
         if let Ok(attempt) = self.attempt_dir(record.run_id, id, false)
             && let Some(raw) = crate::artifacts::read_sealed_observed(
                 &attempt,
-                "budget-overrun.json",
+                provenant_records::AttemptFile::BudgetOverrun.name(),
                 RECORD_LIMIT,
             )?
         {
-            record.extra.insert(
-                "budget_overrun".into(),
-                crate::db::decode::<serde_json::Value>(&raw)?,
-            );
+            let overrun = crate::db::decode::<serde_json::Value>(&raw)?;
+            record
+                .extra
+                .insert("budget_overrun".into(), overrun.clone());
+            if let Some(limit) = record
+                .limits
+                .as_mut()
+                .and_then(|limits| limits.token_budget.as_mut())
+            {
+                limit.extra.insert("overrun".into(), overrun);
+            }
         }
         if let Ok(attempt) = self.attempt_dir(record.run_id, id, false)
             && let Some(raw) = crate::artifacts::read_sealed_observed(
                 &attempt,
-                "budget-wrap-up-refused.json",
+                provenant_records::AttemptFile::BudgetWrapUpRefused.name(),
                 RECORD_LIMIT,
             )?
         {
-            record.extra.insert(
-                "budget_wrap_up_refused".into(),
-                crate::db::decode::<serde_json::Value>(&raw)?,
-            );
+            let refusal = crate::db::decode::<serde_json::Value>(&raw)?;
+            record
+                .extra
+                .insert("budget_wrap_up_refused".into(), refusal.clone());
+            if let Some(limit) = record
+                .limits
+                .as_mut()
+                .and_then(|limits| limits.token_budget.as_mut())
+            {
+                limit.extra.insert("wrap_up_refused".into(), refusal);
+            }
         }
         let (checkpoint, checkpoint_readable) = match self.attempt_dir(record.run_id, id, false) {
             Ok(directory) => {

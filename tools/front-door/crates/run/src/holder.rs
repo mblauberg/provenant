@@ -597,7 +597,7 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
         if clean {
             crate::artifacts::seal(
                 &attempt,
-                "budget-clean-point.json",
+                provenant_records::AttemptFile::BudgetCleanPoint.name(),
                 b"{\"schema_version\":1,\"clean\":true}",
                 RECORD_LIMIT,
             )
@@ -613,7 +613,7 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
             .map_err(custody_error)?;
         crate::artifacts::seal(
             &attempt,
-            "budget-overrun.json",
+            provenant_records::AttemptFile::BudgetOverrun.name(),
             &crate::db::bytes(
                 &serde_json::json!({"schema_version":1,"tokens":tokens,"budget":budget}),
             )
@@ -1079,7 +1079,13 @@ impl RunStore {
         let mut attempt_bytes = [0; 16];
         attempt_bytes.copy_from_slice(&digest.as_bytes()[16..]);
         let attempt = self.attempt_dir(record.run_id, id, false)?;
-        if read_sealed(&attempt, "budget-wrap-up-refused.json", RECORD_LIMIT)?.is_some() {
+        if read_sealed(
+            &attempt,
+            provenant_records::AttemptFile::BudgetWrapUpRefused.name(),
+            RECORD_LIMIT,
+        )?
+        .is_some()
+        {
             return Ok(None);
         }
         let operation_id = provenant_core::OperationId::parse(&format!("budget-wrap-up-{id}"))
@@ -1087,7 +1093,7 @@ impl RunStore {
         let refused = |reason: &str| -> Result<Option<RunId>> {
             crate::artifacts::seal(
                 &attempt,
-                "budget-wrap-up-refused.json",
+                provenant_records::AttemptFile::BudgetWrapUpRefused.name(),
                 &crate::db::bytes(&serde_json::json!({"schema_version":1,"reason":reason}))?,
                 RECORD_LIMIT,
             )?;
@@ -1715,7 +1721,12 @@ impl RunStore {
             })
         });
         let clean_budget = exit.stop_reason == Some(StopReason::TokenBudget)
-            && read_sealed(attempt, "budget-clean-point.json", RECORD_LIMIT)?.is_some();
+            && read_sealed(
+                attempt,
+                provenant_records::AttemptFile::BudgetCleanPoint.name(),
+                RECORD_LIMIT,
+            )?
+            .is_some();
         if clean_budget && !decoded.complete {
             // Use the lane's recorded outcome, including a done progress
             // handoff. With no completed report, ordinary review is required;
@@ -1826,7 +1837,11 @@ impl RunStore {
             decoded.outcome = Outcome::ReviewRequired;
             decoded.reason = Some("token budget crossed; continuing this provider session once to commit, push and report within the remaining grace".into());
         }
-        if let Some(bytes) = read_sealed(attempt, "budget-overrun.json", RECORD_LIMIT)? {
+        if let Some(bytes) = read_sealed(
+            attempt,
+            provenant_records::AttemptFile::BudgetOverrun.name(),
+            RECORD_LIMIT,
+        )? {
             let overrun: serde_json::Value = crate::db::decode(&bytes)?;
             let note = format!(
                 "token budget crossed: {} fresh tokens, target {}",
@@ -4455,6 +4470,11 @@ mod writer_recovery_tests {
             fixture.lane_git(&["commit", "-m", "Native lane work"])?;
             let head =
                 crate::objects::resolve_ref(&git, launch.worktree.repo(), launch.branch.as_str())?;
+            if !dirty {
+                // The clean-point contract uses locally recorded push evidence.
+                // A real local bare remote exercises native Git's tracking ref.
+                fixture.lane_git(&["push", "--set-upstream", "origin", launch.branch.as_str()])?;
+            }
             if dirty {
                 std::fs::write(
                     fixture.writer.worktree.join("budget-work.txt"),
@@ -4465,6 +4485,17 @@ mod writer_recovery_tests {
         } else {
             None
         };
+
+        if native_head.is_some() {
+            if matches!(
+                case,
+                BudgetStopCase::Clean | BudgetStopCase::Native { dirty: false }
+            ) {
+                assert!(launch.budget_clean_point(&attempt)?);
+            } else {
+                assert!(!launch.budget_clean_point(&attempt)?);
+            }
+        }
 
         let filter_sentinel = fixture
             .writer
@@ -4629,7 +4660,7 @@ mod writer_recovery_tests {
         if matches!(case, BudgetStopCase::Clean) {
             crate::artifacts::seal(
                 &attempt,
-                "budget-clean-point.json",
+                provenant_records::AttemptFile::BudgetCleanPoint.name(),
                 b"{\"schema_version\":1,\"clean\":true}",
                 RECORD_LIMIT,
             )?;
@@ -4691,7 +4722,12 @@ mod writer_recovery_tests {
             } else if matches!(case, BudgetStopCase::WrapUpRefused) {
                 assert!(store.prepare_budget_wrap_up(id, &call)?.is_none());
                 assert!(
-                    read_sealed(&attempt, "budget-wrap-up-refused.json", RECORD_LIMIT)?.is_some()
+                    read_sealed(
+                        &attempt,
+                        provenant_records::AttemptFile::BudgetWrapUpRefused.name(),
+                        RECORD_LIMIT
+                    )?
+                    .is_some()
                 );
                 assert!(store.custody_released(&store.record(id, &call)?, &call)?);
             } else {

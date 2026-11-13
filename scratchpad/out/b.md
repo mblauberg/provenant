@@ -19,7 +19,8 @@ in progress are not clean points.
 Clean-point checks use a clean Git view with the effective private/native index.
 
 Supporting files outside the owned list: records/run.rs and fabric-runtime/graph.rs
-carry typed budget source metadata; run controls/reader/writer and CLI holder/launch
+carry typed budget source metadata; records/attempt_file.rs classifies budget
+evidence with the existing record-retention seam; run controls/reader/writer and CLI holder/launch
 connect resume, overrun status, clean points and forwarded holder hooks;
 src graph_interface and fabric interface/owner/settlement carry typed controls,
 explanation and the ordinary resume launch. config/schema.rs exposes fractional
@@ -40,6 +41,10 @@ fixed it and audited the other Kind matches. It was not rerun. Tests, clippy and
 nextest were not run locally; pushed-branch CI owns compilation and execution.
 The first lane CI (43418383505) found a collapsible-if lint, repaired alongside
 the clean-boundary and refusal-release findings from focused source review.
+The second lane CI (43419169966) found an unnecessary Option closure, also repaired.
+Status limits now include live overrun/refusal evidence and distinguish the generated
+wrap-up allowance from its original configured target. The clean-point regression
+pushes native Git work to a local bare remote to verify real tracking evidence.
 Integrated review/full CI remain the batch chair's gate. Current branch/CI evidence
 is in the final schema-v2 handoff collected by the host.
 
