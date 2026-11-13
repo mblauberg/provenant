@@ -491,39 +491,52 @@ fn provision_added_writers(
     use provenant_fabric_runtime::graph::{AccessMode, NodeState, SourceBinding};
     let pending = relay::pending_provisioning(checkpoint);
     let mut fresh = Vec::new();
+    // A planned implementation's writer is provisioned, refused and retried
+    // as its boundary, the logical child; an inactive owner keeps it unborn.
+    let inactive = |id: &str| {
+        checkpoint.nodes.iter().any(|progress| {
+            progress.id == id
+                && (!matches!(progress.state, NodeState::Pending | NodeState::Running)
+                    // Recovery owns an already-started launch. An
+                    // unrelated add must not provision it again.
+                    || progress.launch_retry.is_some()
+                    || !progress.attempts.is_empty())
+        })
+    };
     let writers: Vec<_> = checkpoint
         .expansions
         .iter()
         .flat_map(|expansion| &expansion.nodes)
         .filter(|node| {
-            (added.is_empty() || added.contains(&node.id))
-                && !pending.iter().any(|(id, _, _)| id == &node.id)
-                && node.access == AccessMode::WorktreeWrite
+            node.access == AccessMode::WorktreeWrite
                 && node
                     .extra
                     .get("provision_worktree")
                     .and_then(Value::as_bool)
                     == Some(true)
-                && !checkpoint.nodes.iter().any(|progress| {
-                    (progress.worktree == node.worktree && progress.writer_binding.is_some())
-                        || (progress.id == node.id
-                            && (!matches!(progress.state, NodeState::Pending | NodeState::Running)
-                                // Recovery owns an already-started launch. An
-                                // unrelated add must not provision it again.
-                                || progress.launch_retry.is_some()
-                                || !progress.attempts.is_empty()))
-                })
         })
-        .cloned()
+        .map(|node| (relay::provisioning_owner(checkpoint, &node.id), node))
+        .filter(|(owner, node)| {
+            (added.is_empty() || added.contains(&node.id) || added.contains(owner))
+                && !pending
+                    .iter()
+                    .any(|(id, _, _)| id == &node.id || id == owner)
+                && !checkpoint.nodes.iter().any(|progress| {
+                    progress.worktree == node.worktree && progress.writer_binding.is_some()
+                })
+                && !inactive(&node.id)
+                && !inactive(owner)
+        })
+        .map(|(owner, node)| (owner, node.clone()))
         .collect();
-    for node in writers {
+    for (owner, node) in writers {
         let Some(path) = node.worktree.as_deref() else {
             continue;
         };
         let source = if let Some(source) = checkpoint
             .nodes
             .iter()
-            .find(|progress| progress.id == node.id)
+            .find(|progress| progress.id == owner)
             .and_then(|progress| progress.extra.get("provisioned_source"))
             .and_then(Value::as_str)
         {
@@ -557,14 +570,14 @@ fn provision_added_writers(
         if let Some(progress) = checkpoint
             .nodes
             .iter_mut()
-            .find(|progress| progress.id == node.id)
+            .find(|progress| progress.id == owner)
         {
             progress
                 .extra
                 .insert("provisioned_source".into(), source.clone().into());
         }
-        relay::fence_provisioning(checkpoint, &node.id, path, &source);
-        fresh.push(node.id.clone());
+        relay::fence_provisioning(checkpoint, &owner, path, &source);
+        fresh.push(owner);
     }
     if !relay::pending_provisioning(checkpoint).is_empty() {
         journal.save(checkpoint).map_err(journal_error)?;
@@ -1595,7 +1608,8 @@ mod provisioning_tests {
             .join("worktrees")
             .join(context.identity.project.to_string())
             .join(provenant_confinement::worktrees::state_dir_name(
-                &project.join(path),
+                // Slots are keyed by the canonical checkout path.
+                &project.canonicalize()?.join(path),
             ));
         let slot = Directory::open_anchor(&slot)?;
         let held =

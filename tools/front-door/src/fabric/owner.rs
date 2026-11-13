@@ -3531,14 +3531,23 @@ impl BoundGraphOwner<'_> {
             (target, reference)
         };
         let attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
-        if key.work_key(attempt.key.project()).ok().as_ref() != Some(&attempt.key) {
+        // A local attempt carries this node's exact work key. A remote attempt
+        // lives in the receiver's own graph (`peer_graph_name`), which keeps the
+        // origin node id under the receiver's own graph and attempt numbering.
+        let remote_target = target
+            .host
+            .is_some_and(|host| host != self.factory.context.identity.host);
+        let identity_matches = if remote_target {
+            attempt.key.node() == key.node_id
+        } else {
+            key.work_key(attempt.key.project()).ok().as_ref() == Some(&attempt.key)
+        };
+        if !identity_matches {
             return Err(FacadeError::StateCorrupt);
         }
         // A remote parent is one origin node until its receiver-owned graph
         // has drained, including children that outlive the provider process.
-        if target
-            .host
-            .is_some_and(|host| host != self.factory.context.identity.host)
+        if remote_target
             && attempt
                 .extra
                 .get("peer_subtree")

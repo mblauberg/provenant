@@ -1374,6 +1374,27 @@ pub(super) fn flatten_fragment(
                 child.extra.insert("provision_worktree".into(), true.into());
             }
             if let Some(composite) = &mut child.composite {
+                // A composite exporting one member writer's commit (a planned
+                // implementation) names that checkout after itself, as a
+                // relayed add of the same child does.
+                let mut exported = composite
+                    .exports
+                    .iter()
+                    .filter(|export| export.outputs.contains(&OutputKind::Commit));
+                if let (Some(export), None) = (exported.next(), exported.next())
+                    && let Some(writer) = composite.nodes.iter_mut().find(|member| {
+                        member.id == export.node
+                            && member.access == AccessMode::WorktreeWrite
+                            && member.worktree.is_none()
+                            && member.composite.is_none()
+                            && member.loop_body.is_none()
+                    })
+                {
+                    writer.worktree = Some(super::relay::child_worktree(graph, &id));
+                    writer
+                        .extra
+                        .insert("provision_worktree".into(), true.into());
+                }
                 provision_paths(&mut composite.nodes, graph, &id);
             }
             if let Some(body) = &mut child.loop_body {

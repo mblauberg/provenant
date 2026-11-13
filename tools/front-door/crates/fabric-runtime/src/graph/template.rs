@@ -2312,13 +2312,20 @@ impl<'a> Compiler<'a> {
             "inputs".into(),
             serde_json::json!([{"node":"plan", "outputs":["result"]}]),
         );
+        // Export only what the writer leaf supplies: an explicitly read-only
+        // implementation has no branch or commit to hand on.
+        let outputs = if writer.get("access").and_then(Value::as_str) == Some("worktree_write") {
+            serde_json::json!(["result", "branch", "commit"])
+        } else {
+            serde_json::json!(["result"])
+        };
         boundary.insert("kind".into(), Value::String("composite".into()));
         boundary.insert("access".into(), Value::String("read_only".into()));
         boundary.insert(
             "composite".into(),
             serde_json::json!({
                 "nodes": [planner, self.finish(writer, stack)?],
-                "exports": [{"node":"writer", "outputs":["result", "branch", "commit"]}]
+                "exports": [{"node":"writer", "outputs":outputs}]
             }),
         );
         self.finish(boundary, stack)

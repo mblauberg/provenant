@@ -306,6 +306,33 @@ pub fn fence_provisioning(checkpoint: &mut GraphCheckpoint, node: &str, path: &s
     }
 }
 
+/// The logical node that owns `writer`'s provisioning: the outermost expanded
+/// composite that exports the writer's commit (a planned implementation's
+/// boundary), or the writer itself. Fences, refusals and retries key on it, as
+/// a relayed add keys on its receipt node.
+pub fn provisioning_owner(checkpoint: &GraphCheckpoint, writer: &str) -> String {
+    let specs: Vec<&GraphNode> = checkpoint
+        .expansions
+        .iter()
+        .flat_map(|expansion| &expansion.nodes)
+        .collect();
+    let mut owner = writer.to_owned();
+    for _ in 0..specs.len() {
+        let Some(boundary) = specs.iter().find(|spec| {
+            owner.starts_with(&format!("{}--", spec.id))
+                && spec.composite.as_ref().is_some_and(|composite| {
+                    composite.exports.iter().any(|export| {
+                        export.node == owner && export.outputs.contains(&OutputKind::Commit)
+                    })
+                })
+        }) else {
+            break;
+        };
+        owner.clone_from(&boundary.id);
+    }
+    owner
+}
+
 /// Provisioning fenced but not yet confirmed: `(node, path, source)`.
 pub fn pending_provisioning(checkpoint: &GraphCheckpoint) -> Vec<(String, String, String)> {
     checkpoint
