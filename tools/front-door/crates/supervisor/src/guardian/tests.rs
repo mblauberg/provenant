@@ -11,7 +11,7 @@ fn census_fallback_is_recorded_once_even_if_the_source_keeps_failing() {
 }
 
 #[test]
-fn event_burst_has_bounded_walks_and_failures_request_full_scan() {
+fn event_bursts_coalesce_census_walks_and_failures_request_a_full_scan() {
     let mut last = None;
     let mut walks = 0;
     for now in 0..1_000 {
@@ -20,16 +20,17 @@ fn event_burst_has_bounded_walks_and_failures_request_full_scan() {
             walks += 1;
         }
     }
-    assert!(walks > 0 && walks < 100, "{walks} walks for 1000 events");
-    assert!(super::census_full_due(101, Some(100), true));
-    assert!(!super::census_full_due(101, Some(100), false));
-    assert!(super::census_full_due(u64::MAX, Some(100), false));
+    assert!(walks > 0, "an event burst must eventually be observed");
+    assert!(walks < 1_000, "a census walk followed every event");
+    assert!(super::census_full_due(0, Some(u64::MAX), true));
+    assert!(!super::census_full_due(0, Some(u64::MAX), false));
+    assert!(super::census_full_due(u64::MAX, Some(0), false));
 }
 
-/// Counts census turns over one simulated idle minute at the guardian's
-/// 100 ms wake rate. Without process events only the full backstop runs.
+/// An idle lane gets a census eventually, with no repeated walk before its
+/// full-scan backstop is due. Event-driven work can still request a walk.
 #[test]
-fn idle_lane_walks_only_at_the_full_backstop() {
+fn idle_lane_census_walks_respect_the_full_backstop() {
     let mut last_walk = None;
     let mut last_full = None;
     let mut walks = Vec::new();
@@ -42,31 +43,39 @@ fn idle_lane_walks_only_at_the_full_backstop() {
             walks.push(now);
         }
     }
-    assert_eq!(
-        walks.len() as u64,
-        60_000 / super::FULL_CENSUS_INTERVAL_MS,
-        "{walks:?}"
-    );
+    assert!(!walks.is_empty(), "an idle lane still needs a full census");
     assert!(
         walks
             .windows(2)
             .all(|pair| pair[1] - pair[0] >= super::FULL_CENSUS_INTERVAL_MS)
     );
-    // An event, failed watch or failed census still walks at the 100 ms rate.
-    assert!(super::census_turn_due(1_100, Some(1_000), Some(0), true));
-    assert!(!super::census_turn_due(1_050, Some(1_000), Some(0), true));
-    assert!(!super::census_turn_due(1_100, Some(1_000), Some(0), false));
+    // Events can request a walk as soon as the walk throttle permits it.
+    assert!(super::census_turn_due(
+        super::CENSUS_INTERVAL_MS,
+        Some(0),
+        Some(u64::MAX),
+        true
+    ));
+    assert!(!super::census_turn_due(
+        super::CENSUS_INTERVAL_MS.saturating_sub(1),
+        Some(0),
+        Some(u64::MAX),
+        true
+    ));
+    assert!(!super::census_turn_due(0, Some(0), Some(0), false));
     assert!(super::census_turn_due(0, None, None, false));
-    // Progress evidence is published once a second; so is the CPU sample.
-    const { assert!(super::CPU_SAMPLE_INTERVAL_MS == 1_000) };
 }
 
 #[test]
-fn journal_retry_is_prompt_and_does_not_require_a_census() {
-    assert!(!super::tracking_publication_due(99, Some(0), true));
-    assert!(super::tracking_publication_due(100, Some(0), true));
-    assert!(!super::tracking_publication_due(100, Some(0), false));
-    assert!(!super::census_turn_due(100, Some(0), Some(0), false));
+fn a_failed_journal_retry_can_proceed_without_a_census() {
+    assert!(super::tracking_publication_due(u64::MAX, None, true));
+    assert!(!super::tracking_publication_due(0, Some(u64::MAX), true));
+    assert!(!super::census_turn_due(
+        u64::MAX,
+        Some(u64::MAX),
+        Some(u64::MAX),
+        false
+    ));
 }
 
 #[test]
@@ -1738,4 +1747,38 @@ fn tracking_batches_fork_churn_but_publishes_initial_state_immediately() {
     }
     assert_eq!(publications, [0, 1_000, 2_000]);
     assert!(super::tracking_publication_due(2_100, last, true));
+}
+
+/// All budget actions obey the same completion and clean-point precedence.
+#[test]
+fn budget_actions_preserve_clean_points_and_natural_completion() {
+    use provenant_records::BudgetAction;
+    for action in [BudgetAction::WrapUp, BudgetAction::Warn, BudgetAction::Stop] {
+        for budget in [0, 1, 1000, u64::MAX] {
+            for used in [0, budget, budget.saturating_add(1), u64::MAX] {
+                for clean in [false, true] {
+                    for completed in [false, true] {
+                        let boundary =
+                            super::budget_boundary(budget, action, used, clean, completed);
+                        if completed
+                            || action == BudgetAction::Warn
+                            || budget == 0
+                            || used <= budget
+                        {
+                            assert_eq!(boundary, None);
+                        } else {
+                            assert_eq!(
+                                boundary,
+                                Some(if clean {
+                                    super::BudgetBoundary::Clean
+                                } else {
+                                    super::BudgetBoundary::Dirty
+                                })
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

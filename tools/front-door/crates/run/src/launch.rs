@@ -66,6 +66,7 @@ pub fn capture_plan(task: &TaskRequest, limits: &provenant_records::LaneLimits) 
                 .saturating_mul(1000)
         },
         token_budget: enforced(&limits.token_budget),
+        budget_action: limits.budget_policy.unwrap_or_default().action,
         // Writers only: a fresh attempt continues a writer's retained
         // worktree from its handoff. 0 or unset is off; a provider that
         // reports no per-call context figure is never stopped for it.

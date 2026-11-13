@@ -358,6 +358,14 @@ pub trait Holder {
     fn budget_warning(&self, _context: &[u8], _tokens: u64, _budget: u64) -> Result<()> {
         Ok(())
     }
+    /// Read-only clean-point evidence. Unknown state is not a clean point.
+    fn budget_clean_point(&self, _context: &[u8]) -> Result<bool> {
+        Ok(false)
+    }
+    /// Durable overrun evidence, also used by status and chair notification.
+    fn budget_crossed(&self, _context: &[u8], _tokens: u64, _budget: u64) -> Result<()> {
+        Ok(())
+    }
     fn terminal(
         &self,
         context: &[u8],
@@ -967,6 +975,9 @@ impl Driver<'_> {
         let mut slot_extended_ms = 0_u64;
         let mut budget_warned = false;
         let mut budget_stop_sent = false;
+        let mut budget_crossed = false;
+        let mut budget_sample = None;
+        let mut budget_clean = false;
         let mut context_stop_sent = false;
         let spawn_result = self.spawn_provider(
             argv,
@@ -1278,11 +1289,45 @@ impl Driver<'_> {
                     let _ = holder.budget_warning(&self.holder_context, tokens, plan.token_budget);
                 }
             }
-            let over_budget = plan.token_budget > 0
-                && tokens > plan.token_budget
-                && !budget_stop_sent
+            let crossed = plan.token_budget > 0 && tokens > plan.token_budget;
+            if crossed && !budget_crossed {
+                budget_crossed = true;
+                warn(&mut warnings, &mut omitted_warnings, "token budget crossed");
+                if let Some(holder) = self.holder
+                    && holder
+                        .budget_crossed(&self.holder_context, tokens, plan.token_budget)
+                        .is_err()
+                {
+                    warn(
+                        &mut warnings,
+                        &mut omitted_warnings,
+                        "budget overrun notice could not be delivered",
+                    );
+                }
+            }
+            // Inspect Git only when usage changes, not on every reactor wake.
+            if crossed
+                && plan.budget_action != provenant_records::BudgetAction::Warn
+                && budget_sample != Some(tokens)
                 && !terminal
-                && exit.is_none();
+                && exit.is_none()
+            {
+                budget_sample = Some(tokens);
+                budget_clean = self.holder.is_some_and(|holder| {
+                    holder
+                        .budget_clean_point(&self.holder_context)
+                        .unwrap_or(false)
+                });
+            }
+            let over_budget = budget_boundary(
+                plan.token_budget,
+                plan.budget_action,
+                tokens,
+                budget_clean,
+                terminal || exit.is_some(),
+            )
+            .is_some()
+                && !budget_stop_sent;
             let context_reached = context_handoff_due(
                 plan.context_handoff,
                 out_events.context().or_else(|| err_events.context()),
@@ -2468,3 +2513,33 @@ fn stream_policy(
 
 #[cfg(test)]
 mod tests;
+
+/// A clean stop preserves the lane's own handoff/outcome; a dirty stop either
+/// resumes to wrap up or enforces the hard cap during settlement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BudgetBoundary {
+    Clean,
+    Dirty,
+}
+
+fn budget_boundary(
+    budget: u64,
+    action: provenant_records::BudgetAction,
+    tokens: u64,
+    clean: bool,
+    completed: bool,
+) -> Option<BudgetBoundary> {
+    if budget == 0
+        || tokens <= budget
+        || completed
+        || action == provenant_records::BudgetAction::Warn
+    {
+        None
+    } else {
+        Some(if clean {
+            BudgetBoundary::Clean
+        } else {
+            BudgetBoundary::Dirty
+        })
+    }
+}

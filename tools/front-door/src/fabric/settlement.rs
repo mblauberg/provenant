@@ -102,6 +102,21 @@ pub(crate) fn advance_graphs_after_settlement(
         read_prompts: true,
     };
     let store = provenant_run::RunStore::open(&context, &call)?;
+    let session = provenant_cli::run::Session { store, context };
+    let store = &session.store;
+    // The holder admitted this successor before releasing predecessor custody.
+    // Launch only now, through the ordinary host resume path. Replaying this
+    // durable settlement reaction reuses its operation and queued run.
+    if let Some(run) = store.prepare_budget_wrap_up(settled.attempt_id, &call)? {
+        let edge = provenant_cli::run::Edge {
+            roots: &roots,
+            home: &settled.roots.home,
+            assets: &settled.roots.checkout,
+            cwd: &host.cwd,
+        };
+        provenant_cli::run::launch_budget_wrap_up(&session, run, &edge, &call, host)
+            .map_err(|failure| std::io::Error::other(failure.message))?;
+    }
     let record = store.record(settled.attempt_id, &call)?;
     if let Some(id) = matching_graph_hint(&roots.state, settled.project_id, &record) {
         let result = advance_attempt_graph(settled, &roots, &record, &id, workers);
@@ -257,6 +272,13 @@ pub(crate) fn checkpoint_matches_attempt(
                 .as_deref()
                 .and_then(|reference| reference.rsplit('/').next())
                 == Some(record.attempt_id.to_string().as_str())
+                || record.retry_of.is_some_and(|prior| {
+                    attempt
+                        .attempt_ref
+                        .as_deref()
+                        .and_then(|reference| reference.rsplit('/').next())
+                        == Some(prior.to_string().as_str())
+                })
                 || graph_operation("graph-attempt-operation", &attempt.key)
                     .is_ok_and(|operation| operation == record.operation_id)
         })

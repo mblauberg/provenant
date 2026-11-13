@@ -35,6 +35,11 @@ pub enum AttemptFile {
     Delivery,
     DeliveryStarted,
     ProviderStateExpired,
+    BudgetWarning,
+    BudgetOverrun,
+    BudgetCleanPoint,
+    BudgetWrapUpRefused,
+    BudgetCommit,
     PayloadEvicted,
     Handoff,
     Tmp,
@@ -45,7 +50,7 @@ pub enum AttemptFile {
 }
 
 impl AttemptFile {
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 29] = [
         Self::Prompt,
         Self::Result,
         Self::Stdout,
@@ -63,6 +68,11 @@ impl AttemptFile {
         Self::Delivery,
         Self::DeliveryStarted,
         Self::ProviderStateExpired,
+        Self::BudgetWarning,
+        Self::BudgetOverrun,
+        Self::BudgetCleanPoint,
+        Self::BudgetWrapUpRefused,
+        Self::BudgetCommit,
         Self::PayloadEvicted,
         Self::Handoff,
         Self::Tmp,
@@ -92,6 +102,11 @@ impl AttemptFile {
             Self::Delivery => "delivery.json",
             Self::DeliveryStarted => "delivery-started.json",
             Self::ProviderStateExpired => "provider-state-expired.json",
+            Self::BudgetWarning => "budget-warning.json",
+            Self::BudgetOverrun => "budget-overrun.json",
+            Self::BudgetCleanPoint => "budget-clean-point.json",
+            Self::BudgetWrapUpRefused => "budget-wrap-up-refused.json",
+            Self::BudgetCommit => "budget-commit.json",
             Self::PayloadEvicted => "payload-evicted.json",
             Self::Handoff => "handoff.json",
             Self::Tmp => "tmp",

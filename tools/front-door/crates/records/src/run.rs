@@ -155,6 +155,9 @@ impl HarnessProfile {
 /// Work labels and host-stamped graph provenance. Labels are at most 256 UTF-8 bytes.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkContext {
+    /// Sources of writer budget fields, retained by graph compilation.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub budget_sources: std::collections::BTreeMap<String, crate::LimitSource>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]

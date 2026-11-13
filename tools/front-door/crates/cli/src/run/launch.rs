@@ -163,6 +163,18 @@ pub fn launch(
     launch_prepared(session, run, edge, call, None)
 }
 
+/// Launch the holder-admitted budget continuation with its original host
+/// executable authority, after predecessor custody has been released.
+pub fn launch_budget_wrap_up(
+    session: &Session,
+    run: RunId,
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+    host: &run::HostLaunchContext,
+) -> Result<Vec<run::Started>, Fail> {
+    launch_on_host_with_wait(session, run, edge, call, Some(host), None, None)
+}
+
 /// The detached launcher's entry point. It reopens the admitted run and uses
 /// the ordinary host launch path, including writer custody and guardian handoff.
 pub fn launch_worker(id: RunId, provider_lease_wait: Option<u64>, edge: &Edge<'_>) -> Reply {

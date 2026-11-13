@@ -2770,6 +2770,23 @@ impl BoundGraphOwner<'_> {
             };
             if !accepted && let Some(context) = &mut context {
                 context.writer_predecessor = writer_predecessor;
+                if let Some(spec) = node.attempt {
+                    for (field, configured) in [
+                        ("token_budget", spec.token_budget.is_some()),
+                        ("on_budget", spec.on_budget.is_some()),
+                        ("budget_grace", spec.budget_grace.is_some()),
+                    ] {
+                        if configured {
+                            context.budget_sources.insert(
+                                field.into(),
+                                spec.budget_sources
+                                    .get(field)
+                                    .copied()
+                                    .unwrap_or(provenant_records::LimitSource::Template),
+                            );
+                        }
+                    }
+                }
             }
             let source_commit = successor_head.as_deref().or(node.source_commit);
             let excluded_families = self.writer_families(node.distinct_from_attempts)?;

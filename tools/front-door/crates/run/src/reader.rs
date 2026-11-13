@@ -867,6 +867,20 @@ impl RunStore {
             return Err(RunError::Validation("attempt index identity"));
         }
         validate_attempt(&record)?;
+        // A budget wrap-up is one run-internal same-session successor. Graph
+        // observations already follow this field and wait on the successor.
+        record.superseded_by = self
+            .db
+            .query_row(
+                "SELECT id FROM attempts WHERE continues=?1 AND operation=?2 AND refused=0",
+                params![id.to_string(), format!("budget-wrap-up-{id}")],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|id| {
+                AttemptId::parse(&id).map_err(|_| RunError::Validation("wrap-up successor ID"))
+            })
+            .transpose()?;
         let receipt: Option<(i64, Vec<u8>)> = self
             .db
             .query_row(
@@ -904,6 +918,44 @@ impl RunStore {
             let delivery: WriterDeliveryReceipt = crate::db::decode(&raw)?;
             if delivery.head.is_some() && delivery.head == record.head {
                 record.delivery = Some(delivery);
+            }
+        }
+        if let Ok(attempt) = self.attempt_dir(id, false)
+            && let Some(raw) = crate::artifacts::read_sealed_observed(
+                &attempt,
+                provenant_records::AttemptFile::BudgetOverrun.name(),
+                RECORD_LIMIT,
+            )?
+        {
+            let overrun = crate::db::decode::<serde_json::Value>(&raw)?;
+            record
+                .extra
+                .insert("budget_overrun".into(), overrun.clone());
+            if let Some(limit) = record
+                .limits
+                .as_mut()
+                .and_then(|limits| limits.token_budget.as_mut())
+            {
+                limit.extra.insert("overrun".into(), overrun);
+            }
+        }
+        if let Ok(attempt) = self.attempt_dir(id, false)
+            && let Some(raw) = crate::artifacts::read_sealed_observed(
+                &attempt,
+                provenant_records::AttemptFile::BudgetWrapUpRefused.name(),
+                RECORD_LIMIT,
+            )?
+        {
+            let refusal = crate::db::decode::<serde_json::Value>(&raw)?;
+            record
+                .extra
+                .insert("budget_wrap_up_refused".into(), refusal.clone());
+            if let Some(limit) = record
+                .limits
+                .as_mut()
+                .and_then(|limits| limits.token_budget.as_mut())
+            {
+                limit.extra.insert("wrap_up_refused".into(), refusal);
             }
         }
         let (checkpoint, checkpoint_readable) = match self.attempt_dir(id, false) {

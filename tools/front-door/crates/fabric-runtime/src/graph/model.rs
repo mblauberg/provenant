@@ -210,6 +210,18 @@ pub struct AttemptSpec {
     /// Require a confidential-safe route.
     #[serde(default, skip_serializing_if = "is_false")]
     pub confidential: bool,
+    /// Sources retained when run controls are merged onto template defaults.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub budget_sources: std::collections::BTreeMap<String, provenant_records::LimitSource>,
+    /// Fresh-token target; zero disables it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<u64>,
+    /// Action at the target: wrap_up (default), warn or stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_budget: Option<provenant_records::BudgetAction>,
+    /// Fractional allowance above the target for one wrap-up continuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_grace: Option<provenant_records::BudgetGrace>,
     /// Provider execution timeout in seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_timeout: Option<u64>,
@@ -314,6 +326,20 @@ impl AttemptSpec {
     /// from its preset.
     pub fn lane_knobs(&self) -> Vec<String> {
         let mut knobs = Vec::new();
+        if let Some(budget) = self.token_budget {
+            knobs.push(format!("lanes.token_budget={budget}"));
+        }
+        if let Some(action) = self.on_budget {
+            let name = match action {
+                provenant_records::BudgetAction::WrapUp => "wrap_up",
+                provenant_records::BudgetAction::Warn => "warn",
+                provenant_records::BudgetAction::Stop => "stop",
+            };
+            knobs.push(format!("lanes.budget_action={name}"));
+        }
+        if let Some(grace) = self.budget_grace {
+            knobs.push(format!("lanes.budget_grace={}", grace.as_fraction()));
+        }
         if self.effective_isolation() != "private" {
             knobs.push(format!("lanes.isolation={}", self.effective_isolation()));
         }
@@ -345,6 +371,10 @@ impl AttemptSpec {
             && self.directory.is_none()
             && !self.confidential
             && self.provider_timeout.is_none()
+            && self.budget_sources.is_empty()
+            && self.token_budget.is_none()
+            && self.on_budget.is_none()
+            && self.budget_grace.is_none()
             && self.new_worktree.is_none()
             && self.account.is_none()
             && self.capabilities.is_empty()
