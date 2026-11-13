@@ -2310,7 +2310,7 @@ fn seed_graph_checkpoint(
     state: &provenant_core::StateRoot,
     project: provenant_core::ProjectId,
     actor: provenant_core::ActorId,
-    attempt: provenant_core::AttemptId,
+    attempt_ref: String,
     directory: &std::path::Path,
 ) -> Result {
     use provenant_core::{CancelToken, Clock, WaitBudget};
@@ -2355,7 +2355,7 @@ fn seed_graph_checkpoint(
     })?;
     provenant_fabric_runtime::graph::advance_with_budget(
         &document,
-        &mut Pending(actor.to_string(), format!("host/{attempt}")),
+        &mut Pending(actor.to_string(), attempt_ref),
         &mut journal,
         &Default::default(),
         &Default::default(),
@@ -2506,7 +2506,17 @@ fn persisted_attempt_with(
         });
     }
     store.create(&prepared, &call)?;
-    seed_graph_checkpoint(&roots.state, project_id, actor_id, attempt_id, &rig.project)?;
+    // Attempt references are `HOST/ATTEMPT` with this host's real identity.
+    let host = provenant_cli::fabric::Context::open(roots.clone(), &rig.home, &rig.project)?
+        .identity
+        .host;
+    seed_graph_checkpoint(
+        &roots.state,
+        project_id,
+        actor_id,
+        format!("{host}/{attempt_id}"),
+        &rig.project,
+    )?;
     let started_at = clock.wall_now()?;
     let mut running = store.record(attempt_id, &call)?;
     running.revision = 2;

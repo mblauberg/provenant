@@ -216,19 +216,6 @@ fn restart_hook_reports_in_flight_lanes_and_prs_named_by_the_chair() -> Result {
     let rig = TestRig::new()?;
     let lane = create_lane(&rig)?;
     let key = lane.key.to_string();
-    let cli = rig.command(&["--json", "status"])?;
-    assert_eq!(code(&cli), 0, "{:?}", cli.stderr.bytes);
-    let cli: Value = serde_json::from_slice(&cli.stdout.bytes)?;
-    assert!(
-        cli["data"]["rows"]
-            .as_array()
-            .is_some_and(|rows| rows.iter().any(|entry| {
-                entry["kind"] == "attempt"
-                    && entry["node_id"] == lane.key.node()
-                    && entry["attempt_id"] == lane.attempt
-            })),
-        "{cli}"
-    );
     let checkpoint = store(&rig, "restart-session")?;
     save(
         &checkpoint,

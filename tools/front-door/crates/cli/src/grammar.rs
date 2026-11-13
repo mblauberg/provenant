@@ -1209,8 +1209,9 @@ pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
 }
 #[derive(Clone, Debug, Args)]
 pub struct Status {
-    /// Stream a bounded attempt inventory page for the session collector.
-    #[arg(long, hide = true, conflicts_with_all = ["targets", "all", "cursor"])]
+    /// Stream a bounded attempt inventory page for the session collector,
+    /// paged with --all, --limit and --cursor like the graph listing.
+    #[arg(long, hide = true, conflicts_with = "targets")]
     pub session_stream: bool,
     /// Graphs, nodes or attempts to show (NAME[/NODE[#N]]); every graph when omitted
     #[arg(value_name = "TARGET")]

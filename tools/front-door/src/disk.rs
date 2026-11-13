@@ -555,7 +555,7 @@ mod tests {
             } else {
                 &[]
             };
-            let attempt = state.join("attempts/a");
+            let attempt = state.join(format!("attempts/{index}"));
             fs::create_dir_all(&attempt)?;
             for (name, class) in [("result.md", "other_state"), ("stdout.log", "attempt_logs")] {
                 let part = attempt.join(name);

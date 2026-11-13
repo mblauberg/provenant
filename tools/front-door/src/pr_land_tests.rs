@@ -214,11 +214,20 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         &summary,
         "# Capture contributions\n\nRetain local attempts.\n",
     )?;
+    // `--from-attempt` takes a graph target: name the first attempt by its
+    // graph and node.
+    super::worktree_tests::seed_graph_checkpoint(
+        &landing.rig,
+        &context,
+        "lane-contribution-0",
+        "local",
+        ids[0].parse()?,
+    )?;
     let open_args = [
         "pr",
         "open",
         "--from-attempt",
-        &ids[0],
+        "lane-contribution-0/local",
         "--branch",
         "feat",
         "--base",
@@ -2230,10 +2239,10 @@ pub(crate) fn pr_open_refuses_what_the_receipts_cannot_support() -> Result {
         &summary,
         "# feat(cli): add the thing\n\nIt adds the thing.\n",
     )?;
-    let unknown = "ab".repeat(16);
+    let unknown = "never-ran";
     let args = [
         "--from-attempt",
-        &unknown,
+        unknown,
         "--summary-file",
         summary_arg,
         "--dry-run",
@@ -2274,26 +2283,33 @@ pub(crate) fn pr_open_refuses_what_the_receipts_cannot_support() -> Result {
         "never launched",
     )?;
     store.create(&prepared, &call)?;
-    let attempt = prepared.attempt_id.to_string();
+    let graph = format!("lane-{}", prepared.attempt_id);
+    super::worktree_tests::seed_graph_checkpoint(
+        &rig,
+        &context,
+        &graph,
+        "writer",
+        prepared.attempt_id,
+    )?;
     let refusal = open_refusal(
         &rig,
         &[
             "--from-attempt",
-            &attempt,
+            &graph,
             "--summary-file",
             summary_arg,
             "--dry-run",
         ],
     )?;
     assert_eq!(refusal, "PR_ATTEMPT_STATE");
-    // A malformed attempt ID is a usage error before anything is read.
+    // A malformed target is a usage error before anything is read.
     let invalid = command(
         &rig,
         &[
             "pr",
             "open",
             "--from-attempt",
-            "nope",
+            "Not_A_Target",
             "--summary-file",
             summary_arg,
         ],

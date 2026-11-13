@@ -465,7 +465,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         let frames = concat!(
             "{\"jsonrpc\":\"2.0\",\"id\":999,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}\n",
             "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
-            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fabric_run\",\"arguments\":{\"op\":\"run\",\"use\":\"task\",\"brief\":\"read only\",\"explain\":true}}}\n"
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fabric_run\",\"arguments\":{\"op\":\"run\",\"template\":\"task\",\"brief\":\"read only\",\"explain\":true}}}\n"
         );
         let mut options = provenant_os::exec::ExecOptions::new(
             &launch.argv,
@@ -698,7 +698,8 @@ pub(crate) fn lane_provider() -> Result {
             .find(|reply| reply["id"] == 1)
             .map(|reply| mcp_error_code(&reply["result"]))
             .ok_or("stripped MCP reply")?,
-        "graph_relay_unavailable"
+        "graph_relay_unavailable",
+        "{reply:?}"
     );
     // Exercise the same publisher used by CLI overflow under confinement.
     let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME")?);

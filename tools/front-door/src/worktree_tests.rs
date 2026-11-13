@@ -676,6 +676,77 @@ pub(super) fn writer_context(
     Ok((roots, context))
 }
 
+/// CLI targets resolve through a graph's checkpoint. Record graph `graph` with
+/// one read-only node `node` whose first attempt is `attempt` on this host, so
+/// `graph/node` names an attempt the fixture dispatched directly.
+pub(super) fn seed_graph_checkpoint(
+    rig: &TestRig,
+    context: &provenant_run::ExecutionContext,
+    graph: &str,
+    node: &str,
+    attempt: provenant_core::AttemptId,
+) -> Result {
+    use provenant_core::{CancelToken, WaitBudget};
+    use provenant_fabric_runtime::graph::{
+        AccessMode, AttemptKey, AttemptObservation, AttemptOwner, FileJournal, GraphDocument,
+        GraphExecution, GraphRoute, NodeInput, Replay,
+    };
+    struct Pending(String, String);
+    impl AttemptOwner for Pending {
+        type Error = std::io::Error;
+        fn actor(&self) -> String {
+            self.0.clone()
+        }
+        fn observe_or_start(
+            &mut self,
+            _key: &AttemptKey,
+            _node: NodeInput<'_>,
+            _route: &GraphRoute,
+            _access: AccessMode,
+            _worktree: Option<&str>,
+            _replay: Replay<'_>,
+        ) -> std::io::Result<AttemptObservation> {
+            Ok(AttemptObservation::Pending {
+                attempt_ref: Some(self.1.clone()),
+            })
+        }
+    }
+    let (roots, _) = writer_context(rig)?;
+    let host = provenant_cli::fabric::Context::open(roots, &rig.home, &rig.project)?
+        .identity
+        .host;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"graph_id":graph,
+        "nodes":[{"id":node,"access":"read_only","prompt":"fixture","route":{"alias":"senior"}}]
+    }))?;
+    let mut journal = FileJournal::open(
+        &context.state_root,
+        context.project_id,
+        graph,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    journal.bind(GraphExecution {
+        extra: Default::default(),
+        integration_base: None,
+        review_base: None,
+        directory: rig.project.clone(),
+        document: document.clone(),
+    })?;
+    provenant_fabric_runtime::graph::advance_with_budget(
+        &document,
+        &mut Pending(context.actor_id.to_string(), format!("{host}/{attempt}")),
+        &mut journal,
+        &Default::default(),
+        &Default::default(),
+    )?;
+    Ok(())
+}
+
 fn writer_call<'a>(
     clock: &'a provenant_os::clock::SystemClock,
     cancel: &'a provenant_core::CancelToken,

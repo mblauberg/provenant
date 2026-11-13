@@ -39,7 +39,8 @@ fn snapshot(path: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>> {
 fn status_reads_an_unregistered_project_without_creating_state() -> Result {
     let empty = TestRig::new()?.without_state()?;
     let status = call(&empty, &["status"], 0)?;
-    assert_eq!(status["data"]["rows"], serde_json::json!([]));
+    // A bare `status` lists graphs (`{graphs, omitted, next_cursor}`); there are none.
+    assert_eq!(status["data"]["graphs"], serde_json::json!([]), "{status}");
     assert!(!empty.state.exists());
     Ok(())
 }

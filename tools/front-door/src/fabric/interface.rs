@@ -709,7 +709,7 @@ impl Factory {
                 .filter(|key| !key.is_empty() && key.len() <= 200)
                 .ok_or_else(invalid)?
                 .to_owned(),
-            None if name.is_some() => submission_digest(input, None)?,
+            None if name.is_some() => submission_digest(input, None, None)?,
             None => provenant_core::hex(
                 &provenant_os::fs::entropy_128().map_err(|_| FacadeError::StateCorrupt)?,
             ),
@@ -1109,6 +1109,7 @@ impl Factory {
         cancel: &CancelToken,
         announce: Option<super::graph_execution::Announce<'_>>,
     ) -> Result<Value, FacadeError> {
+        let submitted = input;
         let mut input = launch_input(input)?;
         let raw_owned = input.get("document").cloned();
         let raw = raw_owned.as_ref();
@@ -1269,7 +1270,8 @@ impl Factory {
                 false,
             ),
         };
-        let digest = submission_digest(input, source_commit.as_deref())?;
+        let templates = effective_templates(&library, template_name, input);
+        let digest = submission_digest(input, source_commit.as_deref(), Some(&templates))?;
         let explain = input["explain"] == true;
         let (generated_id, taken) = if explain {
             (
@@ -1295,16 +1297,19 @@ impl Factory {
                 .map_err(graph_input_reason)?
             {
                 NameDecision::Replay(id) => {
-                    let execution = FileJournal::execution(state, project, &id)
-                        .map_err(graph_journal_error)?
-                        .ok_or(FacadeError::StateCorrupt)?;
-                    let mut result = self.launch_submission(
-                        execution.document,
-                        input,
+                    // The same input is the same launch: report that graph as
+                    // it stands and start nothing. Advancing it stays with the
+                    // scheduler and explicit recovery.
+                    let run = self.graph(
+                        GraphInput::Status {
+                            extra: Default::default(),
+                            id: id.clone(),
+                        },
                         budget,
                         cancel,
-                        announce,
                     )?;
+                    let mut result = encode(run)?;
+                    result["timed_out"] = json!(false);
                     result["named"] = json!({"requested":requested, "graph":id, "replayed":true});
                     return Ok(result);
                 }
@@ -1613,11 +1618,26 @@ impl Factory {
                 json!({"document":document, "skipped":skipped, "writer_budgets":writer_budgets}),
             );
         }
-        let mut result = self.launch_submission(document, input, budget, cancel, announce)?;
+        let mut result = match self.launch_submission(document, input, budget, cancel, announce) {
+            // A concurrent launch bound this name to other input between the
+            // choice and the bind. Choose again: the family now includes it.
+            Err(FacadeError::Conflict) if self.name_taken_by_other_input(id, &digest) => {
+                return self.submit_document(submitted, budget, cancel, announce);
+            }
+            result => result?,
+        };
         result["named"] = json!({
             "requested": requested, "graph": id, "replayed": false, "taken": taken,
         });
         Ok(result)
+    }
+
+    /// Whether graph `id` now exists with a launch digest other than `digest`.
+    fn name_taken_by_other_input(&self, id: &str, digest: &str) -> bool {
+        FileJournal::execution(&self.context.roots.state, self.context.identity.project, id)
+            .ok()
+            .flatten()
+            .is_some_and(|execution| execution.document.replay_digest() != Some(digest))
     }
 
     fn launch_submission(
@@ -2183,22 +2203,63 @@ fn typed_binding(
 }
 
 /// The host digest of a launch: everything the caller chose except the name and
-/// how long to wait, plus the commit the launch started from. Equal digests are
-/// the same launch.
-fn submission_digest(input: &Value, source_commit: Option<&str>) -> Result<String, FacadeError> {
+/// how long to wait, the effective templates it runs, and the commit the launch
+/// started from. Equal digests are the same launch.
+fn submission_digest(
+    input: &Value,
+    source_commit: Option<&str>,
+    templates: Option<&Value>,
+) -> Result<String, FacadeError> {
     let mut submission = input.clone();
     if let Some(fields) = submission.as_object_mut() {
         for field in ["explain", "wait_seconds", "name"] {
             fields.remove(field);
         }
     }
-    provenant_records::CanonicalV1::record_digest(
-        "graph-replay",
-        1,
-        &json!({"submission": submission, "source_commit": source_commit}),
-    )
-    .map(|digest| digest.to_string())
-    .map_err(|_| FacadeError::StateCorrupt)
+    let mut identity = json!({"submission": submission, "source_commit": source_commit});
+    if let Some(templates) = templates {
+        identity["templates"] = templates.clone();
+    }
+    provenant_records::CanonicalV1::record_digest("graph-replay", 1, &identity)
+        .map(|digest| digest.to_string())
+        .map_err(|_| FacadeError::StateCorrupt)
+}
+
+/// The resolved body of the launched template and of every template it or the
+/// submitted document reaches through `use`, so an edited template file is a
+/// different launch even under the same name. A name that does not resolve is
+/// kept as `null`; compilation reports it.
+fn effective_templates(library: &TemplateLibrary, root: &str, input: &Value) -> Value {
+    fn uses(value: &Value, into: &mut Vec<String>) {
+        match value {
+            Value::Object(fields) => {
+                for (key, value) in fields {
+                    match (key.as_str(), value) {
+                        ("use", Value::String(name)) => into.push(name.clone()),
+                        _ => uses(value, into),
+                    }
+                }
+            }
+            Value::Array(values) => values.iter().for_each(|value| uses(value, into)),
+            _ => {}
+        }
+    }
+    let mut pending = vec![root.to_owned()];
+    uses(input, &mut pending);
+    let mut resolved = serde_json::Map::new();
+    while let Some(name) = pending.pop() {
+        if resolved.contains_key(&name) {
+            continue;
+        }
+        let body = library
+            .resolve(&name)
+            .ok()
+            .and_then(|template| serde_json::to_value(template).ok())
+            .unwrap_or(Value::Null);
+        uses(&body, &mut pending);
+        resolved.insert(name, body);
+    }
+    Value::Object(resolved)
 }
 
 /// The roles a `--route` map can name.

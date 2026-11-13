@@ -173,11 +173,13 @@ not targets. Pull request numbers stay positional on `land` and `pr`, and
 ### Names and replay
 
 `--name` is a handle. `run --name NAME` creates a graph named `NAME` when the
-project has none. Each launch records a replay digest of the template name or
-graph document digest, the brief, each typed `--set` binding, the placement
+project has none. Each launch records a replay digest of the graph document or
+template name, the resolved body of that template and of every template it
+reaches through `use`, the brief, each typed `--set` binding, the placement
 and route flags, and the source commit. When a graph in the name's family
 (`NAME`, `NAME-2`, …) has the same digest, `run` starts nothing and returns
-that graph's handle and state with exit 0, whether it is running or settled.
+that graph's handle and state with exit 0, whether it is running or settled,
+without advancing or launching any of its nodes.
 When none matches, `run` launches the next free `NAME-k` and prints one line
 saying so; a name conflict is never an error. A name with no room for a suffix
 within 48 bytes is refused in one line.
