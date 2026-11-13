@@ -104,7 +104,7 @@ fn diagnostic(message: &str) {
     let _ = writeln!(
         io::stderr().lock(),
         "{}",
-        message.chars().take(1024).collect::<String>()
+        message.chars().take(5000).collect::<String>()
     );
 }
 // Denial output must obey the hook's real-time protocol budget.
@@ -967,7 +967,8 @@ fn run_local_gate_with(
     use provenant_cli::domains::LocalGateMode;
     use provenant_os::exec::{ExecOptions, StreamPolicy, Termination};
     for command in &settings.commands {
-        let argv = ["sh".into(), "-c".into(), command.into()];
+        let script = format!("exec 2>&1\n{command}");
+        let argv = ["sh".into(), "-c".into(), script.into()];
         let mut options = ExecOptions::new(
             &argv,
             project,
@@ -975,21 +976,30 @@ fn run_local_gate_with(
         );
         options.process_group = true;
         options.cleanup_process_group = true;
-        options.stdout = StreamPolicy::Discard;
+        options.stdout = StreamPolicy::Tail { limit: 4096 };
         options.stderr = StreamPolicy::Discard;
-        let failure = match executor.execute(options) {
-            Ok(outcome) if outcome.timed_out => Some("timed out".to_string()),
-            Ok(outcome) => match outcome.termination {
-                Termination::Exit(0) => None,
-                Termination::Exit(code) => Some(format!("exit status {code}")),
-                Termination::Signal(signal) => Some(format!("signal {signal}")),
-            },
-            Err(error) => Some(format!("execution failed: {error}")),
+        let (failure, output) = match executor.execute(options) {
+            Ok(outcome) => {
+                let failure = if outcome.timed_out {
+                    Some("timed out".to_string())
+                } else {
+                    match outcome.termination {
+                        Termination::Exit(0) => None,
+                        Termination::Exit(code) => Some(format!("exit status {code}")),
+                        Termination::Signal(signal) => Some(format!("signal {signal}")),
+                    }
+                };
+                (failure, outcome.stdout.bytes)
+            }
+            Err(error) => (Some(format!("execution failed: {error}")), Vec::new()),
         };
         if let Some(failure) = failure {
+            let safe = provenant_confinement::redact::known_shapes(&output)
+                .unwrap_or_else(|_| b"[output withheld: redaction failed]".to_vec());
             let message = format!(
-                "local gate command {:?}: {failure}",
-                command.chars().take(200).collect::<String>()
+                "local gate command {:?}: {failure}\n{}",
+                provenant_confinement::redact::bounded_line(command, 200),
+                String::from_utf8_lossy(&safe)
             );
             if settings.mode == LocalGateMode::Enforce {
                 return Err(message.into());
@@ -1034,6 +1044,21 @@ mod answer_delivery_tests {
         settings.mode = LocalGateMode::Enforce;
         settings.commands.clear();
         run_local_gate(&settings, dir.path())?;
+        Ok(())
+    }
+
+    #[test]
+    fn local_gate_failure_reports_output_tail() -> Result<(), Error> {
+        let dir = tempfile::tempdir()?;
+        let settings = provenant_cli::domains::LocalGateSettings {
+            mode: provenant_cli::domains::LocalGateMode::Enforce,
+            commands: vec!["printf 'gate output'; printf ' failure tail' >&2; exit 1".into()],
+            timeout_seconds: 2,
+        };
+        let diagnostic = run_local_gate(&settings, dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(diagnostic.contains("gate output failure tail"));
         Ok(())
     }
 

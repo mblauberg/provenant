@@ -33,7 +33,7 @@ continuation_copy_depth = 32
 source_view_seconds = 300
 source_view_entries = 100000
 source_view_bytes = 536870912
-sandboxed_routes = ["opencode/opencode/"]
+sandboxed_routes = []
 sandbox_cache_reads = []
 
 [projects]
@@ -102,10 +102,10 @@ pub struct RunConfig {
     /// Maximum total file bytes in one pinned source view.
     #[serde(default = "default_source_view_bytes")]
     pub source_view_bytes: u64,
-    /// Route prefixes (`adapter/model`) whose lanes always run sandboxed. The
-    /// default is the OpenCode Zen tier (`opencode/opencode/`), whose free
-    /// models may train on or retain prompts; OpenCode Go
-    /// (`opencode/opencode-go/`) is not on it.
+    /// Route prefixes (`adapter/model`) whose lanes run sandboxed under default
+    /// configuration. Empty by default; users can add routes (e.g. OpenCode Zen tier
+    /// `opencode/opencode/`). An explicit `lanes.sandbox = "off"` / `--no-sandbox`
+    /// overrides this list with a warning.
     #[serde(default = "default_sandboxed_routes")]
     pub sandboxed_routes: Vec<String>,
     /// Host cache directories a sandboxed lane may read but never write, such
@@ -118,14 +118,11 @@ pub struct RunConfig {
 /// Set in every lane's environment to `on` or `off`, so a lane's own tools
 /// can choose, for example, a private cache when they cannot write a shared one.
 pub const SANDBOX_ENV: &str = "PROVENANT_SANDBOX";
-/// The OpenCode Zen tier: model IDs served by the `zen` account.
-pub const DEFAULT_SANDBOXED_ROUTES: [&str; 1] = ["opencode/opencode/"];
+/// Default sandboxed route prefixes. Empty by default.
+pub const DEFAULT_SANDBOXED_ROUTES: [&str; 0] = [];
 const MAX_SANDBOXED_ROUTES: usize = 64;
 fn default_sandboxed_routes() -> Vec<String> {
-    DEFAULT_SANDBOXED_ROUTES
-        .iter()
-        .map(|route| (*route).to_owned())
-        .collect()
+    Vec::new()
 }
 /// Why a lane runs with or without the sandbox, strongest reason first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,14 +139,13 @@ pub enum SandboxSource {
     Platform,
     /// The `lanes.sandbox` knob, from the run, graph node or host `[knobs]`.
     Knob,
-    /// A read-only lane under `auto`: only the sandbox keeps it read-only.
+    /// A read-only lane under legacy `auto`.
     ReadOnly,
-    /// A writer under `auto` on a trusted route: it runs like the CLI started
-    /// by hand.
+    /// Default resolution: lanes run unsandboxed like the CLI started by hand.
     Default,
 }
 /// What decides one attempt's sandbox.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SandboxInputs<'a> {
     /// The route id, `adapter/model` (`command/NAME` for a configured command).
     pub route: &'a str,
@@ -161,18 +157,36 @@ pub struct SandboxInputs<'a> {
     pub network_narrowed: bool,
     /// The lane cannot write its checkout.
     pub read_only: bool,
+    /// The current process is already inside an operating-system sandbox (e.g. Seatbelt).
+    pub os_sandboxed: bool,
+    /// Whether the host platform supports sandbox confinement (true on macOS).
+    pub platform_supported: bool,
 }
 /// The resolved sandbox mode for one attempt.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxMode {
+    /// Whether the user explicitly requested a sandbox (e.g. `--sandbox` or `knob="on"`).
+    pub requested: bool,
+    /// Whether the lane effectively runs under a sandbox.
+    pub effective: bool,
+    /// Legacy alias for `effective`.
     pub sandboxed: bool,
+    /// Why the lane runs with or without the sandbox.
     pub source: SandboxSource,
+    /// Warning emitted when an explicit request overrides a restriction or cannot be honored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 impl SandboxMode {
     /// The `PROVENANT_SANDBOX` value.
-    pub fn env_value(self) -> &'static str {
-        if self.sandboxed { "on" } else { "off" }
+    pub fn env_value(&self) -> &'static str {
+        if self.effective { "on" } else { "off" }
     }
+}
+
+/// Whether the calling process is already running inside an operating-system sandbox (Seatbelt).
+pub fn current_process_is_sandboxed() -> bool {
+    provenant_os::sys::profile::current_process_is_sandboxed()
 }
 /// Default writer token budget.
 pub const DEFAULT_WRITER_TOKEN_BUDGET: u64 = 500_000;
@@ -287,31 +301,137 @@ impl RunConfig {
             .map(PathBuf::as_path)
     }
 
-    /// Resolve one attempt's sandbox. A sandboxed parent, a listed route and
-    /// a narrowed network always sandbox: `off` cannot remove them. Otherwise
-    /// `on` and `off` decide; under `auto` (or no value) a read-only lane is
-    /// sandboxed, because only the sandbox keeps it read-only, and a writer is
-    /// not. A value the registry does not know sandboxes.
+    /// Resolve one attempt's sandbox mode.
+    ///
+    /// By default (`lanes.sandbox` unset or `"auto"`), every lane kind (including read-only)
+    /// runs unsandboxed.
+    ///
+    /// An explicit `--no-sandbox` / knob `"off"` takes precedence over the route floor
+    /// (`sandboxed_routes`), narrowed-network floor, and parent floor where Provenant decides it,
+    /// with a one-line warning naming the dropped restriction(s).
+    ///
+    /// An OS-inherited sandbox (the process is already inside Seatbelt) cannot be removed by
+    /// a child process and is always reported honestly as effective (`sandboxed: true`, `source: Parent`).
+    ///
+    /// Off macOS (or when platform confinement is unsupported), every lane resolves as sandboxed
+    /// (`source: Platform`).
     pub fn sandbox_for(&self, inputs: SandboxInputs<'_>) -> SandboxMode {
         let listed = self
             .sandboxed_routes
             .iter()
             .any(|prefix| !prefix.is_empty() && inputs.route.starts_with(prefix.as_str()));
-        let (sandboxed, source) = if inputs.parent_sandboxed {
-            (true, SandboxSource::Parent)
-        } else if listed {
-            (true, SandboxSource::Route)
-        } else if inputs.network_narrowed {
-            (true, SandboxSource::Network)
-        } else {
-            match inputs.knob {
-                None | Some("auto") if inputs.read_only => (true, SandboxSource::ReadOnly),
-                None | Some("auto") => (false, SandboxSource::Default),
-                Some("off") => (false, SandboxSource::Knob),
-                Some(_) => (true, SandboxSource::Knob),
-            }
+
+        let requested = match inputs.knob {
+            Some("off") => false,
+            Some("on") => true,
+            None | Some("auto") => false,
+            Some(_) => true,
         };
-        SandboxMode { sandboxed, source }
+
+        if !inputs.platform_supported {
+            let warning = if inputs.knob == Some("off") {
+                Some(
+                    "platform does not support unsandboxed launch; lane remains sandboxed"
+                        .to_string(),
+                )
+            } else {
+                None
+            };
+            return SandboxMode {
+                requested,
+                effective: true,
+                sandboxed: true,
+                source: SandboxSource::Platform,
+                warning,
+            };
+        }
+
+        if inputs.os_sandboxed {
+            let warning = if inputs.knob == Some("off") {
+                Some("process is already inside an operating-system sandbox; inherited sandbox remains effective".to_string())
+            } else {
+                None
+            };
+            return SandboxMode {
+                requested,
+                effective: true,
+                sandboxed: true,
+                source: SandboxSource::Parent,
+                warning,
+            };
+        }
+
+        if inputs.knob == Some("off") {
+            let mut dropped = Vec::new();
+            if listed {
+                dropped.push(format!("route '{}'", inputs.route));
+            }
+            if inputs.network_narrowed {
+                dropped.push("network restriction".to_string());
+            }
+            if inputs.parent_sandboxed {
+                dropped.push("parent sandbox floor".to_string());
+            }
+            let warning = if dropped.is_empty() {
+                None
+            } else {
+                Some(format!(
+                    "explicit --no-sandbox drops restriction: {}",
+                    dropped.join(", ")
+                ))
+            };
+            return SandboxMode {
+                requested: false,
+                effective: false,
+                sandboxed: false,
+                source: SandboxSource::Knob,
+                warning,
+            };
+        }
+
+        if matches!(inputs.knob, Some(k) if k != "auto") {
+            return SandboxMode {
+                requested: true,
+                effective: true,
+                sandboxed: true,
+                source: SandboxSource::Knob,
+                warning: None,
+            };
+        }
+
+        if inputs.parent_sandboxed {
+            SandboxMode {
+                requested: false,
+                effective: true,
+                sandboxed: true,
+                source: SandboxSource::Parent,
+                warning: None,
+            }
+        } else if listed {
+            SandboxMode {
+                requested: false,
+                effective: true,
+                sandboxed: true,
+                source: SandboxSource::Route,
+                warning: None,
+            }
+        } else if inputs.network_narrowed {
+            SandboxMode {
+                requested: false,
+                effective: true,
+                sandboxed: true,
+                source: SandboxSource::Network,
+                warning: None,
+            }
+        } else {
+            SandboxMode {
+                requested: false,
+                effective: false,
+                sandboxed: false,
+                source: SandboxSource::Default,
+                warning: None,
+            }
+        }
     }
 
     /// Read `[domains.run]` from the state root's `config.toml`.
@@ -711,98 +831,158 @@ mod tests {
         );
         Ok(())
     }
-    fn writer(route: &str) -> SandboxInputs<'_> {
+    fn lane_input(route: &str) -> SandboxInputs<'_> {
         SandboxInputs {
             route,
             knob: None,
             parent_sandboxed: false,
             network_narrowed: false,
             read_only: false,
+            os_sandboxed: false,
+            platform_supported: true,
         }
     }
-    fn mode(sandboxed: bool, source: SandboxSource) -> SandboxMode {
-        SandboxMode { sandboxed, source }
+    fn writer(route: &str) -> SandboxInputs<'_> {
+        lane_input(route)
     }
+
     #[test]
-    fn trusted_writers_run_unsandboxed_and_every_floor_sandboxes() {
-        let config = RunConfig::default();
-        for route in [
-            "claude/claude-opus-5-5",
-            "codex/gpt-5.5",
-            "agy/gemini-3.5-pro",
-            "cursor/grok-4.7",
-            "opencode/opencode-go/glm-5.3-flash",
-            "command/check",
-        ] {
-            let lane = writer(route);
-            assert_eq!(
-                config.sandbox_for(lane),
-                mode(false, SandboxSource::Default),
-                "{route}"
-            );
-            let knob = |value| SandboxInputs {
-                knob: Some(value),
-                ..lane
+    fn precedence_table_invariants() {
+        let config_with_routes: RunConfig =
+            toml_edit::de::from_str("sandboxed_routes = [\"opencode/opencode/\"]").unwrap();
+        let default_config = RunConfig::default();
+
+        // 1. Invariant: Default is off for every lane kind when no floor applies.
+        for read_only in [false, true] {
+            let input = SandboxInputs {
+                read_only,
+                ..lane_input("codex/gpt-5.5")
             };
+            let res = default_config.sandbox_for(input);
             assert_eq!(
-                config.sandbox_for(knob("auto")),
-                mode(false, SandboxSource::Default)
+                (res.requested, res.effective, res.source),
+                (false, false, SandboxSource::Default),
+                "default off for read_only={read_only}"
             );
-            assert_eq!(
-                config.sandbox_for(knob("on")),
-                mode(true, SandboxSource::Knob)
-            );
-            assert_eq!(
-                config.sandbox_for(knob("off")),
-                mode(false, SandboxSource::Knob)
-            );
-            // A value the registry does not know sandboxes rather than opens.
-            assert_eq!(
-                config.sandbox_for(knob("maybe")),
-                mode(true, SandboxSource::Knob)
-            );
-            // Read-only lanes are sandboxed under auto; `off` opens them.
-            let read_only = SandboxInputs {
-                read_only: true,
-                ..lane
-            };
-            assert_eq!(
-                config.sandbox_for(read_only),
-                mode(true, SandboxSource::ReadOnly)
-            );
-            assert_eq!(
-                config.sandbox_for(SandboxInputs {
-                    knob: Some("off"),
-                    ..read_only
-                }),
-                mode(false, SandboxSource::Knob)
-            );
+            assert_eq!(res.env_value(), "off");
         }
-        // Floors: no knob value removes them, strongest reason first.
+
+        // 2. Invariant: Explicit knob beats default and floors (property: explicit beats default).
+        for config in [&default_config, &config_with_routes] {
+            for route in ["codex/gpt-5.5", "opencode/opencode/glm-5.3-flash-free"] {
+                for network_narrowed in [false, true] {
+                    for parent_sandboxed in [false, true] {
+                        for read_only in [false, true] {
+                            let base = SandboxInputs {
+                                route,
+                                knob: None,
+                                parent_sandboxed,
+                                network_narrowed,
+                                read_only,
+                                os_sandboxed: false,
+                                platform_supported: true,
+                            };
+
+                            // Explicit off beats all Provenant floors:
+                            let off_input = SandboxInputs {
+                                knob: Some("off"),
+                                ..base
+                            };
+                            let off_mode = config.sandbox_for(off_input);
+                            assert!(
+                                !off_mode.effective && !off_mode.sandboxed,
+                                "explicit off must always be unsandboxed on macos"
+                            );
+                            assert_eq!(off_mode.source, SandboxSource::Knob);
+                            assert!(!off_mode.requested);
+                            assert_eq!(off_mode.env_value(), "off");
+
+                            let listed =
+                                config.sandboxed_routes.iter().any(|p| route.starts_with(p));
+                            let had_restriction = listed || network_narrowed || parent_sandboxed;
+                            assert_eq!(
+                                off_mode.warning.is_some(),
+                                had_restriction,
+                                "warning expected when restrictions are dropped"
+                            );
+
+                            // Explicit on always sandboxes:
+                            let on_input = SandboxInputs {
+                                knob: Some("on"),
+                                ..base
+                            };
+                            let on_mode = config.sandbox_for(on_input);
+                            assert!(
+                                on_mode.effective && on_mode.sandboxed,
+                                "explicit on must always sandbox"
+                            );
+                            assert_eq!(on_mode.source, SandboxSource::Knob);
+                            assert!(on_mode.requested);
+                            assert_eq!(on_mode.env_value(), "on");
+
+                            // Default behavior (knob is None or auto):
+                            for knob in [None, Some("auto")] {
+                                let def_input = SandboxInputs { knob, ..base };
+                                let def_mode = config.sandbox_for(def_input);
+                                assert!(!def_mode.requested);
+                                if parent_sandboxed {
+                                    assert!(def_mode.effective);
+                                    assert_eq!(def_mode.source, SandboxSource::Parent);
+                                } else if listed {
+                                    assert!(def_mode.effective);
+                                    assert_eq!(def_mode.source, SandboxSource::Route);
+                                } else if network_narrowed {
+                                    assert!(def_mode.effective);
+                                    assert_eq!(def_mode.source, SandboxSource::Network);
+                                } else {
+                                    assert!(!def_mode.effective);
+                                    assert_eq!(def_mode.source, SandboxSource::Default);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Invariant: Inherited OS sandbox is always reported effective (property: inherited-OS is always reported effective).
         for knob in [None, Some("auto"), Some("off"), Some("on")] {
-            let zen = SandboxInputs {
-                knob,
-                network_narrowed: true,
-                ..writer("opencode/opencode/glm-5.3-flash-free")
-            };
-            assert_eq!(config.sandbox_for(zen), mode(true, SandboxSource::Route));
-            let narrowed = SandboxInputs {
-                knob,
-                network_narrowed: true,
-                ..writer("claude/claude-opus-5-5")
-            };
-            assert_eq!(
-                config.sandbox_for(narrowed),
-                mode(true, SandboxSource::Network)
-            );
-            let child = SandboxInputs {
-                parent_sandboxed: true,
-                ..zen
-            };
-            assert_eq!(config.sandbox_for(child), mode(true, SandboxSource::Parent));
+            for parent_sandboxed in [false, true] {
+                let input = SandboxInputs {
+                    knob,
+                    parent_sandboxed,
+                    os_sandboxed: true,
+                    ..lane_input("codex/gpt-5.5")
+                };
+                let mode = default_config.sandbox_for(input);
+                assert!(
+                    mode.effective && mode.sandboxed,
+                    "inherited OS sandbox must always be reported effective"
+                );
+                assert_eq!(mode.source, SandboxSource::Parent);
+                if knob == Some("off") {
+                    assert!(
+                        mode.warning.is_some(),
+                        "honest warning when --no-sandbox cannot drop OS sandbox"
+                    );
+                }
+            }
         }
-        assert_eq!(mode(true, SandboxSource::Knob).env_value(), "on");
-        assert_eq!(mode(false, SandboxSource::Default).env_value(), "off");
+
+        // 4. Invariant: Unsupported platform always resolves sandboxed.
+        for knob in [None, Some("auto"), Some("off"), Some("on")] {
+            let input = SandboxInputs {
+                knob,
+                platform_supported: false,
+                ..lane_input("codex/gpt-5.5")
+            };
+            let mode = default_config.sandbox_for(input);
+            assert!(
+                mode.effective && mode.sandboxed,
+                "unsupported platform must always resolve sandboxed"
+            );
+            assert_eq!(mode.source, SandboxSource::Platform);
+        }
     }
     #[test]
     fn sandboxed_routes_and_cache_reads_are_configurable_and_validated()

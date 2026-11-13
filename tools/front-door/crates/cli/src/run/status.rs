@@ -1267,7 +1267,9 @@ pub(super) fn render_lanes_with_view(
             // Unsandboxed is the default; name only a sandboxed lane and why.
             let sandbox_field = lane
                 .sandbox()
-                .filter(|sandbox| sandbox["sandboxed"] == true)
+                .filter(|sandbox| {
+                    sandbox["effective"] == true || sandbox["sandboxed"] == true
+                })
                 .map(|sandbox| {
                     format!(
                         " sandboxed({})",

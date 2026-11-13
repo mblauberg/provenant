@@ -435,7 +435,45 @@ fn generated_cutover_status_and_output_corpus() -> Result {
                         _ => Value::Null,
                     };
                     assert_eq!(reported, expected, "provider error: {name} {id}");
-                    assert_eq!(new["data"], before, "output fields: {name} {id}");
+                    // Preserve the read contract across cutover without freezing the
+                    // projection's member set as new settlement evidence is added.
+                    for field in [
+                        "attempt_id",
+                        "run_id",
+                        "task_id",
+                        "state",
+                        "cause",
+                        "reason",
+                        "exit_code",
+                        "part",
+                        "bytes",
+                        "digest",
+                        "offset",
+                        "next_offset",
+                        "length",
+                        "eof",
+                        "clipped",
+                        "complete",
+                        "result_path",
+                        "stale",
+                        "retry_of",
+                        "superseded_by",
+                        "requested_route",
+                        "applied_route",
+                        "observed_route",
+                        "delivery",
+                    ] {
+                        assert_eq!(
+                            new["data"][field], before[field],
+                            "output contract {field}: {name} {id}"
+                        );
+                    }
+                    let schema =
+                        provenant_records::wire::data_schema("output").ok_or("output schema")?;
+                    // Validate the unnormalised reply: normalisation deliberately
+                    // replaces real paths with stable corpus markers.
+                    let reply: Value = serde_json::from_slice(&output.stdout.bytes)?;
+                    provenant_records::wire::schema::validate(&schema, &reply["data"])?;
                 } else {
                     let mut row = new["data"]["rows"]
                         .as_array()

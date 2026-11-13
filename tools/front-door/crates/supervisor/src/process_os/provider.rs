@@ -2,8 +2,8 @@
 //!
 //! This module owns only the provider child, its pipes, and census-proven
 //! descendants. Utility execution remains in `exec`. Provider signals use
-//! `ProviderGroup::stop`; escapee signals require exact observed identity and
-//! proof of the attempt's inherited sandbox.
+//! `ProviderGroup::stop`; descendant signals require exact observed identity
+//! and retained provider-ancestry proof or the attempt's inherited sandbox.
 use crate::census::{
     Ancestry, Census, MAX_CENSUS_ENTRIES, ProcessIdentity, ProcessLookup, ProcessObservation,
 };
@@ -434,27 +434,14 @@ pub(crate) struct AdoptedDelivery {
     pub(crate) outcome: DeliveryOutcome,
 }
 
-/// The child cannot exec until the observer has captured its native identity.
-/// Command::spawn waits for exec, so a short-lived helper handles the parent end
-/// of the handshake. It is joined on every path before custody is returned.
-fn lease_descriptors<'a>(
-    writer: &'a provenant_os::fs::LockGuard,
-    ports: Option<&'a provenant_os::fs::LockGuard>,
-) -> Vec<std::os::fd::BorrowedFd<'a>> {
-    let mut pass = vec![writer.handoff_file().as_fd()];
-    if let Some(ports) = ports {
-        pass.push(ports.handoff_file().as_fd());
-    }
-    pass
-}
-
 struct SpawnDescriptors<'a> {
-    lease: &'a provenant_os::fs::LockGuard,
     secret: Option<&'a child::SecretPipe>,
-    ports: Option<&'a provenant_os::fs::LockGuard>,
     profile: Option<BorrowedFd<'a>>,
 }
 
+/// The child cannot exec until the observer has captured its native identity.
+/// Command::spawn waits for exec, so a short-lived helper handles the parent end
+/// of the handshake. It is joined on every path before custody is returned.
 fn spawn_identified(
     mut command: Command,
     env: &[(OsString, OsString)],
@@ -462,12 +449,7 @@ fn spawn_identified(
     permit: Permit,
     descriptors: SpawnDescriptors<'_>,
 ) -> io::Result<(Child, ProcessIdentity, Permit)> {
-    let SpawnDescriptors {
-        lease,
-        secret,
-        ports,
-        profile,
-    } = descriptors;
+    let SpawnDescriptors { secret, profile } = descriptors;
     let observer =
         super::census::NativeProcessObserver::for_boot(boot).map_err(io::Error::other)?;
     let (mut parent, channel) = UnixStream::pair()?;
@@ -479,7 +461,10 @@ fn spawn_identified(
     unsafe {
         command.pre_exec(move || identity_gate(channel.as_raw_fd()));
     }
-    let mut pass = lease_descriptors(lease, ports);
+    // Custody belongs to the guardian. The child descriptor sweep keeps all
+    // lane locks CLOEXEC, including writer and port leases. Only inputs needed
+    // by the executable cross this boundary.
+    let mut pass = Vec::new();
     if let Some(profile) = profile {
         pass.push(profile);
     }
@@ -694,10 +679,32 @@ fn priority_with_ops(
         Err(read_error) => (None, error.or(Some(read_error))),
     }
 }
+fn owned_cleanup_targets(
+    owned: &BTreeSet<ProcessIdentity>,
+    previously_spared: &BTreeSet<ProcessIdentity>,
+    census: &Census,
+    spared: &BTreeSet<ProcessIdentity>,
+) -> Vec<ProcessIdentity> {
+    owned
+        .iter()
+        .filter(|identity| {
+            !previously_spared.contains(*identity)
+                && matches!(
+                    census.process(identity.pid),
+                    ProcessLookup::Present(fact) if fact.identity == **identity && !fact.zombie
+                )
+                && !spared.iter().any(|owner| {
+                    *owner == **identity || census.ancestry(identity, owner) != Ancestry::No
+                })
+        })
+        .cloned()
+        .collect()
+}
+
 impl ProviderGroup {
     pub(crate) fn spawn(
         spec: provenant_os::sys::raw_exec::SpawnSpec<'_>,
-        lease: &provenant_os::fs::LockGuard,
+        _lease: &provenant_os::fs::LockGuard,
         boot: &str,
         priority: u8,
     ) -> io::Result<Self> {
@@ -758,9 +765,7 @@ impl ProviderGroup {
             boot,
             permit,
             SpawnDescriptors {
-                lease,
                 secret: secret.as_ref(),
-                ports: spec.inherited_ports,
                 profile: profile.as_ref().map(|pipe| pipe.fd()),
             },
         )?;
@@ -1095,13 +1100,29 @@ impl ProviderGroup {
         Ok(result)
     }
 
-    /// Signal exact identities the guardian found still inside the attempt's
-    /// sandbox after they left the provider tree. Each identity is re-observed
-    /// immediately before the signal, so a recycled PID is never targeted.
-    pub(crate) fn stop_marked(
+    /// Retained provider-ancestry proof survives setsid and reparenting. A
+    /// current exact identity is still required; protected owners and their
+    /// possibly related descendants remain excluded.
+    pub(crate) fn owned_cleanup_targets(
+        &self,
+        census: &Census,
+        spared: &BTreeSet<ProcessIdentity>,
+    ) -> Vec<ProcessIdentity> {
+        owned_cleanup_targets(
+            &self.owned_descendants,
+            &self.spared_descendants,
+            census,
+            spared,
+        )
+    }
+
+    /// Signal identities the guardian authorised by retained provider ancestry
+    /// or the attempt sandbox. Re-observe each immediately before signalling
+    /// so a recycled PID is never targeted.
+    pub(crate) fn stop_owned_targets(
         &mut self,
         escalation: bool,
-        marked: &[ProcessIdentity],
+        targets: &[ProcessIdentity],
     ) -> Vec<AdoptedDelivery> {
         let signal = if escalation {
             libc::SIGKILL
@@ -1109,7 +1130,7 @@ impl ProviderGroup {
             libc::SIGTERM
         };
         let mut deliveries = Vec::new();
-        for identity in marked {
+        for identity in targets {
             if self.last_adopted_signal.get(identity) == Some(&signal) {
                 continue;
             }
@@ -1122,8 +1143,8 @@ impl ProviderGroup {
                 _ => continue,
             }
             // SAFETY: the identity (boot, PID, start stamp) was re-read just
-            // above and is inside the attempt's own sandbox. This
-            // targets that one process only, never a group or caller PID.
+            // above; the guardian supplied ancestry or sandbox scope proof.
+            // This targets only that process, never a group or caller PID.
             let outcome = if unsafe { libc::kill(pid, signal) } == 0 {
                 self.last_adopted_signal.insert(identity.clone(), signal);
                 DeliveryOutcome::Delivered
@@ -1344,6 +1365,54 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    fn native_cleanup_targets_require_owned_identity_and_preserve_exclusions() {
+        let identity = |pid: i64| ProcessIdentity {
+            boot: "fixture".into(),
+            pid,
+            native_start: pid as u64,
+            group_id: pid,
+            session_id: pid,
+        };
+        let fact = |pid, parent_pid| crate::census::ProcessFact {
+            identity: identity(pid),
+            parent_pid,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        };
+        let mut reused = fact(50, 1);
+        reused.identity.native_start += 100;
+        let mut zombie = fact(90, 1);
+        zombie.zombie = true;
+        let census = Census::from_observations(
+            [
+                fact(1, 0),
+                fact(20, 1), // Owned descendant after reparenting and setsid.
+                fact(30, 1), // Protected owner.
+                fact(40, 30),
+                reused,
+                fact(70, 1), // Unrelated live process.
+                fact(80, 1), // Previously spared descendant.
+                zombie,
+            ],
+            [(60, crate::census::ObservationIssue::Io)],
+            [],
+            true,
+            false,
+            16,
+        )
+        .expect("valid census");
+        let owned = [20, 40, 50, 60, 80, 90].map(identity).into();
+        let targets = owned_cleanup_targets(
+            &owned,
+            &[identity(80)].into(),
+            &census,
+            &[identity(30)].into(),
+        );
+        assert_eq!(targets, [identity(20)]);
+    }
+
+    #[test]
     fn reactor_rounds_positive_waits_up_without_turning_nonblocking_polls_into_waits() {
         assert_eq!(poll_timeout_ms(Duration::ZERO), 0);
         assert_eq!(poll_timeout_ms(Duration::from_nanos(1)), 1);
@@ -1435,43 +1504,29 @@ mod tests {
     }
 
     #[test]
-    fn provider_lease_descriptors_contain_only_writer_and_ports()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn lane_descriptors_are_cloexec() -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
         let directory = provenant_os::fs::Directory::open_anchor(root.path())?;
-        let writer = directory.try_lock(
-            std::ffi::OsStr::new("writer.lock"),
-            provenant_os::fs::LockMode::Exclusive,
-        )?;
-        let ports = directory.try_lock(
-            std::ffi::OsStr::new("ports.lock"),
-            provenant_os::fs::LockMode::Exclusive,
-        )?;
-        let update = provenant_os::provider_fence::acquire(
-            root.path(),
-            "agy",
-            provenant_os::fs::LockMode::Shared,
-        )?;
-        let pass = lease_descriptors(&writer, Some(&ports));
-        assert_eq!(
-            pass.iter().map(AsRawFd::as_raw_fd).collect::<Vec<_>>(),
-            vec![
-                writer.handoff_file().as_raw_fd(),
-                ports.handoff_file().as_raw_fd()
-            ]
-        );
-        assert!(
-            !pass
-                .iter()
-                .any(|fd| fd.as_raw_fd() == update.handoff_file().as_raw_fd())
-        );
+        assert!(provenant_os::sys::fs::is_cloexec(directory.handoff_file()));
+        for name in [
+            "writer.lock",
+            "ports.lock",
+            "custody.lock",
+            "writer-probe.lock",
+        ] {
+            let lease = directory.try_lock(
+                std::ffi::OsStr::new(name),
+                provenant_os::fs::LockMode::Exclusive,
+            )?;
+            assert!(provenant_os::sys::fs::is_cloexec(lease.handoff_file()));
+        }
         Ok(())
     }
 
     #[test]
-    fn provider_descendant_keeps_writer_flock_after_parent_handles_close()
+    fn orphaned_provider_descendant_does_not_retain_writer_flock()
     -> Result<(), Box<dyn std::error::Error>> {
-        use crate::custody::{CustodyError, Scope};
+        use crate::custody::Scope;
         use provenant_core::{AttemptId, CancelToken, Clock, RunId, WaitBudget};
         use provenant_os::{clock::SystemClock, fs::Directory};
 
@@ -1535,9 +1590,9 @@ mod tests {
             return Err(format!("descendant readiness: {read:?}").into());
         }
         assert_eq!(ready, [b'R']);
-        // Close the guardian's copy and kill the provider, leaving only its
-        // exec'd descendant holding the inherited open file description.
-        drop(writer);
+        // Close the guardian's copy and kill the provider. Its orphaned
+        // exec'd descendant remains alive, but must not retain lane custody.
+        writer.withdraw_unlaunched()?;
         let provider = group.child.as_mut().ok_or("missing provider")?;
         provider.kill()?;
         provider.wait()?;
@@ -1548,10 +1603,7 @@ mod tests {
         let admit = |budget| {
             crate::fixture::acquire_writer(directory.try_clone()?, retry, budget, &cancel, &clock)
         };
-        assert!(matches!(
-            admit(WaitBudget::nonblocking(clock.mono_now())),
-            Err(CustodyError::Busy)
-        ));
+        admit(WaitBudget::nonblocking(clock.mono_now()))?.withdraw_unlaunched()?;
         drop(group.stdin.take());
         let mut tail = Vec::new();
         let mut stdout = group.stdout.take().ok_or("missing stdout")?;

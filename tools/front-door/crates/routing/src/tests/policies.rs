@@ -257,10 +257,8 @@ fn effort_errors_report_recorded_controls_and_nearest_models()
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
     let context = context(&catalogue, &config, now()?);
-    for (model, expected) in [
-        ("codex/gpt-6-luna", "supported efforts: low"),
-        ("opencode/opencode-go/glm-5.3-flash", "takes no effort"),
-    ] {
+    {
+        let (model, expected) = ("codex/gpt-6-luna", "supported efforts: low");
         let mut query = request(model)?;
         query.effort = Some("unsupported".into());
         let error = resolve(&query, &context).expect_err("effort must be refused");
@@ -548,10 +546,9 @@ fn explicit_catalogued_model_is_ready_without_provider_listing()
     assert!(route.exclusions.is_empty());
     let mut with_effort = query.clone();
     with_effort.effort = Some("high".into());
-    assert!(matches!(
-        resolve(&with_effort, &context),
-        Err(RoutingError::UnsupportedEffort { .. })
-    ));
+    let with_effort_route = resolve(&with_effort, &context)?;
+    assert_eq!(with_effort_route.effort, None);
+    assert!(with_effort_route.extra.contains_key("effort_warning"));
     let mut confidential = query;
     confidential.confidential = true;
     assert!(resolve(&confidential, &context).is_ok());

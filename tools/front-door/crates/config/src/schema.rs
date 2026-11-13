@@ -55,6 +55,12 @@ const GC_FIELDS: &[FieldMetadata] = &[
         &["keep", "merged-clean"],
     ),
 ];
+const WORKTREE_FIELDS: &[FieldMetadata] = &[
+    FieldMetadata::new("setup", "array"),
+    FieldMetadata::int("timeout_seconds", 1, 3600),
+    FieldMetadata::new("projects.{project}.setup", "array"),
+    FieldMetadata::int("projects.{project}.timeout_seconds", 1, 3600),
+];
 const RETENTION_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::int("provider_state_days", 1, 3650),
     FieldMetadata::int("logs_days", 1, 3650),
@@ -262,6 +268,12 @@ pub fn schema<T: Serialize>(
             serde_json::to_value(crate::GcSettings::default()).unwrap_or(Value::Null),
             serde_json::to_value(&config.gc).unwrap_or(Value::Null),
             GC_FIELDS,
+        ),
+        (
+            "worktrees",
+            serde_json::to_value(crate::WorktreeSettings::default()).unwrap_or(Value::Null),
+            serde_json::to_value(&config.worktrees).unwrap_or(Value::Null),
+            WORKTREE_FIELDS,
         ),
         (
             "retention",

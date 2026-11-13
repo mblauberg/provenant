@@ -299,14 +299,13 @@ printf '%s\n' "$PROVENANT_PROCESS_TREE"
         "memory-sandboxed": command,
     }))?;
     // An unsandboxed lane is walked by ancestry; a sandboxed one by its mark.
-    // These lanes are read-only, so `off` opens every route but the listed one.
+    // Lanes run unsandboxed by default; sandboxed_routes sandboxes the listed route.
     configure(
         &rig,
         &["domains", "run"],
         "sandboxed_routes",
         strings(&["command/memory-sandboxed"]),
     )?;
-    configure(&rig, &["knobs"], "lanes.sandbox", toml_edit::value("off"))?;
     let _cleanup = rig.process_cleanup();
     for (name, foreign) in [
         ("memory", false),
@@ -327,11 +326,12 @@ printf '%s\n' "$PROVENANT_PROCESS_TREE"
         assert_eq!(lane["state"], "succeeded", "{lane}");
         let sandboxed = name == "memory-sandboxed";
         assert_eq!(
-            lane["applied_route"]["sandbox"],
-            json!({
-                "sandboxed": sandboxed,
-                "source": if sandboxed { "route" } else { "knob" },
-            }),
+            lane["applied_route"]["sandbox"]["effective"], sandboxed,
+            "{lane}"
+        );
+        assert_eq!(
+            lane["applied_route"]["sandbox"]["source"],
+            if sandboxed { "route" } else { "default" },
             "{lane}"
         );
         let output = fs::read_to_string(attempt_dir(&rig, id)?.join("stdout.log"))?;
@@ -388,6 +388,8 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
         "tail":{"argv":["/bin/sh","-c","/usr/bin/yes x | /usr/bin/head -c 2000000; printf '\\nlast-output\\n'"]},
         "missing":{"argv":["/missing/command"]}
     }))?;
+    // This test exercises denied checkout writes as well as command settlement.
+    configure(&rig, &["knobs"], "lanes.sandbox", toml_edit::value("on"))?;
     let _cleanup = rig.process_cleanup();
     for (name, expected, verdict) in [
         ("pass", "succeeded", "PASS"),
@@ -537,10 +539,10 @@ printf 'custom interpreter ran; credentials and writes denied\n'
     let lane = settled(&rig, id)?;
     assert_eq!(lane["state"], "succeeded", "{lane}");
     assert_eq!(
-        lane["applied_route"]["sandbox"],
-        json!({"sandboxed": true, "source": "knob"}),
+        lane["applied_route"]["sandbox"]["effective"], true,
         "{lane}"
     );
+    assert_eq!(lane["applied_route"]["sandbox"]["source"], "knob", "{lane}");
     // Network is on unless the task turns it off.
     assert_eq!(lane["network"], "open", "{submitted}");
     let result = fs::read_to_string(attempt_dir(&rig, id)?.join("result.md"))?;
@@ -590,7 +592,6 @@ fi
         "sandbox_cache_reads",
         strings(&[cache.to_str().ok_or("cache path")?]),
     )?;
-    configure(&rig, &["knobs"], "lanes.sandbox", toml_edit::value("off"))?;
     for (name, mode, write) in [
         ("cache-sandboxed", "on", "denied"),
         ("cache-open", "off", "allowed"),
@@ -615,8 +616,10 @@ fn command_timeout_cleans_descendants_and_running_replay_keeps_one_attempt() -> 
     if !available()? {
         return Ok(());
     }
+    // Outlive the outer test deadline: a missing descendant kill must not
+    // pass merely because the child completed its sleep naturally.
     let rig = rig(
-        json!({"slow":{"argv":["/bin/sh","-c","/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); sleep 30' & child=$!; printf 'child=%s\\n' \"$child\"; wait"]}}),
+        json!({"slow":{"argv":["/bin/sh","-c","/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); sleep 300' & child=$!; printf 'child=%s\\n' \"$child\"; wait"]}}),
     )?;
     let _cleanup = rig.process_cleanup();
     let first = dispatch_with(&rig, "slow", 5, None, false)?;

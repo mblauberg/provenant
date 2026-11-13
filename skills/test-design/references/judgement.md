@@ -1,5 +1,8 @@
 # Test judgement
 
+- Invariants and properties at public boundaries survive code growth and internal reorganisation; example snapshots or exact strings and counts go stale.
+- Regression tests stay minimal: an invariant at the public boundary covers whole classes of defects; write a regression test only where no invariant can catch it.
+- On any test failure, first check whether the test pins implementation details: rewrite it as an invariant or delete it; never bend product code around a rigid test.
 - A typed refusal code survives wording changes; an assertion on an error sentence fails on harmless edits. Assert the code.
 - An enum can exclude an invalid state; a test constructing that state through an unsafe escape adds no evidence about ordinary callers.
 - One table-driven contract test can cover input variations; copied tests for each value add maintenance without a distinct defect.
@@ -9,7 +12,7 @@
 
 ## Test safeguards
 
-- Agent-written suites grow faster than behaviour. Before adding a test, look for one to extend, merge or delete; a net-negative test diff is often the right result.
+- Pruning is normal work and many tests can be removed. Agent-written suites grow faster than behaviour: before adding a test, look for one to extend, merge or delete; a net-negative test diff is often the right result.
 - Prove each behaviour once, at the lowest boundary that can; do not repeat it at unit, integration and end-to-end level.
 - Every test asserts observable behaviour; printed values alone are not an oracle.
 - Derive expected values from the spec, never from the implementation's current output.

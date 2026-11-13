@@ -13,12 +13,22 @@ fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error
         monthly_allowance_usd: None,
         quota_pool: None,
     });
+    catalogue.models.push(ModelEntry {
+        free: false,
+        model: ModelId::parse("codex/no-effort")?,
+        efforts: vec![],
+        evidence_ref: "test".into(),
+        family: None,
+        trains_on_prompts: None,
+        monthly_allowance_usd: None,
+        quota_pool: None,
+    });
     let config = RoutingConfig::default();
     let context = context(&catalogue, &config, now()?);
     let mut query = request("codex/test")?;
     query.effort = Some("high".into());
     query.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse(
-        "opencode/opencode-go/glm-5.3-flash",
+        "codex/no-effort",
     )?])?);
     assert!(matches!(
         resolve(&query, &context),

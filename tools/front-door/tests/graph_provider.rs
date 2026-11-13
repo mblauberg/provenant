@@ -100,11 +100,10 @@ fn agy_lease_fixture() -> Result {
     Ok(())
 }
 
-fn handoff_recovery_provider(prompt: &str, args: &[String], auth: &Value) -> Result {
+fn handoff_recovery_provider(prompt: &str, args: &[String], auth: &Value, session: &str) -> Result {
     let account = auth["tokens"]["account_id"]
         .as_str()
         .ok_or("fixture account")?;
-    let session = "01234567-89ab-cdef-0123-456789abcdef";
     writeln!(
         io::stdout(),
         "{}",
@@ -451,7 +450,11 @@ fn fixture() -> Result {
     {
         assert_eq!(auth["tokens"]["account_id"], "fixture-one");
     }
-    let session = "01234567-89ab-cdef-0123-456789abcdef";
+    // Native launches share the selected account home, like the real CLI.
+    // Give each launch its own thread so an absent rollout cannot reuse a
+    // prior launch's evidence.
+    let fixture_session = std::env::var("PROVENANT_PARENT_ATTEMPT_ID")?;
+    let session = fixture_session.as_str();
     let sessions = home.join("sessions/2026/10/24");
     fs::create_dir_all(&sessions)?;
     let recorded_session = if prompt.contains("mismatch") {
@@ -482,7 +485,7 @@ fn fixture() -> Result {
         )?;
     }
     if prompt.contains("fixture handoff recovery") {
-        return handoff_recovery_provider(&prompt, &args, &auth);
+        return handoff_recovery_provider(&prompt, &args, &auth, session);
     }
     if prompt.contains("fixture partial quota redraw") {
         let writer = prompt.contains("writer partial quota");
@@ -3338,7 +3341,7 @@ fn graph_writer_automatically_continues_retained_or_fresh() -> Result {
         fs::write(
             rig.state.join("config.toml"),
             format!(
-                "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.run]\ncontinuation_copy_entries={}\n{}\n[domains.routing.pools]\nwriter-restart=[{{model='codex/gpt-6-luna',weight=1,effort='low'}}{}]\n",
+                "schema_version=1\n[knobs]\n'lanes.sandbox'='on'\n[gc]\nfree_floor='1B'\n[domains.run]\ncontinuation_copy_entries={}\n{}\n[domains.routing.pools]\nwriter-restart=[{{model='codex/gpt-6-luna',weight=1,effort='low'}}{}]\n",
                 if resume && fresh { 1 } else { 100000 },
                 if resume {
                     "[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6-luna'\n[domains.routing.model_policy.rules.policy.lane]\nresume_continuations=true\n"
@@ -4081,6 +4084,13 @@ fn graph_node_reads_full_upstream_result_from_its_inputs_directory() -> Result {
         return Ok(());
     }
     let rig = claude_fixture()?;
+    // This probe asserts the upstream files' read/write confinement boundary.
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[knobs]\n'lanes.sandbox'='on'"
+    )?;
     let cleanup = rig.process_cleanup();
     for path in [
         ".cargo/bin",
@@ -4322,6 +4332,8 @@ fn graph_codex_commit_source_starts_and_returns_a_verdict() -> Result {
         "codex-commit-source",
         json!({
             "id":"review", "use":"task", "brief":"fixture commit source verdict",
+            // This probe asserts the immutable source view's denied writes.
+            "attempt":{"sandbox":"on"},
             "access":"read_only", "source":{"type":"commit", "commit":head},
             "route":{"adapter":"codex", "model":"gpt-6-luna", "effort":"low"}
         }),
@@ -4367,16 +4379,20 @@ fn graph_codex_rollout_binds_observed_route_and_missing_rollout_is_explicit() ->
                 lane["observed_route"]["model"], "codex/gpt-6-luna",
                 "{lane}"
             );
-            assert_eq!(
-                lane["transcript"]["session"],
-                "01234567-89ab-cdef-0123-456789abcdef"
+            assert!(
+                lane["transcript"]["session"]
+                    .as_str()
+                    .is_some_and(|session| !session.is_empty()),
+                "{lane}"
             );
         } else {
             assert_eq!(lane["state"], "failed", "{lane}");
             assert_eq!(lane["terminal_cause"], "identity_unobserved", "{lane}");
             assert!(lane["observed_route"].is_null(), "{lane}");
-            assert_eq!(
-                lane["transcript"]["session"], "01234567-89ab-cdef-0123-456789abcdef",
+            assert!(
+                lane["transcript"]["session"]
+                    .as_str()
+                    .is_some_and(|session| !session.is_empty()),
                 "{lane}"
             );
             assert!(lane["transcript"]["path"].is_null(), "{lane}");

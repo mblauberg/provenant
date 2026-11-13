@@ -31,6 +31,29 @@ pub fn is_transport_error(error: &io::Error) -> bool {
         .is_some_and(|source| source.is::<ProfileTransportError>())
 }
 
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn sandbox_check(
+        pid: libc::pid_t,
+        operation: *const libc::c_char,
+        filter_type: libc::c_int,
+        ...
+    ) -> libc::c_int;
+}
+
+/// Whether the calling process is already running inside an operating-system sandbox (Seatbelt).
+pub fn current_process_is_sandboxed() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: null operation with filter type 0 checks whether the calling process is sandboxed.
+        unsafe { sandbox_check(0, std::ptr::null(), 0) == 1 }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
 pub struct ProfilePipe {
     reader: io::PipeReader,
     bytes: Arc<[u8]>,

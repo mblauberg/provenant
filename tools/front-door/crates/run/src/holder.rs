@@ -485,6 +485,18 @@ pub struct RetainedGit {
     pub objects: Option<PathBuf>,
 }
 
+/// Return the base pinned by writer settlement, when its evidence is available.
+pub fn writer_base(
+    root: &std::path::Path,
+    record: &AttemptRecord,
+) -> Result<Option<provenant_core::GitOid>> {
+    let attempt = Directory::open_anchor(&root.join(format!(
+        "runs/{}/attempts/{}",
+        record.run_id, record.attempt_id
+    )))?;
+    crate::settlement::pinned_base(&attempt, RunStore::scope(record))
+}
+
 /// Read retained recovery coordinates without attempting Git import or cleanup.
 pub fn retained_git(root: &std::path::Path, record: &AttemptRecord) -> Result<RetainedGit> {
     let attempt = Directory::open_anchor(&root.join(format!(
@@ -2284,7 +2296,15 @@ impl RunStore {
             && settlement.as_ref().is_some_and(|driver| {
                 driver
                     .base()
-                    .zip(driver.head())
+                    .zip(
+                        read_sealed(attempt, "writer-terminal.json", RECORD_LIMIT)
+                            .ok()
+                            .flatten()
+                            .and_then(|raw| {
+                                crate::db::decode::<crate::writer::WriterTerminal>(&raw).ok()
+                            })
+                            .map(|terminal| terminal.head),
+                    )
                     .is_some_and(|(base, head)| base == head)
             })
         {
@@ -3439,7 +3459,12 @@ mod writer_recovery_tests {
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
         use provenant_records::wire::lane::{LaneProjectionFacts, LaneRow};
-        for (changed, dirty) in [(false, false), (true, false), (false, true)] {
+        for (changed, dirty, shared) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, false, true),
+        ] {
             let fixture = PrepareFixture::new()?;
             let execution = registered_landed_writer_fixture(&fixture)?;
             let (clock, cancel) = (clock(), CancelToken::new());
@@ -3493,6 +3518,7 @@ mod writer_recovery_tests {
             drop(provenant_supervisor::fixture::bind_writer_attempt(
                 lease, &attempt,
             )?);
+            let mut shared_head = None;
             if changed {
                 let objects = candidate.join("git-objects");
                 let private_git = |args: &[std::ffi::OsString]| {
@@ -3521,11 +3547,30 @@ mod writer_recovery_tests {
                     "Partial work".into(),
                 ])?;
                 let head = std::str::from_utf8(&head)?.trim();
-                private_git(&[
-                    "update-ref".into(),
-                    launch.branch.as_str().into(),
-                    head.into(),
-                ])?;
+                if shared {
+                    // A native writer may commit file changes through the shared
+                    // worktree while the private candidate remains at the base.
+                    std::fs::write(
+                        fixture.writer.worktree.join("shared-work.txt"),
+                        "committed native work",
+                    )?;
+                    fixture.lane_git(&["add", "shared-work.txt"])?;
+                    fixture.lane_git(&["commit", "-m", "Shared commit"])?;
+                    shared_head = Some(
+                        std::str::from_utf8(&provenant_os::fixture::run_git(
+                            &fixture.writer.worktree,
+                            &["rev-parse", "HEAD"],
+                        )?)?
+                        .trim()
+                        .parse::<provenant_core::GitOid>()?,
+                    );
+                } else {
+                    private_git(&[
+                        "update-ref".into(),
+                        launch.branch.as_str().into(),
+                        head.into(),
+                    ])?;
+                }
             }
             if dirty {
                 std::fs::write(
@@ -3547,6 +3592,22 @@ mod writer_recovery_tests {
                 "```handoff\n{{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"{note}\",\"remaining\":[\"Finish work\"],\"decisions\":[],\"verify\":[]}}\n```"
             ));
             let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
+            if let Some(head) = shared_head {
+                assert_eq!(finished.head, Some(head));
+                let terminal: crate::writer::WriterTerminal = crate::db::decode(
+                    &read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?
+                        .ok_or("writer terminal")?,
+                )?;
+                assert_eq!(terminal.head, head);
+                assert!(
+                    provenant_os::fixture::run_git(
+                        &fixture.writer.worktree,
+                        &["status", "--porcelain", "--untracked-files=normal"],
+                    )?
+                    .is_empty(),
+                    "settlement must preserve the native commit's clean index"
+                );
+            }
             let successor = store.pending_attempts(run.run_id, &call)?;
             assert_eq!(successor.len(), 1);
             assert_eq!(finished.superseded_by, Some(successor[0].attempt_id));
@@ -3761,7 +3822,14 @@ mod writer_recovery_tests {
     #[test]
     fn writer_token_budget_stop_commits_uncommitted_work_and_publishes_branch()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        budget_stop_case(BudgetStopCase::Commit)
+        for case in [
+            BudgetStopCase::Commit,
+            BudgetStopCase::Native { dirty: false },
+            BudgetStopCase::Native { dirty: true },
+        ] {
+            budget_stop_case(case)?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -4083,6 +4151,9 @@ mod writer_recovery_tests {
         /// An operation Git left in progress.
         InProgress(&'static str),
         Commit,
+        Native {
+            dirty: bool,
+        },
         CommitFailure,
         CustodyPresent,
         HostileFilter,
@@ -4150,6 +4221,22 @@ mod writer_recovery_tests {
             launch.worktree.repo().root_path().join("budget-work.txt"),
             "uncommitted work before budget stop\n",
         )?;
+
+        let native_head = if let BudgetStopCase::Native { dirty } = case {
+            fixture.lane_git(&["add", "budget-work.txt"])?;
+            fixture.lane_git(&["commit", "-m", "Native lane work"])?;
+            let head =
+                crate::objects::resolve_ref(&git, launch.worktree.repo(), launch.branch.as_str())?;
+            if dirty {
+                std::fs::write(
+                    fixture.writer.worktree.join("budget-work.txt"),
+                    "additional work before budget stop\n",
+                )?;
+            }
+            Some(head)
+        } else {
+            None
+        };
 
         let filter_sentinel = fixture
             .writer
@@ -4392,6 +4479,36 @@ mod writer_recovery_tests {
                     .contains("budget commit failed:")
             );
             return Ok(());
+        }
+        if let Some(head) = native_head {
+            let published =
+                crate::objects::resolve_ref(&git, launch.worktree.repo(), launch.branch.as_str())?;
+            fixture.lane_git(&[
+                "merge-base",
+                "--is-ancestor",
+                &head.to_string(),
+                &published.to_string(),
+            ])?;
+            assert_eq!(finished.head, Some(published));
+            assert!(
+                provenant_os::fixture::run_git(
+                    &fixture.writer.worktree,
+                    &["status", "--porcelain"]
+                )?
+                .is_empty()
+            );
+            if matches!(case, BudgetStopCase::Native { dirty: false }) {
+                assert_eq!(
+                    published, head,
+                    "clean native work must not create a snapshot"
+                );
+                let disposition: serde_json::Value = serde_json::from_slice(
+                    &read_sealed(&attempt, "budget-commit.json", RECORD_LIMIT)?
+                        .ok_or("budget disposition")?,
+                )?;
+                assert!(disposition.get("commit").is_none());
+                return Ok(());
+            }
         }
         assert!(
             reason_text.contains("work committed on its branch"),

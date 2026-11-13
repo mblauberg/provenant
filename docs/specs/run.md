@@ -476,7 +476,10 @@ always describe one commit.
 
 A chair can release an unsettleable writer fence with
 `provenant reconcile --abandon RUN/ATTEMPT --reason TEXT`. Ordinary reconcile
-continues retrying by default. Abandonment requires a terminal attempt,
+continues retrying by default. A never-dispatched queued attempt can also be
+abandoned when it has no process evidence, writer fence or worktree custody;
+it is withdrawn as cancelled before recording abandonment. Other abandonment
+requires a terminal attempt,
 exclusive settlement and writer locks, and proven absence of custody. It records
 an explicit abandoned settlement outcome with the chair, time, reason and prior
 phase before releasing the reservation. It preserves the last error, provider
@@ -622,7 +625,12 @@ unless those paths are review-exempt. Paths in the project's
 `[domains.run] review_exempt` list (release-note fragments, specs, lock files
 and `.tracker-input` by default) never count toward either, and Git metadata,
 hooks and provider control roots can never be listed. Run reads no provider
-transcript except Codex's post-exit identity projection. A read-only lane (no
+transcript except Codex's post-exit identity projection. Sandboxed Codex
+projects the exact stream thread from its candidate-local rollout. Native
+Codex uses the launch-time home selector in the bounded
+`provider-state/codex-observation-candidate-N.json` record, outside the
+lane-writable candidate subtree. Settlement reads that same home and
+requires the same exact thread, including after recovery. A read-only lane (no
 `writer`) whose complete, validated, non-empty answer is present settles
 `succeeded` without a handoff; only a writer must also report one.
 - Why (default): a crash, truncation or impostor must never read as success.
@@ -677,8 +685,8 @@ specific typed terminal cause was recorded, `terminal_cause` identifies it and
 structured `reason` fields retain the full safe cause, remedy and note in every
 lane response. A writer's declared stop with no new commit records
 `terminal_cause = "stopped_no_work"`: settlement compares its pinned base and
-head, keeps `cause = "declared_stop"` and `state = "review_required"`, and says
-that it stopped with no work and acceptance remains unmet. Missing Git evidence,
+effective committed head, keeps `cause = "declared_stop"` and `state = "review_required"`, and says
+that it stopped with no work and acceptance remains unmet. The result output reports the settlement base and committed head separately from changed paths and publication; unavailable evidence remains unavailable. The residual tree state is a current observation only when the worktree still names that head; otherwise it is unavailable. Missing Git evidence,
 uncommitted edits and other failure causes do not receive this classification.
 Only human `status` rows use short labels pointing to
 `provenant output ID`. Pre-launch causes distinguish an
@@ -767,7 +775,11 @@ the provider with the typed stop `token_budget`, and the attempt settles
 `default`); a host setting equal to the default still reports `host`. If the
 lane stopped with uncommitted work, the host attempts a bounded commit with
 message `stopped on budget`, after custody proves no provider process can still
-write, and before publishing the branch. An in-progress merge is left to the
+write, and before publishing the branch. Settlement selects the lane's effective
+head first, including commits made through native Git, and uses its matching
+index for the snapshot. A clean worktree creates no snapshot; a snapshot of
+remaining edits descends from that head. The resulting head is durably pinned
+for import and replay. An in-progress merge is left to the
 existing stopped-merge handling. Settlement reports a skipped or failed commit;
 a Git error does not replace the budget outcome. At 90% the host uses the
 existing steer capability matrix. All current lane adapters are

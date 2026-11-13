@@ -5,28 +5,30 @@ description: "Use for TDD and choosing, writing, merging or deleting tests."
 
 # Test design
 
-Choose evidence for observable behaviour and keep the suite economical. For a
-bug or core logic, write the spec-derived failing test first and witness the
-failure. For substantial work, an independent author derives acceptance tests
-from the spec (the `review.tests` template reviews a pinned writer commit).
-Deleting and trimming tests is normal work. When a test fails on your change,
-decide whether it caught a defect or only pins the implementation: fix the code
-in the first case, rewrite or delete the test in the second. Do not loosen an
-assertion that encodes a spec clause your change breaks; raise it with the
-scope owner. Report every removed or weakened test with its reason.
+Design tests extensibly, flexibly and reliably so future code evolution does not
+need test updates. Put invariants and property-style checks at public boundaries
+first; avoid rigid tests, example snapshots, or exact strings and counts that go
+stale. Keep regression tests minimal: at most one small test per real defect,
+and only where no invariant covers it.
+
+On any test failure, first decide whether the test caught a defect or pins
+implementation detail: fix the code for a defect; rewrite the test as a boundary
+invariant or delete it if it pins implementation. Never bend product code around
+rigid tests or bump expected values to pass. Pruning is normal, welcome work:
+delete redundant, duplicate, rigid, or implementation-pinned tests on touch, and
+report every removed test with a one-line reason.
 
 ## Choose and prune
 
-1. Make illegal states unrepresentable where possible, and do not test states
-   that types, schemas or lint exclude; name the enforcing check.
-2. One contract test per public behaviour, property tests for invariants,
-   golden tests for stable wire formats, a few end-to-end tests for real
-   paths. Choose the lowest boundary that proves the behaviour.
-3. Search existing tests first and extend one where it fits. Budget about one
-   new test per new behaviour, naming the defect only it catches.
-4. On touch, delete duplicates, type-impossible cases and prose assertions;
-   merge overlaps and rewrite tests coupled to implementation at the public
-   boundary. A test that fails on a pure refactor needs repair.
+1. Invariants first: test observable behaviour and properties at public
+   boundaries. Make illegal states unrepresentable in types or schemas rather
+   than asserting them; name the enforcing check.
+2. Minimal regression tests: add at most one focused check per real defect, only
+   where an existing invariant cannot cover it.
+3. Inspect the test on failure: if a test fails on an unbreaking change or pure
+   refactor, rewrite it to pin an invariant at the public boundary or delete it.
+4. Prune aggressively: delete duplicates, type-impossible cases, prose assertions
+   and implementation-coupled tests. Many tests can and should be removed.
 5. Mock only process, network, clock and randomness edges; use real owned
    collaborators. See [boundaries](references/boundaries.md) and
    [judgement](references/judgement.md), whose safeguards apply whenever you

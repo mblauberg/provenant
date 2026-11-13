@@ -325,7 +325,7 @@ impl provenant_os::exec::Executor for GuardedExecutor<'_> {
     }
 }
 
-/// Agy runs with the attempt's private state as `HOME`, so it sees none of the
+/// Sandboxed Agy runs with the attempt's private state as `HOME`, hiding the
 /// user's Gemini or Antigravity configuration, MCP servers, plugins, hooks,
 /// sidecars or knowledge: its state lives and dies in the private home. Its
 /// sign-in is in a keychain, so the private home links only that one file,
@@ -346,7 +346,7 @@ fn prepare(
         return Err(ProviderError::UnsupportedPolicy);
     }
     input.prompt.check_argv()?;
-    let home = plan.private_state.as_ref().map_or_else(
+    let private_home = plan.private_state.as_ref().map_or_else(
         || {
             use std::io::Write;
             let _ = writeln!(
@@ -362,6 +362,15 @@ fn prepare(
         None => None,
     }
     .unwrap_or_else(|| input.home.join(KEYCHAIN));
+    // An explicit account's HOME selects its keychain. The ordinary login can
+    // use the host HOME and its tool configuration directly.
+    let home = if input.sandboxed() {
+        private_home
+    } else {
+        input
+            .account
+            .map_or(input.home, |account| account.directory())
+    };
     let staged_skills = input.stage_user_skills();
     let user_skills = staged_skills.root.clone();
     let skill_reads = user_skills.iter().map(subtree).collect::<Vec<_>>();
@@ -422,19 +431,34 @@ fn prepare(
     let path = crate::launch::tool_search_path(input.home, shell);
     let mut env = base_env(input, &plan.scratch.path, path);
     for (key, value) in &mut env {
-        if key == "HOME" {
+        if key == "HOME" && (input.sandboxed() || input.account.is_some()) {
             *value = home.into();
         }
     }
-    env.push(("SHELL".into(), SHELL.into()));
+    if input.sandboxed() {
+        env.push(("SHELL".into(), SHELL.into()));
+    } else if home != input.home {
+        for (name, path) in [
+            ("CARGO_HOME", input.home.join(".cargo")),
+            ("RUSTUP_HOME", input.home.join(".rustup")),
+        ] {
+            if !env.iter().any(|(key, _)| key == name) {
+                env.push((name.into(), path.into_os_string()));
+            }
+        }
+    }
     let keychains = home.join("Library/Keychains");
-    let mut setup = vec![
-        SetupStep::CreateDir(keychains.clone()),
-        SetupStep::Symlink {
-            link: keychains.join("login.keychain-db"),
-            target: keychain.clone(),
-        },
-    ];
+    let mut setup = if input.sandboxed() {
+        vec![
+            SetupStep::CreateDir(keychains.clone()),
+            SetupStep::Symlink {
+                link: keychains.join("login.keychain-db"),
+                target: keychain.clone(),
+            },
+        ]
+    } else {
+        Vec::new()
+    };
     if let Some(user_skills) = &user_skills {
         setup.push(SetupStep::CreateDir(home.join(".gemini")));
         setup.push(SetupStep::Symlink {
@@ -449,11 +473,13 @@ fn prepare(
         subtree("/usr/bin"),
         subtree("/usr/libexec"),
     ];
-    env.extend([
-        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-    ]);
-    if shell {
+    if input.sandboxed() {
+        env.extend([
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ]);
+    }
+    if shell && input.sandboxed() {
         crate::launch::rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
         crate::launch::node_tools(
             input.home,

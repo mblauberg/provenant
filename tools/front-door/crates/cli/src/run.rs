@@ -1082,6 +1082,20 @@ impl Registry<'_> {
             }
             decoded.reason = Some(reason);
         }
+        if provenant_records::AdapterSpec::get(adapter.id())
+            .is_some_and(|spec| spec.stdout_error_diagnostic)
+            && let Some(note) = provenant_providers::opencode::stdout_error_diagnostic(stdout)
+        {
+            decoded.reason = Some(match decoded.reason.take() {
+                Some(reason) => format!("{reason}; {note}"),
+                None => note.clone(),
+            });
+            if !decoded.result.is_empty() {
+                decoded.result.push_str("\n\n");
+            }
+            decoded.result.push_str(&note);
+            decoded.result.push('\n');
+        }
         if let Some(ProviderEvent::DeniedNote { .. }) = events
             .iter()
             .find(|event| matches!(event, ProviderEvent::DeniedNote { .. }))

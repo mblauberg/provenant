@@ -357,6 +357,13 @@ pub(crate) fn render_graph_status(rows: &[Value]) -> String {
     human
 }
 
+fn mark_unreadable_attempt(row: &mut Value, attempt: &str, error: &provenant_records::DecodeError) {
+    row["state"] = json!("unreadable");
+    row["reason"] = json!(format!(
+        "run store record for attempt {attempt}: decode error: {error}"
+    ));
+}
+
 /// Enrich graph attempt rows from identity-checked host records. Checkpoint
 /// rows describe graph progress; the run owner retains typed terminal causes.
 pub(crate) fn enrich_status_rows(
@@ -406,6 +413,10 @@ pub(crate) fn enrich_status_rows_within(
                 }
                 // A collected run leaves the retained graph's own row readable.
                 Err(provenant_run::RunError::NotFound) => continue,
+                Err(provenant_run::RunError::Decode(error)) => {
+                    mark_unreadable_attempt(row, &attempt.to_string(), &error);
+                    continue;
+                }
                 Err(error) => return Err(run_error(error)),
             }
         } else {
@@ -1907,6 +1918,27 @@ mod tests {
     use provenant_fabric_runtime::graph::{
         GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
     };
+
+    #[test]
+    fn unreadable_attempt_keeps_other_status_rows() {
+        let mut rows = [
+            json!({"kind":"attempt", "state":"running"}),
+            json!({"kind":"graph", "state":"running"}),
+        ];
+        mark_unreadable_attempt(
+            &mut rows[0],
+            "attempt-id",
+            &provenant_records::DecodeError::Typed { line: 2, column: 3 },
+        );
+        assert_eq!(rows[0]["state"], "unreadable");
+        assert!(
+            rows[0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("run store record for attempt attempt-id: decode error")
+        );
+        assert_eq!(rows[1]["state"], "running");
+    }
 
     fn checkpoint(graph: &str) -> GraphCheckpoint {
         serde_json::from_value(json!({"schema_version":1,"graph_id":graph,"plan_digest":"digest","nodes":[

@@ -588,6 +588,7 @@ mod unreported_checks_tests {
 
     fn check(bucket: &str) -> Check {
         Check {
+            head: "head".into(),
             name: format!("ci-{bucket}"),
             bucket: bucket.into(),
             app: None,

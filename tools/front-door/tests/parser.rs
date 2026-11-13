@@ -389,9 +389,12 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_restricts_authorit
     let human = rig.command(&["config", "show", "--full"])?;
     assert_eq!(code(&human), 0);
     let text = String::from_utf8_lossy(&human.stdout.bytes);
-    assert_eq!(text.lines().count(), 1, "{text}");
-    assert!(text.contains(" profile=balanced "), "{text}");
-    assert!(text.ends_with(" schema_version=1\n"), "{text}");
+    for field in ["profile=balanced", "schema_version=1"] {
+        assert!(
+            text.split_whitespace().any(|value| value == field),
+            "{text}"
+        );
+    }
     let removed = rig.command(&["config", "show", "--task-class", "mechanical", "--json"])?;
     assert_eq!(code(&removed), 2);
     assert!(!rig.state.exists());

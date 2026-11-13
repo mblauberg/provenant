@@ -604,7 +604,7 @@ pub struct GraphRunArgs {
     /// Paths the writer may change, relative to its worktree; repeatable
     #[arg(long = "write-scope")]
     pub write_scope: Vec<String>,
-    /// Copy the node over named items, or a resolver such as @review-panel
+    /// Copy the node over comma-separated items, or a resolver such as @review-panel
     #[arg(long, value_delimiter = ',')]
     pub over: Vec<String>,
     /// Bind a template parameter or attempt.FIELD (NAME=TOML_VALUE); repeatable
@@ -619,9 +619,8 @@ pub struct GraphRunArgs {
     /// Run the lane under the macOS sandbox (sets attempt.sandbox = "on")
     #[arg(long, conflicts_with = "no_sandbox")]
     pub sandbox: bool,
-    /// Run the lane unsandboxed (attempt.sandbox = "off"); a route in
-    /// domains.run.sandboxed_routes, a lane started by a route- or
-    /// knob-sandboxed lane and a lane with a narrowed network stay sandboxed
+    /// Run the lane unsandboxed (attempt.sandbox = "off"); overrides route,
+    /// network and parent floors where Provenant decides them
     #[arg(long)]
     pub no_sandbox: bool,
     /// Explain the compiled graph without starting work

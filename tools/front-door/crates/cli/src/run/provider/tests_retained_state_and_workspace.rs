@@ -94,22 +94,71 @@ fn retained_state_copy_refuses_a_filesystem_boundary() -> Result<(), Box<dyn std
 
 #[test]
 fn codex_rollout_is_found_in_the_launched_candidate() -> Result<(), Box<dyn std::error::Error>> {
-    let base = std::env::temp_dir().join(format!("provenant-candidates-{}", std::process::id()));
-    let thread = "01234567-89ab-cdef-0123-456789abcdef";
-    let day = base.join("candidate-1/sessions/2026/10/24");
-    std::fs::create_dir_all(base.join("candidate-0"))?;
-    std::fs::create_dir_all(&day)?;
-    std::fs::write(
-        day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl")),
-        format!(
-            "{}\n{}\n",
-            serde_json::json!({"type":"session_meta","payload":{"id":thread}}),
-            serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-luna","effort":"low"}}),
-        ),
-    )?;
-    let observed = observe_codex_rollout(&base, thread);
-    std::fs::remove_dir_all(&base)?;
-    assert_eq!(observed?.model, "gpt-6-luna");
+    for native in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().join("provider-state");
+        let candidate = base.join("candidate-1");
+        let thread = "01234567-89ab-cdef-0123-456789abcdef";
+        let home = if native {
+            temp.path().join("selected-account")
+        } else {
+            candidate.clone()
+        };
+        let day = home.join("sessions/2026/10/24");
+        std::fs::create_dir_all(base.join("candidate-0"))?;
+        std::fs::create_dir_all(&candidate)?;
+        std::fs::create_dir_all(&day)?;
+        if native {
+            let selector = base.join("codex-observation-candidate-1.json");
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "home": provenant_records::StructuredPathWire::from_path(&home)?,
+            }))?;
+            // Host metadata uses its own explicit root, independently of
+            // adapter setup's scratch-only file authority. Replay is idempotent.
+            for _ in 0..2 {
+                write_setup_file(&[&base], &selector, &bytes, false)?;
+            }
+        }
+        // Candidate-local bytes cannot redirect host observation.
+        std::fs::write(
+            candidate.join("codex-observation-candidate-1.json"),
+            br#"{"schema_version":1,"home":"/unrelated-home"}"#,
+        )?;
+        std::fs::write(
+            day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl")),
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({"type":"session_meta","payload":{"id":thread}}),
+                serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-luna","effort":"low"}}),
+            ),
+        )?;
+        assert_eq!(observe_codex_rollout(&base, thread)?.model, "gpt-6-luna");
+        assert!(observe_codex_rollout(&base, "another-thread").is_err());
+        if native {
+            // Two fallback candidates can launch against the same login home.
+            std::fs::copy(
+                base.join("codex-observation-candidate-1.json"),
+                base.join("codex-observation-candidate-0.json"),
+            )?;
+            assert_eq!(observe_codex_rollout(&base, thread)?.model, "gpt-6-luna");
+        }
+        // Independent homes that claim the same thread remain ambiguous.
+        let other = base.join("candidate-0");
+        let other_day = other.join("sessions/2026/10/24");
+        std::fs::create_dir_all(&other_day)?;
+        std::fs::copy(
+            day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl")),
+            other_day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl")),
+        )?;
+        if native {
+            std::fs::remove_file(base.join("codex-observation-candidate-0.json"))?;
+        }
+        assert!(matches!(
+            observe_codex_rollout(&base, thread),
+            Err(provenant_providers::ProviderError::IdentityMismatch)
+        ));
+    }
     Ok(())
 }
 
@@ -145,6 +194,7 @@ fn explicit_write_root_keeps_read_only_git_authority() -> Result<(), Box<dyn std
         &Default::default(),
         "codex",
         false,
+        InventoryContext::Sandboxed,
     )?;
     assert!(matches!(request.permissions.mode, AccessMode::ReadOnly));
     assert_eq!(request.permissions.write_roots[0].path, write);
@@ -214,6 +264,7 @@ fn launch_policy_binds_mandatory_aliases_and_all_network_ceilings()
                 &config,
                 "codex",
                 false,
+                InventoryContext::Sandboxed,
             )?;
             let policy = request
                 .permissions
@@ -390,6 +441,7 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
             private_state: &root.join("private"), assets: &root.join("assets"), prompt_file: None,
         },
         None, &run::LaneAccess::default(), &Default::default(), "command", false,
+        InventoryContext::Sandboxed,
     )?;
     let mandatory = request.permissions.policy.as_ref().ok_or("policy")?.mandatory();
     for path in [&foreign, &foreign_common, &foreign.join("nested"), &foreign_common.join("refs")] {
@@ -430,6 +482,7 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
         &Default::default(),
         "codex",
         false,
+        InventoryContext::Sandboxed,
     )?)?;
     let route = provenant_records::ResolvedRoute {
         extra: Default::default(),
@@ -519,6 +572,7 @@ fn attachment_read_grant_is_exact() -> Result<(), Box<dyn std::error::Error>> {
         &Default::default(),
         "cursor",
         false,
+        InventoryContext::Sandboxed,
     )?;
     assert!(request.permissions.read_roots.contains(&PathGrant {
         path: image,
@@ -563,6 +617,7 @@ fn lane_plan_reads_the_active_release_root() -> Result<(), Box<dyn std::error::E
             &Default::default(),
             entry.adapter.id(),
             true,
+            InventoryContext::Sandboxed,
         )?;
         assert!(request.permissions.read_roots.contains(&PathGrant {
             path: assets.to_owned(),
