@@ -1413,7 +1413,7 @@ pub(crate) fn project_run(value: &mut Value, detailed: bool) -> Result<(), Servi
             );
         }
         let mut record: provenant_records::run::AttemptRecord = serde_json::from_value(record)?;
-        let key = record.key.clone().ok_or(FacadeError::StateCorrupt)?;
+        let key = record.key.clone();
         if !detailed {
             for route in [
                 &mut record.resolved_route,
