@@ -1787,6 +1787,30 @@ mod tests {
         );
     }
     #[test]
+    fn help_constraints_name_only_options_the_command_has() {
+        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "--all"]) else {
+            panic!("catalog");
+        };
+        for command in &catalog.commands {
+            for constraint in &command.constraints {
+                for flag in constraint
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                    .filter(|word| word.starts_with("--") && word.len() > 2)
+                {
+                    let long = flag.trim_start_matches("--");
+                    assert!(
+                        command
+                            .arguments
+                            .iter()
+                            .any(|a| a.long.as_deref() == Some(long)),
+                        "{}: constraint names --{long}, which it lacks: {constraint}",
+                        command.command
+                    );
+                }
+            }
+        }
+    }
+    #[test]
     fn chair_log_help_explains_generated_retry_keys() {
         let ParseOutcome::Help { catalog, .. } = parsed(&["help", "--all"]) else {
             panic!("catalog");
