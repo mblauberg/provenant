@@ -172,10 +172,10 @@ fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn s
     let private_state = "/fixture/attempts/own/provider-state/candidate-0";
     plan.private_state.as_mut().expect("private state").path = private_state.into();
     plan.policy = Some(crate::run_config::RunConfig::default().policy_for_launch(
-        Path::new("/fixture/runs"),
+        Path::new("/fixture/attempts"),
         MandatoryRoots::new(
             Path::new("/fixture/home"),
-            Path::new("/fixture/runs"),
+            Path::new("/fixture/attempts"),
             Path::new("/fixture/repo"),
         )?,
     ));
@@ -226,7 +226,7 @@ fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn s
         assert!(rendered.contains(&format!("(allow file-read* (subpath \"{scratch}\"))")));
         for operation in ["file-read*", "file-write*", "process-exec"] {
             let denial = format!(
-                "(deny {operation} (require-all (subpath \"/fixture/runs\") (require-not (subpath \"{scratch}\")) (require-not (subpath \"{private_state}\"))))"
+                "(deny {operation} (require-all (subpath \"/fixture/attempts\") (require-not (subpath \"{scratch}\")) (require-not (subpath \"{private_state}\"))))"
             );
             assert!(
                 rendered.contains(&denial),

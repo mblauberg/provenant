@@ -1547,6 +1547,35 @@ fn set_knob_is_written_atomically_and_shown_with_its_source() {
     );
 }
 #[test]
+fn dispatch_profiles_preserve_fractional_policy_in_canonical_snapshots() {
+    use provenant_records::{BudgetGrace, BudgetPolicy, CanonicalV1, run::HarnessProfile};
+    let config = load::<&[u8]>(&roots(), None).unwrap();
+    for overrides in [vec![], vec!["lanes.budget_grace=0.125".into()]] {
+        let profile = config.dispatch_profile(&overrides).unwrap();
+        let expected = if overrides.is_empty() {
+            BudgetGrace::DEFAULT
+        } else {
+            BudgetGrace::from_fraction(0.125).unwrap()
+        };
+        let raw = CanonicalV1::bytes(&profile).unwrap();
+        let decoded: HarnessProfile = serde_json::from_slice(raw.as_bytes()).unwrap();
+        assert_eq!(decoded, profile);
+        let grace: BudgetGrace =
+            serde_json::from_value(decoded.knobs["lanes.budget_grace"].clone()).unwrap();
+        assert_eq!(grace, expected);
+        let policy = BudgetPolicy {
+            grace,
+            ..Default::default()
+        };
+        let raw = CanonicalV1::bytes(&policy).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<BudgetPolicy>(raw.as_bytes()).unwrap(),
+            policy
+        );
+    }
+}
+
+#[test]
 fn writer_publishing_knob_defaults_on_and_can_be_disabled_per_dispatch() {
     let config = load::<&[u8]>(&roots(), None).unwrap();
     let profile = config.dispatch_profile(&[]).unwrap();

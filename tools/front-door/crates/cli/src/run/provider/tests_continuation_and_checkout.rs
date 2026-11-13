@@ -776,7 +776,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
             let host = context.state_root.as_path();
             let nested = host.join("children/fixture-parent");
             std::fs::create_dir_all(&nested)?;
-            std::fs::rename(host.join("runs"), nested.join("runs"))?;
+            std::fs::rename(host.join("attempts"), nested.join("attempts"))?;
             std::fs::write(
                 host.join("config.toml"),
                 "schema_version=1\n[domains.run]\ncontinuation_copy_entries=1\n",

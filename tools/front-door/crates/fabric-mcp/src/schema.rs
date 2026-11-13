@@ -188,7 +188,7 @@ fn build_strict() -> Vec<Value> {
         "supersedes?":nullable(object(json!({"id":reference("Id"),"expect_revision":integer(1,u64::MAX)}))),
         "deadline?":nullable(pattern(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$")),
         "work?":nullable(object(json!({
-            "graph":text(256),"node?":nullable(text(256)),
+            "graph":text(48),"node?":nullable(text(200)),
             "attempt_id?":nullable(reference("Id")),"repository?":nullable(object(json!({"relative_to_root":object(json!({
                 "encoding":choices(&["utf8","native_bytes"]),"path":text(provenant_records::inbox::REQUEST_REPOSITORY_BYTES)
             }))}))),
@@ -997,15 +997,12 @@ mod wire_parity {
 
     fn attempt(provider_ms: Option<u64>) -> AttemptRecord {
         let mut record = json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "attempt_id": AttemptId::from_bytes([1; 16]),
-            "run_id": "02020202020202020202020202020202",
-            "task_id": "04040404040404040404040404040404",
             "key": provenant_records::WorkKey::new(
                 provenant_core::ProjectId::from_bytes([3; 16]), "graph", "node", 1
             ).unwrap(),
             "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
-            "operation_id": "wire-parity",
             "attempt_number": 1, "revision": 1, "generation": 0,
             "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
             "authority_digest": Digest::from_bytes([5; 32]),
@@ -1104,7 +1101,7 @@ mod wire_parity {
             .unwrap();
             crate::tools::project_run(&mut value, detailed).unwrap();
             let reason = value["attempt"]["reason"].as_str().unwrap();
-            assert!(reason.contains("wire-parity"));
+            assert!(reason.contains(&format!("provenant status {}", record.key)));
             assert!(!reason.contains("TOKEN_SENTINEL"));
             assert!(!reason.contains("/private/source"));
             assert!(
