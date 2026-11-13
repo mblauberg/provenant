@@ -775,7 +775,11 @@ the provider with the typed stop `token_budget`, and the attempt settles
 `default`); a host setting equal to the default still reports `host`. If the
 lane stopped with uncommitted work, the host attempts a bounded commit with
 message `stopped on budget`, after custody proves no provider process can still
-write, and before publishing the branch. An in-progress merge is left to the
+write, and before publishing the branch. Settlement selects the lane's effective
+head first, including commits made through native Git, and uses its matching
+index for the snapshot. A clean worktree creates no snapshot; a snapshot of
+remaining edits descends from that head. The resulting head is durably pinned
+for import and replay. An in-progress merge is left to the
 existing stopped-merge handling. Settlement reports a skipped or failed commit;
 a Git error does not replace the budget outcome. At 90% the host uses the
 existing steer capability matrix. All current lane adapters are

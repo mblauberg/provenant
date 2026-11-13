@@ -3822,7 +3822,14 @@ mod writer_recovery_tests {
     #[test]
     fn writer_token_budget_stop_commits_uncommitted_work_and_publishes_branch()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        budget_stop_case(BudgetStopCase::Commit)
+        for case in [
+            BudgetStopCase::Commit,
+            BudgetStopCase::Native { dirty: false },
+            BudgetStopCase::Native { dirty: true },
+        ] {
+            budget_stop_case(case)?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -4144,6 +4151,9 @@ mod writer_recovery_tests {
         /// An operation Git left in progress.
         InProgress(&'static str),
         Commit,
+        Native {
+            dirty: bool,
+        },
         CommitFailure,
         CustodyPresent,
         HostileFilter,
@@ -4211,6 +4221,22 @@ mod writer_recovery_tests {
             launch.worktree.repo().root_path().join("budget-work.txt"),
             "uncommitted work before budget stop\n",
         )?;
+
+        let native_head = if let BudgetStopCase::Native { dirty } = case {
+            fixture.lane_git(&["add", "budget-work.txt"])?;
+            fixture.lane_git(&["commit", "-m", "Native lane work"])?;
+            let head =
+                crate::objects::resolve_ref(&git, launch.worktree.repo(), launch.branch.as_str())?;
+            if dirty {
+                std::fs::write(
+                    fixture.writer.worktree.join("budget-work.txt"),
+                    "additional work before budget stop\n",
+                )?;
+            }
+            Some(head)
+        } else {
+            None
+        };
 
         let filter_sentinel = fixture
             .writer
@@ -4453,6 +4479,36 @@ mod writer_recovery_tests {
                     .contains("budget commit failed:")
             );
             return Ok(());
+        }
+        if let Some(head) = native_head {
+            let published =
+                crate::objects::resolve_ref(&git, launch.worktree.repo(), launch.branch.as_str())?;
+            fixture.lane_git(&[
+                "merge-base",
+                "--is-ancestor",
+                &head.to_string(),
+                &published.to_string(),
+            ])?;
+            assert_eq!(finished.head, Some(published));
+            assert!(
+                provenant_os::fixture::run_git(
+                    &fixture.writer.worktree,
+                    &["status", "--porcelain"]
+                )?
+                .is_empty()
+            );
+            if matches!(case, BudgetStopCase::Native { dirty: false }) {
+                assert_eq!(
+                    published, head,
+                    "clean native work must not create a snapshot"
+                );
+                let disposition: serde_json::Value = serde_json::from_slice(
+                    &read_sealed(&attempt, "budget-commit.json", RECORD_LIMIT)?
+                        .ok_or("budget disposition")?,
+                )?;
+                assert!(disposition.get("commit").is_none());
+                return Ok(());
+            }
         }
         assert!(
             reason_text.contains("work committed on its branch"),
