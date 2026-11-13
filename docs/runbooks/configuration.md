@@ -67,6 +67,48 @@ dropped whole.
 - Retention and collection (`[retention]`, `[gc]`, `[gc.projects."ID"]`) are in
   [gc](gc.md).
 
+## Git pre-push hook and local gate
+
+Connect the Git pre-push hook to Provenant so it checks pushes, including its
+existing default-branch protection. Pass both Git arguments and leave standard
+input connected: Git supplies the remote name and URL as arguments and the ref
+updates on standard input. For a plain `.git/hooks/pre-push` (make it executable):
+
+```sh
+#!/bin/sh
+exec provenant hook git pre-push "$@"
+```
+
+For Husky, put `provenant hook git pre-push "$@"` in `.husky/pre-push`.
+For Lefthook, configure `use_stdin` so Git's ref updates reach Provenant:
+
+```yaml
+pre-push:
+  commands:
+    provenant:
+      run: 'provenant hook git pre-push "{1}" "{2}"'
+      use_stdin: true
+```
+
+Lefthook sends standard input to only one command configured with `use_stdin`.
+Keep any other checks in the manager's hook.
+
+The optional local gate runs after the push checks in the selected project
+checkout. Configure it in the host `config.toml`:
+
+```toml
+[domains.pr.land.local_gate]
+mode = "warn"              # warn (default), enforce or off
+commands = ["cargo check"] # default: []
+timeout_seconds = 60       # per command; positive integer
+```
+
+Commands run in order through `sh -c`, with a separate timeout for each.
+`warn` reports failures and continues; `enforce` refuses the push at the first
+failure; `off` or an empty command list skips the gate. Failure includes a
+redacted, bounded tail of combined stdout and stderr. Project-specific values
+can override these keys under `[domains.pr.land.projects."ID".local_gate]`.
+
 ## Run host policy
 
 `[domains.run.host_policy]` (`deny_read`, `deny_write`, `network =
@@ -103,8 +145,11 @@ Each macOS attempt resolves whether it runs under Seatbelt. By default, every la
      attempt on another host, counts as sandboxed.
    - When no floor applies, every lane kind runs unsandboxed (`default`).
 
-The lane sees `PROVENANT_SANDBOX=on|off`; the receipt's
-`applied_route.sandbox` and `status` record requested and effective mode and its source.
+The lane sees `PROVENANT_SANDBOX=on|off`. `PROVENANT_PROCESS_TREE` is the
+path to the supervisor's lane process-tree sample, used by `provenant
+process-tree`; preserve it when invoking that tool from a scrubbed environment.
+The receipt's `applied_route.sandbox` and `status` record requested and
+effective mode and its source.
 
 `[domains.run] sandbox_cache_reads` (absolute directories, replaced per project
 by `[domains.run.projects."ID"] sandbox_cache_reads`) gives sandboxed lanes
