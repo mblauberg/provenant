@@ -166,7 +166,7 @@ fn capture(root: &Path, churn: bool) -> Result {
         requester: holder.actor_id,
         resolved_route: "fixture/cpu".into(),
         permission_plan_digest: Digest::from_bytes([0; 32]),
-        task: TaskId::from_bytes([4; 16]),
+        key: provenant_supervisor::custody::fixture_key(4),
         protected_commands: vec![],
         config_environment: fixture::config_environment(),
         argv: fixture::argv_with_args(

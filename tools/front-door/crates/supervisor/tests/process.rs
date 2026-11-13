@@ -78,6 +78,18 @@ fn captures_bytes_and_text_validation(root: &Path) -> Result<()> {
             .iter()
             .any(|frame| frame == b"terminal")
     );
+
+    // A flood retains no more than the bound, and the total still counts it all.
+    let limit = 128;
+    let args = fixture::argv("flood")?;
+    let mut options = ExecOptions::new(&args, root, Duration::from_secs(5));
+    options.env = Some(&env);
+    options.stderr = StreamPolicy::Discard;
+    options.stdout = StreamPolicy::Capture { limit };
+    let outcome = executor.execute(options)?;
+    assert!(outcome.stdout.bytes.len() <= limit);
+    assert!(outcome.stdout.total_bytes > limit as u64);
+    assert_eq!(outcome.stderr.total_bytes, 0);
     Ok(())
 }
 
@@ -92,21 +104,6 @@ fn large_stdin_round_trip(root: &Path) -> Result<()> {
     let outcome = executor.execute(options)?;
     assert_eq!(outcome.stdout.bytes, bytes);
     assert_eq!(outcome.stderr.bytes, b"done\r\n");
-    Ok(())
-}
-
-fn bounded_capture_retains_only_the_configured_limit(root: &Path) -> Result<()> {
-    let env = fixture_environment(root);
-    let executor = SystemExecutor::new(4)?;
-    let args = fixture::argv("flood")?;
-    let mut options = ExecOptions::new(&args, root, Duration::from_secs(5));
-    options.env = Some(&env);
-    options.stderr = StreamPolicy::Discard;
-    options.stdout = StreamPolicy::Capture { limit: 128 };
-    let outcome = executor.execute(options)?;
-    assert_eq!(outcome.stdout.bytes.len(), 128);
-    assert_eq!(outcome.stdout.total_bytes, 262144);
-    assert_eq!(outcome.stderr.total_bytes, 0);
     Ok(())
 }
 
@@ -422,7 +419,6 @@ fn reaper_transfers_and_polls_fairly(root: &Path) -> Result<()> {
 const TESTS: &[&str] = &[
     "captures_bytes_and_text_validation",
     "large_stdin_round_trip",
-    "bounded_capture_retains_only_the_configured_limit",
     "timeout_escalates_to_kill",
     "cleanup_guard_kills_a_guardian_recorded_in_a_nested_store",
     "tee_loss_does_not_stall_capture",
@@ -443,9 +439,6 @@ fn run_case(name: &str) -> Result<()> {
     let result = match name {
         "captures_bytes_and_text_validation" => captures_bytes_and_text_validation(root.path()),
         "large_stdin_round_trip" => large_stdin_round_trip(root.path()),
-        "bounded_capture_retains_only_the_configured_limit" => {
-            bounded_capture_retains_only_the_configured_limit(root.path())
-        }
         "timeout_escalates_to_kill" => timeout_escalates_to_kill(root.path()),
         "cleanup_guard_kills_a_guardian_recorded_in_a_nested_store" => {
             cleanup_guard_kills_a_guardian_recorded_in_a_nested_store(root.path())

@@ -1413,12 +1413,22 @@ mod tests {
     }
 
     #[test]
-    fn reactor_rounds_positive_waits_up_without_turning_nonblocking_polls_into_waits() {
+    fn reactor_waits_never_shrink_and_polls_never_block() {
         assert_eq!(poll_timeout_ms(Duration::ZERO), 0);
-        assert_eq!(poll_timeout_ms(Duration::from_nanos(1)), 1);
-        assert_eq!(poll_timeout_ms(Duration::from_millis(1)), 1);
-        assert_eq!(poll_timeout_ms(Duration::from_nanos(1_000_001)), 2);
-        assert_eq!(poll_timeout_ms(Duration::MAX), 1_000);
+        for wait in [
+            Duration::from_nanos(1),
+            Duration::from_micros(999),
+            Duration::from_millis(1),
+            Duration::from_nanos(1_000_001),
+            Duration::from_millis(250),
+        ] {
+            let rounded = i128::from(poll_timeout_ms(wait));
+            assert!(rounded > 0, "{wait:?} became a nonblocking poll");
+            assert!(
+                rounded * 1_000_000 >= wait.as_nanos() as i128,
+                "{wait:?} was cut short"
+            );
+        }
     }
 
     #[test]

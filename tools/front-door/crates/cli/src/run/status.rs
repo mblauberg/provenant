@@ -1064,9 +1064,7 @@ pub(super) fn lane_query(
 /// Artifact paths live under the session's execution root, which a nested
 /// lane keeps apart from the global configuration root.
 pub(super) fn artifact(root: &Path, record: &run::AttemptRecord, name: &str) -> PathBuf {
-    root.join(format!(
-        "attempts/{}/{name}", record.attempt_id
-    ))
+    root.join(format!("attempts/{}/{name}", record.attempt_id))
 }
 
 pub(super) fn lane_display_state(lane: &run::AttemptRecord) -> String {

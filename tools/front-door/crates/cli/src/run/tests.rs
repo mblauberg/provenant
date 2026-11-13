@@ -1007,11 +1007,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     attempt: id,
                     generation: record.generation,
                 };
-                let attempt_path = edge
-                    .roots
-                    .state
-                    .as_path()
-                    .join(format!("attempts/{id}"));
+                let attempt_path = edge.roots.state.as_path().join(format!("attempts/{id}"));
                 let attempt = Directory::open_anchor(&attempt_path)?;
                 let slot_path = edge.roots.state.as_path().join(format!(
                     "worktrees/{}/abandon-fixture",

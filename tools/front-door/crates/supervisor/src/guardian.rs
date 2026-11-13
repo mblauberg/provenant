@@ -150,7 +150,7 @@ fn settlement_recovery(
     let lock_directory = lock_directory.map_err(|error| {
         CustodyError::Io(io::Error::other(format!(
             "cannot clone writer lock directory for settlement; run `provenant reconcile --id {}`: {error}",
-            reservation.scope.run
+            reservation.scope.attempt
         )))
     })?;
     Ok(Recovery {
@@ -181,7 +181,7 @@ struct LaunchMessage {
     scope: Scope,
     resolved_route: String,
     permission_plan_digest: provenant_core::Digest,
-    task: provenant_core::TaskId,
+    key: provenant_records::WorkKey,
     requester: provenant_core::ActorId,
     binding: StoredWriterBinding,
     executable_snapshot: ExecutableSnapshot,
@@ -240,7 +240,7 @@ pub(crate) fn handoff(
         scope: owned.lease.scope(),
         resolved_route: owned.command.resolved_route,
         permission_plan_digest: owned.command.permission_plan_digest,
-        task: owned.command.task,
+        key: owned.command.key,
         requester: owned.command.requester,
         binding: owned.lease.reservation.binding.clone(),
         executable_snapshot,
@@ -555,7 +555,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
     struct Summary<'a> {
         schema_version: u64,
         scope: Scope,
-        task: &'a provenant_core::TaskId,
+        key: &'a provenant_records::WorkKey,
         resolved_route: &'a str,
         permission_plan_digest: &'a provenant_core::Digest,
         requester: provenant_core::ActorId,
@@ -570,7 +570,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
     let summary = Summary {
         schema_version: 1,
         scope: message.scope,
-        task: &message.task,
+        key: &message.key,
         resolved_route: &message.resolved_route,
         permission_plan_digest: &message.permission_plan_digest,
         requester: message.requester,

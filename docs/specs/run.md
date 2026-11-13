@@ -438,6 +438,11 @@ transient failure. A writer (an attempt that may edit files) is never replayed
 over its own edits: only the graph's stop decision restarts it, as a fresh
 attempt that continues in the same worktree once custody is released, and two
 writers never share a worktree.
+
+Every admitted attempt carries its `WorkKey`: a first attempt names it in its
+task context and a launch that names none is refused, so the store never
+derives one. A continuation takes its parent's graph and node with the next
+attempt number, and each terminal attempt is continued at most once.
 - Why (default): evidence must not be rewritten, and replaying a writer clobbers edits.
 - Test: `crates/run/src/dispatch_lifecycle_tests.rs::resume_continues_a_terminal_attempt_once_with_its_route`;
   `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::writer_limit_after_launch_restarts_in_place_on_the_second_route`
@@ -1178,7 +1183,7 @@ reservations before taking the attempt's writer lock, and an unreadable
 reservation blocks removal. Deletion never follows links, checks identity first and
 unlinks symlinks themselves. Lock files may be removed only below a terminal,
 unreserved `tmp/`; owner locks such as `writer.lock`,
-`publication.lock` and the run store lock keep their inodes.
+`publication.lock` (one per attempt directory) and the run store lock keep their inodes.
 - Why (default): unlinking an owner lock lets two owners lock different inodes, and
   deleting under a reservation destroys a writer's work.
 - Test: `crates/run/src/holder.rs::writer_recovery_accepts_only_matching_terminal_absence`;
@@ -1192,7 +1197,12 @@ unreserved `tmp/`; owner locks such as `writer.lock`,
 
 The run store is SQLite with write-ahead logging (WAL), foreign keys and `synchronous=FULL`.
 Its unit is the attempt row, unique by work key and by attempt ID; a run's
-record is read from its attempt rows rather than stored.
+record is read from its attempt rows rather than stored. On disk an attempt
+lives at `attempts/<AttemptId>/` under the store root, and receipt paths are
+relative to that root. No run or node identifier appears in a path; the
+publication lock is the attempt's own. The files that belong to a whole
+submission (`request.json`, the settlement queue and locks) sit in the
+directory of its first attempt, until graph records replace the run level.
 The store opens from one schema file at one version and refuses any other
 version (`STATE_RESET_REQUIRED`, naming `install --reset-state`) without modifying it; it also
 refuses unsafe companion files beside the database, and caps (1 MiB record or prompt, 64 MiB stream,

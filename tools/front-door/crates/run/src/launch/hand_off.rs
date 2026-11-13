@@ -400,12 +400,19 @@ impl RunStore {
             .as_ref()
             .filter(|c| c.writer.is_some())
             .and_then(|c| lane_port_plan_or_warn(&c.state_root));
+        let key = local_or_withdraw!(
+            record
+                .key
+                .clone()
+                .ok_or(RunError::Validation("attempt has no work key"))
+                .map_err(|e| typed_local("work key", &e))
+        );
         let command = ProviderCommand {
             profile_file,
             lane_ports,
             resolved_route: route,
             permission_plan_digest: task.authority_digest,
-            task: task.task_id,
+            key,
             requester,
             protected_commands: vec![],
             // OpenCode stores answering-model evidence in its shared XDG data

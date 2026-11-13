@@ -3430,7 +3430,14 @@ fn admission_requires_a_key_and_records_it() -> TestResult {
     let keyed = input();
     store.create(&keyed, &call)?;
     let record = store.record(keyed.attempts[0].attempt_id, &call)?;
-    assert!(record.key.is_some());
+    let key = record.key.clone().ok_or("admitted attempt has no key")?;
+    // A restarted host finds the same attempt by its key alone.
+    drop(store);
+    let restarted = RunStore::open(&context, &call)?;
+    assert_eq!(
+        restarted.attempt_by_key(&key, &call)?.attempt_id,
+        record.attempt_id
+    );
     Ok(())
 }
 

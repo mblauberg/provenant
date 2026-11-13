@@ -390,9 +390,10 @@ mod tests {
         );
         use std::os::unix::fs::PermissionsExt;
         let id = AttemptId::from_bytes([101; 16]);
-        let checkpoint = roots.state.as_path().join(format!(
-            "attempts/{id}/process.json"
-        ));
+        let checkpoint = roots
+            .state
+            .as_path()
+            .join(format!("attempts/{id}/process.json"));
         let observed_at = clock.wall_now()?;
         std::fs::write(
             &checkpoint,
