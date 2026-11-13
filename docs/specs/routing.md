@@ -80,6 +80,15 @@ publication leaves readiness unknown and never erases held refusals.
   `::full_refusal_file_accepts_probe_failure_and_restores_refusals`
 - Owner: `crates/quota/src/admission.rs`, `crates/quota/src/readiness.rs`
 
+## Depletion handoff
+
+For a graph stop, readiness observations older than one hour are unknown. A
+pinned account remains pinned, and the graph does not take a higher tier as a
+depletion fallback. A chosen tier travels with the graph route so the next
+stop uses the same tier. If facts cannot be read, declared routes remain the
+fallback. Pre-launch route switching requires local preparation and released
+custody; launched stops follow the graph stop rule.
+
 ## Revisioned, bounded refresh
 
 A quota refresh commits only against the revision it claimed, so stale

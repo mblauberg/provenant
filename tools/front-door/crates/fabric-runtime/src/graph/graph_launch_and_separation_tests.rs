@@ -262,7 +262,7 @@ fn alias_retry_receives_the_prior_model() {
         alias: Some("senior".into()),
         effort: None,
         account: None,
-    };
+    tier: None, };
     member.route = None;
     member.routes = Some(vec![alias.clone(), alias]);
     let mut limited = done_as("h/1");
@@ -428,7 +428,7 @@ fn panel_with_one_usage_limited_member_reaches_synthesis() {
         alias: Some("junior".into()),
         effort: None,
         account: None,
-    };
+    tier: None, };
     let mut nodes = Vec::new();
     for id in ["one", "two", "three"] {
         let mut member = node(id, route("first"));

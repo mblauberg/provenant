@@ -997,6 +997,7 @@ pub(super) fn route_is_bounded(route: &GraphRoute) -> bool {
         && route.model.as_deref().is_none_or(|value| field(value, 256))
         && route.alias.as_deref().is_none_or(|value| field(value, 128))
         && route.effort.as_deref().is_none_or(|value| field(value, 64))
+        && route.tier.as_deref().is_none_or(|value| field(value, 128))
         && route
             .account
             .as_deref()

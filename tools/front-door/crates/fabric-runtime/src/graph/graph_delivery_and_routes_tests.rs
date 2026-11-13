@@ -613,7 +613,7 @@ fn exhausted_pool_names_the_cause_and_the_pool() {
         alias: Some("junior".into()),
         effort: None,
         account: None,
-    };
+    tier: None, };
     let mut lens = node("lens", route("first"));
     lens.route = None;
     lens.routes = Some(vec![alias.clone(), alias]);

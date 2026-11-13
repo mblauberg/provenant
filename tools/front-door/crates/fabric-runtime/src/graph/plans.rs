@@ -1042,6 +1042,7 @@ fn prepare_nested(
                 model: None,
                 effort: None,
                 account: None,
+                tier: None,
             });
         }
         return Ok(());
@@ -1079,6 +1080,7 @@ fn prepare_nested(
                 model: None,
                 effort: None,
                 account: None,
+                tier: None,
             });
         }
     }
@@ -1430,6 +1432,7 @@ pub(super) fn flatten_fragment(
                 model: None,
                 effort: None,
                 account: None,
+                tier: None,
             });
         }
     }

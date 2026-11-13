@@ -190,6 +190,7 @@ fn target_route(target: &ladder::Target, effort: Option<String>) -> GraphRoute {
             alias: None,
             effort,
             account: account.clone(),
+            tier: None,
         },
         ladder::Target::HostNative { name } => GraphRoute {
             extra: Default::default(),
@@ -199,6 +200,7 @@ fn target_route(target: &ladder::Target, effort: Option<String>) -> GraphRoute {
             alias: None,
             effort: None,
             account: None,
+            tier: None,
         },
     }
 }
@@ -244,7 +246,7 @@ fn depletion_successor(
         .iter()
         .filter_map(|attempt| attempt.attempt_ref.clone())
         .collect();
-    let facts = match ladder_facts(DepletionRequest {
+    let mut facts = match ladder_facts(DepletionRequest {
         key: &attempt.key,
         reference,
         tried: &references,
@@ -253,14 +255,11 @@ fn depletion_successor(
     }) {
         Ok(Some(facts)) => facts,
         Ok(None) => return declared(),
-        Err(_) => {
-            return Successor {
-                routes: Vec::new(),
-                wake: None,
-                choice: None,
-            };
-        }
+        Err(_) => return declared(),
     };
+    if let Some(tier) = attempt.route.tier.as_ref() {
+        facts.stopped.tier = Some(tier.clone());
+    }
     let mut tried = facts.tried.clone();
     for target in launched
         .iter()
@@ -270,14 +269,40 @@ fn depletion_successor(
             tried.push(target);
         }
     }
+    let pinned_account = node
+        .attempt
+        .as_ref()
+        .and_then(|attempt| attempt.account.as_deref())
+        .or_else(|| {
+            node.routes
+                .get(usize::from(attempt.key.route_index))
+                .and_then(|route| route.account.as_deref())
+        });
+    let readiness: Vec<_> = facts
+        .readiness
+        .iter()
+        .filter(|fact| pinned_account.is_none_or(|pin| fact.account.as_deref() == Some(pin)))
+        .cloned()
+        .collect();
+    let host_native = if pinned_account.is_some() {
+        &[][..]
+    } else {
+        facts.host_native.as_slice()
+    };
+    // A depletion does not silently spend a higher tier.
+    facts
+        .config
+        .depletion
+        .adjacent
+        .retain(|step| *step != ladder::TierStep::Higher);
     let step = ladder::next_after_depletion(&ladder::DepletionInput {
         catalogue: &facts.catalogue,
         config: &facts.config,
         stopped: &facts.stopped,
         cause: depletion,
-        facts: &facts.readiness,
+        facts: &readiness,
         tried: &tried,
-        host_native: &facts.host_native,
+        host_native,
         exclusions: &facts.exclusions,
         intent: facts.intent,
         confidential: facts.confidential,
@@ -302,12 +327,21 @@ fn depletion_successor(
             // The ladder route first; the node's untried routes stay behind it
             // as fallbacks, and a host-native route keeps a launchable one
             // after it, as the plan requires of every host-native route.
-            let first = target_route(&handoff.target, handoff.effort);
+            let mut first = target_route(&handoff.target, handoff.effort);
+            first.tier = handoff.tier;
             let mut routes = vec![first.clone()];
             routes.extend(
                 restart_routes(node, progress)
                     .into_iter()
-                    .filter(|route| *route != first),
+                    .filter(|route| *route != first)
+                    .filter(|route| {
+                        pinned_account.is_none_or(|pin| {
+                            route
+                                .account
+                                .as_deref()
+                                .is_none_or(|account| account == pin)
+                        })
+                    }),
             );
             let native = |route: &GraphRoute| route.adapter.as_deref() == Some(HOST_NATIVE);
             if routes
@@ -351,6 +385,7 @@ enum Settle {
         restart: patch::Restart,
     },
     Pause(String),
+    Chair,
 }
 
 /// What follows this node's stop, or `None` when its failure stands: the
@@ -401,11 +436,35 @@ fn decide(
                     .collect()
             })
             .unwrap_or_default(),
+        NextStep::NewRoute
+            if cause == StopCause::StoppedEarly
+                && attempt
+                    .route
+                    .tier
+                    .as_deref()
+                    .or(attempt.route.alias.as_deref())
+                    == Some("junior") =>
+        {
+            let mut route = attempt.route.clone();
+            route.alias = Some("senior".into());
+            route.tier = Some("senior".into());
+            route.adapter = None;
+            route.name = None;
+            route.model = None;
+            route.effort = None;
+            vec![route]
+        }
         NextStep::NewRoute if cause.depleted() => {
             let successor = depletion_successor(node, progress, cause, ladder_facts);
             wake = successor.wake;
             ladder = successor.choice;
             successor.routes
+        }
+        NextStep::NewRoute
+            if matches!(cause, StopCause::LaneTokenLost | StopCause::ContextHandoff)
+                && node.routes.len() == 1 =>
+        {
+            vec![attempt.route.clone()]
         }
         NextStep::NewRoute => restart_routes(node, progress),
     };
@@ -413,7 +472,8 @@ fn decide(
         return pause(format!(
             "node {} stopped ({cause}); no different route is available; return to the chair",
             node.id
-        ));
+        ))
+        .or(Some(Settle::Chair));
     }
     if plans::continuation_count(checkpoint) >= limits.continuations {
         return pause(format!(
@@ -497,6 +557,10 @@ pub(super) fn settle_stop(
     let (index, node, settle) = select(plan, checkpoint, limits, ladder_facts)?;
     let mut next = checkpoint.clone();
     let (routes, wake, restart) = match settle {
+        Settle::Chair => {
+            fence_stopped(&mut next.nodes[index]);
+            return Some((index, next));
+        }
         Settle::Pause(reason) => {
             plans::set_expansion_pause(&mut next, index, reason, false, None);
             return Some((index, next));
@@ -560,7 +624,10 @@ fn unblock_dependants(plan: &PlannedGraph, checkpoint: &mut GraphCheckpoint, id:
         let before = restarted.len();
         for (node, progress) in plan.nodes.iter().zip(&mut checkpoint.nodes) {
             if progress.state == NodeState::Blocked
-                && progress.advance_error_code.as_deref() == Some("upstream_blocked")
+                && matches!(
+                    progress.advance_error_code.as_deref(),
+                    None | Some("upstream_blocked" | "required_input_unavailable")
+                )
                 && node
                     .depends_on
                     .iter()
@@ -629,5 +696,117 @@ pub(super) fn validate_on_stop(node: &GraphNode) -> Result<(), String> {
             node.id
         )),
         None => Ok(()),
+    }
+}
+
+/// Settlement fallback decision outcome.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SettlementFallback {
+    Continue,
+    Fail {
+        code: Option<String>,
+        message: Option<String>,
+    },
+}
+
+/// Settle an attempt outcome, evaluating whether fallback should fire or node should fail.
+pub(super) struct FallbackEvidence<'a> {
+    pub preparation: Option<PreparationFallbackEvidence>,
+    pub unreadable: bool,
+    pub review_limit_reached: bool,
+    pub cause: Option<&'a provenant_records::RouteExclusionReason>,
+    pub skipped_accounts: &'a [provenant_records::SkippedAccount],
+}
+
+pub(super) fn settlement_fallback_decision(
+    node: &PlannedNode,
+    route_index: usize,
+    outcome: AttemptOutcome,
+    launched: bool,
+    evidence: FallbackEvidence<'_>,
+) -> SettlementFallback {
+    let FallbackEvidence {
+        preparation: fallback_evidence,
+        unreadable: evidence_unreadable,
+        review_limit_reached,
+        cause: fallback_cause,
+        skipped_accounts,
+    } = evidence;
+    let route = node.routes.get(route_index);
+
+    if !live_fallback_allowed(outcome, launched, node.access, fallback_evidence)
+        || route_index + 1 == node.routes.len()
+        || review_limit_reached
+    {
+        let (mut advance_error_code, mut advance_error) = match outcome {
+            AttemptOutcome::PreparationRefused(cause) => (
+                Some("preparation_refused".into()),
+                Some(bounded(cause.detail(), MAX_ADVANCE_ERROR_BYTES)),
+            ),
+            AttemptOutcome::AuthRequired => (
+                Some("auth_required".into()),
+                Some("The lane requires authentication.".into()),
+            ),
+            AttemptOutcome::AdapterUnavailable => (
+                Some("adapter_unavailable".into()),
+                Some("The lane's adapter is unavailable.".into()),
+            ),
+            _ => (None, None),
+        };
+        if outcome == AttemptOutcome::UsageLimited {
+            advance_error_code = Some("usage_limited".into());
+            let pool = route
+                .and_then(|r| r.alias.as_deref())
+                .map_or_else(String::new, |alias| format!(" for pool {alias}"));
+            // A refusal before launch names each account it passed over: a
+            // stale failure or a login is not a spent allowance.
+            advance_error = Some(bounded(
+                &if !launched && !skipped_accounts.is_empty() {
+                    format!(
+                        "No account could take the route{pool}: {}; repair or refresh an account (`provenant quota tick`) or choose an eligible route.",
+                        provenant_records::SkippedAccount::describe(skipped_accounts)
+                    )
+                } else {
+                    format!(
+                        "Provider quota or rate limit reached{pool}; wait for the allowance to reset or choose an eligible route."
+                    )
+                },
+                MAX_ADVANCE_ERROR_BYTES,
+            ));
+        }
+        if route_index + 1 == node.routes.len()
+            && launched
+            && node.access == AccessMode::ReadOnly
+            && route.is_some_and(|r| r.account.is_some() || r.model.is_some())
+        {
+            advance_error_code = Some("fallback_route_pinned".into());
+            advance_error = Some("The selected route is pinned and has no fallback.".into());
+        }
+        if !live_fallback_allowed(outcome, launched, node.access, fallback_evidence)
+            && route_index + 1 < node.routes.len()
+        {
+            let (code, message) = fallback_denial(
+                launched,
+                node.access,
+                evidence_unreadable,
+                outcome,
+                fallback_cause,
+            );
+            advance_error_code = Some(code.into());
+            advance_error = Some(message);
+        }
+        if review_limit_reached
+            && route_index + 1 < node.routes.len()
+            && live_fallback_allowed(outcome, launched, node.access, fallback_evidence)
+        {
+            advance_error_code = Some("review_substitution_limit".into());
+            advance_error = Some("review substitution limit reached".into());
+        }
+        SettlementFallback::Fail {
+            code: advance_error_code,
+            message: advance_error,
+        }
+    } else {
+        SettlementFallback::Continue
     }
 }

@@ -81,7 +81,7 @@ pub struct GraphDocument {
 
 /// Selects `model`, then `name`, then `alias`. A named model-less entry
 /// requires `adapter`, as does a model route.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphRoute {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
@@ -98,6 +98,9 @@ pub struct GraphRoute {
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// Tier retained across a concrete ladder handoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
 }
 
 /// The selector used when launching a graph route.
@@ -358,6 +361,18 @@ impl AttemptSpec {
     }
 }
 
+fn graph_node_extra<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<provenant_records::ExtraFields, D::Error> {
+    let extra = provenant_records::ExtraFields::deserialize(deserializer)?;
+    if extra.contains_key("auto_continue_no_work") {
+        return Err(serde::de::Error::custom(
+            "auto_continue_no_work was removed; use on_stop",
+        ));
+    }
+    Ok(extra)
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
     /// The step to take after a stop with a given cause instead of the stop
@@ -374,7 +389,7 @@ pub struct GraphNode {
     pub when: Vec<WhenTerm>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<provenant_records::run::WorkContext>,
-    #[serde(flatten)]
+    #[serde(flatten, deserialize_with = "graph_node_extra")]
     pub extra: provenant_records::ExtraFields,
     #[serde(skip)]
     pub(super) composite_members: Vec<String>,

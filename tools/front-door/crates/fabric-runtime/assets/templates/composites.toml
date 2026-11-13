@@ -21,10 +21,13 @@ exports = [
 ]
 nodes = [
   { id = "frame", use = "task", when = { review-frame = true }, brief = "Frame the pinned review subject and its acceptance criteria for the independent lenses." },
-  { id = "lenses", use = "review", over = "@review-panel", min_ok = 1, after = ["frame"], inputs = [{ node = "frame", outputs = ["result"] }], reduce_verdict = true, with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
-  { id = "verify", use = "review.verify", over = "@review-verifiers", when = { review-verify = true }, min_ok = 1, reduce_verdict = true, after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
+  { id = "lenses", use = "review", over = "@review-panel", min_ok = "${min_ok}", after = ["frame"], inputs = [{ node = "frame", outputs = ["result"] }], reduce_verdict = true, with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
+  { id = "verify", use = "review.verify", over = "@review-verifiers", when = { review-verify = true }, min_ok = "${min_ok}", reduce_verdict = true, after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
   { id = "synthesis", use = "review.synthesis", when = { review-synthesis = true }, after = ["lenses", "verify"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }, { node = "verify", outputs = ["result", "findings", "verdict"] }] },
 ]
+
+[review-shape.parameters]
+min_ok = { type = "integer", default = 1, min = 1 }
 
 [research-swarm]
 doc = "Research named questions and reconcile dated evidence."

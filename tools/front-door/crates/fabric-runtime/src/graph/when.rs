@@ -58,6 +58,30 @@ pub fn skipped(nodes: &[GraphNode]) -> Vec<(&str, &[WhenTerm])> {
         .collect()
 }
 
+/// Required inputs removed because a producer is skipped.
+fn removed_requirements(nodes: &[GraphNode], producer: &str) -> Vec<serde_json::Value> {
+    let mut removed = Vec::new();
+    for node in nodes.iter().filter(|node| holds(&node.when)) {
+        for input in node
+            .inputs
+            .iter()
+            .filter(|input| input.node == producer && !input.required_outputs.is_empty())
+        {
+            removed.push(serde_json::json!({"consumer": node.id, "required_outputs": input.required_outputs}));
+        }
+        if let Some(spec) = &node.composite {
+            if spec.reduce_verdict
+                && spec.exports.iter().any(|export| {
+                    export.node == producer && export.outputs.contains(&OutputKind::Verdict)
+                })
+            {
+                removed.push(serde_json::json!({"consumer": node.id, "verdict_input": true}));
+            }
+        }
+    }
+    removed
+}
+
 /// The skipped rows an expanded document will start with, each with its
 /// condition, for `explain` to show beside the document.
 pub fn skipped_rows(
@@ -70,7 +94,7 @@ pub fn skipped_rows(
     skipped(&expanded.nodes)
         .into_iter()
         .map(|(id, terms)| {
-            serde_json::json!({"node": id, "when": terms, "reason": skip_reason(terms)})
+            serde_json::json!({"node": id, "when": terms, "reason": skip_reason(terms), "removed_requirements": removed_requirements(&expanded.nodes, id)})
         })
         .collect()
 }
@@ -129,6 +153,15 @@ pub(super) fn prune(document: &GraphDocument) -> Result<Option<GraphDocument>, A
         found
     };
     let mut pruned = document.clone();
+    for node in &mut pruned.nodes {
+        if skipped.contains(node.id.as_str()) {
+            let removed = removed_requirements(&document.nodes, &node.id);
+            if !removed.is_empty() {
+                node.extra
+                    .insert("removed_requirements".into(), serde_json::json!(removed));
+            }
+        }
+    }
     for node in &mut pruned.nodes {
         if skipped.contains(node.id.as_str()) {
             continue;

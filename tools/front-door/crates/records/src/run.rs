@@ -1343,6 +1343,18 @@ impl SettlementReceipts {
     }
 }
 
+fn decode_continuation<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let value = Option::<String>::deserialize(deserializer)?;
+    if value.as_deref() == Some("automatic") {
+        return Err(serde::de::Error::custom(
+            "automatic continuation was removed",
+        ));
+    }
+    Ok(value)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1357,7 +1369,11 @@ pub struct AttemptRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// `fresh` when a resume could not use provider continuation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "decode_continuation"
+    )]
     pub continuation: Option<String>,
     #[serde(default, skip_serializing_if = "HarnessProfile::is_empty")]
     pub profile: HarnessProfile,

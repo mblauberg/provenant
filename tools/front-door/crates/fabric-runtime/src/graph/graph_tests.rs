@@ -256,6 +256,7 @@ impl AttemptOwner for FakeOwner {
             alias: None,
             effort: None,
             account: None,
+            tier: None,
         }))
     }
     fn attempt_models(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
@@ -461,6 +462,7 @@ fn route(adapter: &str) -> GraphRoute {
         model: Some(format!("{adapter}/model")),
         alias: None,
         effort: None,
+        tier: None,
     }
 }
 
