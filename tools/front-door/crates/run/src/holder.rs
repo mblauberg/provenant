@@ -4357,7 +4357,8 @@ mod writer_recovery_tests {
         budget_stop_case(BudgetStopCase::WrapUp)?;
         budget_stop_case(BudgetStopCase::Natural)?;
         budget_stop_case(BudgetStopCase::Clean)?;
-        budget_stop_case(BudgetStopCase::WrapUpRefused)
+        budget_stop_case(BudgetStopCase::WrapUpRefused)?;
+        budget_stop_case(BudgetStopCase::NativeStaged)
     }
 
     #[derive(Clone, Copy)]
@@ -4367,6 +4368,7 @@ mod writer_recovery_tests {
         Commit,
         WrapUp,
         WrapUpRefused,
+        NativeStaged,
         Natural,
         Clean,
         Native {
@@ -4432,6 +4434,9 @@ mod writer_recovery_tests {
         let candidate = store.temporary_path(id, &call)?.join("candidate-0");
         std::fs::create_dir_all(&candidate)?;
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        if matches!(case, BudgetStopCase::NativeStaged) {
+            fixture.lane_git(&["push", "--set-upstream", "origin", launch.branch.as_str()])?;
+        }
         crate::objects::prepare_bound(
             &git,
             launch.worktree.repo(),
@@ -4460,6 +4465,53 @@ mod writer_recovery_tests {
             launch.worktree.repo().root_path().join("budget-work.txt"),
             "uncommitted work before budget stop\n",
         )?;
+
+        if matches!(case, BudgetStopCase::NativeStaged) {
+            // Match the launcher's private upstream configuration so a false
+            // clean status cannot be hidden by a missing-upstream error.
+            let source = crate::objects::bound_source(&attempt)?.ok_or("private source")?;
+            let refs = source.refs.current_path()?;
+            for (key, value) in [
+                (
+                    "remote.origin.fetch".to_owned(),
+                    "+refs/heads/*:refs/remotes/origin/*".to_owned(),
+                ),
+                (
+                    format!("branch.{}.remote", launch.branch.as_str()),
+                    "origin".to_owned(),
+                ),
+                (
+                    format!("branch.{}.merge", launch.branch.as_str()),
+                    format!("refs/heads/{}", launch.branch.as_str()),
+                ),
+            ] {
+                crate::objects::command(
+                    &git,
+                    &refs,
+                    launch.worktree.repo().root_path(),
+                    &["config".into(), key.into(), value.into()],
+                    None,
+                )?;
+            }
+            crate::objects::command(
+                &git,
+                &refs,
+                launch.worktree.repo().root_path(),
+                &[
+                    "update-ref".into(),
+                    format!("refs/remotes/origin/{}", launch.branch.as_str()).into(),
+                    launch.base.to_string().into(),
+                ],
+                None,
+            )?;
+            fixture.lane_git(&["add", "budget-work.txt"])?;
+            std::fs::remove_file(fixture.writer.worktree.join("budget-work.txt"))?;
+            assert!(
+                !launch.budget_clean_point(&attempt)?,
+                "native staged edits are dirty even before HEAD advances"
+            );
+            return Ok(());
+        }
 
         let native_head = if let Some(dirty) = match case {
             BudgetStopCase::Native { dirty } => Some(dirty),

@@ -65,3 +65,8 @@ The bounded same-session wrap-up defers context-threshold restart, preventing a
 fresh restart from resetting the grace allowance. Its admission invariant checks
 that the hard remaining allowance survives. The retry-extend preamble test also
 uses resolved-value propagation rather than hard-stop wording.
+
+The clean-point check covers both candidate and native indexes before the first
+native commit, when equal heads cannot identify which index owns staged edits.
+A regression stages a new file, removes it from disk, and keeps a pushed base;
+it must remain dirty. This prevents a false clean stop that would skip wrap-up.

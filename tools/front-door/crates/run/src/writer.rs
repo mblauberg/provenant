@@ -336,10 +336,21 @@ impl WriterLaunch {
         }
         index_dir.read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
         let index = index_dir.current_path()?.join("index");
+        let mut indexes = vec![index];
+        if head == self.base {
+            // Before the first native commit the heads cannot identify which
+            // index owns staged edits. Neither index may carry pending work.
+            repo.private_dir()
+                .read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
+            let native_index = repo.private_dir().current_path()?.join("index");
+            if !indexes.contains(&native_index) {
+                indexes.push(native_index);
+            }
+        }
         let objects = source.objects.current_path()?;
         let alternate = repo.common_git_dir().join("objects");
         let clean = crate::objects::with_clean_view(&git, repo, head, None, |_, path| {
-            let run = |args: &[&str]| {
+            let run = |args: &[&str], index: &Path| {
                 crate::objects::execute_bounded(
                     &git,
                     path,
@@ -348,25 +359,34 @@ impl WriterLaunch {
                     None,
                     crate::objects::Execution {
                         object_directory: Some(&objects),
-                        index_file: Some(&index),
+                        index_file: Some(index),
                         alternate_directory: Some(&alternate),
                         ..Default::default()
                     },
                 )
             };
-            run(&["update-ref", "HEAD", &head.to_string()])?;
-            Ok(run(&[
-                "--no-optional-locks",
-                "--work-tree",
-                repo.root_path()
-                    .to_str()
-                    .ok_or(RunError::Validation("worktree path"))?,
-                "status",
-                "--porcelain",
-                "-z",
-                "-uall",
-            ])?
-            .is_empty())
+            run(&["update-ref", "HEAD", &head.to_string()], &indexes[0])?;
+            for index in &indexes {
+                if !run(
+                    &[
+                        "--no-optional-locks",
+                        "--work-tree",
+                        repo.root_path()
+                            .to_str()
+                            .ok_or(RunError::Validation("worktree path"))?,
+                        "status",
+                        "--porcelain",
+                        "-z",
+                        "-uall",
+                    ],
+                    index,
+                )?
+                .is_empty()
+                {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
         })?;
         if !clean {
             return Ok(false);
