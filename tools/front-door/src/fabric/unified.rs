@@ -2894,7 +2894,7 @@ mod tests {
             ]}
         });
         let run = provenant_cli::run::with_deferred_provider_launch(|| {
-            factory.graph_document(input, budget, &cancel)
+            factory.graph_document(input.clone(), budget, &cancel)
         })?;
         let graph = run["checkpoint"]["graph_id"]
             .as_str()
@@ -2925,10 +2925,17 @@ mod tests {
 
         // An unrelated ref-less launch on an unavailable peer must not mask
         // the locally retained attempt, regardless of graph scan order.
-        let other_graph = "unrelated-offline-peer";
-        let mut other = checkpoint.clone();
-        other.graph_id = other_graph.into();
-        other.nodes[0].attempts[0].key.graph_id = other_graph.into();
+        let mut other_input = input;
+        other_input["operation_id"] = json!("steer-unrelated-offline-test");
+        let other_run = provenant_cli::run::with_deferred_provider_launch(|| {
+            factory.graph_document(other_input, budget, &cancel)
+        })?;
+        let other_graph = other_run["checkpoint"]["graph_id"]
+            .as_str()
+            .ok_or("other graph ID missing")?;
+        let mut other = FileJournal::read_checkpoint(&roots.state, project, other_graph)?
+            .ok_or("other checkpoint missing")?;
+        other.nodes[0].attempts[0].attempt_ref = None;
         other.nodes[0].attempts[0]
             .extra
             .insert("placement_host".into(), json!("unconfigured-offline-peer"));
