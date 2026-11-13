@@ -292,8 +292,6 @@ mod tests {
         let credential = base.join("credential");
         std::fs::write(&credential, "searchable fixture")?;
         let prompt = state
-            .join("runs")
-            .join(RunId::from_bytes([0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).to_string())
             .join("attempts")
             .join(ids[1000].to_string())
             .join("prompt.txt");
@@ -330,8 +328,6 @@ mod tests {
             let mut run_bytes = [0u8; 16];
             run_bytes[..2].copy_from_slice(&((index / 64) as u16).to_be_bytes());
             let path = state
-                .join("runs")
-                .join(RunId::from_bytes(run_bytes).to_string())
                 .join("attempts")
                 .join(id.to_string())
                 .join("prompt.txt");

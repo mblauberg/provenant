@@ -325,11 +325,11 @@ fn check_continuable_refuses_nonterminal_before_session() -> Result<(), Box<dyn 
 #[test]
 fn cancel_and_reconcile_report_leftover_paths_and_reasons_without_terminal_controls() {
     let state = run::Reconciled::TemporaryRetained {
-        path: PathBuf::from("/state/runs/run/attempts/attempt/tmp"),
+        path: PathBuf::from("/state/attempts/attempt/tmp"),
         reason: "permission denied\n\x1b[31mretry later\x1b[0m".into(),
     };
     let rendered = reconcile_summary(&state);
-    assert!(rendered.contains("/state/runs/run/attempts/attempt/tmp"));
+    assert!(rendered.contains("/state/attempts/attempt/tmp"));
     assert!(rendered.contains("permission denied"));
     assert!(rendered.contains("retry later"));
     assert!(!rendered.chars().any(char::is_control));

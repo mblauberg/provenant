@@ -422,7 +422,7 @@ mod tests {
             head: GitOid::parse(head).ok(),
             branch: Some("feat/thing".into()),
             delivery_id: None,
-            receipt_path: format!("runs/r/attempts/{attempt}"),
+            receipt_path: format!("attempts/{attempt}"),
             risk: Some("substantial".into()),
             reviews: Vec::new(),
         }
@@ -451,8 +451,8 @@ mod tests {
             &format!("Approve merge of `{HEAD}` to `main`."),
             "Risk tier: substantial (delivery receipt). Rollback: revert the merge commit on `main`.",
             &format!("Base: `main` at `abcdef0`. Head under review: `feat/thing` at `{HEAD}`."),
-            "- Author route: `codex/gpt-6@high` (receipt `runs/r/attempts/1`)",
-            "- Reviewer route: `claude/opus@high` (receipt `runs/r/attempts/2`)",
+            "- Author route: `codex/gpt-6@high` (receipt `attempts/1`)",
+            "- Reviewer route: `claude/opus@high` (receipt `attempts/2`)",
             &format!("- Exact head reviewed: `{HEAD}`\n"),
             "<summary>Implementation detail</summary>\n\nAttempt 01010101010101010101010101010101",
         ] {

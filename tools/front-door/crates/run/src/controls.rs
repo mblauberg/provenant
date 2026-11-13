@@ -89,10 +89,7 @@ pub fn holder_absent(root: &std::path::Path, record: &AttemptRecord) -> bool {
     if !matches!(record.state, AttemptState::Running { .. }) {
         return false;
     }
-    let path = root.join(format!(
-        "runs/{}/attempts/{}",
-        record.run_id, record.attempt_id
-    ));
+    let path = root.join(format!("attempts/{}", record.attempt_id));
     let Ok(attempt) = provenant_os::fs::Directory::open_anchor(&path) else {
         return false;
     };
@@ -346,10 +343,7 @@ mod reboot_tests {
         let record = store.record(id, &call)?;
         store.commit_lost(RunStore::scope(&record), "fixture", &call)?;
         store.set_temporary_retained(id, true, &call)?;
-        let path = context
-            .state_root
-            .as_path()
-            .join(format!("runs/{}/attempts/{id}", run.run_id));
+        let path = context.state_root.as_path().join(format!("attempts/{id}"));
         std::fs::rename(path, temp.path().join("missing-attempt"))?;
         store.reconcile_with_observer(
             run.run_id,
@@ -383,11 +377,8 @@ mod reboot_tests {
         store.claim(id, &clock, &call)?.ok_or("not admitted")?;
         let record = store.record(id, &call)?;
         let scope = RunStore::scope(&record);
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
-        let path = context
-            .state_root
-            .as_path()
-            .join(format!("runs/{}/attempts/{id}", run.run_id));
+        let attempt = store.attempt_dir(id, false)?;
+        let path = context.state_root.as_path().join(format!("attempts/{id}"));
         drop(custody::acquire_reader(
             attempt.try_clone()?,
             scope,
@@ -479,7 +470,7 @@ mod reboot_tests {
         )?;
         store.claim(id, &clock, &call)?.ok_or("not admitted")?;
         let record = store.record(id, &call)?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let scope = RunStore::scope(&record);
         attempt.atomic_write(std::ffi::OsStr::new("process.json"), ".checkpoint-", &serde_json::to_vec(&serde_json::json!({
             "schema_version": 1, "scope": scope,
@@ -568,7 +559,7 @@ mod reboot_tests {
             None,
             &call,
         )?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let launcher = attempt.try_lock(
             std::ffi::OsStr::new("launcher.lock"),
             provenant_os::fs::LockMode::Exclusive,
@@ -667,7 +658,7 @@ mod reboot_tests {
         let clock = crate::tests::clock();
         let cancel = provenant_core::CancelToken::new();
         let call = crate::tests::call(&clock, &cancel);
-        let attempt = store.attempt_dir(run, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let spawn = |_: &[std::ffi::OsString], _: &std::path::Path| Ok(());
         // A live launcher holds the attempt's writer lock.
         let launcher = attempt.lock(
@@ -704,7 +695,7 @@ mod reboot_tests {
         let clock = crate::tests::clock();
         let cancel = provenant_core::CancelToken::new();
         let call = crate::tests::call(&clock, &cancel);
-        let attempt = store.attempt_dir(run, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         assert!(
             matches!(attempt.metadata_at(std::ffi::OsStr::new("writer.lock"), false),
             Err(error) if error.is_not_found())
@@ -739,7 +730,7 @@ mod reboot_tests {
         let clock = crate::tests::clock();
         let cancel = provenant_core::CancelToken::new();
         let call = crate::tests::call(&clock, &cancel);
-        let attempt = store.attempt_dir(run, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         for name in ["launcher.lock", "writer.lock"] {
             assert!(
                 matches!(attempt.metadata_at(std::ffi::OsStr::new(name), false),
@@ -766,11 +757,11 @@ mod reboot_tests {
     #[test]
     fn a_handed_off_launcher_is_not_reaped_as_an_unlaunched_attempt()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let (_temp, store, run, id) = starting_store()?;
+        let (_temp, store, _run, id) = starting_store()?;
         let clock = crate::tests::clock();
         let cancel = provenant_core::CancelToken::new();
         let call = crate::tests::call(&clock, &cancel);
-        let attempt = store.attempt_dir(run, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         // The launcher no longer holds writer.lock after handing custody to
         // the guardian. Its durable launch evidence rules out prelaunch death.
         drop(attempt.try_lock(
@@ -800,7 +791,7 @@ mod reboot_tests {
         let cancel = provenant_core::CancelToken::new();
         let call = crate::tests::call(&clock, &cancel);
         let record = store.record(id, &call)?;
-        let attempt = store.attempt_dir(run, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let slot = store
             .writer_registry
             .join("worktrees")
@@ -940,10 +931,7 @@ mod reboot_tests {
             &call,
         )?;
         store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-        let path = context
-            .state_root
-            .as_path()
-            .join(format!("runs/{}/attempts/{id}", run.run_id));
+        let path = context.state_root.as_path().join(format!("attempts/{id}"));
         let evidence = path.join(id.to_string());
         std::fs::create_dir_all(&evidence)?;
         let reservation = evidence.join("reservation.json");
@@ -1033,6 +1021,7 @@ mod lineage_tests {
             original.run_id = RunId::from_bytes([60 + index as u8; 16]);
             original.operation_id = format!("explicit-{index}").parse()?;
             original.attempts[0].attempt_id = AttemptId::from_bytes([70 + index as u8; 16]);
+            crate::tests::rekey(&mut original);
             let prior = original.attempts[0].attempt_id;
             let (project_id, info) =
                 worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
@@ -1092,7 +1081,7 @@ mod lineage_tests {
             let record = store.record(prior, &call)?;
             crate::prepare_writer(&writer, &store.writer_registry, project_id)?.snapshot(
                 store.context.state_root.as_path(),
-                &store.attempt_dir(record.run_id, prior, false)?,
+                &store.attempt_dir(prior, false)?,
                 RunStore::scope(&record),
             )?;
             if origin == Some(WorktreeOrigin::Lane) {
@@ -1108,6 +1097,7 @@ mod lineage_tests {
                 owner.run_id = RunId::from_bytes([122; 16]);
                 owner.operation_id = "previous-owner".parse()?;
                 owner.attempts[0].attempt_id = AttemptId::from_bytes([120; 16]);
+                crate::tests::rekey(&mut owner);
                 owner_store.create(&owner, &call)?;
                 assert!(matches!(
                     store.check_writer_lineage(&record, &launch.worktree, &call),
@@ -1144,7 +1134,7 @@ mod lineage_tests {
                 )?;
                 assert!(matches!(
                     crate::writer::seal_writer_ownership(
-                        &store.attempt_dir(record.run_id, prior, false)?,
+                        &store.attempt_dir(prior, false)?,
                         &launch.worktree
                     ),
                     Err(RunError::Conflict)
@@ -1158,7 +1148,7 @@ mod lineage_tests {
                 )?;
             }
             if origin == Some(WorktreeOrigin::Lane) {
-                let attempt = store.attempt_dir(record.run_id, prior, false)?;
+                let attempt = store.attempt_dir(prior, false)?;
                 let snapshot = attempt.current_path()?.join("writer-owned.json");
                 let legacy = br#"{"schema_version":1,"lane_owned":true}"#;
                 std::fs::write(&snapshot, legacy)?;
@@ -1193,6 +1183,7 @@ mod lineage_tests {
             graph.operation_id = format!("graph-retry-{index}").parse()?;
             graph.attempts[0].attempt_id = AttemptId::from_bytes([190 + index as u8; 16]);
             graph.request.tasks[0] = original.request.tasks[0].clone();
+            crate::tests::rekey(&mut graph);
             let graph_task = &mut graph.request.tasks[0];
             graph_task.source_head = graph_task.head.clone();
             graph_task
@@ -1387,11 +1378,12 @@ mod lineage_tests {
         probe.run_id = RunId::from_bytes([70; 16]);
         probe.operation_id = "lineage-probe".parse()?;
         probe.attempts[0].attempt_id = AttemptId::from_bytes([71; 16]);
+        crate::tests::rekey(&mut probe);
         store.create(&probe, &call)?;
         let continuation = store.record(probe.attempts[0].attempt_id, &call)?;
         launch.snapshot(
             store.context.state_root.as_path(),
-            &store.attempt_dir(continuation.run_id, continuation.attempt_id, false)?,
+            &store.attempt_dir(continuation.attempt_id, false)?,
             RunStore::scope(&continuation),
         )?;
         let queued = store.record(prior, &call)?;
@@ -1438,7 +1430,7 @@ mod lineage_tests {
         let record = store.record(prior, &call)?;
         launch.snapshot(
             store.context.state_root.as_path(),
-            &store.attempt_dir(record.run_id, prior, false)?,
+            &store.attempt_dir(prior, false)?,
             RunStore::scope(&record),
         )?;
         let owner = worktrees::load_owner(&launch.worktree)?.ok_or("owner")?;
@@ -1720,7 +1712,7 @@ impl RunStore {
             return Ok(None);
         }
         if matches!(record.state, AttemptState::Terminal { .. })
-            && matches!(self.attempt_dir(record.run_id, record.attempt_id, false), Err(RunError::Filesystem(error)) if error.is_not_found())
+            && matches!(self.attempt_dir(record.attempt_id, false), Err(RunError::Filesystem(error)) if error.is_not_found())
         {
             // Terminal cleanup handles the missing directory and any writer fence.
             return Ok(None);
@@ -1732,7 +1724,7 @@ impl RunStore {
         }
         // Collection failures are uncertain; settlement errors still propagate.
         let collect = || -> Result<_> {
-            let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+            let attempt = self.attempt_dir(record.attempt_id, false)?;
             if !matches!(record.state, AttemptState::Terminal { .. })
                 && read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some()
             {
@@ -1953,7 +1945,7 @@ impl RunStore {
         observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
         let scope = Self::scope(record);
-        let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let attempt = self.attempt_dir(record.attempt_id, false)?;
         if read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some()
             || !custody::holder_gone(&attempt, scope, observer)
         {
@@ -1995,7 +1987,7 @@ impl RunStore {
         };
         // A reader can publish its exit and release exclusion after the first
         // check, so both proofs must still hold under exclusion.
-        let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let attempt = self.attempt_dir(record.attempt_id, false)?;
         if recovery.scope() != scope
             || read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some()
             || !custody::holder_gone(&attempt, scope, observer)
@@ -2019,7 +2011,7 @@ impl RunStore {
         proof_errors_uncertain: bool,
     ) -> Result<Option<Reconciled>> {
         let collect = || -> Result<_> {
-            let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+            let attempt = self.attempt_dir(record.attempt_id, false)?;
             // The slot is named from the worktree path, so it needs no Git access.
             let request = self.request(record.run_id, call)?;
             let writer = request
@@ -2179,7 +2171,7 @@ impl RunStore {
                 }
                 _ => {}
             }
-            let dir = self.attempt_dir(record.run_id, id, false)?;
+            let dir = self.attempt_dir(id, false)?;
             let unlaunched = matches!(record.state, AttemptState::Starting { .. })
                 && matches!(
                     custody::reattach(dir.try_clone()?, Self::scope(&record)),
@@ -2228,7 +2220,7 @@ impl RunStore {
             }
             // `settle_unlaunched` waits on a held lock; a live launcher is
             // asked to unwind instead, so cancel stays prompt.
-            let dir = self.attempt_dir(record.run_id, id, false)?;
+            let dir = self.attempt_dir(id, false)?;
             if self.launcher_gone(&record, &dir, true, call)
                 && matches!(
                     self.settle_unlaunched(id, &record, call)?,
@@ -2447,7 +2439,7 @@ impl RunStore {
                 }
                 return Ok(owner);
             }
-            let directory = self.attempt_dir(current.run_id, current.attempt_id, false)?;
+            let directory = self.attempt_dir(current.attempt_id, false)?;
             if let Some(raw) = read_sealed(&directory, "writer-owned.json", crate::RECORD_LIMIT)? {
                 // Recorded under custody before launch. A later owner removal or
                 // adoption cannot turn an owned lane into an explicit tree.
@@ -2870,7 +2862,7 @@ impl RunStore {
                 .any(|attempt| match attempt.state {
                     AttemptState::Running { .. } => true,
                     AttemptState::Starting { .. } => self
-                        .attempt_dir(run, attempt.attempt_id, false)
+                        .attempt_dir(attempt.attempt_id, false)
                         .is_ok_and(|dir| {
                             read_sealed(&dir, "cancel.json", RECORD_LIMIT)
                                 .is_ok_and(|found| found.is_some())
@@ -2987,7 +2979,7 @@ impl RunStore {
                 }));
             }
             if let Some(state) = state {
-                found.push((id, self.track_reconcile_progress(run, id, state, call)));
+                found.push((id, self.track_reconcile_progress(id, state, call)));
             }
         }
         if cutover_error.is_some() {
@@ -3026,7 +3018,6 @@ impl RunStore {
     /// Progress is advisory: a broken attempt must not hide its peers' results.
     fn track_reconcile_progress(
         &self,
-        run: RunId,
         id: AttemptId,
         state: Reconciled,
         call: &Request<'_>,
@@ -3042,7 +3033,7 @@ impl RunStore {
         }
         let progress = (|| {
             let scope = Self::scope(&self.record(id, call)?);
-            let directory = self.attempt_dir(run, id, false)?;
+            let directory = self.attempt_dir(id, false)?;
             match &state {
                 Reconciled::Uncertain { reason } => {
                     crate::settlement::blocked(&directory, scope, &reason.to_string(), call.clock)
@@ -3089,7 +3080,7 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<Option<Reconciled>> {
         let scope = Self::scope(record);
-        let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let attempt = self.attempt_dir(record.attempt_id, false)?;
         if fence.scope != scope
             || read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some()
         {
@@ -3138,7 +3129,7 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<Reconciled> {
         let scope = Self::scope(record);
-        let dir = || self.attempt_dir(record.run_id, id, false);
+        let dir = || self.attempt_dir(id, false);
         let cancelled = crate::store::cancel_requested(&dir()?, scope);
         if !matches!(record.state, AttemptState::Starting { .. }) {
             return Ok(Reconciled::uncertain(UncertainReason::NoLaunchSummary));
@@ -3247,7 +3238,7 @@ impl RunStore {
         call: &Request<'_>,
         observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
-        let directory = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let directory = self.attempt_dir(record.attempt_id, false)?;
         if crate::settlement::queued_abandonment_pending(&directory, record)? {
             return Ok(None);
         }
@@ -3260,7 +3251,7 @@ impl RunStore {
             .context
             .state_root
             .as_path()
-            .join(format!("runs/{}/attempts/{id}/tmp", record.run_id));
+            .join(format!("attempts/{id}/tmp"));
         let listing = match self.writer_fence_listing() {
             Ok(listing) => listing,
             Err(error) => {
@@ -3317,13 +3308,11 @@ impl RunStore {
             });
         // An unreadable reservation cannot establish absence of custody.
         if let Some(issue) = listing.issues.first() {
-            let temporary = self
-                .attempt_dir(record.run_id, id, false)
-                .and_then(|attempt| {
-                    attempt
-                        .metadata_at(std::ffi::OsStr::new("tmp"), false)
-                        .map_err(Into::into)
-                });
+            let temporary = self.attempt_dir(id, false).and_then(|attempt| {
+                attempt
+                    .metadata_at(std::ffi::OsStr::new("tmp"), false)
+                    .map_err(Into::into)
+            });
             if !pending_writer
                 && matches!(temporary, Err(RunError::Filesystem(ref error)) if error.is_not_found())
             {
@@ -3346,7 +3335,7 @@ impl RunStore {
         // terminal result without waiting for Git. Keep the retained marker
         // until the independently retried effect actually succeeds.
         if pending_writer {
-            let attempt = self.attempt_dir(record.run_id, id, false)?;
+            let attempt = self.attempt_dir(id, false)?;
             if crate::holder::object_import_refused(&attempt, scope)?.is_some() {
                 return Ok(Some(Reconciled::TemporaryRetained {
                     path,
@@ -3388,12 +3377,10 @@ impl RunStore {
         {
             // The retry marker covers release, including reader reservations.
             // Once released, preserved scratch must never enter normal cleanup.
-            match self
-                .attempt_dir(record.run_id, id, false)
-                .and_then(|attempt| {
-                    let evidence = custody::attempt_evidence(&attempt, scope)?;
-                    read_sealed(&evidence, "reservation.json", RECORD_LIMIT)
-                }) {
+            match self.attempt_dir(id, false).and_then(|attempt| {
+                let evidence = custody::attempt_evidence(&attempt, scope)?;
+                read_sealed(&evidence, "reservation.json", RECORD_LIMIT)
+            }) {
                 Ok(Some(_)) => {
                     return Ok(Some(Reconciled::uncertain(
                         UncertainReason::GuardianNotObservable,
@@ -3411,12 +3398,10 @@ impl RunStore {
             self.set_temporary_retained(id, false, call)?;
             return Ok(None);
         }
-        let attempt = match self
-            .attempt_dir(record.run_id, id, false)
-            .and_then(|attempt| {
-                attempt.metadata_at(std::ffi::OsStr::new("tmp"), false)?;
-                Ok(attempt)
-            }) {
+        let attempt = match self.attempt_dir(id, false).and_then(|attempt| {
+            attempt.metadata_at(std::ffi::OsStr::new("tmp"), false)?;
+            Ok(attempt)
+        }) {
             Ok(attempt) => attempt,
             Err(RunError::Filesystem(error)) if error.is_not_found() => {
                 self.set_temporary_retained(id, false, call)?;
@@ -3489,13 +3474,13 @@ impl RunStore {
         observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
         let record = self.record(id, call)?;
-        let directory = self.attempt_dir(record.run_id, id, false)?;
+        let directory = self.attempt_dir(id, false)?;
         if let Some(state) = crate::settlement::abandoned(&directory, Self::scope(&record))? {
             return Ok(Some(state));
         }
         if !matches!(record.state, AttemptState::Queued { .. })
             && self
-                .attempt_dir(record.run_id, id, false)
+                .attempt_dir(id, false)
                 .is_ok_and(|attempt| self.supervisor_stalled(&attempt, Self::scope(&record), call))
         {
             return Ok(Some(Reconciled::uncertain(UncertainReason::HostStalled)));
@@ -3506,7 +3491,7 @@ impl RunStore {
             {
                 return Ok(Some(state));
             }
-            let directory = self.attempt_dir(record.run_id, id, false)?;
+            let directory = self.attempt_dir(id, false)?;
             let scope = Self::scope(&record);
             let effects_retained = read_sealed(&directory, "terminal-effects.json", RECORD_LIMIT)?
                 .is_some()
@@ -3571,7 +3556,7 @@ impl RunStore {
         if let Some(state) = self.settle_rebooted(record, call, observer)? {
             return Ok(state);
         }
-        let dir = || self.attempt_dir(record.run_id, id, false);
+        let dir = || self.attempt_dir(id, false);
         match custody::reattach(dir()?, scope) {
             Ok(handle) => {
                 let budget = provenant_core::WaitBudget::cli(call.clock.mono_now(), 1)
@@ -3784,17 +3769,19 @@ mod tests {
                     &call,
                 )?;
                 crate::artifacts::seal(
-                    &store.attempt_dir(run.run_id, bad, false)?,
+                    &store.attempt_dir(bad, false)?,
                     "launch.json",
                     b"{}",
                     RECORD_LIMIT,
                 )?;
             }
             // Make journal I/O fail without relying on disk capacity or permissions.
-            std::fs::create_dir(context.state_root.as_path().join(format!(
-                "runs/{}/attempts/{bad}/settlement-progress.json",
-                run.run_id
-            )))?;
+            std::fs::create_dir(
+                context
+                    .state_root
+                    .as_path()
+                    .join(format!("attempts/{bad}/settlement-progress.json")),
+            )?;
             let found = store.reconcile_with_observer(
                 run.run_id,
                 &crate::dispatch_tests::Fake::default(),
@@ -3858,7 +3845,7 @@ mod tests {
             store.record(orphan, &call),
             Err(RunError::NotFound)
         ));
-        store.attempt_dir(run.run_id, orphan, true)?;
+        store.attempt_dir(orphan, true)?;
         assert_eq!(store.writer_fences()?.len(), 1);
         let found = store.reconcile_with_observer(
             run.run_id,
@@ -3916,7 +3903,7 @@ mod tests {
         legacy["reservation_inode"] = metadata.inode.into();
         std::fs::write(slot.join("reservation.json"), serde_json::to_vec(&legacy)?)?;
         std::fs::remove_file(&child)?;
-        store.attempt_dir(run.run_id, orphan, true)?;
+        store.attempt_dir(orphan, true)?;
         assert!(store.writer_fence_listing()?.reservations.is_empty());
         let found = store.reconcile_with_observer(
             run.run_id,
@@ -4058,7 +4045,7 @@ mod tests {
             &call,
         )?;
         let running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-        let directory = store.attempt_dir(run.run_id, id, false)?;
+        let directory = store.attempt_dir(id, false)?;
         crate::artifacts::seal(&directory, "stdout.log", b"answer", RECORD_LIMIT)?;
         let mut exit = crate::tests::exit();
         exit.scope = RunStore::scope(&running);

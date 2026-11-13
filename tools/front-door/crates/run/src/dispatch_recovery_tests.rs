@@ -35,7 +35,7 @@ fn reconcile_rebooted_slot_handoff_after_device_numbers_change() -> TestResult {
         .claim(id, &at_micros(100), &call)?
         .ok_or("not admitted")?;
     let scope = RunStore::scope(&store.record(id, &call)?);
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let custody = store
         .writer_registry
         .join("worktrees")
@@ -107,15 +107,12 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
         &call,
     )?;
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let mut observed = exit();
     observed.scope = RunStore::scope(&store.record(id, &call)?);
     seal_exit(&store, &observed)?;
     let record = store.finish(id, &attempt, &observed, &Fake::default(), &call)?;
-    let path = context
-        .state_root
-        .as_path()
-        .join(format!("runs/{}/attempts/{id}", run.run_id));
+    let path = context.state_root.as_path().join(format!("attempts/{id}"));
     // Recreate the reservation retained by a crash after the canonical commit.
     drop(provenant_supervisor::fixture::acquire_writer(
         attempt.try_clone()?,
@@ -307,7 +304,7 @@ fn reconcile_sealed_never_spawned_exit_without_a_stop_request() -> TestResult {
         )?;
         let record = store.record(id, &call)?;
         let scope = RunStore::scope(&record);
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let mut observed = exit();
         observed.scope = scope;
         observed.never_spawned = true;
@@ -366,7 +363,7 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
     store
         .claim(exited, &at_micros(100), &call)?
         .ok_or("not admitted")?;
-    let dir = store.attempt_dir(batch.run_id, exited, false)?;
+    let dir = store.attempt_dir(exited, false)?;
     artifacts::seal(&dir, "stdout.log", DONE_ANSWER.as_bytes(), CAPTURE_LIMIT)?;
     let mut observed = exit();
     observed.scope.attempt = exited;
@@ -395,7 +392,7 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
         generation: 1,
     };
     drop(provenant_supervisor::fixture::acquire_writer(
-        store.attempt_dir(batch.run_id, orphan, false)?,
+        store.attempt_dir(orphan, false)?,
         scope,
         call.lock_budget(),
         &cancel,
@@ -460,7 +457,7 @@ fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult
     store
         .claim(id, &at_micros(100), &call)?
         .ok_or("not admitted")?;
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let scope = provenant_supervisor::custody::Scope {
         run: run.run_id,
         attempt: id,
@@ -639,7 +636,7 @@ fn repeat_cancel_while_the_launcher_holds_keeps_one_request_and_settles_on_relea
         &clock,
     )?;
     assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let first = artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
         .ok_or("cancel request missing")?;
     // A repeat while the launcher still holds the writer neither settles the
@@ -706,6 +703,7 @@ fn a_cancelled_unlaunched_start_frees_the_worktree_writer_for_the_next_run() -> 
     next.run_id = RunId::from_bytes([9; 16]);
     next.operation_id = provenant_core::OperationId::parse("run-test-next")?;
     next.attempts[0].attempt_id = AttemptId::from_bytes([10; 16]);
+    crate::tests::rekey(&mut next);
     store.create(&next, &call)?;
     let next_id = next.attempts[0].attempt_id;
     store.mark_starting(
@@ -778,8 +776,6 @@ fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt
             context
                 .state_root
                 .as_path()
-                .join("runs")
-                .join(prepared.run_id.to_string())
                 .join("attempts")
                 .join(first.to_string())
         )

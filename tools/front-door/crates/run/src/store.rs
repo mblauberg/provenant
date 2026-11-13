@@ -65,16 +65,12 @@ pub struct PreparedRun {
     pub attempts: Vec<NewAttempt>,
     pub created_at: WallTime,
 }
-/// The work key an admitted task records. A graph launch names its key in the
-/// task context; the store never assigns its attempt number. Any other launch
-/// is a one-node graph keyed by its run and task, the adaptor until callers
-/// pass keys themselves.
+/// The work key a first attempt records: the graph, node and attempt number
+/// its task context names. A launch without a key is refused; the store never
+/// derives one. A continuation takes its key from its parent instead.
 pub(crate) fn work_key(
     project: provenant_core::ProjectId,
     context: Option<&provenant_records::run::WorkContext>,
-    run: RunId,
-    task: TaskId,
-    number: u64,
 ) -> Result<provenant_records::WorkKey> {
     let named = context.and_then(|context| {
         Some((
@@ -83,18 +79,32 @@ pub(crate) fn work_key(
             context.attempt?,
         ))
     });
-    match named {
-        Some((graph, node, attempt)) => {
-            provenant_records::WorkKey::new(project, graph, node, attempt)
+    let (graph, node, attempt) = named.ok_or(RunError::Validation("task names no work key"))?;
+    provenant_records::WorkKey::new(project, graph, node, attempt)
+        .map_err(|_| RunError::Validation("work key"))
+}
+/// A plain lane is a one-node graph. Until callers name their graph, the
+/// edge that builds the request gives it one derived from its task id; a
+/// context that already names its key is kept. Adaptor until C2 supplies names.
+impl PreparedRun {
+    /// Name the key of every task that names none, as `lane_context` does.
+    pub fn name_lane_keys(&mut self) {
+        for task in &mut self.request.tasks {
+            task.context = Some(lane_context(task.context.take(), task.task_id));
         }
-        None => provenant_records::WorkKey::new(
-            project,
-            run.to_string(),
-            task.to_string(),
-            u32::try_from(number).map_err(|_| RunError::Validation("attempt number"))?,
-        ),
     }
-    .map_err(|_| RunError::Validation("work key"))
+}
+pub(crate) fn lane_context(
+    context: Option<provenant_records::run::WorkContext>,
+    task: TaskId,
+) -> provenant_records::run::WorkContext {
+    let mut context = context.unwrap_or_default();
+    if context.graph_id.is_none() || context.node_id.is_none() || context.attempt.is_none() {
+        context.graph_id = Some(format!("lane-{task}"));
+        context.node_id = Some("lane".into());
+        context.attempt = Some(1);
+    }
+    context
 }
 /// Result and route material is supplied by the trusted provider/confinement
 /// composition edge, after secret scanning. This storage API never launches.
@@ -265,13 +275,7 @@ impl RunStore {
             .iter()
             .find(|task| task.task_id == first.task_id)
             .and_then(|task| task.context.as_ref());
-        let key = work_key(
-            self.context.project_id,
-            context,
-            input.run_id,
-            first.task_id,
-            1,
-        )?;
+        let key = work_key(self.context.project_id, context)?;
         self.insert_refusal_row(
             key,
             first.attempt_id.to_string(),
@@ -284,16 +288,21 @@ impl RunStore {
     /// Commit a trusted owner's preflight refusal before canonical admission.
     /// The caller supplies only an already projected, safe diagnostic. The first
     /// record wins; replays may not change its scope, kind or request identity.
-    /// Without a work key the refusal is a one-node graph keyed by its run.
+    /// A refusal that never reached a task is a one-node lane keyed by its
+    /// run; callers that know the key use `insert_refusal_under`.
     pub fn insert_refusal(
         &self,
         operation: OperationRecord,
         call: &Request<'_>,
     ) -> Result<OperationRecord> {
         let run = operation.run_id.to_string();
-        let key =
-            provenant_records::WorkKey::new(self.context.project_id, run.clone(), run.clone(), 1)
-                .map_err(|_| RunError::Validation("work key"))?;
+        let key = provenant_records::WorkKey::new(
+            self.context.project_id,
+            format!("lane-{run}"),
+            "lane",
+            1,
+        )
+        .map_err(|_| RunError::Validation("work key"))?;
         self.insert_refusal_row(key, run.clone(), run, operation, call)
     }
     /// Commit a preflight refusal under the work key the caller would have
@@ -398,7 +407,7 @@ impl RunStore {
         record: &AttemptRecord,
         call: &Request<'_>,
     ) -> Result<bool> {
-        let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let attempt = self.attempt_dir(record.attempt_id, false)?;
         if crate::settlement::abandoned(&attempt, Self::scope(record))?.is_some() {
             return Ok(true);
         }
@@ -453,20 +462,14 @@ impl RunStore {
             call.check()?;
             let (id, raw) = row?;
             let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
-            if self.effects_pending(run, id, &raw, call).unwrap_or(true) {
+            if self.effects_pending(id, &raw, call).unwrap_or(true) {
                 pending.push(id);
             }
         }
         Ok(pending)
     }
 
-    fn effects_pending(
-        &self,
-        run: RunId,
-        id: AttemptId,
-        raw: &[u8],
-        call: &Request<'_>,
-    ) -> Result<bool> {
+    fn effects_pending(&self, id: AttemptId, raw: &[u8], call: &Request<'_>) -> Result<bool> {
         // A cancelled delivery waits for an explicit `lane deliver`.
         let retryable = |effect: &EffectDisposition| {
             matches!(
@@ -484,7 +487,7 @@ impl RunStore {
         let manifest = retryable(&receipts.manifest_conflict)
             && (matches!(receipts.manifest_conflict, EffectDisposition::Failed { .. })
                 || self
-                    .attempt_dir(run, id, false)
+                    .attempt_dir(id, false)
                     .and_then(|attempt| {
                         crate::artifacts::subdir(&attempt, OsStr::new("quarantine"), false)
                     })
@@ -510,7 +513,7 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
         let old = self.record(id, call)?;
-        let dir = self.attempt_dir(old.run_id, id, false)?;
+        let dir = self.attempt_dir(id, false)?;
         if read_sealed(
             &dir,
             AttemptFile::TerminalPending.name(),
@@ -542,7 +545,7 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
         let old = self.record(id, call)?;
-        let dir = self.attempt_dir(old.run_id, id, false)?;
+        let dir = self.attempt_dir(id, false)?;
         let pending: AttemptRecord = crate::db::decode_attempt(
             &read_sealed(
                 &dir,
@@ -568,8 +571,8 @@ impl RunStore {
     }
     /// Commit the exact scoped decision sealed before a failed transaction.
     pub fn replay_terminal(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptRecord> {
-        let current = self.record(id, call)?;
-        let run = self.run_dir(current.run_id, false)?;
+        self.record(id, call)?;
+        let run = self.attempt_dir(id, false)?;
         let guard = run.lock(
             OsStr::new("publication.lock"),
             LockMode::Exclusive,
@@ -592,7 +595,7 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<(AttemptRecord, bool)> {
         let current = self.record(id, call)?;
-        let dir = self.attempt_dir(current.run_id, id, false)?;
+        let dir = self.attempt_dir(id, false)?;
         let pending: AttemptRecord = crate::db::decode_attempt(
             &read_sealed(
                 &dir,
@@ -615,10 +618,10 @@ impl RunStore {
             return Err(RunError::Conflict);
         }
         if let Some(result) = &pending.result {
-            self.artifact_bytes(current.run_id, result, RESULT_LIMIT)?;
+            self.artifact_bytes(result, RESULT_LIMIT)?;
         }
         if let Some(exit) = &pending.exit_evidence {
-            let raw = self.artifact_bytes(current.run_id, exit, RECORD_LIMIT)?;
+            let raw = self.artifact_bytes(exit, RECORD_LIMIT)?;
             let stored: SealedExit = decode(&raw)?;
             let AttemptState::Terminal { exit_code, .. } = pending.state else {
                 return Err(RunError::Conflict);
@@ -906,18 +909,22 @@ impl RunStore {
             }
             // A continuation is the next attempt of the prior task, and each
             // terminal attempt is continued at most once.
-            let number: i64 = match input.request.parent {
-                None => 1,
+            // A continuation is the next attempt of its parent's node: it
+            // takes the node's key with the following attempt number, and
+            // each terminal attempt is continued at most once. Any other
+            // launch names its own key in its task context.
+            let keys = match input.request.parent {
+                None => input.request.tasks.iter().map(|task| work_key(context.project_id, task.context.as_ref())).collect::<Result<Vec<_>>>()?,
                 Some(target) => {
-                    let (task, number): (String, i64) = tx.query_row("SELECT task,number FROM attempts WHERE id=?1 AND project=?2 AND refused=0", params![target.to_string(), context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?.ok_or(RunError::NotFound)?;
+                    let (task, graph, node, number): (String, String, String, u32) = tx.query_row("SELECT task,graph,node,attempt FROM attempts WHERE id=?1 AND project=?2 AND refused=0", params![target.to_string(), context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?.ok_or(RunError::NotFound)?;
                     if input.request.tasks.iter().any(|t| t.task_id.to_string() != task) { return Err(RunError::Validation("continuation must keep its task")); }
                     let taken: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM attempts WHERE continues=?1)", [target.to_string()], |r| r.get(0))?;
                     if taken { return Err(RunError::Conflict); }
-                    number.checked_add(1).ok_or(RunError::Validation("attempt number"))?
+                    let next = number.checked_add(1).ok_or(RunError::Validation("attempt number"))?;
+                    let key = provenant_records::WorkKey::new(context.project_id, graph, node, next).map_err(|_| RunError::Validation("work key"))?;
+                    input.request.tasks.iter().map(|_| key.clone()).collect()
                 }
             };
-            let number_u64 = u64::try_from(number).map_err(|_| RunError::Validation("attempt number"))?;
-            let keys = input.request.tasks.iter().map(|task| work_key(context.project_id, task.context.as_ref(), input.run_id, task.task_id, number_u64)).collect::<Result<Vec<_>>>()?;
             if keys.iter().enumerate().any(|(index, key)| keys[..index].contains(key)) {
                 return Err(RunError::Validation("work key repeats within a request"));
             }
@@ -998,12 +1005,24 @@ impl RunStore {
             {
                 return Err(RunError::Conflict);
             }
+            let attempt_dir = self.attempt_dir(attempt.attempt_id, true)?;
             seal(
-                &self.attempt_dir(input.run_id, attempt.attempt_id, true)?,
+                &attempt_dir,
                 AttemptFile::Prompt.name(),
                 attempt.prompt.as_bytes(),
                 RECORD_LIMIT,
             )?;
+            // Publication serialises per attempt: every attempt directory
+            // holds its own lock. The first attempt's is held above.
+            if attempt.attempt_id != self.run_anchor(input.run_id)? {
+                drop(attempt_dir.lock(
+                    OsStr::new("publication.lock"),
+                    LockMode::Exclusive,
+                    call.lock_budget(),
+                    call.cancel,
+                    call.clock,
+                )?);
+            }
         }
         self.write(call, |tx| {
             let mut accepted = operation.clone();
@@ -1030,7 +1049,7 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
         let old = self.record(id, call)?;
-        let durable_exit = sealed_exit(&self.attempt_dir(old.run_id, id, false)?, exit)?;
+        let durable_exit = sealed_exit(&self.attempt_dir(id, false)?, exit)?;
         let outcome_exit = match exit.termination {
             Some(Termination::Exit(code)) => Some(code),
             _ => None,
@@ -1055,7 +1074,7 @@ impl RunStore {
             && !exit.never_spawned
             && exit.cancel_delivered_before_exit != Some(true)
             && !import_cancelled(
-                &self.attempt_dir(old.run_id, id, false)?,
+                &self.attempt_dir(id, false)?,
                 Self::scope(&old),
                 old.verified_owner.unwrap_or(self.context.actor_id),
             )?
@@ -1172,8 +1191,8 @@ impl RunStore {
             return Err(RunError::Validation("withdrawal outcome"));
         }
         let defer_writer_cleanup = matches!(expected, AttemptState::Starting { .. });
-        let old = self.record(id, call)?;
-        let dir = self.run_dir(old.run_id, false)?;
+        self.record(id, call)?;
+        let dir = self.attempt_dir(id, false)?;
         let writer = dir.lock(
             OsStr::new("publication.lock"),
             LockMode::Exclusive,
@@ -1194,7 +1213,7 @@ impl RunStore {
             return Err(RunError::Conflict);
         }
         let revision = old.revision;
-        let attempt_dir = self.attempt_dir(old.run_id, id, true)?;
+        let attempt_dir = self.attempt_dir(id, true)?;
         // An interrupted withdrawal resumes its own sealed facts, so a retry
         // never renders a second finished_at or reason.
         let (outcome, finished_at, reason, preparation_failure, terminal_cause, terminal_note) =
@@ -1323,7 +1342,7 @@ impl RunStore {
         recovery: Option<&provenant_supervisor::custody::Recovery>,
         call: &Request<'_>,
     ) {
-        let Ok(attempt_dir) = self.attempt_dir(record.run_id, record.attempt_id, false) else {
+        let Ok(attempt_dir) = self.attempt_dir(record.attempt_id, false) else {
             return;
         };
         if !matches!(
@@ -1460,7 +1479,7 @@ impl RunStore {
         next.schema_version = 2;
         let import_cancellation = publication.outcome == Outcome::Cancelled
             && import_cancelled(
-                &self.attempt_dir(old.run_id, id, false)?,
+                &self.attempt_dir(id, false)?,
                 Self::scope(&old),
                 old.verified_owner.unwrap_or(self.context.actor_id),
             )?;
@@ -1488,7 +1507,7 @@ impl RunStore {
         ));
         next.publication_error = None;
         next.exit_evidence = durable_exit;
-        let attempt = self.attempt_dir(old.run_id, id, false)?;
+        let attempt = self.attempt_dir(id, false)?;
         if import_cancellation {
             next.cancellation_disposition = Some(CancellationDisposition::ImportEffective);
         } else if publication.outcome == Outcome::Cancelled
@@ -1563,7 +1582,7 @@ impl RunStore {
         }
         super::reader::validate_attempt(&next)?;
         let intent = crate::db::attempt_bytes(&next)?;
-        let attempt_dir = self.attempt_dir(old.run_id, id, false)?;
+        let attempt_dir = self.attempt_dir(id, false)?;
         // Seal the result, then the exact terminal intent that names it. A
         // crash between them leaves a result-only orphan, which the edge
         // recovers with revalidated facts; intent never names missing bytes.
@@ -1622,7 +1641,7 @@ impl RunStore {
         if publication_locked {
             self.commit_terminal_record(&old, &next, call)?;
         } else {
-            let run = self.run_dir(old.run_id, false)?;
+            let run = self.attempt_dir(id, false)?;
             let _lock = run.lock(
                 OsStr::new("publication.lock"),
                 LockMode::Exclusive,
@@ -1658,7 +1677,7 @@ impl RunStore {
         reason: &str,
         call: &Request<'_>,
     ) -> Result<()> {
-        let directory = self.run_dir(scope.run, false)?;
+        let directory = self.attempt_dir(scope.attempt, false)?;
         let _publication = directory.lock(
             OsStr::new("publication.lock"),
             LockMode::Exclusive,
@@ -1691,7 +1710,7 @@ impl RunStore {
             reason: Some(reason.into()),
         };
         super::reader::validate_attempt(&next)?;
-        let attempt = self.attempt_dir(old.run_id, old.attempt_id, false)?;
+        let attempt = self.attempt_dir(old.attempt_id, false)?;
         let name = AttemptFile::TerminalPending.name();
         let next = match read_sealed(&attempt, name, TERMINAL_RECORD_LIMIT)? {
             Some(raw) => {
@@ -1728,10 +1747,10 @@ impl RunStore {
                     return Err(RunError::Conflict);
                 }
                 if let Some(result) = &saved.result {
-                    self.artifact_bytes(old.run_id, result, RESULT_LIMIT)?;
+                    self.artifact_bytes(result, RESULT_LIMIT)?;
                 }
                 if let Some(exit) = &saved.exit_evidence {
-                    self.artifact_bytes(old.run_id, exit, RECORD_LIMIT)?;
+                    self.artifact_bytes(exit, RECORD_LIMIT)?;
                 }
                 saved
             }
@@ -1800,7 +1819,7 @@ impl RunStore {
                 }
                 _ => None,
             };
-            let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+            let attempt = self.attempt_dir(record.attempt_id, false)?;
             let head = crate::settlement::pinned_head(&attempt, Self::scope(record))?;
             let mut remove_import_pin = slot.is_some();
             if let Some(slot) = &slot {
@@ -1870,7 +1889,7 @@ impl RunStore {
                 .find(|task| task.task_id == old.task_id)
                 .is_some_and(|task| task.writer.is_some()),
         )?;
-        let attempt = self.attempt_dir(old.run_id, id, false)?;
+        let attempt = self.attempt_dir(id, false)?;
         let mut receipts = SettlementReceipts {
             cancellation: next.cancellation_disposition,
             ..Default::default()
@@ -1909,7 +1928,7 @@ impl RunStore {
         // scope- and requester-checked request, not from mutable lane state.
         // A stop sealed later is acknowledged by `cancel` seeing the terminal row.
         if next.cancellation_disposition.is_none()
-            && let Ok(attempt) = self.attempt_dir(old.run_id, id, false)
+            && let Ok(attempt) = self.attempt_dir(id, false)
             && let Ok(Some(raw)) = read_sealed(&attempt, "cancel.json", RECORD_LIMIT)
             && decode::<CancellationEvidence>(&raw).is_ok_and(|request| {
                 request.requests_stop(
@@ -2168,6 +2187,7 @@ mod admission_key_tests {
             prepared.run_id = RunId::from_bytes([number as u8; 16]);
             prepared.operation_id = OperationId::parse(&format!("number-{number}"))?;
             prepared.attempts[0].attempt_id = AttemptId::from_bytes([number as u8 + 10; 16]);
+            crate::tests::rekey(&mut prepared);
             prepared.request.tasks[0].context = Some(provenant_records::run::WorkContext {
                 graph_id: Some("numbered-graph".into()),
                 node_id: Some("writer".into()),
@@ -2188,14 +2208,6 @@ mod admission_key_tests {
                 store.create(&conflict, &call),
                 Err(RunError::OperationConflict)
             ));
-            assert!(
-                !context
-                    .state_root
-                    .as_path()
-                    .join("runs")
-                    .join(conflict.run_id.to_string())
-                    .exists()
-            );
         }
         Ok(())
     }

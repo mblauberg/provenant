@@ -288,8 +288,7 @@ fn graph_owner_fails_node_when_result_integrity_is_lost()
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let artifact = fixture.rig.state.join(format!(
-        "runs/{}/attempts/{}/result.md",
-        fixture.settled.run_id, fixture.settled.attempt_id
+        "attempts/{}/result.md", fixture.settled.attempt_id
     ));
     std::fs::write(&artifact, b"XX")?;
     for required in [None, Some("VERDICT: PASS")] {
@@ -403,8 +402,7 @@ extend: Vec::new(),
         &call,
     )?;
     let artifact = fixture.rig.state.join(format!(
-        "runs/{}/attempts/{}/result.md",
-        continuation.run_id, continuation.attempt_id
+        "attempts/{}/result.md", continuation.attempt_id
     ));
     std::fs::write(&artifact, b"XX")?;
     let id = "corrupt-auth";

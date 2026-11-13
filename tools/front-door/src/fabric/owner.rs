@@ -3729,8 +3729,7 @@ impl BoundGraphOwner<'_> {
                                     .state
                                     .as_path()
                                     .join(format!(
-                                        "runs/{}/attempts/{}/result.md",
-                                        attempt.run_id, attempt.attempt_id
+                                        "attempts/{}/result.md", attempt.attempt_id
                                     ))
                                     .to_string_lossy()
                                     .into_owned()

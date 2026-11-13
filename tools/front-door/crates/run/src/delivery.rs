@@ -2638,7 +2638,7 @@ impl crate::RunStore {
         call: &crate::Request<'_>,
     ) -> Result<Option<(WriterDeliveryRequest, WriterDeliveryReceipt)>> {
         let record = self.record(id, call)?;
-        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        let attempt = self.attempt_dir(id, false)?;
         match attempt.read_stable(OsStr::new("delivery-pickup.json"), crate::RECORD_LIMIT) {
             Ok(raw) => {
                 let pickup: PickupReceipt = crate::db::decode(&raw)?;
@@ -2667,8 +2667,8 @@ impl crate::RunStore {
         id: provenant_core::AttemptId,
         call: &crate::Request<'_>,
     ) -> Result<Option<serde_json::Value>> {
-        let record = self.record(id, call)?;
-        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        self.record(id, call)?;
+        let attempt = self.attempt_dir(id, false)?;
         match attempt.read_stable(OsStr::new("worktree-settlement.json"), crate::RECORD_LIMIT) {
             Ok(raw) => Ok(Some(crate::db::decode(&raw)?)),
             Err(error) if error.is_not_found() => Ok(None),
@@ -2695,8 +2695,8 @@ impl crate::RunStore {
         admit: impl FnOnce(Option<&serde_json::Value>) -> bool,
         call: &crate::Request<'_>,
     ) -> Result<bool> {
-        let record = self.record(id, call)?;
-        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        self.record(id, call)?;
+        let attempt = self.attempt_dir(id, false)?;
         let _lock = attempt.lock(
             OsStr::new("worktree-settlement.lock"),
             provenant_os::fs::LockMode::Exclusive,
@@ -2783,7 +2783,7 @@ impl crate::RunStore {
         let head = record
             .head
             .ok_or(RunError::Validation("receipt has no settled head"))?;
-        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        let attempt = self.attempt_dir(id, false)?;
         let key = provenant_core::hex(
             provenant_records::CanonicalV1::file_digest(
                 &serde_json::to_vec(&(head, &request))

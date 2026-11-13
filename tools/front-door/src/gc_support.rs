@@ -447,7 +447,7 @@ fn scan_terminal(
         if root.metadata_at(OsStr::new("run.sqlite3"), false).is_ok() {
             return Err("unobservable run store".into());
         }
-        match root.open_verified_directory(OsStr::new("runs")) {
+        match root.open_verified_directory(OsStr::new("attempts")) {
             Ok(runs) if !entry_names(&runs, 10_000)?.is_empty() => {
                 return Err("unindexed run records".into());
             }

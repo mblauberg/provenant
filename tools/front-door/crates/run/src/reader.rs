@@ -358,7 +358,7 @@ impl RunStore {
             }
         };
         artifact
-            .map(|artifact| self.artifact_bytes(record.run_id, artifact, limit))
+            .map(|artifact| self.artifact_bytes(artifact, limit))
             .transpose()
     }
 
@@ -785,14 +785,14 @@ impl RunStore {
         use provenant_os::fs::LockMode;
         if record.project_id != self.context.project_id {
             return Err(RunError::unsafe_path(
-                format!("runs/{}/attempts/{}", record.run_id, record.attempt_id),
+                format!("attempts/{}", record.attempt_id),
                 PathCheck::Containment,
             ));
         }
         if !matches!(record.state, AttemptState::Terminal { .. }) {
             return Ok(false);
         }
-        let directory = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let directory = self.attempt_dir(record.attempt_id, false)?;
         let _custody = match directory.try_lock_existing(
             std::ffi::OsStr::new(AttemptFile::CustodyLock.name()),
             LockMode::Exclusive,
@@ -894,7 +894,7 @@ impl RunStore {
                 outcome: Outcome::Succeeded,
                 ..
             }
-        ) && let Ok(attempt) = self.attempt_dir(record.run_id, id, false)
+        ) && let Ok(attempt) = self.attempt_dir(id, false)
             && let Some(raw) = match read {
                 RecordRead::Durable => {
                     crate::artifacts::read_sealed(&attempt, "delivery.json", RECORD_LIMIT)?
@@ -910,7 +910,7 @@ impl RunStore {
                 record.delivery = Some(delivery);
             }
         }
-        let (checkpoint, checkpoint_readable) = match self.attempt_dir(record.run_id, id, false) {
+        let (checkpoint, checkpoint_readable) = match self.attempt_dir(id, false) {
             Ok(directory) => {
                 let read_checkpoint = match read {
                     RecordRead::Durable => crate::artifacts::read_sealed(
@@ -1024,7 +1024,7 @@ impl RunStore {
         };
         let (bytes, complete, digest) = match part {
             ArtifactPart::Stderr => {
-                let dir = self.attempt_dir(record.run_id, id, false)?;
+                let dir = self.attempt_dir(id, false)?;
                 let (bytes, complete) = match crate::artifacts::read_sealed_observed(
                     &dir,
                     AttemptFile::Stderr.name(),
@@ -1046,7 +1046,7 @@ impl RunStore {
             }
             ArtifactPart::Transcript => {
                 let session = record.session.as_deref().ok_or(RunError::NotFound)?;
-                let dir = self.attempt_dir(record.run_id, id, false)?;
+                let dir = self.attempt_dir(id, false)?;
                 let (dir, name, _) = crate::transcript::find(&dir, session, &record.write_grants)
                     .ok_or(RunError::NotFound)?;
                 let (bytes, complete) = crate::transcript::tail(&dir, &name).ok_or_else(|| {
@@ -1070,7 +1070,7 @@ impl RunStore {
                     ArtifactPart::Prompt => (&record.prompt, RECORD_LIMIT),
                     _ => (record.result.as_ref().ok_or(missing_output)?, RESULT_LIMIT),
                 };
-                let bytes = self.artifact_bytes(record.run_id, artifact, limit)?;
+                let bytes = self.artifact_bytes(artifact, limit)?;
                 if std::str::from_utf8(&bytes).is_err() {
                     return Err(RunError::Validation("prompt/result is not UTF-8"));
                 }

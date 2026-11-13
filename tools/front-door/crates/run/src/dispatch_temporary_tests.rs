@@ -83,7 +83,7 @@ fn cancel_settles_a_prepared_attempt_nobody_holds() -> TestResult {
         generation: 1,
     };
     drop(provenant_supervisor::fixture::acquire_writer(
-        store.attempt_dir(batch.run_id, orphan, false)?,
+        store.attempt_dir(orphan, false)?,
         scope,
         call.lock_budget(),
         &cancel,
@@ -230,7 +230,7 @@ fn reconcile_preserves_protected_locks_outside_temporary() -> TestResult {
         WallTime::from_micros(150)?,
         &call,
     )?;
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let run_dir = store.run_dir(run.run_id, false)?;
     drop(attempt.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?);
     // The run lock may stay held while reconcile removes attempt payload.
@@ -290,7 +290,7 @@ fn reconcile_reports_temporary_removal_failures_and_continues() -> TestResult {
     let removed = run.attempts[1].attempt_id;
     let temporary = store.temporary_path(retained, &call)?;
     std::fs::write(temporary.join("payload"), "retain")?;
-    let _held = store.attempt_dir(run.run_id, retained, false)?.try_lock(
+    let _held = store.attempt_dir(retained, false)?.try_lock(
         std::ffi::OsStr::new("writer.lock"),
         provenant_os::fs::LockMode::Exclusive,
     )?;
@@ -348,7 +348,7 @@ fn reconcile_leaves_nonterminal_and_reserved_temporary_data() -> TestResult {
         // Also cover a reservation retained after its owner releases the lock.
         if reserved {
             drop(provenant_supervisor::fixture::acquire_writer(
-                store.attempt_dir(run.run_id, id, false)?,
+                store.attempt_dir(id, false)?,
                 RunStore::scope(&store.record(id, &call)?),
                 call.lock_budget(),
                 &cancel,
@@ -568,7 +568,7 @@ fn reconcile_temporary_removal_never_follows_symlinks() -> TestResult {
         let outside = temp.path().join("outside");
         std::fs::create_dir(&outside)?;
         std::fs::write(outside.join("keep"), "keep")?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         if link_at_root {
             std::fs::remove_dir_all(&temporary)?;
             symlink(&outside, &temporary)?;
@@ -658,10 +658,7 @@ fn cancel_queued_work_without_an_attempt_directory() -> TestResult {
     let run = input();
     store.create(&run, &call)?;
     let id = run.attempts[0].attempt_id;
-    let attempt = context
-        .state_root
-        .as_path()
-        .join(format!("runs/{}/attempts/{id}", run.run_id));
+    let attempt = context.state_root.as_path().join(format!("attempts/{id}"));
     // The queued transaction can survive a crash before directory publication.
     std::fs::remove_dir_all(attempt)?;
     assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Cancelled);

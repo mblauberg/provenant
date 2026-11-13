@@ -427,7 +427,7 @@ mod tests {
             assert_eq!(output.termination, Termination::Exit(0), "{output:?}");
             let path = state.join("quota/key/opencode.json");
             let before = std::fs::read(&path)?;
-            let provider_state = state.join("runs/run/attempts/attempt/provider-state");
+            let provider_state = state.join("attempts/attempt/provider-state");
             let route = quota_test_route();
             let decoded = run::Providers::decode_captures(
                 &Registry::default(),
@@ -444,7 +444,7 @@ mod tests {
             assert_eq!(record[0].refusals.len(), 1);
             return Ok(());
         };
-        let attempt_path = state.join("runs/run/attempts/attempt");
+        let attempt_path = state.join("attempts/attempt");
         std::fs::create_dir_all(&attempt_path)?;
         let registration = &provenant_providers::opencode::REGISTRATION;
         let frames = QuotaFrames {
@@ -471,7 +471,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir()?;
         let state = temp.path().join("state");
-        let attempt = state.join("runs/run/attempts/attempt");
+        let attempt = state.join("attempts/attempt");
         std::fs::create_dir_all(&attempt)?;
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
         let observed = SystemClock::new().unix_seconds();
@@ -516,7 +516,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir()?;
         let state = temp.path().join("state");
-        let attempt = state.join("runs/run/attempts/attempt");
+        let attempt = state.join("attempts/attempt");
         std::fs::create_dir_all(&attempt)?;
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
         let observed = SystemClock::new().unix_seconds();
@@ -580,7 +580,7 @@ mod tests {
 
         let temp = tempfile::tempdir()?;
         let state = temp.path().join("state");
-        let attempt = state.join("runs/run/attempts/attempt");
+        let attempt = state.join("attempts/attempt");
         let quota = state.join("quota");
         std::fs::create_dir_all(&attempt)?;
         std::fs::create_dir(&quota)?;

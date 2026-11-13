@@ -13,7 +13,7 @@ fn cancellation_keeps_a_genuine_launch_preparation_failure() -> TestResult {
         run.run_id,
         &Ready,
         &|record, _| {
-            let attempt = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+            let attempt = store.attempt_dir(record.attempt_id, false)?;
             artifacts::seal(
                 &attempt,
                 "cancel.json",
@@ -59,7 +59,7 @@ fn publication_legacy_result_orphan_retains_manifest_failure() -> TestResult {
         &call,
     )?;
     let record = store.claim(id, &clock, &call)?.ok_or("claim")?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     artifacts::seal(&attempt, "stdout.log", b"answer", CAPTURE_LIMIT)?;
     artifacts::seal(&attempt, "result.md", b"legacy result", RESULT_LIMIT)?;
     let archive = artifacts::subdir(&attempt, std::ffi::OsStr::new("quarantine"), true)?;
@@ -115,7 +115,7 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
         "a preflight refusal needs no custody lock"
     );
     record.provider_launched = Some(true);
-    let directory = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+    let directory = store.attempt_dir(record.attempt_id, false)?;
     assert!(
         store.custody_released(&record, &call).is_err(),
         "missing custody is not release evidence"
@@ -298,6 +298,7 @@ fn lane_continuation_respects_sealed_parent_or_open_fallback() -> TestResult {
         proposal.run_id = RunId::from_bytes([35; 16]);
         proposal.operation_id = "lane-continuation".parse()?;
         proposal.attempts[0].attempt_id = AttemptId::from_bytes([36; 16]);
+        crate::tests::rekey(&mut proposal);
         proposal.request.parent = Some(prior.attempts[0].attempt_id);
         proposal.request.tasks[0].access.network = Some(NetworkAccess::Provider);
         let mut narrower = proposal.request.tasks[0].clone();
@@ -606,7 +607,7 @@ fn memory_pressure_threshold_controls_admission_and_waits() -> TestResult {
         });
         let run = lane(54, writer);
         let id = starting(&store, &run, &call)?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let waits =
             store.lane_waits_with_resources(&[store.record(id, &call)?], &call, &Pressured(level));
         assert_eq!(
@@ -685,7 +686,7 @@ fn admission_refuses_near_the_user_process_limit() -> TestResult {
         });
         let run = lane(55, true);
         let id = starting(&store, &run, &call)?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let resources = Processes(ProcessBudget { used, limit });
         let waits = store.lane_waits_with_resources(&[store.record(id, &call)?], &call, &resources);
         assert_eq!(
@@ -767,7 +768,7 @@ fn pressure_errors_and_low_advisory_memory_do_not_refuse() -> TestResult {
         });
         let run = lane(58, true);
         let id = starting(&store, &run, &call)?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let result = store.admit(
             id,
             &attempt,
@@ -803,7 +804,7 @@ fn out_of_range_build_settings_do_not_block_admission() -> TestResult {
         }
         let run = lane(69, true);
         let id = starting(&store, &run, &call)?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         std::fs::write(
             store.writer_registry.join("config.toml"),
             format!("schema_version=1\n[domains.fabric.lanes]\n{assignment}\n"),
@@ -859,7 +860,7 @@ fn guardian_identity_unknown_retries_and_names_expiry() -> TestResult {
         });
         let run = lane(70, true);
         let id = starting(&store, &run, &call)?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let result = store.admit(
             id,
             &attempt,
@@ -904,7 +905,7 @@ fn idle_writers_are_admitted_beyond_the_build_limit() -> TestResult {
         for seed in 1..=70 {
             let run = lane(seed, true);
             let id = starting(&store, &run, &call)?;
-            let dir = store.attempt_dir(run.run_id, id, false)?;
+            let dir = store.attempt_dir(id, false)?;
             assert_eq!(
                 store
                     .admit(id, &dir, &HostFacts::new(100), &clock, &cancel)?
@@ -945,7 +946,7 @@ fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
         for seed in 80..84 {
             let run = lane(seed, true);
             let id = starting(&store, &run, &call)?;
-            let dir = store.attempt_dir(run.run_id, id, false)?;
+            let dir = store.attempt_dir(id, false)?;
             last = Some(store.admit(id, &dir, &facts, &clock, &cancel));
             if seed < 83 {
                 assert_eq!(
@@ -1090,7 +1091,7 @@ fn a_stop_at_the_runtime_deadline_settles_as_a_typed_timeout() -> TestResult {
         &call,
     )?;
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let dir = store.attempt_dir(run.run_id, id, false)?;
+    let dir = store.attempt_dir(id, false)?;
     // A hung provider's partial output, then the guardian's stop and kill.
     artifacts::seal(&dir, "stdout.log", b"half an answer", CAPTURE_LIMIT)?;
     let mut observed = exit();
@@ -1293,10 +1294,7 @@ fn listing_scans_are_bounded_by_the_page_not_by_retained_history() -> TestResult
             .join(record.project_id.to_string());
         for index in 0..retained {
             let attempt = format!("{index:032x}");
-            std::fs::create_dir_all(
-                temp.path()
-                    .join(format!("runs/{attempt}/attempts/{attempt}")),
-            )?;
+            std::fs::create_dir_all(temp.path().join(format!("attempts/{attempt}")))?;
             let slot = worktrees.join(format!("slot-{index}")).join(&attempt);
             std::fs::create_dir_all(&slot)?;
             std::fs::write(slot.join("reservation.json"), "{")?;
@@ -1316,7 +1314,7 @@ fn listing_scans_are_bounded_by_the_page_not_by_retained_history() -> TestResult
         )?;
         assert_eq!(page.lanes.len(), 1);
         assert!(store.custody_released(&record, &call)?);
-        let attempt = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let attempt = store.attempt_dir(record.attempt_id, false)?;
         let _ = store.supervisor_stalled(&attempt, RunStore::scope(&record), &call);
         scans.push(provenant_os::fs::directory_scans() - before);
     }

@@ -437,7 +437,7 @@ fn credential_authority_never_follows_links_below_the_host_root()
     let temp = tempfile::tempdir()?;
     let base = temp.path().canonicalize()?;
     let host_root = base.join("host-state");
-    let relative = Path::new("children/parent/runs/run/attempts/attempt");
+    let relative = Path::new("children/parent/attempts/attempt");
     let attempt = host_root.join(relative);
     let config = base.join("home/.claude-pro");
     std::fs::create_dir_all(attempt.join("provider-state"))?;
@@ -578,8 +578,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
             };
             store.create(&request, &call)?;
             let candidate = context.state_root.as_path().join(format!(
-                "runs/{}/attempts/{}/provider-state/candidate-0",
-                prior.run_id, prior.attempt_id
+                "attempts/{}/provider-state/candidate-0", prior.attempt_id
             ));
             std::fs::DirBuilder::new()
                 .recursive(true)
@@ -860,7 +859,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
             if adapter == "opencode" {
                 let temp = tempfile::tempdir()?;
                 let root = temp.path().canonicalize()?;
-                let state = root.join(format!("runs/{}/attempts/{}/provider-state", prior.run_id, prior.attempt_id));
+                let state = root.join(format!("attempts/{}/provider-state", prior.attempt_id));
                 let data = state.join("candidate-0/data/opencode");
                 std::fs::create_dir_all(&data)?;
                 let db = rusqlite::Connection::open(data.join("opencode.db"))?;

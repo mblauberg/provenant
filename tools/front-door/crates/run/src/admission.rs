@@ -363,7 +363,7 @@ impl RunStore {
         resources: &dyn Resources,
     ) -> Result<String> {
         let ticket = self.ticket(&self.db, lane.attempt_id)?;
-        let attempt = self.attempt_dir(lane.run_id, lane.attempt_id, false)?;
+        let attempt = self.attempt_dir(lane.attempt_id, false)?;
         let memory = resources.memory();
         let disk = resources.disk(&attempt);
         let floor = provenant_config::GcSettings::read(&self.writer_registry)
@@ -422,7 +422,7 @@ impl RunStore {
                 let class = ticket.lane_class;
                 let stalled = !matches!(lane.state, AttemptState::Queued { .. })
                     && *stalled_cache.entry(lane.attempt_id).or_insert_with(|| {
-                        self.attempt_dir(lane.run_id, lane.attempt_id, false)
+                        self.attempt_dir(lane.attempt_id, false)
                             .is_ok_and(|attempt| {
                                 self.supervisor_stalled(&attempt, Self::scope(lane), call)
                             })
@@ -460,7 +460,7 @@ impl RunStore {
                             _ => "launch: not yet handed to a guardian".to_owned(),
                         })
                 } else if matches!(lane.state, AttemptState::Starting { .. })
-                    && self.attempt_dir(lane.run_id, lane.attempt_id, false).is_ok_and(|attempt| {
+                    && self.attempt_dir(lane.attempt_id, false).is_ok_and(|attempt| {
                         matches!(
                             attempt.try_lock_existing(
                                 std::ffi::OsStr::new(crate::writer::SEED_WAIT_LOCK),
@@ -576,7 +576,7 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Option<(WaitKind, Option<SlotWait>)> {
         use provenant_os::build_slots::WAIT_MARKER;
-        let attempt = self.attempt_dir(lane.run_id, lane.attempt_id, false).ok()?;
+        let attempt = self.attempt_dir(lane.attempt_id, false).ok()?;
         match attempt.metadata_at("process-exit.json".as_ref(), false) {
             Err(error) if error.is_not_found() => {}
             _ => return None,
@@ -667,7 +667,7 @@ impl RunStore {
         if class != LaneClass::Writer {
             return None;
         }
-        let attempt = self.attempt_dir(lane.run_id, lane.attempt_id, false).ok()?;
+        let attempt = self.attempt_dir(lane.attempt_id, false).ok()?;
         // The guardian samples sealed state, cwd and cache volumes. A listing
         // cannot reconstruct those private launch inputs from the attempt path.
         let observed =
@@ -688,7 +688,7 @@ impl RunStore {
 
     /// The running guardian publishes this lane's pause in its checkpoint.
     fn disk_pause_wait(&self, lane: &AttemptRecord, resources: &dyn Resources) -> Option<String> {
-        let attempt = self.attempt_dir(lane.run_id, lane.attempt_id, false).ok()?;
+        let attempt = self.attempt_dir(lane.attempt_id, false).ok()?;
         // The periodic checkpoint may predate provider exit while a living
         // guardian retains unresolved cleanup. Exit publication ends pausing.
         match attempt.metadata_at("process-exit.json".as_ref(), false) {
@@ -1628,6 +1628,7 @@ mod process_wait_tests {
             run.run_id = provenant_core::RunId::from_bytes([n; 16]);
             run.operation_id = provenant_core::OperationId::parse(&format!("view-census-{n}"))?;
             run.attempts[0].attempt_id = provenant_core::AttemptId::from_bytes([n; 16]);
+            crate::tests::rekey(&mut run);
             store.create(&run, &call)?;
             let queued = store.record(run.attempts[0].attempt_id, &call)?;
             lanes.push(if n % 2 == 0 {

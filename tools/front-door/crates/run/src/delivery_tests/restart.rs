@@ -43,7 +43,7 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
         input.request.tasks[0].deliver = Some(fixture.request.clone());
         store.create(&input, &call)?;
         let id = input.attempts[0].attempt_id;
-        let attempt = store.attempt_dir(input.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let scope = RunStore::scope(&store.record(id, &call)?);
         let mut driver =
             crate::settlement::Guard::claim(&attempt, scope, &clock)?.ok_or("driver")?;
@@ -465,7 +465,7 @@ fn reconcile_settles_exhausted_writer_import_after_durable_exit()
         &call,
     )?;
     let scope = RunStore::scope(&record);
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let mut launch = crate::prepare_writer(
         &fixture.writer,
         &store.writer_registry,
@@ -593,7 +593,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
         execution.state_root.as_path(),
         execution.project_id,
     )?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     store.mark_starting(
         &store.record(id, &call)?,
         &tests::route(),
@@ -832,7 +832,7 @@ fn terminal_outcomes_remove_the_launch_base_pin_and_interrupted_import_ref()
         if outcome == Outcome::Cancelled {
             exit.cancel_delivered_before_exit = Some(true);
         }
-        let attempt = store.attempt_dir(input.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let launch = crate::prepare_writer(
             &fixture.writer,
             execution.state_root.as_path(),

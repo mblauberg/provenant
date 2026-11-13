@@ -607,8 +607,6 @@ fn local_wait_observes_settlement_and_renders_pending_details()
         .context
         .state_root
         .as_path()
-        .join("runs")
-        .join(prepared.run_id.to_string())
         .join("attempts")
         .join(id.to_string());
     let directory = provenant_os::fs::Directory::open_anchor(&attempt_path)?;

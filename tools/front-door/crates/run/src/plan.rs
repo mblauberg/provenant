@@ -9,15 +9,13 @@ impl RunStore {
     /// Provider temporary files live below this attempt, never in a
     /// shared system temporary directory. Settlement removes it best-effort.
     pub fn temporary_path(&self, id: AttemptId, call: &Request<'_>) -> Result<PathBuf> {
-        let record = self.record(id, call)?;
-        let directory = self.attempt_dir(record.run_id, id, false)?;
+        self.record(id, call)?;
+        let directory = self.attempt_dir(id, false)?;
         subdir(&directory, OsStr::new("tmp"), true)?;
         Ok(self
             .context
             .state_root
             .as_path()
-            .join("runs")
-            .join(record.run_id.to_string())
             .join("attempts")
             .join(id.to_string())
             .join("tmp"))
@@ -32,8 +30,8 @@ impl RunStore {
     ) -> Result<Option<Vec<u8>>> {
         const NAME: &str = "availability.json";
         const LIMIT: u64 = 1024 * 1024;
-        let record = self.record(id, call)?;
-        let directory = self.attempt_dir(record.run_id, id, false)?;
+        self.record(id, call)?;
+        let directory = self.attempt_dir(id, false)?;
         let metadata = match directory.metadata_at(OsStr::new(NAME), false) {
             Ok(metadata) => metadata,
             Err(error) if error.is_not_found() => return Ok(None),

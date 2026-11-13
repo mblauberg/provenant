@@ -84,8 +84,6 @@ fn lane_waits_report_only_the_running_lanes_own_disk_pause() -> TestResult {
         .context
         .state_root
         .as_path()
-        .join("runs")
-        .join(running.run_id.to_string())
         .join("attempts")
         .join(id.to_string())
         .join("process.json");
@@ -143,13 +141,11 @@ fn lane_waits_report_a_running_lane_waiting_for_a_build_slot() -> TestResult {
     let other = store
         .claim(other_id, &at(20_000), &call)?
         .ok_or("other starts")?;
-    let attempt = |id: AttemptId, run: RunId| {
+    let attempt = |id: AttemptId, _run: RunId| {
         store
             .context
             .state_root
             .as_path()
-            .join("runs")
-            .join(run.to_string())
             .join("attempts")
             .join(id.to_string())
     };
@@ -264,8 +260,6 @@ fn disk_pause_wait_ignores_false_missing_symlinked_and_oversized_observations() 
         .context
         .state_root
         .as_path()
-        .join("runs")
-        .join(records[0].run_id.to_string())
         .join("attempts")
         .join(id.to_string())
         .join("process.json");
@@ -337,7 +331,7 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
         }
         let has_writes = writer || write_root;
         let id = starting(&store, &run, &call)?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let record = store.record(id, &call)?;
         let waits = store.lane_waits_with_resources(&[record], &call, &Disk(free));
         if has_writes && free < 100 {
@@ -438,7 +432,7 @@ fn admission_below_the_floor_reclaims_build_output_and_then_admits() -> TestResu
         });
         let run = lane(102, writer);
         let id = starting(&store, &run, &call)?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let disk = Disk {
             free: Cell::new(40),
             reclaims: Cell::new(0),
@@ -503,7 +497,7 @@ fn admission_missing_configuration_uses_the_default_host_floor() -> TestResult {
         });
         let run = lane(101, true);
         let id = starting(&store, &run, &call)?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         std::fs::remove_file(config)?;
         // A nested store's config must not replace the missing host config.
         std::fs::write(context.state_root.as_path().join("config.toml"), "[gc")?;
@@ -573,7 +567,7 @@ fn admission_rereads_gc_floor_after_submission_and_while_waiting() -> TestResult
     });
     let run = lane(99, true);
     let id = starting(&store, &run, &call)?;
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     std::fs::write(&config, "schema_version=1\n[gc]\nfree_floor='101B'\n")?;
     let disk = Disk {
         config: &config,
@@ -630,7 +624,7 @@ fn admission_waits_for_a_readable_current_gc_floor() -> TestResult {
     });
     let run = lane(100, true);
     let id = starting(&store, &run, &call)?;
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     std::fs::write(&config, "schema_version=1\n[gc]\nfree_floor='")?;
     let disk = Disk {
         config: &config,
@@ -667,7 +661,7 @@ fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResul
         None,
         &call,
     )?;
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let _writer = attempt.try_lock(
         OsStr::new("writer.lock"),
         provenant_os::fs::LockMode::Exclusive,

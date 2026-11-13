@@ -307,7 +307,7 @@ fn other_state(path: &Path, report: &mut DiskReport) {
     };
     let mut observed = false;
     for name in names {
-        if name != "runs"
+        if name != "attempts"
             && name != "children"
             && !name
                 .to_str()
@@ -424,10 +424,10 @@ mod tests {
             fs::create_dir_all(root.join("target"))?;
             fs::write(root.join("target/CACHEDIR.TAG"), "cache")?;
         }
-        fs::create_dir_all(rig.state.join("runs/run/attempts/attempt/tmp"))?;
-        fs::create_dir_all(rig.state.join("runs/run/attempts/attempt/scratch"))?;
+        fs::create_dir_all(rig.state.join("attempts/attempt/tmp"))?;
+        fs::create_dir_all(rig.state.join("attempts/attempt/scratch"))?;
         fs::write(
-            rig.state.join("runs/run/attempts/attempt/tmp/keep"),
+            rig.state.join("attempts/attempt/tmp/keep"),
             "unindexed",
         )?;
         fs::write(rig.state.join("config.toml"), "schema_version = 1\n")?;
@@ -558,7 +558,7 @@ mod tests {
             } else {
                 &[]
             };
-            let attempt = state.join(format!("runs/{index}/attempts/a"));
+            let attempt = state.join(format!("attempts/a"));
             fs::create_dir_all(&attempt)?;
             for (name, class) in [("result.md", "other_state"), ("stdout.log", "attempt_logs")] {
                 let part = attempt.join(name);

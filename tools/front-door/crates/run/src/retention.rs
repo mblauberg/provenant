@@ -78,8 +78,8 @@ impl RunStore {
         id: AttemptId,
         call: &Request<'_>,
     ) -> Result<LockGuard> {
-        let record = self.record(id, call)?;
-        let run = self.run_dir(record.run_id, false)?;
+        self.record(id, call)?;
+        let run = self.attempt_dir(id, false)?;
         let lease = run.lock(
             OsStr::new("publication.lock"),
             LockMode::Shared,
@@ -87,7 +87,7 @@ impl RunStore {
             call.cancel,
             call.clock,
         )?;
-        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        let attempt = self.attempt_dir(id, false)?;
         match attempt.metadata_at(OsStr::new(EXPIRED), false) {
             Ok(_) => return Err(RunError::ProviderStateExpired),
             Err(error) if error.is_not_found() => {}
@@ -222,7 +222,7 @@ impl RunStore {
                 .context
                 .state_root
                 .as_path()
-                .join(format!("runs/{run}/attempts/{id}/provider-state"));
+                .join(format!("attempts/{id}/provider-state"));
             let first_removal = report.removed.len();
             let first_tightened = report.tightened.len();
             let result = (|| -> Result<()> {
@@ -413,7 +413,7 @@ struct Held {
 
 impl RunStore {
     fn hold_attempt(&self, record: &AttemptRecord, id: &str) -> Result<Option<Held>> {
-        let run = match self.run_dir(record.run_id, false) {
+        let run = match self.attempt_dir(record.attempt_id, false) {
             Ok(run) => run,
             Err(error) if missing_directory(&error) => return Ok(None),
             Err(error) => return Err(error),
@@ -478,7 +478,7 @@ impl RunStore {
             Err(error) if error.is_not_found() => {}
             Err(error) => return Err(error.into()),
         }
-        let attempt = match self.attempt_dir(record.run_id, record.attempt_id, false) {
+        let attempt = match self.attempt_dir(record.attempt_id, false) {
             Ok(attempt) => attempt,
             Err(error) if missing_directory(&error) => return Ok(None),
             Err(error) => return Err(error),
@@ -747,7 +747,7 @@ impl RunStore {
                     .context
                     .state_root
                     .as_path()
-                    .join(format!("runs/{}/attempts/{id}", entry.run));
+                    .join(format!("attempts/{id}"));
                 match self.evict_attempt(&id, &entry, now, dry_run, &path) {
                     Ok(true) => {
                         total = total.saturating_sub(entry.bytes);
@@ -814,7 +814,7 @@ impl RunStore {
                 .context
                 .state_root
                 .as_path()
-                .join(format!("runs/{run}/attempts/{id}"));
+                .join(format!("attempts/{id}"));
             let result = (|| -> Result<Option<LedgerEntry>> {
                 let record: AttemptRecord = crate::db::decode_attempt(&raw)?;
                 crate::reader::validate_attempt(&record)?;
@@ -827,7 +827,7 @@ impl RunStore {
                 let AttemptState::Terminal { finished_at, .. } = record.state else {
                     return Ok(None);
                 };
-                let attempt = match self.attempt_dir(record.run_id, record.attempt_id, false) {
+                let attempt = match self.attempt_dir(record.attempt_id, false) {
                     Ok(attempt) => attempt,
                     Err(error) if missing_directory(&error) => return Ok(None),
                     Err(error) => return Err(error),
@@ -1569,10 +1569,10 @@ mod tests {
         let store = RunStore::open(&context, &call)?;
         let input = input();
         store.create(&input, &call)?;
-        let attempt = context.state_root.as_path().join(format!(
-            "runs/{}/attempts/{}",
-            input.run_id, input.attempts[0].attempt_id
-        ));
+        let attempt = context
+            .state_root
+            .as_path()
+            .join(format!("attempts/{}", input.attempts[0].attempt_id));
         let candidate = attempt.join("provider-state/candidate-0");
         fs::create_dir_all(candidate.join("sessions"))?;
         fs::set_permissions(
@@ -1628,10 +1628,10 @@ mod tests {
         let store = RunStore::open(&context, &call)?;
         let input = input();
         store.create(&input, &call)?;
-        let attempt = context.state_root.as_path().join(format!(
-            "runs/{}/attempts/{}",
-            input.run_id, input.attempts[0].attempt_id
-        ));
+        let attempt = context
+            .state_root
+            .as_path()
+            .join(format!("attempts/{}", input.attempts[0].attempt_id));
         for path in [
             "provider-state/candidate-0/sessions",
             "provider-state/candidate-0/claude-config/projects",
@@ -2086,10 +2086,10 @@ mod tests {
             prompt: input.attempts[0].prompt.clone(),
         });
         store.create(&input, &call)?;
-        let attempt = context.state_root.as_path().join(format!(
-            "runs/{}/attempts/{}",
-            input.run_id, input.attempts[0].attempt_id
-        ));
+        let attempt = context
+            .state_root
+            .as_path()
+            .join(format!("attempts/{}", input.attempts[0].attempt_id));
         withdraw(&store, &input, &call)?;
         fs::write(attempt.join("stdout.log"), vec![1; 200_000])?;
         let root = Directory::open_anchor(context.state_root.as_path())?;
@@ -3006,13 +3006,14 @@ mod tests {
         second.run_id = provenant_core::RunId::from_bytes([14; 16]);
         second.operation_id = provenant_core::OperationId::parse("run-test-b")?;
         second.attempts[0].attempt_id = AttemptId::from_bytes([16; 16]);
+        crate::tests::rekey(&mut second);
         let mut paths = vec![];
         for (index, prepared) in [&first, &second].into_iter().enumerate() {
             store.create(prepared, &call)?;
-            let attempt = context.state_root.as_path().join(format!(
-                "runs/{}/attempts/{}",
-                prepared.run_id, prepared.attempts[0].attempt_id
-            ));
+            let attempt = context
+                .state_root
+                .as_path()
+                .join(format!("attempts/{}", prepared.attempts[0].attempt_id));
             let candidate = attempt.join("provider-state/candidate-0");
             fs::DirBuilder::new()
                 .recursive(true)

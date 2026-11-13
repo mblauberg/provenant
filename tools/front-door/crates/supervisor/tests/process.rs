@@ -125,7 +125,7 @@ fn timeout_escalates_to_kill(root: &Path) -> Result<()> {
 
 fn cleanup_guard_kills_a_guardian_recorded_in_a_nested_store(root: &Path) -> Result<()> {
     let store = root.join("store");
-    let nested = store.join("children/a/runs/r/attempts/x");
+    let nested = store.join("children/a/attempts/x");
     std::fs::create_dir_all(&nested)?;
     let socket = root.join("guard.sock");
     let listener = UnixListener::bind(&socket).map_err(|error| {

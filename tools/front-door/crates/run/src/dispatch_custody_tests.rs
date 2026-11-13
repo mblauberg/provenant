@@ -74,7 +74,7 @@ fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult
     // The first attempt's owner dies; recovery commits its terminal from the
     // sealed exit, as reconcile does, and that frees its host lease.
     let dead = batches[0].attempts[0].attempt_id;
-    let dir = stores[0].attempt_dir(batches[0].run_id, dead, false)?;
+    let dir = stores[0].attempt_dir(dead, false)?;
     artifacts::seal(&dir, "stdout.log", b"partial", CAPTURE_LIMIT)?;
     let mut observed = exit();
     observed.scope.run = batches[0].run_id;
@@ -117,10 +117,11 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
         matches!(&started[..], [Started::Refused { reason, .. }] if reason.contains("disabled"))
     );
     let prompt = fake.prompt.borrow();
-    let path = store.context.state_root.as_path().join(format!(
-        "runs/{}/attempts/{}",
-        run.run_id, run.attempts[0].attempt_id
-    ));
+    let path = store
+        .context
+        .state_root
+        .as_path()
+        .join(format!("attempts/{}", run.attempts[0].attempt_id));
     assert!(prompt.contains(&path.join("result.md").display().to_string()));
     assert!(prompt.contains(&path.join("process-exit.json").display().to_string()));
     assert!(prompt.contains("only durable outputs"));
@@ -230,7 +231,7 @@ fn publication_holder_commits_decoded_success_only_with_exit_zero_and_observed_i
             &call,
         )?;
         store.claim(id, &now, &call)?.ok_or("not admitted")?;
-        let dir = store.attempt_dir(batch.run_id, id, false)?;
+        let dir = store.attempt_dir(id, false)?;
         artifacts::seal(&dir, "stdout.log", DONE_ANSWER.as_bytes(), CAPTURE_LIMIT)?;
         let mut observed = exit();
         observed.scope.attempt = id;
@@ -311,7 +312,7 @@ fn never_spawned_exit_is_a_refusal_with_its_reason() -> TestResult {
     });
     observed.settlement_evidence = provenant_supervisor::custody::SettlementEvidence::NeverSpawned;
     seal_exit(&store, &observed)?;
-    let dir = store.attempt_dir(run.run_id, id, false)?;
+    let dir = store.attempt_dir(id, false)?;
     let fake = Fake {
         refuse: false,
         observed: None,
@@ -409,7 +410,7 @@ fn writer_private_temporary_directories_are_removed_after_terminal_and_withdrawa
         });
         store.create(&run, &call)?;
         let id = run.attempts[0].attempt_id;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let scratch = artifacts::subdir(&attempt, std::ffi::OsStr::new("scratch"), true)?;
         let temporary = store.temporary_path(id, &call)?;
         let candidate = temporary.join("candidate-0");
@@ -490,7 +491,7 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
         generation: 1,
     };
     let held = provenant_supervisor::fixture::acquire_writer(
-        store.attempt_dir(batch.run_id, starting, false)?,
+        store.attempt_dir(starting, false)?,
         scope,
         call.lock_budget(),
         &cancel,
@@ -500,7 +501,7 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
         store.cancel(starting, "stop", &spent)?,
         CancelReceipt::Requested
     );
-    let dir = store.attempt_dir(batch.run_id, starting, false)?;
+    let dir = store.attempt_dir(starting, false)?;
     let request: serde_json::Value = serde_json::from_slice(
         &artifacts::read_sealed(&dir, "cancel.json", RECORD_LIMIT)?
             .ok_or("cancel request missing")?,

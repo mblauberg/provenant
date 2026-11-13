@@ -1065,8 +1065,7 @@ pub(super) fn lane_query(
 /// lane keeps apart from the global configuration root.
 pub(super) fn artifact(root: &Path, record: &run::AttemptRecord, name: &str) -> PathBuf {
     root.join(format!(
-        "runs/{}/attempts/{}/{name}",
-        record.run_id, record.attempt_id
+        "attempts/{}/{name}", record.attempt_id
     ))
 }
 
@@ -1982,7 +1981,7 @@ pub fn recorded_attempt_facts(record: &run::AttemptRecord) -> AttemptFacts {
             .or_else(|| record.delivery.as_ref().and_then(|d| d.head)),
         branch: record.delivery.as_ref().map(|d| d.branch.clone()),
         delivery_id: record.delivery_id,
-        receipt_path: format!("runs/{}/attempts/{}", record.run_id, record.attempt_id),
+        receipt_path: format!("attempts/{}", record.attempt_id),
         risk: None,
         reviews: Vec::new(),
     }

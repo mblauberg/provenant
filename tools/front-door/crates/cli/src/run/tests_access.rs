@@ -507,7 +507,7 @@ fn opencode_stderr_quota_settles_and_records_refusal() -> Result<(), Box<dyn std
     let state = temp.path().join("state");
     std::fs::create_dir(&state)?;
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
-    let provider_state = state.join("runs/run/attempts/attempt/provider-state");
+    let provider_state = state.join("attempts/attempt/provider-state");
     let argv = ["/bin/sh", "-c", "printf '%s\\n' 'AI.Error.QuotaExceeded: Go usage limit exceeded retryAfterMs=60000' >&2; exit 1"].map(std::ffi::OsString::from);
     let mut options = ExecOptions::new(&argv, temp.path(), Duration::from_secs(30));
     options.stdout = StreamPolicy::Capture { limit: 8192 };
@@ -588,7 +588,7 @@ fn opencode_stderr_quota_text_does_not_overturn_a_successful_run()
     let state = temp.path().join("state");
     std::fs::create_dir(&state)?;
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
-    let provider_state = state.join("runs/run/attempts/attempt/provider-state");
+    let provider_state = state.join("attempts/attempt/provider-state");
     let mut exit = clean_exit();
     exit.termination = Some(provenant_os::exec::Termination::Exit(0));
     let decoded = Registry::default().decode_captures(

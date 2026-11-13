@@ -593,7 +593,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
     let run_id = RunId::from_bytes([2; 16]);
     let attempt_id = AttemptId::from_bytes([1; 16]);
-    let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
+    let attempt = state.join(format!("attempts/{attempt_id}"));
     let paths = run::LaunchPaths {
         attempt_id,
         operation_id: OperationId::parse("registry-fixture")?,
@@ -818,7 +818,7 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     std::fs::set_permissions(&readiness_path, std::fs::Permissions::from_mode(0o600))?;
     let run_id = RunId::from_bytes([2; 16]);
     let attempt_id = AttemptId::from_bytes([1; 16]);
-    let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
+    let attempt = state.join(format!("attempts/{attempt_id}"));
     let paths = run::LaunchPaths {
         attempt_id,
         operation_id: OperationId::parse("opencode-auth-fixture")?,
@@ -1038,7 +1038,7 @@ fn prepare_over_two_accounts(
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
     let run_id = RunId::from_bytes([2; 16]);
     let attempt_id = AttemptId::from_bytes([1; 16]);
-    let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
+    let attempt = state.join(format!("attempts/{attempt_id}"));
     let paths = run::LaunchPaths {
         attempt_id,
         operation_id: OperationId::parse("exhausted-walk-fixture")?,

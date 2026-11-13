@@ -855,7 +855,7 @@ fn host_preparation_never_uses_prepopulated_child_scratch_or_temporary_directori
     let temp = tempfile::tempdir().unwrap();
     let host_root = temp.path().canonicalize().unwrap();
     let child_store = host_root.join("children/parent-attempt");
-    let attempt = child_store.join("runs/run/attempts/attempt");
+    let attempt = child_store.join("attempts/attempt");
     let scratch = attempt.join("scratch");
     let candidate = attempt.join("tmp/candidate-0");
     for directory in [&scratch, &candidate] {
