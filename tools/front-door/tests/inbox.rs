@@ -29,7 +29,7 @@ fn draft(rig: &TestRig, kind: &str) -> Result<String> {
     std::fs::write(
         &path,
         serde_json::to_vec(
-            &json!({"work":{"run_id":"00000000000000000000000000000001","task_id":"00000000000000000000000000000002"},"kind":kind,"title":"Repair choice","body":"Choose how to repair the check.","blocking":kind=="decision","options":[{"id":"repair","label":"Repair","description":"Repair the failing check"}],"recommended_option_id":"repair","proceeding_with":if kind=="assumption" {json!("Repair the failing check")}else{Value::Null}}),
+            &json!({"work":{"graph":"inbox-graph","node":"repair"},"kind":kind,"title":"Repair choice","body":"Choose how to repair the check.","blocking":kind=="decision","options":[{"id":"repair","label":"Repair","description":"Repair the failing check"}],"recommended_option_id":"repair","proceeding_with":if kind=="assumption" {json!("Repair the failing check")}else{Value::Null}}),
         )?,
     )?;
     Ok(path.to_str().ok_or("draft path")?.into())
@@ -86,10 +86,7 @@ fn inbox_cli_posts_lists_and_resolves_all_kinds_without_apps() -> Result {
             .iter()
             .find(|item| item["id"] == id)
             .ok_or("created request")?;
-        assert_eq!(
-            item["request"]["work"]["task_id"],
-            "00000000000000000000000000000002"
-        );
+        assert_eq!(item["request"]["work"]["node"], "repair");
         assert_eq!(item["work_coverage"], "unindexed");
         let action = match kind {
             "assumption" => "confirm",
@@ -673,7 +670,7 @@ impl provenant_run::Providers for Indexed {
 
 #[test]
 fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result {
-    use provenant_core::{ActorId, CancelToken, OperationId, ProjectId, TaskId};
+    use provenant_core::{ActorId, CancelToken, OperationId, ProjectId};
     use provenant_run::{
         DispatchRequest, DispatchTask, ExecutionContext, Request, RequestedRoute, RunStore, Service,
     };
@@ -695,19 +692,21 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
         read_prompts: false,
     };
     let store = RunStore::open(&context, &request)?;
-    let task = TaskId::from_bytes([3; 16]);
-    let run = Service::new(&store).dispatch(
+    let attempt = Service::new(&store).dispatch(
         DispatchRequest {
             chair: None,
             operation_id: OperationId::parse("correlation-fixture")?,
-            concurrency: 1,
             lane_depth: 1,
             parent_attempt: None,
-            tasks: vec![DispatchTask {
-                context: None,
+            task: DispatchTask {
+                context: Some(provenant_records::run::WorkContext {
+                    graph_id: Some("correlation-graph".into()),
+                    node_id: Some("review".into()),
+                    attempt: Some(1),
+                    ..Default::default()
+                }),
                 build_heavy: false,
                 title: None,
-                task_id: task,
                 prompt: "fixture".into(),
                 base: None,
                 pinned_base: None,
@@ -725,14 +724,14 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
                 deliver: None,
                 worktree: None,
                 access: Default::default(),
-            }],
+            },
         },
         &rig.project,
         &request,
     )?;
     let repository = identity["data"]["common_dir"].clone();
     let outcomes = store.start(
-        run.run_id,
+        attempt.attempt_id,
         &Indexed(serde_json::from_value(repository.clone())?),
         &|_, _| Err(provenant_run::RunError::Validation("fixture handoff")),
         &request,
@@ -741,7 +740,7 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
         matches!(outcomes.as_slice(), [provenant_run::Started::Refused { reason, .. }] if reason.contains("fixture handoff"))
     );
     let draft = json!({"kind":"question","title":"Correlation","body":"Which work?",
-        "work":{"run_id":run.run_id,"task_id":task,"repository":repository,"head":"a".repeat(40)}});
+        "work":{"graph":attempt.key.graph(),"node":attempt.key.node(),"attempt_id":attempt.attempt_id,"repository":repository,"head":"a".repeat(40)}});
     let path = rig.root.join("linked.json");
     let path_str = path.to_str().ok_or("draft")?;
     std::fs::write(&path, serde_json::to_vec(&draft)?)?;
@@ -766,7 +765,7 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
         for field in ["repository", "head"] {
             let mut bad = draft.clone();
             if unqualified {
-                bad["work"].as_object_mut().ok_or("work")?.remove("task_id");
+                bad["work"].as_object_mut().ok_or("work")?.remove("node");
             }
             bad["work"][field] = if field == "head" {
                 json!("b".repeat(40))

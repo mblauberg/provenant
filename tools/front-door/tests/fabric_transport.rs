@@ -252,7 +252,7 @@ fn peer_health_advertises_graph_submission() -> Result {
     assert_eq!(health["available"], true, "{health}");
     assert_eq!(health["execution"], true, "{health}");
     assert_eq!(health["run_capabilities"]["submit"], true, "{health}");
-    assert!(!rig.state.join("runs").exists());
+    assert!(!rig.state.join("attempts").exists());
     rig.assert_legacy_unchanged()
 }
 
@@ -1168,7 +1168,9 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
             Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
         );
         assert_eq!(
-            store.request(record.run_id, &call)?.tasks[0]
+            store
+                .request(record.attempt_id, &call)?
+                .task
                 .account
                 .as_deref(),
             Some(account)
@@ -1267,7 +1269,6 @@ fn graph_cancel_recovers_an_attempt_missing_its_checkpoint_reference() -> Result
 fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Result {
     use provenant_core::{
         ActorId, AttemptId, CancelToken, Clock, Digest, HostId, OperationId, ProjectId, RootInputs,
-        RunId, TaskId,
     };
     use provenant_fabric_runtime::hosts::PeerResult;
     use provenant_os::clock::SystemClock;
@@ -1296,32 +1297,31 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         read_prompts: false,
     };
     let store = provenant_run::RunStore::open(&context, &call)?;
-    let tasks = [
-        TaskId::from_bytes([92; 16]),
-        TaskId::from_bytes([93; 16]),
-        TaskId::from_bytes([94; 16]),
-    ];
     let attempts = [
         AttemptId::from_bytes([91; 16]),
         AttemptId::from_bytes([95; 16]),
         AttemptId::from_bytes([97; 16]),
     ];
     let attempt = attempts[0];
-    store.create(
-        &provenant_run::PreparedRun {
-            run_id: RunId::from_bytes([96; 16]),
-            operation_id: OperationId::parse("edge-read")?,
-            created_at: clock.wall_now()?,
-            request: CanonicalRequest {
-                extra: Default::default(),
-                child_attempt_id_version: None,
-                chair: None,
-                fresh_continuation: None,
-                schema_version: 1,
-                tasks: tasks
-                    .iter()
-                    .map(|task_id| TaskRequest {
-                        context: None,
+    // One launch admits one attempt, so each attempt is its own operation.
+    for (index, attempt_id) in attempts.iter().enumerate() {
+        store.create(
+            &provenant_run::PreparedRun {
+                attempt_id: *attempt_id,
+                operation_id: OperationId::parse(&format!("edge-read-{index}"))?,
+                created_at: clock.wall_now()?,
+                request: CanonicalRequest {
+                    extra: Default::default(),
+                    chair: None,
+                    fresh_continuation: None,
+                    schema_version: 1,
+                    task: TaskRequest {
+                        context: Some(provenant_records::run::WorkContext {
+                            graph_id: Some("edge-read-graph".into()),
+                            node_id: Some(format!("node-{index}")),
+                            attempt: Some(1),
+                            ..Default::default()
+                        }),
                         extra: Default::default(),
                         build_heavy: false,
                         title: None,
@@ -1331,7 +1331,6 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
                         base_ref: None,
                         writer: None,
                         profile: provenant_records::run::HarnessProfile::default(),
-                        task_id: *task_id,
                         prompt_digest: CanonicalV1::file_digest(b"prompt"),
                         route: RequestedRoute::Model {
                             extra: Default::default(),
@@ -1345,25 +1344,16 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
                         delivery_id: None,
                         deliver: None,
                         access: Default::default(),
-                    })
-                    .collect(),
-                concurrency: 1,
-                parent: None,
-                lane_depth: Some(1),
-                parent_attempt: None,
+                    },
+                    parent: None,
+                    lane_depth: Some(1),
+                    parent_attempt: None,
+                },
+                prompt: "prompt".into(),
             },
-            attempts: tasks
-                .iter()
-                .zip(attempts)
-                .map(|(task_id, attempt_id)| provenant_run::NewAttempt {
-                    attempt_id,
-                    task_id: *task_id,
-                    prompt: "prompt".into(),
-                })
-                .collect(),
-        },
-        &call,
-    )?;
+            &call,
+        )?;
+    }
     drop(store);
     let output = mcp(
         &rig,
@@ -1793,9 +1783,11 @@ fn submitted_policy(
         ],
     )?;
     let attempt = replies.iter().find(|r| r["id"] == 2).ok_or("status")?["result"]["structuredContent"]["attempt"].clone();
-    let run = attempt["run_id"].as_str().ok_or("run ID")?;
     let request = serde_json::from_slice(&std::fs::read(
-        rig.state.join("runs").join(run).join("request.json"),
+        rig.state
+            .join("attempts")
+            .join(attempt_id)
+            .join("request.json"),
     )?)?;
     Ok((request, attempt))
 }
@@ -1806,10 +1798,10 @@ fn submission_preserves_explicit_named_route_tier() -> Result {
     let cleanup = rig.process_cleanup();
     let (request, attempt) =
         submitted_policy(&rig, "named-tier", json!({"kind":"named","name":"senior"}))?;
-    assert_eq!(request.tasks[0].title.as_deref(), Some("Review fixture"));
+    assert_eq!(request.task.title.as_deref(), Some("Review fixture"));
     assert_eq!(attempt["title"], "Review fixture");
     assert_eq!(
-        request.tasks[0].route,
+        request.task.route,
         provenant_records::run::RequestedRoute::Named {
             extra: Default::default(),
             name: "senior".into(),
@@ -1860,7 +1852,7 @@ fn removed_submission_operation_is_not_advertised_or_accepted() -> Result {
     let reply = mcp(
         &rig,
         &[
-            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"submit","operation_id":"unsupported-inputs","tasks":[{"prompt":"fixture","inputs":[],"route":{"kind":"named","name":"senior"},"timeout_seconds":60}]}}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"submit","operation_id":"unsupported-inputs","task":{"prompt":"fixture","inputs":[],"route":{"kind":"named","name":"senior"},"timeout_seconds":60}}}}),
         ],
     )?;
     let call = reply.iter().find(|reply| reply["id"] == 2).ok_or("call")?;
@@ -1870,7 +1862,7 @@ fn removed_submission_operation_is_not_advertised_or_accepted() -> Result {
     let reply = mcp(
         &rig,
         &[
-            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"submit","operation_id":"no-task-class","tasks":[{"prompt":"fixture","route":{"kind":"named","name":"senior"},"task_class":"mechanical","timeout_seconds":60}]}}}),
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"submit","operation_id":"no-task-class","task":{"prompt":"fixture","route":{"kind":"named","name":"senior"},"task_class":"mechanical","timeout_seconds":60}}}}),
         ],
     )?;
     let call = reply.iter().find(|reply| reply["id"] == 3).ok_or("call")?;
@@ -1893,10 +1885,10 @@ fn silence_knob_controls_capture_plan_observations() -> Result {
         "config-silence",
         json!({"kind":"model","provider":"codex","model":"fixture"}),
     )?;
-    let task = &request.tasks[0];
+    let task = &request.task;
     assert_eq!(serde_json::to_value(&task.profile)?, attempt["profile"]);
     assert_eq!(task.profile.knobs["lanes.silence_seconds"], 2);
-    let plan = provenant_run::capture_plan(&request.tasks[0], &Default::default());
+    let plan = provenant_run::capture_plan(&request.task, &Default::default());
     assert_eq!(plan.silence_ms, 2000);
     assert!(!plan.silent(1999, Some(0)));
     assert!(plan.silent(2000, Some(0)));
@@ -3223,7 +3215,8 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
     )?;
     assert_eq!(code(&peer_identity), 0);
     let peer_identity: Value = serde_json::from_slice(&peer_identity.stdout.bytes)?;
-    let context = serde_json::from_value(json!({"graph_id":"remote-graph","node_id":"one"}))?;
+    let context =
+        serde_json::from_value(json!({"graph_id":"remote-graph","node_id":"one","attempt":1}))?;
     let (attempt, _) = seed_attempt_in_state(
         &rig,
         &peer_identity,
@@ -3333,8 +3326,7 @@ fn seed_attempt_in_state(
     Vec<provenant_records::run::RunEvent>,
 )> {
     use provenant_core::{
-        ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, ProjectId, RootInputs, RunId,
-        TaskId,
+        ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, ProjectId, RootInputs,
     };
     use provenant_os::clock::SystemClock;
     use provenant_records::{
@@ -3360,21 +3352,26 @@ fn seed_attempt_in_state(
         read_prompts: false,
     };
     let store = provenant_run::RunStore::open(&context, &call)?;
-    let task_id = TaskId::from_bytes([92; 16]);
+    // A launch without a work key is refused, so an unlabelled seed gets one.
+    let work_context = work_context.unwrap_or_else(|| provenant_records::run::WorkContext {
+        graph_id: Some("page-seed-graph".into()),
+        node_id: Some("node".into()),
+        attempt: Some(1),
+        ..Default::default()
+    });
     let attempt_id = AttemptId::from_bytes([91; 16]);
     store.create(
         &provenant_run::PreparedRun {
-            run_id: RunId::from_bytes([96; 16]),
+            attempt_id,
             operation_id: OperationId::parse("page-seed")?,
             created_at: clock.wall_now()?,
             request: CanonicalRequest {
                 extra: Default::default(),
-                child_attempt_id_version: None,
                 chair: None,
                 fresh_continuation: None,
                 schema_version: 1,
-                tasks: vec![TaskRequest {
-                    context: work_context,
+                task: TaskRequest {
+                    context: Some(work_context),
                     extra: Default::default(),
                     build_heavy: false,
                     title: None,
@@ -3384,7 +3381,6 @@ fn seed_attempt_in_state(
                     base_ref: None,
                     writer: None,
                     profile: provenant_records::run::HarnessProfile::default(),
-                    task_id,
                     prompt_digest: CanonicalV1::file_digest(prompt.as_bytes()),
                     route: RequestedRoute::Model {
                         extra: Default::default(),
@@ -3398,17 +3394,12 @@ fn seed_attempt_in_state(
                     delivery_id: None,
                     deliver: None,
                     access: Default::default(),
-                }],
-                concurrency: 1,
+                },
                 parent: None,
                 lane_depth: Some(1),
                 parent_attempt: None,
             },
-            attempts: vec![provenant_run::NewAttempt {
-                attempt_id,
-                task_id,
-                prompt: prompt.into(),
-            }],
+            prompt: prompt.into(),
         },
         &call,
     )?;
