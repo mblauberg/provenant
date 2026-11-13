@@ -658,7 +658,10 @@ pub fn decide_graph_name(
 ) -> Result<NameDecision, String> {
     let family: Vec<&String> = existing
         .iter()
-        .filter(|id| id.as_str() == base || family_suffix(base, id).is_some_and(|k| k >= 2))
+        .filter(|id| {
+            id.as_str() == base
+                || family_suffix(base, id).is_some_and(|k| k >= if replay { 2 } else { 1 })
+        })
         .collect();
     if replay {
         for id in &family {

@@ -93,7 +93,8 @@ impl BudgetAction {
 }
 
 /// A bounded fractional grace above a token budget, stored in millionths so
-/// policy records retain equality and serialize the user-facing fraction.
+/// policy records retain equality. Snapshots encode an exact six-decimal
+/// string; authored settings may supply a numeric fraction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BudgetGrace(u64);
 
@@ -132,7 +133,11 @@ impl Serialize for BudgetGrace {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_f64(self.as_fraction())
+        serializer.serialize_str(&format!(
+            "{}.{:06}",
+            self.0 / Self::SCALE,
+            self.0 % Self::SCALE
+        ))
     }
 }
 
@@ -141,9 +146,34 @@ impl<'de> Deserialize<'de> for BudgetGrace {
     where
         D: serde::Deserializer<'de>,
     {
-        let value = f64::deserialize(deserializer)?;
-        Self::from_fraction(value).ok_or_else(|| {
-            serde::de::Error::custom("budget grace must be a finite nonnegative fraction")
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Input {
+            Authored(f64),
+            Snapshot(String),
+        }
+        let grace = match Input::deserialize(deserializer)? {
+            Input::Authored(value) => Self::from_fraction(value),
+            Input::Snapshot(value) => value.split_once('.').and_then(|(whole, fraction)| {
+                if whole.is_empty()
+                    || !whole.bytes().all(|byte| byte.is_ascii_digit())
+                    || fraction.len() != 6
+                    || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    return None;
+                }
+                whole
+                    .parse::<u64>()
+                    .ok()?
+                    .checked_mul(Self::SCALE)?
+                    .checked_add(fraction.parse::<u64>().ok()?)
+                    .map(Self)
+            }),
+        };
+        grace.ok_or_else(|| {
+            serde::de::Error::custom(
+                "budget grace must be a finite nonnegative fraction or exact snapshot",
+            )
         })
     }
 }
