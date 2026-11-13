@@ -896,9 +896,11 @@ mod loop_tests {
 }
 mod plan_tests {
     include!("plan_tests.rs");
+    include!("planner_implement_invariants.rs");
 }
 mod relay_tests {
     include!("relay_tests.rs");
+    include!("relay_implement_invariants.rs");
 }
 mod envelope_tests {
     include!("envelope_tests.rs");

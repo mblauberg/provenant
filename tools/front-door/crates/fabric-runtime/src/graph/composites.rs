@@ -52,7 +52,119 @@ fn expand_document(
     {
         return Err(reason);
     }
+    resolve_writer_targets(&mut expanded);
     Ok(expanded)
+}
+
+/// Scalar writer links name the leaf that owns the checkout and delivery.
+/// Result inputs keep their composite boundary and its exported artefacts.
+pub(super) fn resolve_writer_targets(document: &mut GraphDocument) {
+    fn scope(
+        nodes: &mut [GraphNode],
+        inherited: &BTreeMap<String, String>,
+        inherited_results: &BTreeMap<String, String>,
+    ) {
+        let writers: BTreeSet<_> = nodes
+            .iter()
+            .filter(|node| {
+                node.access == AccessMode::WorktreeWrite
+                    && node.kind.is_none_or(|kind| kind == NodeKind::Task)
+            })
+            .map(|node| node.id.clone())
+            .collect();
+        let links = |result: bool| -> BTreeMap<String, String> {
+            nodes
+                .iter()
+                .filter_map(|node| {
+                    let exports = &node.composite.as_ref()?.exports;
+                    let targets: Vec<_> = exports
+                        .iter()
+                        .filter(|export| {
+                            export.outputs.contains(&OutputKind::Branch)
+                                && export.outputs.contains(&OutputKind::Commit)
+                                && (!result || export.outputs.contains(&OutputKind::Result))
+                        })
+                        .collect();
+                    (targets.len() == 1).then(|| (node.id.clone(), targets[0].node.clone()))
+                })
+                .collect()
+        };
+        let aliases = |links: BTreeMap<String, String>, inherited: &BTreeMap<String, String>| {
+            let mut aliases = inherited.clone();
+            for node in nodes.iter() {
+                aliases.remove(&node.id);
+            }
+            for id in links.keys() {
+                let mut target = id;
+                for _ in 0..=links.len() {
+                    if writers.contains(target) {
+                        aliases.insert(id.clone(), target.clone());
+                        break;
+                    }
+                    let Some(next) = links.get(target) else { break };
+                    target = next;
+                }
+            }
+            aliases
+        };
+        let writer_aliases = aliases(links(false), inherited);
+        let result_aliases = aliases(links(true), inherited_results);
+        let bind = |id: &mut String, aliases: &BTreeMap<String, String>| {
+            if let Some(target) = aliases.get(id) {
+                *id = target.clone();
+            }
+        };
+        for node in nodes {
+            match &mut node.source {
+                Some(SourceBinding::Head { node }) => bind(node, &writer_aliases),
+                Some(SourceBinding::Node { node: target }) => {
+                    if let Some(writer) = result_aliases.get(target) {
+                        *target = writer.clone();
+                        // Keep the composite dependency as its settlement gate,
+                        // and retain the direct edge required by a Node source.
+                        if !node.depends_on.contains(writer) {
+                            node.depends_on.push(writer.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if let Some(id) = &mut node.continues {
+                bind(id, &writer_aliases);
+            }
+            if let Some(land) = &mut node.land {
+                bind(&mut land.node, &writer_aliases);
+            }
+            if let Some(GateCondition::Ci {
+                target: CiTarget::Node { node, .. },
+                ..
+            }) = &mut node.condition
+            {
+                bind(node, &writer_aliases);
+            }
+            if let Some(plan) = &mut node.plan {
+                for template in &mut plan.templates {
+                    for fields in std::iter::once(&mut template.node).chain(
+                        template
+                            .nodes
+                            .iter_mut()
+                            .filter_map(serde_json::Value::as_object_mut),
+                    ) {
+                        if let Some(value) = fields.get_mut("continues")
+                            && let Some(target) =
+                                value.as_str().and_then(|id| writer_aliases.get(id))
+                        {
+                            *value = serde_json::Value::String(target.clone());
+                        }
+                    }
+                }
+            }
+            if let Some(body) = &mut node.loop_body {
+                scope(&mut body.body, &writer_aliases, &result_aliases);
+            }
+        }
+    }
+    scope(&mut document.nodes, &BTreeMap::new(), &BTreeMap::new());
 }
 
 fn scoped(prefix: &str, local: &str) -> String {

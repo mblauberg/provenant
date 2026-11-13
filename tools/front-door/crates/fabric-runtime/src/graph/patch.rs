@@ -896,10 +896,12 @@ pub fn submission(
         .unwrap_or_default();
     for (index, node) in document.nodes.iter().enumerate() {
         let mut raw = serde_json::to_value(node).map_err(|e| PatchError::invalid(e.to_string()))?;
-        // Snapshot compiled nodes without inheriting dotted template behaviour
-        // a second time. Explicit extensions retain their provenance.
+        // Snapshot compiled nodes without inheriting template behaviour a
+        // second time. Bare implement also inserts a sizing plan, which must
+        // not run again after the original brief has already been compiled.
+        // Explicit extensions retain their provenance.
         let original = raw.get("template").and_then(Value::as_str).unwrap_or("raw");
-        let name = if original.contains('.') {
+        let name = if original == "implement" || original.contains('.') {
             format!("submission-node-{index}")
         } else {
             original.to_owned()
@@ -1177,13 +1179,32 @@ pub(super) fn prepare(
         .with(Layer::Repository, &catalogue)
         .and_then(|library| library.with(Layer::Inline, &patch.templates))
         .map_err(PatchError::invalid)?;
+    let mut resolvers = context.resolvers.clone();
+    if matches!(mode, Preparation::FinalFragment)
+        && parent.is_some_and(|node| {
+            node.plan.is_some()
+                || node
+                    .extra
+                    .get(template::TEMPLATE_FIELD)
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| name == "plan" || name.starts_with("plan."))
+        })
+    {
+        resolvers.insert(template::BOUNDED_IMPLEMENTATION.into(), vec!["true".into()]);
+    }
     let compiler = Compiler {
         library: &library,
-        resolvers: context.resolvers,
+        resolvers: &resolvers,
+    };
+    let scoped = compiler.scoped_plan_sources(&patch.nodes);
+    let compiler = Compiler {
+        resolvers: &scoped,
+        ..compiler
     };
     let mut local = Vec::with_capacity(patch.nodes.len());
     let mut uses = Vec::new();
-    for raw in &patch.nodes {
+    let authored = compiler.bounded_plan_consumers(&patch.nodes);
+    for raw in &authored {
         let mut node = compiler.compile(raw)?;
         let used = raw.get("use").and_then(Value::as_str);
         let trusted = used.is_some_and(|name| {

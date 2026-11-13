@@ -75,7 +75,7 @@ exports = [
 ]
 doc = "Implement an approved brief through CI, review and landing."
 nodes = [
-  { id = "implement", use = "implement", brief = "${brief}", delivery = "pr", worktree = "${worktree}", write_scope = "${write_scope}" },
+  { id = "implement", use = "implement", with = { bounded = "${bounded}" }, brief = "${brief}", delivery = "pr", worktree = "${worktree}", write_scope = "${write_scope}" },
   { id = "initial-review", use = "findings-panel", after = ["implement"], source = { type = "node", node = "implement" } },
   { id = "repair", use = "review-repair", after = ["initial-review"], inputs = [{ node = "initial-review", outputs = ["findings", "verdict"] }], with = { writer = "implement", worktree = "${worktree}", write_scope = "${write_scope}", max_repair_cycles = "${max_repair_cycles}" } },
   { id = "ci", kind = "gate", access = "read_only", after = ["repair"], condition = { type = "ci", target = { node = "implement" } } },
@@ -84,6 +84,7 @@ nodes = [
   { id = "land", kind = "land", access = "read_only", after = ["accept"], land = { node = "implement", tier = "substantial" } },
 ]
 [deliver.parameters]
+bounded = { type = "boolean", default = false, doc = "The implementation brief is already one sized slice or a plan output." }
 max_repair_cycles = { type = "integer", default = 3, min = 1 }
 brief = { type = "string", default = "Meet the acceptance checks." }
 worktree = { type = "string" }

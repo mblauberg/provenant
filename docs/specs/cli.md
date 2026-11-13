@@ -105,6 +105,15 @@ standard input given `-`, and conflicts with `BRIEF`. Inside a lane, `run` adds
 a child node to the calling graph, and `--name` names that node. `--explain`
 inspects compilation without starting work.
 
+`implement` defaults to a junior writer for a bounded brief. Mark one slice
+with `--set bounded=true`; a `batch` item, `implement.plan`, a planner-produced
+implementation node, or an implementation consuming a sibling plan's `result`
+is also bounded. Otherwise expansion adds a read-only senior `plan` upstream
+of the junior writer. The planner sizes the brief into ordered slices with
+acceptance evidence and write scopes; the writer consumes that plan in its
+existing worktree. `--explain` shows the planner, writer, dependency and input
+edge. Delivery consumers retain the implementation boundary's branch and commit.
+
 `--route` takes a tier (`junior`, `senior`, `principal`) for every node, or a
 role map such as `--route writer=junior,review=senior`; a role it does not
 name keeps the template's tier. An unknown tier or role is invalid input that
@@ -191,10 +200,15 @@ graph's records. [Run](run.md#operation-ids) owns the digest.
 
 An attempt's token budget is an attempt field, set per run with
 `--set attempt.token_budget=N` (`0` for none) and
-`--set attempt.on_budget=wrap_up|warn|stop`, or per template or project
-through the same field. The compiled default is 1,000,000 tokens with a grace
-of 0.10 before the action applies; configuration overrides both. `run` has
-no budget flags.
+`--set attempt.on_budget=wrap_up|warn|stop`, or through template attempt
+fields and project budget settings. Each field resolves independently, nearest first:
+run attempt override, template, selected route tier, project, host, compiled
+default. The tier layer is `[domains.run.writer_budget_tiers.TIER]`, keyed by
+the node's route tier, including `--route` role maps; it does not depend on the
+removed `run --tier` spelling. The compiled default is 1,000,000 tokens,
+`wrap_up`, with a grace of 0.10. `--set attempt.token_budget=0` disables the
+target. `run --explain` and attempt status retain each field's winning source.
+[Run](run.md#a-writer-stops-on-a-token-budget) owns budget enforcement.
 
 ### Waits
 
@@ -242,13 +256,13 @@ keeps the envelope and `--full` shows complete detail.
 
 ### Removed spellings
 
-These spellings exit 2 with one line naming the replacement. The table in
-`crates/cli/src/lib.rs` (`REMOVED`) is the source.
+These common removed spellings exit 2 with one line naming the replacement.
+`crates/cli/src/lib.rs` (`REMOVED`) owns the full list.
 
 | Spelling | Replacement |
 |---|---|
 | `dispatch`, `review`, `run --use` | `run TEMPLATE BRIEF` |
-| `lanes`, `fabric graph` | `status` |
+| `lanes` | `status` |
 | `resume`, `redo`, `retry --node` | `retry NAME/NODE` |
 | `continue` | `retry NAME/NODE#N` |
 | `cancel`, `stop --operation-id` | `stop NAME` |

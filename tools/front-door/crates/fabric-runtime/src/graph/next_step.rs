@@ -704,7 +704,7 @@ pub(super) fn validate_on_stop(node: &GraphNode) -> Result<(), String> {
 pub(crate) enum SettlementFallback {
     Continue,
     Fail {
-        code: Option<String>,
+        code: Option<&'static str>,
         message: Option<String>,
     },
 }
@@ -733,28 +733,51 @@ pub(super) fn settlement_fallback_decision(
         skipped_accounts,
     } = evidence;
     let route = node.routes.get(route_index);
-
-    if !live_fallback_allowed(outcome, launched, node.access, fallback_evidence)
-        || route_index + 1 == node.routes.len()
-        || review_limit_reached
-    {
+    // Preparation evidence proves custody; the shared stop rule chooses the
+    // step. A launched stop is handled by decide(), never by this path.
+    let cause = match outcome {
+        AttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
+        AttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
+        AttemptOutcome::AdapterUnavailable | AttemptOutcome::PreparationRefused(_) => {
+            Some(StopCause::AdapterUnavailable)
+        }
+        _ => None,
+    };
+    let custody_released = live_fallback_allowed(outcome, launched, node.access, fallback_evidence);
+    let step = cause.map(|cause| {
+        cause.next_step(
+            &node.on_stop,
+            StopFacts {
+                retries: 0,
+                custody_released,
+            },
+        )
+    });
+    if custody_released && step != Some(NextStep::NewRoute) {
+        return SettlementFallback::Fail {
+            code: Some("on_stop_held"),
+            message: Some("on_stop keeps this stop off the next route; return to the chair".into()),
+        };
+    }
+    let allowed = step == Some(NextStep::NewRoute);
+    if !allowed || route_index + 1 == node.routes.len() || review_limit_reached {
         let (mut advance_error_code, mut advance_error) = match outcome {
             AttemptOutcome::PreparationRefused(cause) => (
-                Some("preparation_refused".into()),
+                Some("preparation_refused"),
                 Some(bounded(cause.detail(), MAX_ADVANCE_ERROR_BYTES)),
             ),
             AttemptOutcome::AuthRequired => (
-                Some("auth_required".into()),
+                Some("auth_required"),
                 Some("The lane requires authentication.".into()),
             ),
             AttemptOutcome::AdapterUnavailable => (
-                Some("adapter_unavailable".into()),
+                Some("adapter_unavailable"),
                 Some("The lane's adapter is unavailable.".into()),
             ),
             _ => (None, None),
         };
         if outcome == AttemptOutcome::UsageLimited {
-            advance_error_code = Some("usage_limited".into());
+            advance_error_code = Some("usage_limited");
             let pool = route
                 .and_then(|r| r.alias.as_deref())
                 .map_or_else(String::new, |alias| format!(" for pool {alias}"));
@@ -779,12 +802,10 @@ pub(super) fn settlement_fallback_decision(
             && node.access == AccessMode::ReadOnly
             && route.is_some_and(|r| r.account.is_some() || r.model.is_some())
         {
-            advance_error_code = Some("fallback_route_pinned".into());
+            advance_error_code = Some("fallback_route_pinned");
             advance_error = Some("The selected route is pinned and has no fallback.".into());
         }
-        if !live_fallback_allowed(outcome, launched, node.access, fallback_evidence)
-            && route_index + 1 < node.routes.len()
-        {
+        if !allowed && route_index + 1 < node.routes.len() {
             let (code, message) = fallback_denial(
                 launched,
                 node.access,
@@ -792,14 +813,11 @@ pub(super) fn settlement_fallback_decision(
                 outcome,
                 fallback_cause,
             );
-            advance_error_code = Some(code.into());
+            advance_error_code = Some(code);
             advance_error = Some(message);
         }
-        if review_limit_reached
-            && route_index + 1 < node.routes.len()
-            && live_fallback_allowed(outcome, launched, node.access, fallback_evidence)
-        {
-            advance_error_code = Some("review_substitution_limit".into());
+        if review_limit_reached && route_index + 1 < node.routes.len() && allowed {
+            advance_error_code = Some("review_substitution_limit");
             advance_error = Some("review substitution limit reached".into());
         }
         SettlementFallback::Fail {

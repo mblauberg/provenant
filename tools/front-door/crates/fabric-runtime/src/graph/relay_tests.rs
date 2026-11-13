@@ -1187,7 +1187,7 @@ fn child_key_is_scoped_to_logical_parent_and_replays_a_retried_attempt() {
     let (mut document, mut checkpoint) = live(None);
     document.integration_branch = Some("integration".into());
     let mut request = child("fix", "same-child");
-    request.template = "implement".into();
+    request.template = "implement.plan".into();
     request.writer = true;
     let first = add(&document, &mut checkpoint, "a", &request).unwrap();
     let parent = checkpoint.nodes.iter_mut().find(|node| node.id == "a").unwrap();
@@ -1220,7 +1220,7 @@ fn honest_stop_continuation_replays_its_logical_parents_writer_child() {
     let mut journal = MemoryJournal::default();
     let mut checkpoint = advance(&document, &mut owner, &mut journal).unwrap().checkpoint;
     let mut request = child("fix", "stable-writer");
-    request.template = "implement".into();
+    request.template = "implement.plan".into();
     request.writer = true;
     request.write_scope = vec!["child".into()];
     let first = add(&document, &mut checkpoint, "parent", &request).unwrap();
@@ -1280,10 +1280,16 @@ fn bound_document_child_preserves_explicit_worktree_and_upstream_source() {
         "a", &request, &context, Some(("parent", &"a".repeat(40)))).unwrap();
     assert_eq!(receipt.worktree.as_deref(), Some(".worktrees/existing"));
     let expanded = plans::expand(&document, &checkpoint.extensions, &checkpoint.expansions, &limits).unwrap();
-    let node = expanded.nodes.iter().find(|node| node.id == receipt.node).unwrap();
+    let boundary = expanded.nodes.iter().find(|node| node.id == receipt.node).unwrap();
+    let writer = boundary.composite.as_ref().unwrap().exports.iter()
+        .find(|export| export.outputs.contains(&OutputKind::Commit)).unwrap();
+    let node = expanded.nodes.iter().find(|node| node.id == writer.node).unwrap();
     assert_eq!(node.worktree, receipt.worktree);
     assert_eq!(node.source, Some(SourceBinding::Node { node:"a".into() }));
     assert_eq!(node.delivery, Some(provenant_records::run::DeliveryMode::Push));
+    assert!(expanded.nodes.iter().filter(|node| node.extra.get(template::TEMPLATE_FIELD)
+        .and_then(Value::as_str) == Some("plan"))
+        .all(|node| node.source == Some(SourceBinding::Node { node:"a".into() })));
 }
 
 #[test]
