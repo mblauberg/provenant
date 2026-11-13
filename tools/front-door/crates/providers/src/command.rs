@@ -80,10 +80,12 @@ fn prepare(
         scratch,
         crate::launch::tool_search_path(input.home, true),
     );
-    env.extend([
-        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-    ]);
+    if input.sandboxed() {
+        env.extend([
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ]);
+    }
     let mut profile = ProviderProfileSpec {
         process_executables: vec![exact("/bin/sh"), exact(input.executable)],
         allow_process_fork: true,
@@ -101,29 +103,31 @@ fn prepare(
     let mut setup = Vec::new();
     let omitted_discovery = Vec::new();
     let mut tool_requirements = crate::launch::ToolRequirements::default();
-    if [".cargo/bin", ".rustup/toolchains"]
-        .iter()
-        .all(|path| input.home.join(path).is_dir())
-    {
-        rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
-    } else {
-        crate::launch::system_tools(
+    if input.sandboxed() {
+        if [".cargo/bin", ".rustup/toolchains"]
+            .iter()
+            .all(|path| input.home.join(path).is_dir())
+        {
+            rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
+        } else {
+            crate::launch::system_tools(
+                access,
+                &mut tool_requirements.reads,
+                &mut tool_requirements.exec,
+                &mut env,
+            );
+            let cwd = subtree(input.cwd);
+            tool_requirements.exec.push(cwd.clone());
+            tool_requirements.required_exec.push(cwd);
+        }
+        node_tools(
+            input.home,
             access,
-            &mut tool_requirements.reads,
-            &mut tool_requirements.exec,
+            scratch,
+            &mut tool_requirements,
             &mut env,
         );
-        let cwd = subtree(input.cwd);
-        tool_requirements.exec.push(cwd.clone());
-        tool_requirements.required_exec.push(cwd);
     }
-    node_tools(
-        input.home,
-        access,
-        scratch,
-        &mut tool_requirements,
-        &mut env,
-    );
     Ok(LaunchSpec {
         argv,
         env,

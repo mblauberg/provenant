@@ -185,6 +185,17 @@ pub(super) fn write_roots(
         .collect()
 }
 
+/// Credential discovery belongs to a selected launch, never adapter eligibility.
+/// Preflight still validates the fixed authority roots without walking the home.
+pub(super) enum InventoryContext<'a> {
+    Preflight,
+    Launch(&'a run::TaskRequest, &'a str),
+    #[cfg(any(test, feature = "fixture"))]
+    Sandboxed,
+}
+
+// Composition edge keeps launch authority and inventory mode explicit.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn confinement_request(
     project_id: ProjectId,
     roots: ConfinementRoots<'_>,
@@ -193,6 +204,7 @@ pub(super) fn confinement_request(
     host_writes: &provenant_confinement::run_config::RunConfig,
     adapter: &str,
     publishing: bool,
+    sandbox_context: InventoryContext<'_>,
 ) -> Result<PlanRequest, provenant_confinement::permissions::PermissionError> {
     let mode = match writer {
         Some(writer) => {
@@ -225,15 +237,40 @@ pub(super) fn confinement_request(
             &fixture_roots
         }
     };
-    let mut mandatory = provenant_confinement::permissions::MandatoryRoots::for_host_with_scratch(
-        host_roots,
-        roots.home,
-        roots.cwd,
-        roots.scratch,
-        roots.credential_roots,
-        roots.github_roots,
-        roots.protected_worktrees,
-    )?;
+    let sandboxed = match sandbox_context {
+        InventoryContext::Preflight => false,
+        #[cfg(any(test, feature = "fixture"))]
+        InventoryContext::Sandboxed => true,
+        InventoryContext::Launch(task, route) => {
+            let minimal = provenant_confinement::permissions::MandatoryRoots::new(
+                roots.home,
+                roots.state,
+                roots.cwd,
+            )?;
+            let policy = host_writes.policy_for_launch(roots.state, minimal);
+            sandbox_mode_for_access(
+                host_writes,
+                route,
+                task,
+                policy
+                    .optional()
+                    .network_for(access.network(writer.is_some())),
+                writer.is_none(),
+            )
+            .sandboxed
+        }
+    };
+    let mut mandatory =
+        provenant_confinement::permissions::MandatoryRoots::for_host_with_scratch_mode(
+            host_roots,
+            roots.home,
+            roots.cwd,
+            roots.scratch,
+            roots.credential_roots,
+            roots.github_roots,
+            roots.protected_worktrees,
+            sandboxed,
+        )?;
     if writer.is_none() && access.source_root.is_some() && !access.source_live {
         // The host materialises a commit source beside candidate scratch under
         // state. Its ordinary read root cannot override the state denial, and
@@ -357,9 +394,29 @@ pub(super) fn sandbox_mode(
     task: &run::TaskRequest,
     plan: &ConfinedPlan,
 ) -> provenant_confinement::run_config::SandboxMode {
-    use provenant_confinement::run_config::SandboxInputs;
     let permissions = plan.permissions();
-    let mode = host.sandbox_for(SandboxInputs {
+    let mode = sandbox_mode_for_access(
+        host,
+        route,
+        task,
+        permissions.network,
+        matches!(permissions.mode, AccessMode::ReadOnly),
+    );
+    if let Some(warning) = &mode.warning {
+        eprintln!("provenant: {warning}");
+    }
+    mode
+}
+
+fn sandbox_mode_for_access(
+    host: &provenant_confinement::run_config::RunConfig,
+    route: &str,
+    task: &run::TaskRequest,
+    network: NetworkAccess,
+    read_only: bool,
+) -> provenant_confinement::run_config::SandboxMode {
+    use provenant_confinement::run_config::SandboxInputs;
+    host.sandbox_for(SandboxInputs {
         route,
         knob: task
             .profile
@@ -372,15 +429,11 @@ pub(super) fn sandbox_mode(
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false)
         }),
-        network_narrowed: permissions.network != NetworkAccess::Open,
-        read_only: matches!(permissions.mode, AccessMode::ReadOnly),
+        network_narrowed: network != NetworkAccess::Open,
+        read_only,
         os_sandboxed: provenant_confinement::run_config::current_process_is_sandboxed(),
         platform_supported: cfg!(target_os = "macos"),
-    });
-    if let Some(warning) = &mode.warning {
-        eprintln!("provenant: {warning}");
-    }
-    mode
+    })
 }
 
 /// Tell the lane its mode (`PROVENANT_SANDBOX=on|off`) and record it, with

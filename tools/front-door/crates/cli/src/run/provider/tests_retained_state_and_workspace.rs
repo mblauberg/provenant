@@ -145,6 +145,7 @@ fn explicit_write_root_keeps_read_only_git_authority() -> Result<(), Box<dyn std
         &Default::default(),
         "codex",
         false,
+        InventoryContext::Sandboxed,
     )?;
     assert!(matches!(request.permissions.mode, AccessMode::ReadOnly));
     assert_eq!(request.permissions.write_roots[0].path, write);
@@ -214,6 +215,7 @@ fn launch_policy_binds_mandatory_aliases_and_all_network_ceilings()
                 &config,
                 "codex",
                 false,
+                InventoryContext::Sandboxed,
             )?;
             let policy = request
                 .permissions
@@ -390,6 +392,7 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
             private_state: &root.join("private"), assets: &root.join("assets"), prompt_file: None,
         },
         None, &run::LaneAccess::default(), &Default::default(), "command", false,
+        InventoryContext::Sandboxed,
     )?;
     let mandatory = request.permissions.policy.as_ref().ok_or("policy")?.mandatory();
     for path in [&foreign, &foreign_common, &foreign.join("nested"), &foreign_common.join("refs")] {
@@ -430,6 +433,7 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
         &Default::default(),
         "codex",
         false,
+        InventoryContext::Sandboxed,
     )?)?;
     let route = provenant_records::ResolvedRoute {
         extra: Default::default(),
@@ -519,6 +523,7 @@ fn attachment_read_grant_is_exact() -> Result<(), Box<dyn std::error::Error>> {
         &Default::default(),
         "cursor",
         false,
+        InventoryContext::Sandboxed,
     )?;
     assert!(request.permissions.read_roots.contains(&PathGrant {
         path: image,
@@ -563,6 +568,7 @@ fn lane_plan_reads_the_active_release_root() -> Result<(), Box<dyn std::error::E
             &Default::default(),
             entry.adapter.id(),
             true,
+            InventoryContext::Sandboxed,
         )?;
         assert!(request.permissions.read_roots.contains(&PathGrant {
             path: assets.to_owned(),

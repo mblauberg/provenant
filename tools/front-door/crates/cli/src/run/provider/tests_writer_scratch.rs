@@ -1914,6 +1914,7 @@ printf 'agy 1.0.0\n'
         &config,
         "cursor",
         false,
+        InventoryContext::Sandboxed,
     )?;
     assert!(request.permissions.protected_roots.is_empty());
     assert_eq!(
@@ -2032,6 +2033,7 @@ fn host_writer_roots_inside_other_checkouts(
             config,
             "cursor",
             false,
+            InventoryContext::Sandboxed,
         )
     };
     let hosted = config(vec![locks.clone()]);

@@ -112,6 +112,7 @@ fn commit_source_lanes_can_read_their_view_without_changing_adapter_writes()
                 &Default::default(),
                 adapter,
                 false,
+                InventoryContext::Sandboxed,
             )?;
             let plan = ConfinedPlan::new(request)?;
             let permissions = plan.permissions();
