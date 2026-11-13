@@ -1197,11 +1197,7 @@ impl<'a> Compiler<'a> {
     /// `use`, `over` or `repeat` passes through unchanged, apart from nested
     /// composite and loop members, which are lowered in turn.
     pub fn lower(&self, node: &Value) -> Result<Value, CompileError> {
-        let lowered = self.lower_in(node, &Map::new(), &mut Vec::new())?;
-        if lowered.to_string().contains("${item}") {
-            return Err("${item} is bound only inside `over`".into());
-        }
-        Ok(lowered)
+        self.lower_in(node, &Map::new(), &mut Vec::new())
     }
 
     pub fn compile(&self, node: &Value) -> Result<GraphNode, CompileError> {
@@ -1279,6 +1275,8 @@ impl<'a> Compiler<'a> {
             // A planner catalogue keeps its own placeholders for run time.
             let value = if bindings.is_empty() || key == "plan" {
                 value.clone()
+            } else if matches!(key.as_str(), "brief" | "goal" | "prompt") {
+                interpolate_prose(value, bindings)?
             } else {
                 interpolate(value, bindings)?
             };
@@ -1413,8 +1411,7 @@ impl<'a> Compiler<'a> {
                 .entry("with")
                 .or_insert_with(|| Value::Object(Map::new()));
             if let Some(with) = with.as_object_mut() {
-                with.entry(ITEM)
-                    .or_insert_with(|| Value::String(format!("${{{ITEM}}}")));
+                with.insert(ITEM.into(), Value::String(format!("${{{ITEM}}}")));
             }
         }
         let mut ids = BTreeSet::new();
@@ -1460,19 +1457,7 @@ impl<'a> Compiler<'a> {
             }
             member.insert("id".into(), Value::String(item_id(item, &mut ids)));
             let mut child = self.lower_in(&Value::Object(member), &scoped, stack)?;
-            if !Value::Object(copy.clone()).to_string().contains("${item}")
-                && copy
-                    .get("use")
-                    .and_then(Value::as_str)
-                    .and_then(|name| self.library.resolve(name).ok())
-                    .is_some_and(|template| !template.parameters.contains_key(ITEM))
-                && let Some(prompt) = child
-                    .get("prompt")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            {
-                child["prompt"] = Value::String(format!("{prompt}\n\nItem: {item}"));
-            }
+            append_item(&mut child, item);
             children.push(child);
         }
         let exports = default_exports(&children);
@@ -2110,6 +2095,43 @@ pub(super) fn check_value(parameter: &TemplateParameter, value: &Value) -> Resul
         ));
     }
     Ok(())
+}
+
+// Composite members execute the work, so give each leaf its item too.
+fn append_item(node: &mut Value, item: &str) {
+    if let Some(prompt) = node
+        .get("prompt")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        && !prompt.contains(item)
+    {
+        node["prompt"] = Value::String(format!("{prompt}\n\nItem: {item}"));
+    }
+    for pointer in ["/composite/nodes", "/loop/body"] {
+        if let Some(children) = node.pointer_mut(pointer).and_then(Value::as_array_mut) {
+            for child in children {
+                append_item(child, item);
+            }
+        }
+    }
+}
+
+// Prose may describe placeholder syntax; substitute known bindings only.
+fn interpolate_prose(value: &Value, parameters: &Map<String, Value>) -> Result<Value, String> {
+    let Some(text) = value.as_str() else {
+        return interpolate(value, parameters);
+    };
+    let mut rendered = text.to_owned();
+    for name in parameters.keys() {
+        let marker = format!("${{{name}}}");
+        if rendered.contains(&marker) {
+            let replacement = interpolate(&Value::String(marker.clone()), parameters)?;
+            if let Some(replacement) = replacement.as_str() {
+                rendered = rendered.replace(&marker, replacement);
+            }
+        }
+    }
+    Ok(Value::String(rendered))
 }
 
 /// Replace `${name}` placeholders. A string that is exactly one placeholder

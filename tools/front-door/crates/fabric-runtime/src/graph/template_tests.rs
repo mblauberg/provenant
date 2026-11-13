@@ -119,6 +119,32 @@ fn swarm_over_named_areas_is_one_node() {
 }
 
 #[test]
+fn bundled_leaf_fanout_prompts_contain_only_their_item() {
+    let library = library();
+    let compiler = Compiler::new(&library);
+    let items = ["unique-area-alpha", "unique-area-beta"];
+    for name in library.names() {
+        let template = library.resolve(name).unwrap();
+        if template.is_composite() {
+            continue;
+        }
+        for brief in [None, Some("Inspect the requested area")] {
+            let mut node = json!({"id":"fanout", "use":name, "over":items});
+            if let Some(brief) = brief {
+                node["brief"] = json!(brief);
+            }
+            let compiled = compiler
+                .compile(&node)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            for (index, child) in compiled.composite.unwrap().nodes.iter().enumerate() {
+                assert!(child.prompt.contains(items[index]), "{name}");
+                assert!(!child.prompt.contains(items[1 - index]), "{name}");
+            }
+        }
+    }
+}
+
+#[test]
 fn over_binds_item_in_overrides_and_resolves_named_lists() {
     let library = library();
     let resolvers = BTreeMap::from([
@@ -149,11 +175,11 @@ fn over_binds_item_in_overrides_and_resolves_named_lists() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("resolver @missing"), "{error}");
-    let error = Compiler::new(&library)
-        .compile(&json!({"id": "loose", "use": "task", "brief": "Do ${item}"}))
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("only inside `over`"), "{error}");
+    let prose = Compiler::new(&library)
+        .compile(&json!({"id": "loose", "use": "task", "brief": "Describe ${item} and ${unknown}"}))
+        .unwrap();
+    assert!(prose.prompt.contains("${item}"));
+    assert!(prose.prompt.contains("${unknown}"));
 }
 
 #[test]
