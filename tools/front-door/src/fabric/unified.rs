@@ -1844,7 +1844,9 @@ pub(crate) fn unsettled_graphs(
     cancel: &CancelToken,
 ) -> Result<Vec<WaitGraph>, Box<dyn std::error::Error>> {
     wait_remaining(deadline, cancel)?;
-    let Some(context) = read_context(edge)? else {
+    let context = read_context(edge)?;
+    wait_remaining(deadline, cancel)?;
+    let Some(context) = context else {
         return Ok(Vec::new());
     };
     let root = &context.roots.state;

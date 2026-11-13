@@ -2337,24 +2337,68 @@ mod result_tests {
         )?)?;
         assert_eq!(index[0]["status"], "capped");
         assert_eq!(index[0]["attempt_ref"], format!("{remote_host}/{attempt}"));
+        // Prove a later page is checked too, after a valid first page.
+        let second_response = rig.root.join("second-response");
+        let second_seen = rig.root.join("second-seen");
+        let mut second: PeerResponse = serde_json::from_slice(&serde_json::to_vec(&reply)?)?;
+        if let PeerResult::Output {
+            data:
+                OutputResult::Chunk {
+                    offset,
+                    next_offset,
+                    eof,
+                    bytes,
+                    ..
+                },
+            ..
+        } = &mut second.result
+        {
+            *offset = 5;
+            *next_offset = text.len() as u64;
+            *eof = true;
+            *bytes = OutputBytes::Utf8(text[5..].into());
+        }
+        std::fs::write(&second_response, serde_json::to_vec(&second)?)?;
+        std::fs::write(
+            &ssh,
+            format!(
+                "#!/bin/sh\nrequest=$(cat)\ncase \"$request\" in\n  *'\"offset\":5'*) touch '{}' ; cat '{}' ;;\n  *) cat '{}' ;;\nesac\n",
+                second_seen.display(),
+                second_response.display(),
+                response.display()
+            ),
+        )?;
+        let paged = graph_inputs::materialise(
+            &factory,
+            WaitBudget::cli(factory.clock.mono_now(), 30)?,
+            &CancelToken::new(),
+            &key,
+            &[request("review", Some(&format!("{remote_host}/{attempt}")))],
+            16_384,
+        );
+        let MaterialisedInput::File { path, .. } = &paged.entries[0] else {
+            return Err(format!("{paged:?}").into());
+        };
+        assert_eq!(std::fs::read_to_string(path)?, text);
+        assert!(second_seen.exists());
         if let PeerResult::Output {
             data: OutputResult::Chunk { extra, .. },
             ..
-        } = &mut reply.result
+        } = &mut second.result
         {
             extra.insert(
                 "peer_origin_work_key".into(),
                 serde_json::json!(origin.next_attempt().unwrap()),
             );
         }
-        std::fs::write(&response, serde_json::to_vec(&reply)?)?;
+        std::fs::write(&second_response, serde_json::to_vec(&second)?)?;
         let refused = graph_inputs::materialise(
             &factory,
             WaitBudget::cli(factory.clock.mono_now(), 30)?,
             &CancelToken::new(),
             &key,
             &[request("review", Some(&format!("{remote_host}/{attempt}")))],
-            5,
+            16_384,
         );
         assert!(matches!(
             refused.entries[0],
