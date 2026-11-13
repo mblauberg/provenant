@@ -388,6 +388,8 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
         "tail":{"argv":["/bin/sh","-c","/usr/bin/yes x | /usr/bin/head -c 2000000; printf '\\nlast-output\\n'"]},
         "missing":{"argv":["/missing/command"]}
     }))?;
+    // This test exercises denied checkout writes as well as command settlement.
+    configure(&rig, &["knobs"], "lanes.sandbox", toml_edit::value("on"))?;
     let _cleanup = rig.process_cleanup();
     for (name, expected, verdict) in [
         ("pass", "succeeded", "PASS"),

@@ -1133,10 +1133,16 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
     let prompt = Prompt::new("fixture prompt".into());
     let route = route("opencode", "configured/model");
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
-        for git_context in [false, true] {
+        for (git_context, sandboxed) in [(false, true), (true, true), (false, false), (true, false)]
+        {
             let plan = fixture_access_plan(access, Some("login"), false);
             let input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+            let sandbox_mode = |key: &str| {
+                (key == provenant_confinement::run_config::SANDBOX_ENV)
+                    .then(|| if sandboxed { "on" } else { "off" }.into())
+            };
             let spec = opencode::OpenCode.prepare(PrepareInput {
+                host_var: &sandbox_mode,
                 git_context,
                 ..input
             })?;
@@ -1146,10 +1152,28 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
                     .find(|(name, _)| name == key)
                     .map(|(_, value)| value)
             };
-            assert_eq!(
-                env("HOME"),
-                Some(&std::ffi::OsString::from("/fixture/home"))
-            );
+            let expected_home = if sandboxed {
+                Some(std::ffi::OsString::from("/fixture/home"))
+            } else {
+                std::env::var_os("HOME")
+            };
+            assert_eq!(env("HOME"), expected_home.as_ref());
+            for (key, expected) in [
+                ("GIT_CONFIG_GLOBAL", "/dev/null"),
+                ("GIT_CONFIG_NOSYSTEM", "1"),
+                ("XDG_CONFIG_HOME", "/fixture/state/config"),
+                ("XDG_DATA_HOME", "/fixture/state/data"),
+                ("XDG_CACHE_HOME", "/fixture/state/cache"),
+                ("XDG_STATE_HOME", "/fixture/state/state"),
+            ] {
+                let values: Vec<_> = spec
+                    .env
+                    .iter()
+                    .filter(|(name, _)| name == key)
+                    .map(|(_, value)| value.as_os_str())
+                    .collect();
+                assert_eq!(values, [std::ffi::OsStr::new(expected)], "{key}");
+            }
             let config_home = Path::new(env("XDG_CONFIG_HOME").expect("config home"));
             let data_home = Path::new(env("XDG_DATA_HOME").expect("data home"));
             assert_eq!(config_home, Path::new("/fixture/state/config"));

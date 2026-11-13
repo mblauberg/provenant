@@ -3319,6 +3319,29 @@ pub(super) fn prepare_candidates(
             spec.argv
                 .splice(1..1, [argument.into(), scratch.as_os_str().to_owned()]);
         }
+        if !sandbox.sandboxed && route.adapter == "codex" {
+            // Native Codex writes its rollout beside the selected login rather
+            // than in this candidate's private state. Retain the launch-time
+            // selector outside the lane-writable candidate subtree so settlement
+            // observes the same trusted home after recovery.
+            let codex_home = spec
+                .env
+                .iter()
+                .find(|(key, _)| key == "CODEX_HOME")
+                .map(|(_, value)| PathBuf::from(value))
+                .unwrap_or_else(|| home.join(".codex"));
+            spec.setup.push(SetupStep::WriteFile {
+                path: paths
+                    .provider_state
+                    .join(format!("codex-observation-{scratch_name}.json")),
+                bytes: serde_json::to_vec(&serde_json::json!({
+                    "schema_version": 1,
+                    "home": provenant_records::StructuredPathWire::from_path(&codex_home)
+                        .map_err(|error| error.to_string())?,
+                }))
+                .map_err(|error| error.to_string())?,
+            });
+        }
         spec.complete_tool_requirements(&plan, &home, &cwd);
         if isolated {
             super::source_tree::ensure_profile_isolated(&source, &spec.profile.spec)

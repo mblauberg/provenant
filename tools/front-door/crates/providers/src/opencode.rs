@@ -418,6 +418,20 @@ fn prepare(
         tool_exec_roots.push(exact(rg));
         tool_exec_roots.push(exact("/usr/bin/grep"));
     }
+    // Native environments already contain host selectors. Replace them so the
+    // child cannot observe an earlier duplicate instead of its private state.
+    env.retain(|(key, _)| {
+        ![
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_NOSYSTEM",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+        ]
+        .iter()
+        .any(|name| key == *name)
+    });
     env.extend([
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),

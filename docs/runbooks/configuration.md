@@ -143,12 +143,15 @@ to run on the host.
 boundaries; absolute paths only, no per-project override. The effective
 network is the narrower of the ceiling and the lane's request. Path denials
 apply only to sandboxed lanes; keep a route in `sandboxed_routes` to keep a
-path from it. A narrowed network always sandboxes the lane.
+path from it. A narrowed network sandboxes the lane unless an explicit `off`
+overrides that restriction.
 
 ## Lane sandbox mode
 
-Each macOS attempt resolves whether it runs under Seatbelt. By default, every lane kind
-(writers and read-only lanes alike) runs unsandboxed. In precedence order:
+Each macOS attempt resolves whether it runs under Seatbelt. The registry default is
+`auto`: every lane kind (writers and read-only lanes alike) runs unsandboxed unless
+a configured floor requires sandboxing. Only an explicit `off` overrides those
+floors. In precedence order:
 
 1. **Unsupported backend:** Off macOS every lane resolves as sandboxed (`platform`),
    so Linux keeps refusing lane launch.
