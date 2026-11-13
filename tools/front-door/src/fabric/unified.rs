@@ -44,6 +44,15 @@ impl Factory {
             })),
             Err(ResolveError::NotFound(_)) => Ok(None),
             Err(ResolveError::Ambiguous { .. }) => Err(FacadeError::Conflict),
+            // A whole unreadable graph stays addressable so status can name
+            // its retirement command and stop can retire it.
+            Err(ResolveError::Read(error)) if target.node.is_none() && error.is_unreadable() => {
+                Ok(Some(GraphTarget {
+                    graph: target.name,
+                    node: None,
+                    attempt: None,
+                }))
+            }
             Err(ResolveError::Read(error)) => Err(graph_journal_error(error)),
         }
     }
@@ -844,13 +853,20 @@ pub(crate) fn unified_graph_command(
         };
         if let Some(factory) = factory.as_ref().filter(|factory| !factory.context.in_lane) {
             for target in targets {
-                resolve(
+                match resolve(
                     &factory.context.roots.state,
                     factory.context.identity.project,
                     target,
                     Want::Work,
-                )
-                .map_err(target_fault)?;
+                ) {
+                    // A whole unreadable graph still reports and stops: the
+                    // graph path names its retirement command.
+                    Err(ResolveError::Read(error))
+                        if target.node.is_none() && error.is_unreadable() => {}
+                    result => {
+                        result.map_err(target_fault)?;
+                    }
+                }
             }
         }
         let selectors: Vec<(String, Option<&str>)> = if targets.is_empty() {
@@ -1421,30 +1437,107 @@ fn host_graph_output(
     cancel: &CancelToken,
 ) -> Result<provenant_cli::run::Reply, Box<dyn std::error::Error>> {
     let (resolved, checkpoint) =
-        resolve_with_checkpoint(factory, &command.target, Want::Attempt { settled: true })?;
-    let reference = resolved.attempt_ref.clone().ok_or_else(|| TargetFault {
-        outcome: provenant_records::Outcome::Invalid,
-        code: "NOT_FOUND",
-        message: format!("NOT_FOUND: {} has not launched", resolved.target()),
-    })?;
-    let failure_rows = if command.target.attempt.is_none() {
-        let target = GraphTarget {
-            graph: resolved.graph.clone(),
-            node: resolved.node.clone(),
-            attempt: None,
+        match resolve_with_checkpoint(factory, &command.target, Want::Attempt { settled: true }) {
+            Ok(found) => found,
+            // A node that failed before it launched has no attempt to read;
+            // its failure and remedy are still the answer.
+            Err(fault) if command.target.attempt.is_none() && fault.code == "NOT_FOUND" => {
+                return match unlaunched_failure_output(command, factory, budget, cancel)? {
+                    Some(reply) => Ok(reply),
+                    None => Err(fault.into()),
+                };
+            }
+            Err(fault) => return Err(fault.into()),
         };
-        let mut rows = status_rows(&graph_snapshot(checkpoint), &target);
-        enrich_status_rows_within(&mut rows, &factory.context, &factory.clock, cancel, budget)?;
-        localise_worktree_actions(factory, &target.graph, &mut rows);
-        rows.retain(|row| {
-            row["kind"] == "node" && matches!(row["state"].as_str(), Some("failed" | "blocked"))
-        });
-        rows
+    let Some(reference) = resolved.attempt_ref.clone() else {
+        let fault = TargetFault {
+            outcome: provenant_records::Outcome::Invalid,
+            code: "NOT_FOUND",
+            message: format!("NOT_FOUND: {} has not launched", resolved.target()),
+        };
+        if command.target.attempt.is_none()
+            && let Some(reply) = unlaunched_failure_output(command, factory, budget, cancel)?
+        {
+            return Ok(reply);
+        }
+        return Err(fault.into());
+    };
+    let failure_rows = if command.target.attempt.is_none() {
+        node_failure_rows(
+            factory,
+            checkpoint,
+            &resolved.graph,
+            resolved.node.clone(),
+            budget,
+            cancel,
+        )?
     } else {
         Vec::new()
     };
     let reply = graph_attempt_output(command.clone(), &reference, edge, factory, budget, cancel)?;
     Ok(with_graph_failures(reply, &failure_rows))
+}
+
+/// The failed or blocked node rows under a graph or node target.
+fn node_failure_rows(
+    factory: &Factory,
+    checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint,
+    graph: &str,
+    node: Option<String>,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    let target = GraphTarget {
+        graph: graph.to_owned(),
+        node,
+        attempt: None,
+    };
+    let mut rows = status_rows(&graph_snapshot(checkpoint), &target);
+    enrich_status_rows_within(&mut rows, &factory.context, &factory.clock, cancel, budget)?;
+    localise_worktree_actions(factory, &target.graph, &mut rows);
+    rows.retain(|row| {
+        row["kind"] == "node" && matches!(row["state"].as_str(), Some("failed" | "blocked"))
+    });
+    Ok(rows)
+}
+
+/// An output reply for a one-node target whose node failed before launching
+/// any attempt: no output, and the node's failure rows.
+fn unlaunched_failure_output(
+    command: &provenant_cli::Output,
+    factory: &Factory,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<Option<provenant_cli::run::Reply>, Box<dyn std::error::Error>> {
+    let Some(checkpoint) = FileJournal::read_status_checkpoint(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        &command.target.name,
+    )?
+    else {
+        return Ok(None);
+    };
+    let node = match (&command.target.node, checkpoint.nodes.as_slice()) {
+        (Some(node), _) => node.clone(),
+        (None, [only]) => only.id.clone(),
+        (None, _) => return Ok(None),
+    };
+    let graph = command.target.name.clone();
+    let rows = node_failure_rows(factory, checkpoint, &graph, Some(node), budget, cancel)?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let reply = provenant_cli::run::Reply {
+        result: provenant_records::CommandResult::new(
+            "output",
+            provenant_records::Outcome::Ok,
+            json!({"graph_id": graph, "outputs": []}),
+        ),
+        human: "no attempt output yet\n".into(),
+        summary: None,
+        read_only: true,
+    };
+    Ok(Some(with_graph_failures(reply, &rows)))
 }
 
 fn graph_attempt_output(

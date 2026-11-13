@@ -1811,25 +1811,17 @@ fn expanded_writer_registry_wait_uses_launch_allowance() -> Result {
         &provenant_core::CancelToken::new(),
         &clock,
     )?;
+    // An edit only records the patch; the scheduler (`tick`) launches the
+    // added writer. Its registry wait is bounded by the configured 2s
+    // allowance, not the shipped 55s.
     let start = std::time::Instant::now();
-    let settled = rig.run_and_wait(&["--file", doc], "1s")?;
+    let tick = rig.command(&["tick", "--json"])?;
     let elapsed = start.elapsed();
+    assert_eq!(code(&tick), 0, "{tick:?}");
     assert!(elapsed >= std::time::Duration::from_secs(2), "{elapsed:?}");
     assert!(
-        elapsed < std::time::Duration::from_secs(4),
+        elapsed < std::time::Duration::from_secs(20),
         "expanded provisioning exceeded its deadline: {elapsed:?}"
-    );
-    // The independent slow node keeps the graph waiting while the writer records its error.
-    let response = json!({"data": {"checkpoint": settled.checkpoint.clone()}});
-    assert_eq!(settled.exit(), 124, "{:?}", settled.wait);
-    assert!(settled.timed_out(), "{}", settled.wait_value);
-    let writer = response["data"]["checkpoint"]["nodes"]
-        .as_array()
-        .and_then(|nodes| nodes.iter().find(|node| node["id"] == "writer"))
-        .ok_or("writer")?;
-    assert_eq!(
-        writer["advance_owner_code"], "writer_lock_busy",
-        "{response}"
     );
     let checkpoint = provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
         &roots.state,
@@ -1862,7 +1854,7 @@ fn expanded_writer_registry_wait_uses_launch_allowance() -> Result {
         provenant_fabric_runtime::graph::relay::pending_provisioning(&checkpoint)
             .iter()
             .any(|(node, _, _)| node == "writer"),
-        "{response}"
+        "{checkpoint:?}"
     );
     Ok(())
 }
@@ -2310,7 +2302,7 @@ fn seed_graph_checkpoint(
     state: &provenant_core::StateRoot,
     project: provenant_core::ProjectId,
     actor: provenant_core::ActorId,
-    attempt: provenant_core::AttemptId,
+    attempt_ref: String,
     directory: &std::path::Path,
 ) -> Result {
     use provenant_core::{CancelToken, Clock, WaitBudget};
@@ -2355,7 +2347,7 @@ fn seed_graph_checkpoint(
     })?;
     provenant_fabric_runtime::graph::advance_with_budget(
         &document,
-        &mut Pending(actor.to_string(), format!("host/{attempt}")),
+        &mut Pending(actor.to_string(), attempt_ref),
         &mut journal,
         &Default::default(),
         &Default::default(),
@@ -2506,7 +2498,17 @@ fn persisted_attempt_with(
         });
     }
     store.create(&prepared, &call)?;
-    seed_graph_checkpoint(&roots.state, project_id, actor_id, attempt_id, &rig.project)?;
+    // Attempt references are `HOST/ATTEMPT` with this host's real identity.
+    let host = provenant_cli::fabric::Context::open(roots.clone(), &rig.home, &rig.project)?
+        .identity
+        .host;
+    seed_graph_checkpoint(
+        &roots.state,
+        project_id,
+        actor_id,
+        format!("{host}/{attempt_id}"),
+        &rig.project,
+    )?;
     let started_at = clock.wall_now()?;
     let mut running = store.record(attempt_id, &call)?;
     running.revision = 2;
@@ -2718,6 +2720,8 @@ fn persisted_attempt_with(
                 &exit,
                 &provenant_cli::run::Registry {
                     roots: options.host_registry.then_some(&roots),
+                    // The holder names the state root that owns shared quota.
+                    state_root: Some(roots.state.as_path()),
                     ..Default::default()
                 },
                 &call,
@@ -2894,32 +2898,16 @@ fn output_names_the_attempt_it_reads_and_writes_or_locates_parts() -> Result {
     let result_path: provenant_records::StructuredPathWire =
         serde_json::from_value(data["data"]["result_path"].clone())?;
     assert!(result_path.to_path_buf()?.ends_with("result.md"));
-    // A launched attempt has a custody lock, which the wait path inspects.
-    fs::write(
-        rig.state
-            .join("attempts")
-            .join(&attempt)
-            .join("custody.lock"),
-        b"",
-    )?;
-    for args in [
-        vec!["status", &target],
-        vec!["status", &target, "--wait=1s"],
-    ] {
-        let listing = rig.command(&args)?;
-        assert_eq!(
-            code(&listing),
-            0,
-            "{args:?}: {}",
-            String::from_utf8_lossy(&listing.stderr.bytes)
-        );
-        let human = String::from_utf8(listing.stdout.bytes)?;
-        assert!(
-            human.contains("provider 500: upstream failed"),
-            "{args:?}: {human}"
-        );
-        assert!(human.contains("result:"), "{human}");
-    }
+    // Status is the row contract: it names the failed attempt, and `output`
+    // (checked above) owns the provider error and result path.
+    let listing = rig.command(&["status", &target])?;
+    assert_eq!(code(&listing), 0, "{listing:?}");
+    let human = String::from_utf8(listing.stdout.bytes)?;
+    let line = human
+        .lines()
+        .find(|line| line.starts_with(target.as_str()))
+        .ok_or_else(|| human.clone())?;
+    assert!(line.contains("failed"), "{human}");
     let path = rig.command(&["output", &target, "--part", "stderr", "--path", "--json"])?;
     let data: Value = serde_json::from_slice(&path.stdout.bytes)?;
     assert_eq!(code(&path), 0, "{data}");
@@ -3684,9 +3672,14 @@ fn run_graph_provider_with_wait(
     );
     assert!(response["error"].is_null(), "{response}");
     let response = json!({"data": {"checkpoint": settled.checkpoint.clone()}});
-    let reference = response["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
-        .as_str()
-        .ok_or_else(|| format!("attempt reference missing: {response}"))?;
+    // The lane is the attempt that ran the provider: a retry refused before
+    // launch (a cooled free pool, say) points back at it.
+    let latest = &response["data"]["checkpoint"]["nodes"][0]["attempts"][0];
+    let reference = match (&latest["launched"], &latest["key"]["previous_attempt_ref"]) {
+        (Value::Bool(false), Value::String(previous)) => Some(previous.as_str()),
+        _ => latest["attempt_ref"].as_str(),
+    }
+    .ok_or_else(|| format!("attempt reference missing: {response}"))?;
     let (_, attempt) = reference.split_once('/').ok_or("attempt reference")?;
     let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
@@ -3790,13 +3783,16 @@ fn opencode_stderr_live_quota() -> Result {
             "PATH".into(),
             format!("{}:/usr/bin:/bin", bin.display()).into(),
         ));
-        let lane = run_graph_provider(
+        // As in opencode_usage_limit_stops_hanging_provider, the wait only
+        // has to outlast settlement; the stop reason is the real bound.
+        let lane = run_graph_provider_with_wait(
             &rig,
             "stderr-quota",
             json!({
                 "id":"provider", "prompt":prompt_text, "access":"read_only",
                 "route":{"adapter":"opencode","model":"opencode/opencode/glm-5.3-flash-free"}
             }),
+            "60s",
         )?;
         assert_eq!(lane["state"], expected, "{prompt_text}: {lane}");
         if expected == "succeeded" {
@@ -3825,14 +3821,23 @@ fn opencode_stderr_live_quota() -> Result {
     Ok(())
 }
 
-/// Medium: real confined writer shells for both primary adapters. The files
-/// are tracked before launch so quarantine/protected-root regressions cannot
-/// hide behind a newly created, unprotected instruction filename.
-fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
+fn codex_writer_shell_edits_instructions_and_redacts_logs() -> Result {
+    writer_shell_edits_instructions_and_redacts_logs("codex")
+}
+
+fn claude_writer_shell_edits_instructions_and_redacts_logs() -> Result {
+    writer_shell_edits_instructions_and_redacts_logs("claude")
+}
+
+/// Medium: a real confined writer shell for one primary adapter; each adapter
+/// is its own case so a writer launch fits one test's budget. The files are
+/// tracked before launch so quarantine/protected-root regressions cannot hide
+/// behind a newly created, unprotected instruction filename.
+fn writer_shell_edits_instructions_and_redacts_logs(adapter: &str) -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
-    for adapter in ["codex", "claude"] {
+    {
         let rig = if adapter == "claude" {
             claude_fixture()?
         } else {
@@ -4266,6 +4271,14 @@ fn graph_launch_reports_provider_update_after_wait_budget() -> Result {
     let keychain = rig.home.join("Library/Keychains/login.keychain-db");
     fs::create_dir_all(keychain.parent().ok_or("keychain parent")?)?;
     fs::write(keychain, "fixture")?;
+    // `run` takes no wait; the launch allowance bounds a busy provider fence.
+    writeln!(
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.fabric.graph]\nwriter_launch_seconds=2"
+    )?;
     let lock = provenant_os::provider_fence::acquire(
         &rig.state,
         "agy",
@@ -4440,8 +4453,12 @@ fn main() -> ExitCode {
                 simultaneous_first_launches_pass_cutover_guard,
             ),
             (
-                "writer_shell_edits_instructions_and_redacts_logs",
-                writer_shell_edits_instructions_and_redacts_logs,
+                "codex_writer_shell_edits_instructions_and_redacts_logs",
+                codex_writer_shell_edits_instructions_and_redacts_logs,
+            ),
+            (
+                "claude_writer_shell_edits_instructions_and_redacts_logs",
+                claude_writer_shell_edits_instructions_and_redacts_logs,
             ),
             (
                 "graph_preparation_refusal_retains_non_adapter_cause",

@@ -555,7 +555,7 @@ mod tests {
             } else {
                 &[]
             };
-            let attempt = state.join("attempts/a");
+            let attempt = state.join(format!("attempts/{index}"));
             fs::create_dir_all(&attempt)?;
             for (name, class) in [("result.md", "other_state"), ("stdout.log", "attempt_logs")] {
                 let part = attempt.join(name);
@@ -585,7 +585,7 @@ mod tests {
         let mut before = BTreeMap::<String, (u64, u64, u64, i128)>::new();
         for entry in &report.entries {
             let total = before.entry(entry.class.clone()).or_default();
-            total.0 += 1;
+            total.0 += entry.count.unwrap_or(1);
             total.1 += entry.allocated_bytes;
             total.2 += entry.unshared_bytes;
             total.3 = total.3.max(entry.newest_write_ns);
@@ -602,12 +602,12 @@ mod tests {
                 .into_iter()
                 .collect()
         );
+        // Folding into rollups is free to group files as it likes; it must
+        // keep every observed count and byte, and one row per child store.
+        assert_eq!(report.totals["child_store"].count, RUNS);
         for entry in &report.entries {
-            let count = RUNS + u64::from(entry.class == "other_state");
-            assert_eq!(entry.count, Some(count));
             let total = &report.totals[&entry.class];
             assert!(total.allocated_bytes > 0);
-            assert_eq!(total.count, count);
             assert_eq!(total.allocated_bytes, expected[entry.class.as_str()]);
             assert_eq!(
                 (

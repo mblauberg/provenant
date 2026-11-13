@@ -83,7 +83,6 @@ pub(crate) fn tick_graphs(
                 let due_at_start = checkpoint.cancelled || graph_wake_due(&checkpoint, now);
                 let clock = SystemClock::new();
                 let cancel = CancelToken::new();
-                let budget = WaitBudget::cli(clock.mono_now(), 55)?;
                 let mut journal = match FileJournal::open(
                     &resolved.roots.state,
                     project,
@@ -139,6 +138,10 @@ pub(crate) fn tick_graphs(
                 if context.identity.project != project || context.in_lane {
                     return Err(EdgeError::Invalid.into());
                 }
+                // A tick has no caller wait: its launches, including writer
+                // binding, have the configured launch allowance.
+                let budget =
+                    WaitBudget::cli(clock.mono_now(), context.config.graph.writer_launch_seconds)?;
                 let factory = Factory {
                     project_attribution: crate::usage::attribution_enabled(&context.roots),
                     context,
@@ -724,14 +727,55 @@ impl Factory {
                 "Unreadable graph record retired. Identifiable attempts and inbox requests were cancelled; unidentifiable work and writer fences require inspection.".into(),
             ));
         }
-        let mut journal = FileJournal::open(
-            &self.context.roots.state,
-            self.context.identity.project,
-            id,
-            budget,
-            cancel,
-            &self.clock,
-        )
+        let open = |budget| {
+            FileJournal::open(
+                &self.context.roots.state,
+                self.context.identity.project,
+                id,
+                budget,
+                cancel,
+                &self.clock,
+            )
+        };
+        let launch_digest = document
+            .as_ref()
+            .and_then(|document| document.replay_digest());
+        let mut journal = match launch_digest {
+            // A fresh launch does not queue behind another launch that bound
+            // this name to other input: it loses the name at once and takes
+            // the next one. While the holder has not bound yet, probe in short
+            // slices so the answer arrives as soon as it binds. The same input
+            // waits, as a replay.
+            Some(digest) => loop {
+                let slice = WaitBudget::up_to(
+                    self.clock.mono_now(),
+                    provenant_core::DurationMicros::from_micros(200_000),
+                )
+                .cap_at(budget.deadline().as_mono_time());
+                match open(slice) {
+                    Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
+                        provenant_os::fs::FsError::LockTimeout { .. },
+                    )) if budget.remaining(self.clock.mono_now()).as_micros() > 0 => {
+                        let bound = FileJournal::execution(
+                            &self.context.roots.state,
+                            self.context.identity.project,
+                            id,
+                        )
+                        .ok()
+                        .flatten();
+                        match bound {
+                            Some(bound) if bound.document.replay_digest() != Some(digest) => {
+                                return Err(FacadeError::Conflict);
+                            }
+                            Some(_) => break open(budget),
+                            None => continue,
+                        }
+                    }
+                    opened => break opened,
+                }
+            },
+            None => open(budget),
+        }
         .map_err(|_| FacadeError::io("access graph journal"))?;
         if let Some(document) = &document {
             // GC and admission hold this graph's lock. If collection removed
@@ -754,6 +798,14 @@ impl Factory {
             } else {
                 None
             };
+            // A graph name holds one launch input. A new launch that finds the
+            // name bound to another digest lost a race for it; never resume or
+            // patch the other launch's graph.
+            if let (Some(bound), Some(digest)) = (&bound_execution, document.replay_digest())
+                && bound.document.replay_digest() != Some(digest)
+            {
+                return Err(FacadeError::Conflict);
+            }
             let mut ledger_warning = None;
             let integration_base = if existing {
                 journal.integration_base()

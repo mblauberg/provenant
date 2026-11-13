@@ -44,8 +44,10 @@ fn row(
         format: ledger::FORMAT.into(),
         source: Source::Settlement,
         project: ProjectId::from_bytes([3; 16]),
-        graph: None,
-        node: None,
+        // Each attempt is the only one of its own one-node graph, so a cost
+        // target names it as `graph-X` (its first id letter).
+        graph: Some(format!("graph-{}", &attempt[..1])),
+        node: Some("task".into()),
         attempt: attempt.into(),
         labels: Labels::default(),
         provider: Some(provider.into()),
@@ -148,7 +150,7 @@ fn data(rig: &TestRig, args: &[&str]) -> Result<Value> {
 #[test]
 fn cost_for_one_attempt_is_small_and_works_inside_a_lane() -> Result {
     let rig = fixture()?;
-    let output = rig.command(&["telemetry", "cost", "aaaaaaaa", "--json"])?;
+    let output = rig.command(&["telemetry", "cost", "graph-a", "--json"])?;
     assert_eq!(code(&output), 0, "{output:?}");
     assert!(
         output.stdout.bytes.len() < 1024,
@@ -158,10 +160,10 @@ fn cost_for_one_attempt_is_small_and_works_inside_a_lane() -> Result {
     let report: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(report["data"]["totals"]["usd"], "2.000000");
     assert_eq!(report["data"]["totals"]["attempts"], 1);
-    let human = rig.command(&["telemetry", "cost", "aaaaaaaa"])?;
+    let human = rig.command(&["telemetry", "cost", "graph-a/task"])?;
     assert_eq!(code(&human), 0);
     assert!(human.stdout.bytes.len() < 1024);
-    let missing = rig.command(&["telemetry", "cost", "ffffffff"])?;
+    let missing = rig.command(&["telemetry", "cost", "graph-f"])?;
     assert_ne!(code(&missing), 0);
     Ok(())
 }
@@ -185,7 +187,7 @@ fn cost_reports_unpriced_and_unattributed_attempts_without_zero_filling() -> Res
     let gap = group("unattributed").ok_or("gap group")?;
     assert_eq!(gap["unattributed_attempts"], 1);
     // An unpriced attempt on its own has no cost, not a zero one.
-    let alone = data(&rig, &["telemetry", "cost", "bbbbbbbb", "--json"])?;
+    let alone = data(&rig, &["telemetry", "cost", "graph-b", "--json"])?;
     assert!(alone["totals"]["usd"].is_null(), "{alone}");
     assert_eq!(alone["totals"]["unpriced_attempts"], 1);
     Ok(())

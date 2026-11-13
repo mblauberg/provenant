@@ -478,16 +478,16 @@ fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
     std::fs::write(&broken, b"PRIVATE_CONTENT_SENTINEL")?;
     let (output, listing) = rig.run(&["status"])?;
     assert!(output.status.success(), "{listing}");
-    let rows = listing["data"]["rows"].as_array().ok_or("rows")?;
+    let rows = listing["data"]["graphs"].as_array().ok_or("graphs")?;
     let bad = rows
         .iter()
-        .find(|row| row["id"] == "broken")
+        .find(|row| row["name"] == "broken")
         .ok_or("broken row")?;
     assert_eq!(bad["state"], "unreadable");
     let reason = bad["reason"].as_str().ok_or("reason")?;
     assert!(reason.contains("provenant stop -- broken"), "{reason}");
     assert!(reason.contains("Other graphs"), "{reason}");
-    assert!(rows.iter().any(|row| row["id"] == "healthy"));
+    assert!(rows.iter().any(|row| row["name"] == "healthy"));
     assert!(!listing.to_string().contains("PRIVATE_CONTENT_SENTINEL"));
     assert!(
         !listing
@@ -514,22 +514,30 @@ fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
         status.to_string().contains("provenant stop -- broken"),
         "{status}"
     );
-    assert_eq!(
-        status["data"]["rows"][0]["next"],
-        "provenant stop -- broken"
-    );
     assert!(!status.to_string().contains("PRIVATE_CONTENT_SENTINEL"));
     assert!(
         !status
             .to_string()
             .contains(&rig.state().display().to_string())
     );
-    let (output, stopped) = rig.run(&["stop", "--", "broken"])?;
+    // The row's own next action is the command that retires the record.
+    let next = status["data"]["rows"][0]["next"]
+        .as_str()
+        .ok_or("next action")?;
+    let words: Vec<&str> = next.split_whitespace().collect();
+    assert_eq!(words.first(), Some(&"provenant"), "{next}");
+    assert!(
+        words.contains(&"stop") && words.last() == Some(&"broken"),
+        "{next}"
+    );
+    let (output, stopped) = rig.run(&words[1..])?;
     assert!(output.status.success(), "{stopped}");
     let (_, after) = rig.run(&["status"])?;
-    let rows = after["data"]["rows"].as_array().ok_or("rows after stop")?;
-    assert!(!rows.iter().any(|row| row["id"] == "broken"));
-    assert!(rows.iter().any(|row| row["id"] == "healthy"));
+    let rows = after["data"]["graphs"]
+        .as_array()
+        .ok_or("graphs after stop")?;
+    assert!(!rows.iter().any(|row| row["name"] == "broken"), "{after}");
+    assert!(rows.iter().any(|row| row["name"] == "healthy"), "{after}");
     Ok(())
 }
 
@@ -1118,13 +1126,27 @@ fn a_named_run_replays_its_input_and_a_changed_input_takes_the_next_name() -> Re
             })
             .count())
     };
+    let records = || -> Result<Vec<Vec<u8>>> {
+        let mut paths = graph_records(&rig.state())?;
+        paths.sort();
+        Ok(paths
+            .iter()
+            .map(std::fs::read)
+            .collect::<std::io::Result<_>>()?)
+    };
     let first = run(&["--name", "once", "--set", "tag=a"])?;
     assert_eq!(first["checkpoint"]["graph_id"], "once");
-    // The same input returns the same graph and launches nothing.
+    // The same input returns the same graph and writes nothing: no node is
+    // launched or advanced by a replay.
+    let before = records()?;
     let again = run(&["--name", "once", "--set", "tag=a"])?;
     assert_eq!(again["checkpoint"]["graph_id"], "once");
     assert_eq!(again["named"]["replayed"], true, "{again}");
-    assert_eq!(again["checkpoint"]["nodes"], first["checkpoint"]["nodes"]);
+    assert_eq!(
+        records()?,
+        before,
+        "a replay leaves every graph record as it was"
+    );
     assert_eq!(graph_count()?, 1);
     // Changed input takes the next free name and leaves the first graph alone.
     let changed = run(&["--name", "once", "--set", "tag=b"])?;
@@ -1143,6 +1165,14 @@ fn a_named_run_replays_its_input_and_a_changed_input_takes_the_next_name() -> Re
     let replay = run(&["--name", "once", "--set", "tag=a"])?;
     assert_eq!(replay["checkpoint"]["graph_id"], "once");
     assert_eq!(graph_count()?, 2);
+    // An edited template is a different launch under the same input.
+    std::fs::write(
+        templates.join("stamp.toml"),
+        "kind='gate'\n[node.condition]\ntype='budget'\n[parameters.tag]\ntype='string'\ndefault='edited'\n",
+    )?;
+    let edited = run(&["--name", "once", "--set", "tag=a"])?;
+    assert_eq!(edited["checkpoint"]["graph_id"], "once-3", "{edited}");
+    assert_eq!(graph_count()?, 3);
     // Without a name the host assigns a valid, unique handle and never replays.
     let mut handles = std::collections::BTreeSet::new();
     for _ in 0..3 {
@@ -1158,7 +1188,51 @@ fn a_named_run_replays_its_input_and_a_changed_input_takes_the_next_name() -> Re
         assert!(id.starts_with("stamp-"), "{id}");
         assert!(handles.insert(id), "handles are unique");
     }
-    assert_eq!(graph_count()?, 5);
+    assert_eq!(graph_count()?, 6);
+    Ok(())
+}
+
+#[test]
+fn concurrent_named_runs_with_different_input_each_launch_under_their_own_name() -> Result {
+    let rig = GraphProject::new()?;
+    let templates = rig.project.join(".provenant/templates");
+    std::fs::create_dir_all(&templates)?;
+    std::fs::write(
+        templates.join("stamp.toml"),
+        "kind='gate'\n[node.condition]\ntype='budget'\n[parameters.tag]\ntype='string'\ndefault='none'\n",
+    )?;
+    let launches = 4;
+    let barrier = std::sync::Barrier::new(launches);
+    let ids = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..launches)
+            .map(|index| {
+                let (rig, barrier) = (&rig, &barrier);
+                scope.spawn(move || -> std::result::Result<String, String> {
+                    let tag = format!("tag={index}");
+                    barrier.wait();
+                    let (output, result) = rig
+                        .run(&["run", "stamp", "--name", "race", "--set", &tag])
+                        .map_err(|error| error.to_string())?;
+                    if !output.status.success() {
+                        return Err(result.to_string());
+                    }
+                    result["data"]["checkpoint"]["graph_id"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| result.to_string())
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().map_err(|_| "launch panicked".to_owned())?)
+            .collect::<std::result::Result<std::collections::BTreeSet<_>, _>>()
+    })?;
+    assert_eq!(ids.len(), launches, "each input owns one graph: {ids:?}");
+    assert!(
+        ids.iter().all(|id| id == "race" || id.starts_with("race-")),
+        "{ids:?}"
+    );
     Ok(())
 }
 
@@ -1448,7 +1522,7 @@ fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
 }
 
 #[test]
-fn steer_graph_and_node_refuse_ambiguous_live_attempts_before_reading_stdin() -> Result {
+fn steer_graph_and_node_refuse_an_unlaunched_attempt_before_reading_stdin() -> Result {
     let rig = GraphProject::new()?;
     let path = rig.document(&json!({"schema_version":1,"graph_id":"steer-ambiguous","nodes":[{"id":"accept","kind":"gate","access":"read_only","condition":{"type":"budget"}}]}))?;
     let output = rig.command().args(["run", "--file"]).arg(path).output()?;
@@ -1478,10 +1552,8 @@ fn steer_graph_and_node_refuse_ambiguous_live_attempts_before_reading_stdin() ->
     let attempt = json!({"key":{"graph_id":"steer-ambiguous","node_id":"accept","route_index":0},
         "launched":false,"route":{"alias":"senior"},"state":"starting","attempt_ref":null,
         "outcome":null,"launch_actor":"fixture"});
-    let mut other = attempt.clone();
-    other["key"]["route_index"] = json!(1);
     checkpoint.nodes[0].state = NodeState::Running;
-    checkpoint.nodes[0].attempts = serde_json::from_value(json!([attempt, other]))?;
+    checkpoint.nodes[0].attempts = serde_json::from_value(json!([attempt]))?;
     let clock = provenant_os::clock::SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5)?;
@@ -1490,17 +1562,13 @@ fn steer_graph_and_node_refuse_ambiguous_live_attempts_before_reading_stdin() ->
     journal.bind(execution)?;
     journal.save(&checkpoint)?;
     drop(journal);
+    // A node target names its newest attempt; one with no provider session
+    // yet is refused as a target before any steer text is read.
     for target in ["steer-ambiguous", "steer-ambiguous/accept"] {
         let (output, value) = rig.run(&["steer", target, "--text-stdin"])?;
         assert!(!output.status.success(), "{value}");
         assert_eq!(value["status"], "refused", "{value}");
         assert_eq!(value["error"]["code"], "steer_target_refused", "{value}");
-        assert!(
-            value["error"]["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("several live attempts")),
-            "{value}"
-        );
     }
     Ok(())
 }

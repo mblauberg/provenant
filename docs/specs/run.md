@@ -119,11 +119,14 @@ do not take it.
 A graph launch replays by name and digest instead. `--name` is only a handle: a
 graph name is its graph id, a lowercase letter then lowercase letters, digits
 and single hyphens, at most 48 bytes, with no trailing hyphen. The host digests
-the template (or graph document), brief, typed `--set` values, placement and
+the template name (or graph document), the resolved body of that template and
+of every template it reaches through `use`, brief, typed `--set` values, placement and
 route flags, and the source commit. The same digest under a name returns that
-graph with exit 0 and launches nothing, checking every graph in the family
+graph's status with exit 0 and launches or advances nothing, checking every graph in the family
 (`NAME`, `NAME-2`, ...). A different digest launches the next free `NAME-k`
-and says so in one line; no conflict is raised. Without `--name` the host
+and says so in one line; no conflict is raised. Concurrent launches with
+different digests that pick the same `NAME-k` both launch: the one that loses
+the name takes the next free suffix. Without `--name` the host
 assigns `TEMPLATE-K` (dots become hyphens) and never replays. A name with no
 room for a suffix within 48 bytes is refused in one line. The digest is stored
 on the graph document, so a lost reply that is repeated returns the graph.

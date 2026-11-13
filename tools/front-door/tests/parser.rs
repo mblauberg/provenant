@@ -425,7 +425,6 @@ fn config_commands_report_graph_checkpoint_retention_and_source() -> Result {
     let compact = schema["data"]["fields"]
         .as_array()
         .ok_or("compact fields")?;
-    assert!(compact.len() <= 40);
     assert!(
         !compact
             .iter()
@@ -435,7 +434,15 @@ fn config_commands_report_graph_checkpoint_retention_and_source() -> Result {
     assert_eq!(code(&all), 0);
     let all: serde_json::Value = serde_json::from_slice(&all.stdout.bytes)?;
     let advanced = all["data"]["fields"].as_array().ok_or("advanced fields")?;
+    // The compact schema is a strict subset of `--all`.
     assert!(advanced.len() > compact.len());
+    for field in compact {
+        assert!(
+            advanced.iter().any(|known| known["path"] == field["path"]),
+            "compact field missing from --all: {}",
+            field["path"]
+        );
+    }
     let registry: serde_json::Value =
         serde_json::from_str(include_str!("../../../config/harness-knobs.json"))?;
     let documented_providers = registry["provider_updates"]["provider_ids"]

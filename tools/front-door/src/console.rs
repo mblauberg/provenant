@@ -587,9 +587,11 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let hosts = vec![HostId::from_bytes([2; 16]), HostId::from_bytes([3; 16])];
+        let project = ProjectId::from_bytes([5; 16]);
+        let key = provenant_records::WorkKey::new(project, "graph", "node", 1).unwrap();
         let local = serde_json::json!({"lanes":[{
-            "lane_id":{"host":HostId::from_bytes([1; 16]),"attempt_id":AttemptId::from_bytes([4; 16])},
-            "metadata":{"attempt":{"project_id":ProjectId::from_bytes([5; 16])}}
+            "lane_id":{"host":HostId::from_bytes([1; 16]),"key":key,"attempt_id":AttemptId::from_bytes([4; 16])},
+            "metadata":{"attempt":{"project_id":project}}
         }],"next_cursor":"local-cursor","coverage":{"scope":"local"}});
         let start = Instant::now();
         let budget = Duration::from_millis(300);
