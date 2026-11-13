@@ -73,12 +73,24 @@ fn implementation_is_planned_unless_its_brief_is_already_bounded() {
     }
     // A plan result bounds the consumer; an arbitrary task's result does not.
     for source in ["plan", "task"] {
-        let nodes = compiler.compile_all(&[
+        let raw = [
             json!({"id":"source", "use":source}),
             json!({"id":"work", "use":"implement", "inputs":[{"node":"source","outputs":["result"]}],
-                "worktree":"/fixture/writer", "write_scope":["src"]})
-        ]).unwrap();
+                "worktree":"/fixture/writer", "write_scope":["src"]}),
+        ];
+        let nodes = compiler.compile_all(&raw).unwrap();
         assert_eq!(nodes[1].composite.is_some(), source != "plan");
+        // A raw composite must use the same sibling inference as a template.
+        let nested = compiler
+            .compile(
+                &json!({"id":"outer", "kind":"composite", "access":"read_only",
+            "composite":{"nodes":raw, "exports":[{"node":"work","outputs":["result"]}]}}),
+            )
+            .unwrap();
+        assert_eq!(
+            nested.composite.unwrap().nodes[1].composite.is_some(),
+            source != "plan"
+        );
     }
     let over = compiler
         .compile(

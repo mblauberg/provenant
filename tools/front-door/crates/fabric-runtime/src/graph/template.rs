@@ -16,6 +16,9 @@ pub const MAX_TEMPLATE_DEPTH: usize = 16;
 /// Copies one `over` may produce.
 pub const MAX_OVER_ITEMS: usize = 256;
 const ITEM: &str = "item";
+/// Host compilation context for a patch emitted by a planner. Every nested
+/// implementation in that patch has already been sized by its producer.
+pub(super) const BOUNDED_IMPLEMENTATION: &str = "implementation-brief-bounded";
 /// Node field naming the template a leaf was compiled from; carried to attempts.
 pub const TEMPLATE_FIELD: &str = "template";
 
@@ -1411,7 +1414,7 @@ impl<'a> Compiler<'a> {
         let planners: BTreeSet<&str> = nodes
             .iter()
             .filter(|node| {
-                node.get("plan").is_some()
+                node.get("plan").is_some_and(|plan| !plan.is_null())
                     || node
                         .get("use")
                         .and_then(Value::as_str)
@@ -1457,9 +1460,10 @@ impl<'a> Compiler<'a> {
         {
             return;
         }
-        let with = node
-            .as_object_mut()
-            .unwrap()
+        let Some(fields) = node.as_object_mut() else {
+            return;
+        };
+        let with = fields
             .entry("with")
             .or_insert_with(|| serde_json::json!({}));
         if with.is_null() {
@@ -1608,6 +1612,11 @@ impl<'a> Compiler<'a> {
                 if implementation_template(&name) {
                     parameters.insert("bounded".into(), Value::Bool(true));
                 }
+            }
+            if (implementation_template(&name) || name == "deliver")
+                && self.resolvers.contains_key(BOUNDED_IMPLEMENTATION)
+            {
+                parameters.insert("bounded".into(), Value::Bool(true));
             }
             if template.composite_behaviour == Some(CompositeBehaviour::ReviewRepair)
                 && with.get("lenses").is_none()
@@ -2293,9 +2302,10 @@ impl<'a> Compiler<'a> {
                 .and_then(|spec| spec.get_mut(key))
                 .and_then(Value::as_array_mut)
             {
-                for member in members.iter_mut() {
-                    if needs_lowering(member) {
-                        *member = self.lower_in(member, &Map::new(), stack)?;
+                let authored = self.bounded_plan_consumers(members);
+                for (member, authored) in members.iter_mut().zip(authored) {
+                    if needs_lowering(&authored) {
+                        *member = self.lower_in(&authored, &Map::new(), stack)?;
                     }
                 }
             }

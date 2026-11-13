@@ -1177,13 +1177,7 @@ pub(super) fn prepare(
         .with(Layer::Repository, &catalogue)
         .and_then(|library| library.with(Layer::Inline, &patch.templates))
         .map_err(PatchError::invalid)?;
-    let compiler = Compiler {
-        library: &library,
-        resolvers: context.resolvers,
-    };
-    let mut local = Vec::with_capacity(patch.nodes.len());
-    let mut uses = Vec::new();
-    let mut authored = compiler.bounded_plan_consumers(&patch.nodes);
+    let mut resolvers = context.resolvers.clone();
     if matches!(mode, Preparation::FinalFragment)
         && parent.is_some_and(|node| {
             node.plan.is_some()
@@ -1194,10 +1188,15 @@ pub(super) fn prepare(
                     .is_some_and(|name| name == "plan" || name.starts_with("plan."))
         })
     {
-        for node in &mut authored {
-            Compiler::mark_bounded_implementation(node);
-        }
+        resolvers.insert(template::BOUNDED_IMPLEMENTATION.into(), vec!["true".into()]);
     }
+    let compiler = Compiler {
+        library: &library,
+        resolvers: &resolvers,
+    };
+    let mut local = Vec::with_capacity(patch.nodes.len());
+    let mut uses = Vec::new();
+    let authored = compiler.bounded_plan_consumers(&patch.nodes);
     for raw in &authored {
         let mut node = compiler.compile(raw)?;
         let used = raw.get("use").and_then(Value::as_str);
