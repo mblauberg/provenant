@@ -137,6 +137,22 @@ pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::S
             plain_text(fallback["reason"].as_str().unwrap_or_default(), 160)
         ));
     }
+    if headed && data.get("writer_base").is_some() {
+        for (label, key) in [
+            ("base", "writer_base"),
+            ("committed head", "writer_head"),
+            ("publication", "publication"),
+        ] {
+            lines.push(format!(
+                "{label}: {}",
+                data[key].as_str().unwrap_or("unavailable")
+            ));
+        }
+        lines.push(format!(
+            "residual tree state: {}",
+            data["residual_tree"].as_str().unwrap_or("unavailable")
+        ));
+    }
     if headed && let Some(files) = data.get("changed_files") {
         lines.push(match files.as_array() {
             Some(paths) => {
@@ -684,6 +700,24 @@ fn output_read_part(
         data["tail_clamped"] = json!(command.tail != tail);
     }
     if matches!(command.part, Part::Result) && command.tail.is_none() && command.offset == 0 {
+        let base = run::writer_base(session.context.state_root.as_path(), &record)
+            .ok()
+            .flatten();
+        data["writer_base"] = json!(base);
+        data["writer_head"] = json!(record.head);
+        data["residual_tree"] = residual_tree_evidence(session, &record, call);
+        data["publication"] = match &record.delivery {
+            Some(delivery)
+                if matches!(delivery.state, run::WriterDeliveryState::Delivered { .. })
+                    && delivery
+                        .integration
+                        .as_ref()
+                        .is_some_and(|integration| !integration.remote.is_empty()) =>
+            {
+                json!("pushed")
+            }
+            _ => Value::Null,
+        };
         let (paths, total) = changed_file_evidence(session, &record, call);
         data["changed_files"] = paths;
         data["changed_files_total"] = total;
@@ -914,6 +948,58 @@ pub(super) fn chunk_bytes(data: &Value) -> Option<Vec<u8>> {
     }
 }
 
+/// Observe the current worktree only while it still names the recorded head.
+fn residual_tree_evidence(
+    session: &Session,
+    record: &run::AttemptRecord,
+    call: &run::Request<'_>,
+) -> Value {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    let read = || -> Option<&'static str> {
+        let task = session
+            .store
+            .request(record.run_id, call)
+            .ok()?
+            .tasks
+            .into_iter()
+            .find(|task| task.task_id == record.task_id)?;
+        let worktree = task.writer?.worktree;
+        let git = provenant_os::git::git_executable()?;
+        let executor = SystemExecutor::new(1).ok()?;
+        let run_git = |args: &[&str]| {
+            let argv: Vec<std::ffi::OsString> = std::iter::once(git.as_os_str().to_owned())
+                .chain(args.iter().map(|arg| std::ffi::OsString::from(*arg)))
+                .collect();
+            let mut options = ExecOptions::new(&argv, &worktree, Duration::from_secs(5));
+            options.stdout = StreamPolicy::Capture { limit: 65536 };
+            options.stderr = StreamPolicy::Discard;
+            options.stop_on_output_limit = true;
+            let output = executor.execute(options).ok()?;
+            if output.termination != Termination::Exit(0)
+                || output.timed_out
+                || output.cancelled
+                || output.stdout.truncated
+                || output.stdout.read_failed
+                || output.drain_truncated
+            {
+                return None;
+            }
+            Some(output.stdout.bytes)
+        };
+        let head = run_git(&["rev-parse", "--verify", "HEAD^{commit}"])?;
+        if std::str::from_utf8(&head).ok()?.trim() != record.head?.to_string() {
+            return None;
+        }
+        let status = run_git(&["status", "--porcelain", "-z", "--untracked-files=normal"])?;
+        Some(if status.is_empty() {
+            "clean (current observation)"
+        } else {
+            "uncommitted changes (current observation)"
+        })
+    };
+    json!(read())
+}
+
 /// Use the recorded base and final head, never the caller's current checkout
 /// diff. Pruned/private objects and read-only attempts may have no evidence.
 pub(super) fn changed_file_evidence(
@@ -932,7 +1018,7 @@ pub(super) fn changed_file_evidence(
             .find(|task| task.task_id == record.task_id)?;
         let writer = task.writer?;
         let project = writer.project;
-        let base: provenant_core::GitOid = task.base?.parse().ok()?;
+        let base = run::writer_base(session.context.state_root.as_path(), record).ok()??;
         let head = record.head?;
         let git = provenant_os::git::git_executable()?;
         let argv = [

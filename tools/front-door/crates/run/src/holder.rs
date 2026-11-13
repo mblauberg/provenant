@@ -485,6 +485,18 @@ pub struct RetainedGit {
     pub objects: Option<PathBuf>,
 }
 
+/// Return the base pinned by writer settlement, when its evidence is available.
+pub fn writer_base(
+    root: &std::path::Path,
+    record: &AttemptRecord,
+) -> Result<Option<provenant_core::GitOid>> {
+    let attempt = Directory::open_anchor(&root.join(format!(
+        "runs/{}/attempts/{}",
+        record.run_id, record.attempt_id
+    )))?;
+    crate::settlement::pinned_base(&attempt, RunStore::scope(record))
+}
+
 /// Read retained recovery coordinates without attempting Git import or cleanup.
 pub fn retained_git(root: &std::path::Path, record: &AttemptRecord) -> Result<RetainedGit> {
     let attempt = Directory::open_anchor(&root.join(format!(
@@ -2284,7 +2296,15 @@ impl RunStore {
             && settlement.as_ref().is_some_and(|driver| {
                 driver
                     .base()
-                    .zip(driver.head())
+                    .zip(
+                        read_sealed(attempt, "writer-terminal.json", RECORD_LIMIT)
+                            .ok()
+                            .flatten()
+                            .and_then(|raw| {
+                                crate::db::decode::<crate::writer::WriterTerminal>(&raw).ok()
+                            })
+                            .map(|terminal| terminal.head),
+                    )
                     .is_some_and(|(base, head)| base == head)
             })
         {
@@ -3439,7 +3459,12 @@ mod writer_recovery_tests {
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
         use provenant_records::wire::lane::{LaneProjectionFacts, LaneRow};
-        for (changed, dirty) in [(false, false), (true, false), (false, true)] {
+        for (changed, dirty, shared) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, false, true),
+        ] {
             let fixture = PrepareFixture::new()?;
             let execution = registered_landed_writer_fixture(&fixture)?;
             let (clock, cancel) = (clock(), CancelToken::new());
@@ -3521,11 +3546,23 @@ mod writer_recovery_tests {
                     "Partial work".into(),
                 ])?;
                 let head = std::str::from_utf8(&head)?.trim();
-                private_git(&[
-                    "update-ref".into(),
-                    launch.branch.as_str().into(),
-                    head.into(),
-                ])?;
+                if shared {
+                    // A native writer may commit through the shared worktree.
+                    fixture.git(&[
+                        "-C",
+                        fixture.writer.worktree.to_str().ok_or("worktree")?,
+                        "commit",
+                        "--allow-empty",
+                        "-m",
+                        "Shared commit",
+                    ])?;
+                } else {
+                    private_git(&[
+                        "update-ref".into(),
+                        launch.branch.as_str().into(),
+                        head.into(),
+                    ])?;
+                }
             }
             if dirty {
                 std::fs::write(

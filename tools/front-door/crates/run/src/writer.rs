@@ -2708,7 +2708,7 @@ impl WriterLaunch {
             "writer-terminal.json",
             &crate::db::bytes(&WriterTerminal {
                 schema_version: 1,
-                head: verified_tip,
+                head: tip,
             })?,
             crate::RECORD_LIMIT,
         )?;

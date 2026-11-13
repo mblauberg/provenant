@@ -677,8 +677,8 @@ specific typed terminal cause was recorded, `terminal_cause` identifies it and
 structured `reason` fields retain the full safe cause, remedy and note in every
 lane response. A writer's declared stop with no new commit records
 `terminal_cause = "stopped_no_work"`: settlement compares its pinned base and
-head, keeps `cause = "declared_stop"` and `state = "review_required"`, and says
-that it stopped with no work and acceptance remains unmet. Missing Git evidence,
+effective committed head, keeps `cause = "declared_stop"` and `state = "review_required"`, and says
+that it stopped with no work and acceptance remains unmet. The result output reports the settlement base and committed head separately from changed paths and publication; unavailable evidence remains unavailable. The residual tree state is a current observation only when the worktree still names that head; otherwise it is unavailable. Missing Git evidence,
 uncommitted edits and other failure causes do not receive this classification.
 Only human `status` rows use short labels pointing to
 `provenant output ID`. Pre-launch causes distinguish an
