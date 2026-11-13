@@ -1057,7 +1057,7 @@ fn changed_paths(
         head.to_string().into(),
         "--".into(),
     ];
-    let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
+    let mut options = ExecOptions::new(&argv, project, Duration::from_secs(5));
     options.stdout = StreamPolicy::Capture { limit: 65536 };
     options.stderr = StreamPolicy::Discard;
     options.stop_on_output_limit = true;
@@ -1274,19 +1274,28 @@ mod tests {
         let repo = temp.path().join("repo");
         let remote = temp.path().join("remote.git");
         std::fs::create_dir(&repo).unwrap();
+        use provenant_os::exec::{
+            ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+        };
         let git = |args: &[&str]| -> String {
-            let output = std::process::Command::new("git")
-                .current_dir(&repo)
-                .args(args)
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
+            let executable = provenant_os::git::git_executable().unwrap();
+            let argv: Vec<std::ffi::OsString> = std::iter::once(executable.into_os_string())
+                .chain(args.iter().map(|arg| (*arg).into()))
+                .collect();
+            let mut options = ExecOptions::new(&argv, &repo, std::time::Duration::from_secs(5));
+            options.stdout = StreamPolicy::Capture { limit: 65536 };
+            options.stderr = StreamPolicy::Capture { limit: 65536 };
+            let output = SystemExecutor::new(1).unwrap().execute(options).unwrap();
+            assert_eq!(
+                output.termination,
+                Termination::Exit(0),
                 "{}",
-                String::from_utf8_lossy(&output.stderr)
+                String::from_utf8_lossy(&output.stderr.bytes)
             );
-            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+            String::from_utf8(output.stdout.bytes)
+                .unwrap()
+                .trim()
+                .to_owned()
         };
         git(&["init", "-q"]);
         git(&["config", "user.name", "Fixture"]);
