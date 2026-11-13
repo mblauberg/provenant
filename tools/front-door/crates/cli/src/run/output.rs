@@ -137,6 +137,22 @@ pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::S
             plain_text(fallback["reason"].as_str().unwrap_or_default(), 160)
         ));
     }
+    if headed && data.get("writer_base").is_some() {
+        for (label, key) in [
+            ("base", "writer_base"),
+            ("committed head", "writer_head"),
+            ("publication", "publication"),
+        ] {
+            lines.push(format!(
+                "{label}: {}",
+                data[key].as_str().unwrap_or("unavailable")
+            ));
+        }
+        lines.push(format!(
+            "residual tree state: {}",
+            data["residual_tree"].as_str().unwrap_or("unavailable")
+        ));
+    }
     if headed && let Some(files) = data.get("changed_files") {
         lines.push(match files.as_array() {
             Some(paths) => {
@@ -684,6 +700,24 @@ fn output_read_part(
         data["tail_clamped"] = json!(command.tail != tail);
     }
     if matches!(command.part, Part::Result) && command.tail.is_none() && command.offset == 0 {
+        let base = run::writer_base(session.context.state_root.as_path(), &record)
+            .ok()
+            .flatten();
+        data["writer_base"] = json!(base);
+        data["writer_head"] = json!(record.head);
+        data["residual_tree"] = residual_tree_evidence(session, &record, call);
+        data["publication"] = match &record.delivery {
+            Some(delivery)
+                if matches!(delivery.state, run::WriterDeliveryState::Delivered { .. })
+                    && delivery
+                        .integration
+                        .as_ref()
+                        .is_some_and(|integration| !integration.remote.is_empty()) =>
+            {
+                json!("pushed")
+            }
+            _ => Value::Null,
+        };
         let (paths, total) = changed_file_evidence(session, &record, call);
         data["changed_files"] = paths;
         data["changed_files_total"] = total;
@@ -914,6 +948,58 @@ pub(super) fn chunk_bytes(data: &Value) -> Option<Vec<u8>> {
     }
 }
 
+/// Observe the current worktree only while it still names the recorded head.
+fn residual_tree_evidence(
+    session: &Session,
+    record: &run::AttemptRecord,
+    call: &run::Request<'_>,
+) -> Value {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    let read = || -> Option<&'static str> {
+        let task = session
+            .store
+            .request(record.run_id, call)
+            .ok()?
+            .tasks
+            .into_iter()
+            .find(|task| task.task_id == record.task_id)?;
+        let worktree = task.writer?.worktree;
+        let git = provenant_os::git::git_executable()?;
+        let executor = SystemExecutor::new(1).ok()?;
+        let run_git = |args: &[&str]| {
+            let argv: Vec<std::ffi::OsString> = std::iter::once(git.as_os_str().to_owned())
+                .chain(args.iter().map(|arg| std::ffi::OsString::from(*arg)))
+                .collect();
+            let mut options = ExecOptions::new(&argv, &worktree, Duration::from_secs(5));
+            options.stdout = StreamPolicy::Capture { limit: 65536 };
+            options.stderr = StreamPolicy::Discard;
+            options.stop_on_output_limit = true;
+            let output = executor.execute(options).ok()?;
+            if output.termination != Termination::Exit(0)
+                || output.timed_out
+                || output.cancelled
+                || output.stdout.truncated
+                || output.stdout.read_failed
+                || output.drain_truncated
+            {
+                return None;
+            }
+            Some(output.stdout.bytes)
+        };
+        let head = run_git(&["rev-parse", "--verify", "HEAD^{commit}"])?;
+        if std::str::from_utf8(&head).ok()?.trim() != record.head?.to_string() {
+            return None;
+        }
+        let status = run_git(&["status", "--porcelain", "-z", "--untracked-files=normal"])?;
+        Some(if status.is_empty() {
+            "clean (current observation)"
+        } else {
+            "uncommitted changes (current observation)"
+        })
+    };
+    json!(read())
+}
+
 /// Use the recorded base and final head, never the caller's current checkout
 /// diff. Pruned/private objects and read-only attempts may have no evidence.
 pub(super) fn changed_file_evidence(
@@ -921,7 +1007,6 @@ pub(super) fn changed_file_evidence(
     record: &run::AttemptRecord,
     call: &run::Request<'_>,
 ) -> (Value, Value) {
-    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
     let read = || -> Option<(Vec<Option<provenant_records::StructuredPathWire>>, usize)> {
         let task = session
             .store
@@ -932,36 +1017,9 @@ pub(super) fn changed_file_evidence(
             .find(|task| task.task_id == record.task_id)?;
         let writer = task.writer?;
         let project = writer.project;
-        let base: provenant_core::GitOid = task.base?.parse().ok()?;
+        let base = run::writer_base(session.context.state_root.as_path(), record).ok()??;
         let head = record.head?;
-        let git = provenant_os::git::git_executable()?;
-        let argv = [
-            git.into_os_string(),
-            "diff".into(),
-            "--no-ext-diff".into(),
-            "--no-textconv".into(),
-            "--name-only".into(),
-            "-z".into(),
-            base.to_string().into(),
-            head.to_string().into(),
-            "--".into(),
-        ];
-        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
-        options.stdout = StreamPolicy::Capture { limit: 65536 };
-        options.stderr = StreamPolicy::Discard;
-        options.stop_on_output_limit = true;
-        let output = SystemExecutor::new(1).ok()?.execute(options).ok()?;
-        if output.termination != Termination::Exit(0)
-            || output.timed_out
-            || output.cancelled
-            || output.stdout.truncated
-            || output.stdout.read_failed
-            || output.drain_truncated
-        {
-            return None;
-        }
-        let text = String::from_utf8(output.stdout.bytes).ok()?;
-        let all: Vec<_> = text.split('\0').filter(|path| !path.is_empty()).collect();
+        let all = changed_paths(&project, base, head)?;
         Some((
             all.iter()
                 .take(limits::OUTPUT_PATHS)
@@ -979,6 +1037,43 @@ pub(super) fn changed_file_evidence(
     read().map_or((Value::Null, Value::Null), |(paths, total)| {
         (json!(paths), json!(total))
     })
+}
+
+fn changed_paths(
+    project: &std::path::Path,
+    base: provenant_core::GitOid,
+    head: provenant_core::GitOid,
+) -> Option<Vec<String>> {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    let git = provenant_os::git::git_executable()?;
+    let argv = [
+        git.into_os_string(),
+        "diff".into(),
+        "--no-ext-diff".into(),
+        "--no-textconv".into(),
+        "--name-only".into(),
+        "-z".into(),
+        base.to_string().into(),
+        head.to_string().into(),
+        "--".into(),
+    ];
+    let mut options = ExecOptions::new(&argv, project, Duration::from_secs(5));
+    options.stdout = StreamPolicy::Capture { limit: 65536 };
+    options.stderr = StreamPolicy::Discard;
+    options.stop_on_output_limit = true;
+    let output = SystemExecutor::new(1).ok()?.execute(options).ok()?;
+    if output.termination != Termination::Exit(0)
+        || output.timed_out
+        || output.cancelled
+        || output.stdout.truncated
+        || output.stdout.read_failed
+        || output.drain_truncated
+    {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout.bytes).ok()?;
+    let all: Vec<_> = text.split('\0').filter(|path| !path.is_empty()).collect();
+    Some(all.into_iter().map(str::to_owned).collect())
 }
 
 pub(super) fn tail_start(bytes: &[u8], lines: u64) -> usize {
@@ -1173,6 +1268,69 @@ pub fn attempt_provider(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn committed_paths_follow_git_across_edits_and_push() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let remote = temp.path().join("remote.git");
+        std::fs::create_dir(&repo).unwrap();
+        use provenant_os::exec::{
+            ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+        };
+        let git = |args: &[&str]| -> String {
+            let executable = provenant_os::git::git_executable().unwrap();
+            let argv: Vec<std::ffi::OsString> = std::iter::once(executable.into_os_string())
+                .chain(args.iter().map(|arg| (*arg).into()))
+                .collect();
+            let mut options = ExecOptions::new(&argv, &repo, std::time::Duration::from_secs(5));
+            options.stdout = StreamPolicy::Capture { limit: 65536 };
+            options.stderr = StreamPolicy::Capture { limit: 65536 };
+            let output = SystemExecutor::new(1).unwrap().execute(options).unwrap();
+            assert_eq!(
+                output.termination,
+                Termination::Exit(0),
+                "{}",
+                String::from_utf8_lossy(&output.stderr.bytes)
+            );
+            String::from_utf8(output.stdout.bytes)
+                .unwrap()
+                .trim()
+                .to_owned()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.invalid"]);
+        git(&["commit", "--allow-empty", "-qm", "base"]);
+        let base: provenant_core::GitOid = git(&["rev-parse", "HEAD"]).parse().unwrap();
+        git(&["init", "--bare", "-q", remote.to_str().unwrap()]);
+        for step in 0..4 {
+            if step == 1 || step == 3 {
+                std::fs::write(repo.join(format!("file{step}")), step.to_string()).unwrap();
+                git(&["add", "."]);
+                git(&["commit", "-qm", "change"]);
+            }
+            if step == 2 {
+                std::fs::write(repo.join("uncommitted"), "edit").unwrap();
+                git(&[
+                    "push",
+                    "-q",
+                    remote.to_str().unwrap(),
+                    "HEAD:refs/heads/lane",
+                ]);
+            }
+            let head: provenant_core::GitOid = git(&["rev-parse", "HEAD"]).parse().unwrap();
+            let expected = git(&["diff", "--name-only", &base.to_string(), &head.to_string()]);
+            let paths = super::changed_paths(&repo, base, head).unwrap();
+            assert_eq!(
+                paths,
+                expected.lines().map(str::to_owned).collect::<Vec<_>>()
+            );
+        }
+        let missing: provenant_core::GitOid =
+            "1111111111111111111111111111111111111111".parse().unwrap();
+        assert!(super::changed_paths(&repo, base, missing).is_none());
+    }
+
     use super::{
         add_planner_fallback, fallback_reason_for_graph, output_summary,
         provider_error_from_result, provider_error_from_stderr,
