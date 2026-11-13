@@ -1128,6 +1128,15 @@ mod tests {
                 });
                 run.request.tasks.push(task);
                 store.create(&run, &call)?;
+                store.db.execute(
+                    "INSERT INTO attempts(id,project,graph,node,attempt,digest,actor,operation,run,task,number,refused,operation_record,revision,terminal,record,tmp_retained) \
+                     SELECT ?1,project,'refused-graph','refused-node',1,digest,actor,'refused-operation',run,task,number,1,operation_record,1,1,NULL,1 \
+                     FROM attempts WHERE id=?2",
+                    rusqlite::params![
+                        provenant_core::AttemptId::from_bytes([0xfe; 16]).to_string(),
+                        bad.to_string()
+                    ],
+                )?;
                 for id in [bad, good] {
                     store.mark_starting(
                         &store.record(id, &call)?,
@@ -2188,7 +2197,7 @@ impl crate::RunStore {
         stalled: &dyn Fn(&Directory, Scope) -> bool,
     ) -> Result<Vec<(provenant_core::AttemptId, crate::Reconciled)>> {
         self.run(run, call)?;
-        let mut query = self.db.prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 AND (terminal=0 OR tmp_retained=1) ORDER BY sequence")?;
+        let mut query = self.db.prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 AND refused=0 AND (terminal=0 OR tmp_retained=1) ORDER BY sequence")?;
         let rows = query.query_map(
             rusqlite::params![run.to_string(), self.context.project_id.to_string()],
             |row| row.get::<_, String>(0),

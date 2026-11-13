@@ -9,6 +9,18 @@ use provenant_records::{AttemptFact, AttemptFile, OutputRef, ReviewerFact, Revie
 use rusqlite::{OptionalExtension, params};
 use std::collections::VecDeque;
 
+type AttemptIndexKey = (String, String, u32);
+type AttemptIndexRow = (
+    Vec<u8>,
+    String,
+    String,
+    i64,
+    i64,
+    bool,
+    String,
+    AttemptIndexKey,
+);
+
 #[cfg(test)]
 thread_local! {
     /// Runs once on the next `record_row`, after the attempt row is read
@@ -809,7 +821,7 @@ impl RunStore {
         } else {
             None
         };
-        let (raw, run_id, task_id, number, revision, terminal, operation, key): (Vec<u8>, String, String, i64, i64, bool, String, (String, String, u32)) = self.db.query_row("SELECT record,run,task,number,revision,terminal,operation,graph,node,attempt FROM attempts WHERE id=?1 AND project=?2 AND refused=0", params![id.to_string(), self.context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, (r.get(7)?, r.get(8)?, r.get(9)?)))).optional()?.ok_or(RunError::NotFound)?;
+        let (raw, run_id, task_id, number, revision, terminal, operation, key): AttemptIndexRow = self.db.query_row("SELECT record,run,task,number,revision,terminal,operation,graph,node,attempt FROM attempts WHERE id=?1 AND project=?2 AND refused=0", params![id.to_string(), self.context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, (r.get(7)?, r.get(8)?, r.get(9)?)))).optional()?.ok_or(RunError::NotFound)?;
         #[cfg(test)]
         if let Some(hook) = AFTER_ATTEMPT_ROW.with(|hook| hook.borrow_mut().take()) {
             hook();
