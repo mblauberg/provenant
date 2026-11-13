@@ -3504,3 +3504,21 @@ fn reset_lock_named_symlink_refuses_before_any_store_is_removed() -> Result {
     );
     Ok(())
 }
+
+#[test]
+fn reset_recovers_retired_store_companions_after_format_two_receipt() -> Result {
+    let (rig, stage) = reset_fixture()?;
+    set_receipt_format(&rig, 2)?;
+    fs::remove_file(rig.state.join("run.sqlite3"))?;
+    fs::write(
+        rig.state.join("work-index.sqlite3-wal"),
+        "retired companion",
+    )?;
+    let before = snapshot(&rig.state)?;
+    assert_eq!(code(&reset_install(&rig, &stage, &[])?), 6);
+    assert_eq!(snapshot(&rig.state)?, before);
+    let result = reset_install(&rig, &stage, &["--reset-state"])?;
+    assert_eq!(code(&result), 0, "{result:?}");
+    assert!(!rig.state.join("work-index.sqlite3-wal").exists());
+    Ok(())
+}

@@ -102,6 +102,8 @@ or dropped stores in a root marked by `install/` trigger `STATE_FORMAT_BREAK`
 A dry run describes the reset. Receipt errors and newer formats refuse rather
 than guessing. Header-only `user_version` inspection also detects foreign stores
 recreated after a format-2 receipt, so an acknowledged reset can recover.
+Retired work-index files and companions also trigger this recovery; no format-2
+writer creates them.
 
 Reset follows source verification, every account preview and release smoke
 checks. The plan is rechecked before removal. Old peer and tick agents are

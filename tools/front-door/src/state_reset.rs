@@ -88,7 +88,12 @@ fn foreign_header(root: &Directory, name: &str, expected: u32) -> io::Result<boo
 }
 
 fn foreign_store_headers(store: &Directory) -> io::Result<bool> {
+    // Work index has no format-2 schema or writer. Any remaining file (even
+    // only a companion after interruption) belongs to the retired class.
     let mut foreign = false;
+    for suffix in std::iter::once("").chain(COMPANIONS.iter().copied()) {
+        foreign |= metadata(store, OsStr::new(&format!("work-index.sqlite3{suffix}")))?.is_some();
+    }
     for (name, version) in [
         ("run.sqlite3", 12),
         (
