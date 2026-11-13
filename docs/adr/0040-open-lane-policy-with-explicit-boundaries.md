@@ -125,14 +125,16 @@ state. Configured-host native checks cover actual enforcement. A lane returning
 
 ## Sandbox mode
 
-Writers on trusted routes run without Seatbelt, like the same CLI started by
-hand, so they can share host build caches and services. A lane stays sandboxed
-when its route is listed in `domains.run.sandboxed_routes` (the OpenCode Zen
-tier, whose models may train on prompts), when a lane sandboxed by its route,
-its parent or the knob started it or admitted it into a graph,
-when its network is narrowed, or, under the default `auto`, when it is
-read-only, because only the sandbox enforces those. The `lanes.sandbox` knob
-sets the rest. The
+Every lane kind (writers and read-only lanes alike) runs without Seatbelt by
+default, like the same CLI started by hand, so they can share host build caches
+and services. `[domains.run] sandboxed_routes` defaults to empty; users can add
+route prefixes whose lanes should sandbox under default policy. Explicit `--sandbox`
+opts into Seatbelt confinement.
+
+An explicit `--no-sandbox` / knob `off` takes precedence over route floors,
+narrowed-network floors, and parent floors where Provenant decides them, warning
+of the dropped restriction. An OS-inherited sandbox cannot be dropped and is
+always reported honestly as effective. The
 [configuration runbook](../runbooks/configuration.md#lane-sandbox-mode) owns
 the rules and what holds in each mode.
 

@@ -101,7 +101,7 @@ hand-written graph; `--explain` inspects it before launch.
 | **Usage meter** | `provenant quota` and an optional macOS menu bar app show every account's windows, reset times, credits and staleness in one place. |
 | **Your harnesses** | One install wires Fabric MCP, skills and instructions into Claude Code, Codex, Cursor, Agy and OpenCode. Claude Code also gets managed hooks and automatic account switching. |
 | **Routing** | Named pools (`utility`, `junior`, `senior`, `principal`, `writing`, `design`) choose among models by weight, scaled by each provider's pacing. |
-| **Lane modes** | Each lane runs `read-only` or `worktree-write`. Writers on trusted routes run unsandboxed and share host caches; read-only lanes, narrowed-network lanes and listed routes (the OpenCode Zen tier) run under a macOS sandbox profile. `--sandbox` and `--no-sandbox` override per run. Writers get one registered worktree. |
+| **Lane modes** | Each lane runs `read-only` or `worktree-write`. Lanes run unsandboxed by default and share host caches; `--sandbox` opts into a macOS Seatbelt sandbox profile, and `--no-sandbox` overrides route, network and parent floors. Writers get one registered worktree. |
 | **Host-side delivery** | The host verifies a writer's final commit, pushes it to the branch you name and can open a pull request. |
 | **Fabric** | Messages, claims and activity between sessions and agents, plus dispatch to configured peer hosts over SSH. |
 | **Records and history** | Every run, task and attempt is stored with its route, account, knobs and output. Lanes can be listed, read, resumed or cancelled later. |

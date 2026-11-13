@@ -357,15 +357,9 @@ pub(super) fn sandbox_mode(
     task: &run::TaskRequest,
     plan: &ConfinedPlan,
 ) -> provenant_confinement::run_config::SandboxMode {
-    use provenant_confinement::run_config::{SandboxInputs, SandboxMode, SandboxSource};
-    if !cfg!(target_os = "macos") {
-        return SandboxMode {
-            sandboxed: true,
-            source: SandboxSource::Platform,
-        };
-    }
+    use provenant_confinement::run_config::SandboxInputs;
     let permissions = plan.permissions();
-    host.sandbox_for(SandboxInputs {
+    let mode = host.sandbox_for(SandboxInputs {
         route,
         knob: task
             .profile
@@ -380,7 +374,13 @@ pub(super) fn sandbox_mode(
         }),
         network_narrowed: permissions.network != NetworkAccess::Open,
         read_only: matches!(permissions.mode, AccessMode::ReadOnly),
-    })
+        os_sandboxed: provenant_confinement::run_config::current_process_is_sandboxed(),
+        platform_supported: cfg!(target_os = "macos"),
+    });
+    if let Some(warning) = &mode.warning {
+        eprintln!("provenant: {warning}");
+    }
+    mode
 }
 
 /// Tell the lane its mode (`PROVENANT_SANDBOX=on|off`) and record it, with
