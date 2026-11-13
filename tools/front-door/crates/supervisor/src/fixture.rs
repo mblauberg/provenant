@@ -969,10 +969,24 @@ pub fn dispatch() -> io::Result<bool> {
             if let Ok(profile) = fixture_path(&args, 4) {
                 extra.push(profile.into_os_string());
             }
-            ChildGuard::new(
-                command_with_args("s2-setsid-descendant", &extra, &root, true)?.spawn()?,
-            )
-            .detach();
+            let mut command = if extra.len() == 1 {
+                use std::os::unix::process::CommandExt;
+                // Ordinary detached services do not use our utility runner's
+                // descriptor sweep. Preserve that behaviour in this fixture.
+                let mut command = Command::new(std::env::current_exe()?);
+                command
+                    .args(["--fixture", "s2-setsid-descendant"])
+                    .args(&extra);
+                // SAFETY: after fork this hook only calls setsid, which takes
+                // no pointers, allocates nothing and affects only this child.
+                unsafe {
+                    command.pre_exec(provenant_os::sys::fixture_create_session);
+                }
+                command
+            } else {
+                command_with_args("s2-setsid-descendant", &extra, &root, true)?
+            };
+            ChildGuard::new(command.spawn()?).detach();
             if scenario == "s2-registered-detach-provider" {
                 let owner = [fixture_path(&args, 5)?.into_os_string()];
                 ChildGuard::new(
