@@ -1002,8 +1002,8 @@ fn resolve_graph_steer_target(
         return Ok(SteerResolution::NoMatch);
     };
     let project = factory.context.identity.project;
-    let graphs = if let Some(graph) = graph_filter {
-        vec![graph]
+    let graphs = if let Some(graph) = &graph_filter {
+        vec![graph.clone()]
     } else {
         FileJournal::graph_ids(&factory.context.roots.state, project)
             .map_err(graph_journal_error)?
@@ -1047,6 +1047,22 @@ fn resolve_graph_steer_target(
     }
     match matches.len() {
         0 => match candidate_error {
+            Some(error) if graph_filter.is_none() => {
+                // The inbox owns bare local attempt IDs, including continuations
+                // not yet reflected in their graph checkpoint. Give that owner
+                // precedence over errors from unrelated ref-less graph rows.
+                let edge = provenant_cli::run::Edge {
+                    roots: &factory.context.roots,
+                    home: &factory.home,
+                    assets: &factory.assets,
+                    cwd: &factory.cwd,
+                };
+                match provenant_cli::run::attempt_provider(&edge, attempt_id) {
+                    Ok(_) => Ok(SteerResolution::NoMatch),
+                    Err(fail) if fail.kind == provenant_run::ErrorKind::NotFound => Err(error),
+                    Err(fail) => Err(fail_error(fail)),
+                }
+            }
             Some(error) => Err(error),
             None => Ok(SteerResolution::NoMatch),
         },
@@ -2966,6 +2982,48 @@ mod tests {
             };
             assert_eq!(reference, original);
         }
+        // A continuation can be retained before the graph checkpoint replaces
+        // its predecessor reference. The inbox still owns that bare ID.
+        for (checkpoint_ref, graph_resolves) in [
+            (None, true),
+            (
+                Some(format!(
+                    "{}/{}",
+                    factory.context.identity.host,
+                    provenant_core::AttemptId::from_bytes([98; 16])
+                )),
+                false,
+            ),
+        ] {
+            checkpoint.nodes[0].attempts[0].attempt_ref = checkpoint_ref;
+            let mut journal = FileJournal::open(
+                &roots.state,
+                project,
+                graph,
+                budget,
+                &cancel,
+                &factory.clock,
+            )?;
+            journal.save(&checkpoint)?;
+            drop(journal);
+            let resolution = resolve_graph_steer_target(&factory, attempt_id, budget, &cancel)?;
+            match (graph_resolves, resolution) {
+                (true, SteerResolution::Resolved { reference }) => assert_eq!(reference, original),
+                (false, SteerResolution::NoMatch) => {}
+                (_, other) => return Err(format!("unexpected resolution: {other:?}").into()),
+            }
+        }
+        checkpoint.nodes[0].attempts[0].attempt_ref = None;
+        let mut journal = FileJournal::open(
+            &roots.state,
+            project,
+            graph,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.save(&checkpoint)?;
+        drop(journal);
         // With no established owner, the candidate failure remains visible.
         let unknown = provenant_core::AttemptId::from_bytes([99; 16]).to_string();
         assert!(resolve_graph_steer_target(&factory, &unknown, budget, &cancel).is_err());
