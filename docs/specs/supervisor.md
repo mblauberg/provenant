@@ -82,7 +82,8 @@ remain explicit uncertainty. The guardian continues retaining unresolved
 custody; a timeout alone never authorises settlement or an unrelated signal.
 - Test: `crates/supervisor/src/process_os/provider.rs::lane_descriptors_are_cloexec`;
   `::orphaned_provider_descendant_does_not_retain_writer_flock`;
-  `crates/supervisor/tests/custody.rs::guardian_loss_never_invents_exit_or_releases_the_reservation`
+  `crates/supervisor/tests/custody.rs::unsandboxed_detached_service_does_not_block_settlement`;
+  `::guardian_loss_never_invents_exit_or_releases_the_reservation`
 
 ### Durable exit publication
 

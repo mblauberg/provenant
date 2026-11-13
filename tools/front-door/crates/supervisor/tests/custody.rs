@@ -1798,6 +1798,34 @@ fn escapee_is_ended_only_when_the_host_reports_no_nested_runs(root: &Path) -> Re
     Ok(())
 }
 #[cfg(target_os = "macos")]
+fn unsandboxed_detached_service_does_not_block_settlement(root: &Path) -> Result<()> {
+    std::fs::create_dir(root.join("PROVENANT_STATE_DIR"))?;
+    std::fs::write(
+        root.join("PROVENANT_STATE_DIR/s2-provider-exit-first"),
+        b"gate",
+    )?;
+    let ready_path = root.join("native-detached.sock");
+    let listener = UnixListener::bind(&ready_path)?;
+    let (_writer, handle) = start(
+        root,
+        "native-detached",
+        "s2-detach-provider",
+        &[ready_path.into_os_string()],
+        CapturePlan::default(),
+    )?;
+    let mut stream = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    byte(&mut stream, b'R')?;
+    let service = process_identity(read_pid_line(&mut stream)?)?;
+    assert_eq!(service.session_id, service.pid);
+    let exit = exited(&handle)?;
+    assert!(!exit.unresolved_cleanup, "{exit:?}");
+    // No sandbox mark or ancestry gives cleanup authority over this service.
+    assert_eq!(process_identity(service.pid)?, service);
+    drop(stream);
+    wait_for_identity_absence(&service)?;
+    Ok(())
+}
+#[cfg(target_os = "macos")]
 fn detached_descendant_in_the_attempt_sandbox_is_found_and_ended(root: &Path) -> Result<()> {
     let ready_path = root.join("mark-ready.sock");
     let ready_listener = UnixListener::bind(&ready_path)?;
@@ -3219,6 +3247,11 @@ const CASES: &[Case] = &[
     (
         "escapee_is_ended_only_when_the_host_reports_no_nested_runs",
         escapee_is_ended_only_when_the_host_reports_no_nested_runs,
+    ),
+    #[cfg(target_os = "macos")]
+    (
+        "unsandboxed_detached_service_does_not_block_settlement",
+        unsandboxed_detached_service_does_not_block_settlement,
     ),
     #[cfg(target_os = "macos")]
     (

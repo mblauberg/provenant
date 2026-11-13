@@ -946,8 +946,8 @@ pub fn dispatch() -> io::Result<bool> {
             wait_for_eof(&mut ready)?;
         }
         "s2-detach-provider" | "s2-registered-detach-provider" => {
-            // Start a session-leading descendant in the attempt's sandbox, then
-            // exit at once so no census can follow the parent edge. The
+            // Start a session-leading descendant, optionally in the attempt's
+            // sandbox, then exit before a census follows the parent edge. The
             // registered variant also leaves a nested owner whose custody the
             // macOS census cannot prove, which forbids stops by descent.
             let warm_index = if scenario == "s2-detach-provider" {
@@ -965,10 +965,10 @@ pub fn dispatch() -> io::Result<bool> {
                 }
             }
             let root = std::env::current_dir()?;
-            let extra = [
-                fixture_path(&args, 3)?.into_os_string(),
-                fixture_path(&args, 4)?.into_os_string(),
-            ];
+            let mut extra = vec![fixture_path(&args, 3)?.into_os_string()];
+            if let Ok(profile) = fixture_path(&args, 4) {
+                extra.push(profile.into_os_string());
+            }
             ChildGuard::new(
                 command_with_args("s2-setsid-descendant", &extra, &root, true)?.spawn()?,
             )
