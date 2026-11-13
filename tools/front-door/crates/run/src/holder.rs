@@ -566,6 +566,52 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
         record_budget_warning(&attempt, context.attempt_id, provider, tokens, budget)
             .map_err(custody_error)
     }
+    fn budget_clean_point(&self, raw: &[u8]) -> custody::Result<bool> {
+        let (context, store) =
+            HolderContext::open_with_clock(raw, self.clock).map_err(custody_error)?;
+        let cancel = CancelToken::new();
+        let call = call(self.clock, &cancel).map_err(custody_error)?;
+        let record = store
+            .record(context.attempt_id, &call)
+            .map_err(custody_error)?;
+        let request = store.request(record.run_id, &call).map_err(custody_error)?;
+        let Some(writer) = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == record.task_id)
+            .and_then(|task| task.writer.as_ref())
+        else {
+            return Ok(false);
+        };
+        let attempt = store
+            .attempt_dir(record.run_id, record.attempt_id, false)
+            .map_err(custody_error)?;
+        Ok(crate::prepare_writer_with_facts(
+            writer,
+            &store.writer_registry,
+            record.project_id,
+            &store.repo_facts,
+        )
+        .and_then(|writer| writer.budget_clean_point(&attempt))
+        .unwrap_or(false))
+    }
+    fn budget_crossed(&self, raw: &[u8], tokens: u64, budget: u64) -> custody::Result<()> {
+        let (context, store) =
+            HolderContext::open_with_clock(raw, self.clock).map_err(custody_error)?;
+        let attempt = store
+            .attempt_dir(context.run_id, context.attempt_id, false)
+            .map_err(custody_error)?;
+        crate::artifacts::seal(
+            &attempt,
+            "budget-overrun.json",
+            &crate::db::bytes(
+                &serde_json::json!({"schema_version":1,"tokens":tokens,"budget":budget}),
+            )
+            .map_err(custody_error)?,
+            RECORD_LIMIT,
+        )
+        .map_err(custody_error)
+    }
     fn terminal(
         &self,
         context: &[u8],
@@ -972,10 +1018,74 @@ impl RunStore {
             completion.custody(),
             call,
         );
+        self.prepare_budget_wrap_up(record.attempt_id, call)?;
         Ok(Finished {
             record: self.record(record.attempt_id, call)?,
             release_permitted: true,
         })
+    }
+
+    /// Admit exactly one same-session wrap-up before releasing the predecessor.
+    /// The ordinary settlement reaction launches this queued run after custody
+    /// drops; recovery replays the same operation rather than creating another.
+    pub fn prepare_budget_wrap_up(
+        &self,
+        id: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<Option<RunId>> {
+        let record = self.record(id, call)?;
+        let is_budget = matches!(&record.state, AttemptState::Terminal { outcome: Outcome::ReviewRequired, extra, .. }
+            if extra.get("terminal_cause").and_then(serde_json::Value::as_str) == Some("token_budget"));
+        if !is_budget || !soft_budget_wrap_up(&record, &record.usage) {
+            return Ok(None);
+        }
+        let request = self.request(record.run_id, call)?;
+        let task = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == record.task_id)
+            .ok_or(RunError::NotFound)?;
+        if task.writer.is_none() || task.profile.extra.contains_key("budget_wrap_up") {
+            return Ok(None);
+        }
+        let budget = record
+            .limits
+            .as_ref()
+            .and_then(|limits| limits.token_budget.as_ref())
+            .ok_or(RunError::Validation("wrap-up budget missing"))?;
+        let policy = record
+            .limits
+            .as_ref()
+            .and_then(|limits| limits.budget_policy)
+            .unwrap_or_default();
+        let remaining = budget_ceiling(budget.value, policy.grace)
+            .saturating_sub(crate::token_budget::used(&record.usage).unwrap_or(budget.value));
+        if remaining == 0 {
+            return Ok(None);
+        }
+        let digest = provenant_records::CanonicalV1::record_digest("budget-wrap-up", 1, &id)?;
+        let mut run_bytes = [0; 16];
+        run_bytes.copy_from_slice(&digest.as_bytes()[..16]);
+        let mut attempt_bytes = [0; 16];
+        attempt_bytes.copy_from_slice(&digest.as_bytes()[16..]);
+        let input = crate::Resume {
+            prior: id,
+            expected_generation: 0,
+            operation_id: provenant_core::OperationId::parse(&format!("budget-wrap-up-{id}"))
+                .map_err(|_| RunError::Validation("wrap-up operation"))?,
+            run_id: RunId::from_bytes(run_bytes),
+            attempt_id: AttemptId::from_bytes(attempt_bytes),
+            prompt: format!(
+                "The writer token target has been crossed. You have {remaining} fresh tokens left in the grace allowance. Finish at a clean point now: commit your work, push your branch, and return the final handoff. Continue this same task and provider session. This is the only budget wrap-up continuation; the remaining allowance is a hard stop."
+            ),
+            created_at: match record.state {
+                AttemptState::Terminal { finished_at, .. } => finished_at,
+                _ => return Ok(None),
+            },
+            extend: Vec::new(),
+        };
+        self.resume_budget_wrap_up(&input, remaining, call)
+            .map(|run| Some(run.run_id))
     }
 
     /// Reconcile a failed import as a final failure once custody proves that
@@ -1564,7 +1674,9 @@ impl RunStore {
             })
         });
         // Valid natural completion wins over a late stop request.
-        if decoded.outcome != Outcome::Succeeded {
+        if decoded.outcome != Outcome::Succeeded
+            && !(exit.stop_reason == Some(StopReason::TokenBudget) && decoded.complete)
+        {
             match exit.stop_reason {
                 Some(
                     StopReason::WallDeadline | StopReason::TokenBudget | StopReason::ContextHandoff,
@@ -1643,6 +1755,24 @@ impl RunStore {
                 _ => limit,
             });
         }
+        if decoded.outcome == Outcome::TimedOut
+            && exit.stop_reason == Some(StopReason::TokenBudget)
+            && soft_budget_wrap_up(&record, &decoded.usage)
+        {
+            decoded.outcome = Outcome::ReviewRequired;
+            decoded.reason = Some("token budget crossed; continuing this provider session once to commit, push and report within the remaining grace".into());
+        }
+        if let Some(bytes) = read_sealed(attempt, "budget-overrun.json", RECORD_LIMIT)? {
+            let overrun: serde_json::Value = crate::db::decode(&bytes)?;
+            let note = format!(
+                "token budget crossed: {} fresh tokens, target {}",
+                overrun["tokens"], overrun["budget"]
+            );
+            decoded.reason = Some(match decoded.reason.take() {
+                Some(reason) => format!("{reason}; {note}"),
+                None => note,
+            });
+        }
         if let Some(budget) = record
             .limits
             .as_ref()
@@ -1704,7 +1834,9 @@ impl RunStore {
                             recovery
                                 .ok_or(RunError::Validation("writer terminal custody missing"))?,
                             driver,
-                            exit.stop_reason == Some(StopReason::TokenBudget),
+                            exit.stop_reason == Some(StopReason::TokenBudget)
+                                && decoded.outcome == Outcome::TimedOut
+                                && !soft_budget_wrap_up(&record, &decoded.usage),
                         )
                     })
                 })
@@ -4139,11 +4271,20 @@ mod writer_recovery_tests {
         assert_eq!(kept.note, "claimed done");
     }
 
+    #[test]
+    fn budget_wrap_up_resumes_once_with_remaining_grace_and_natural_completion_wins()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        budget_stop_case(BudgetStopCase::WrapUp)?;
+        budget_stop_case(BudgetStopCase::Natural)
+    }
+
     #[derive(Clone, Copy)]
     enum BudgetStopCase {
         /// An operation Git left in progress.
         InProgress(&'static str),
         Commit,
+        WrapUp,
+        Natural,
         Native {
             dirty: bool,
         },
@@ -4166,12 +4307,27 @@ mod writer_recovery_tests {
         run.request.tasks[0].writer = Some(fixture.writer.clone());
         store.create(&run, &call)?;
         let id = run.attempts[0].attempt_id;
-        store.mark_starting(
+        let limits = if matches!(case, BudgetStopCase::WrapUp | BudgetStopCase::Natural) {
+            provenant_records::LaneLimits {
+                token_budget: Some(provenant_records::Limit::new(
+                    1_000_000,
+                    provenant_records::LimitSource::Default,
+                    provenant_records::LimitStrength::Default,
+                )),
+                budget_policy: Some(provenant_records::BudgetPolicy::default()),
+                ..Default::default()
+            }
+        } else {
+            Default::default()
+        };
+        store.mark_starting_with_priority(
             &store.record(id, &call)?,
             &route(),
             &[],
             &Default::default(),
             None,
+            None,
+            &limits,
             &call,
         )?;
         let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
@@ -4400,9 +4556,68 @@ mod writer_recovery_tests {
             )?,
             RECORD_LIMIT,
         )?;
-        let fake =
-            crate::dispatch_tests::Fake::with_observed(Some(route()), Some(Outcome::TimedOut));
+        let mut fake = crate::dispatch_tests::Fake::with_observed(
+            Some(route()),
+            Some(if matches!(case, BudgetStopCase::Natural) {
+                Outcome::Succeeded
+            } else {
+                Outcome::TimedOut
+            }),
+        );
+        if matches!(case, BudgetStopCase::WrapUp | BudgetStopCase::Natural) {
+            fake.codex_usage = Some(UsageRecord {
+                uncached_input: Some(1_000_001),
+                ..Default::default()
+            });
+        }
         let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
+        if matches!(case, BudgetStopCase::WrapUp | BudgetStopCase::Natural) {
+            assert!(read_sealed(&attempt, "budget-commit.json", RECORD_LIMIT)?.is_none());
+            assert!(
+                std::fs::read_to_string(fixture.writer.worktree.join("budget-work.txt"))?
+                    .contains("uncommitted work")
+            );
+            if matches!(case, BudgetStopCase::Natural) {
+                assert!(!matches!(
+                    finished.state,
+                    AttemptState::Terminal {
+                        outcome: Outcome::TimedOut,
+                        ..
+                    }
+                ));
+                assert!(store.prepare_budget_wrap_up(id, &call)?.is_none());
+            } else {
+                assert!(matches!(
+                    finished.state,
+                    AttemptState::Terminal {
+                        outcome: Outcome::ReviewRequired,
+                        ..
+                    }
+                ));
+                let successor = store
+                    .prepare_budget_wrap_up(id, &call)?
+                    .ok_or("wrap-up successor")?;
+                assert_eq!(store.prepare_budget_wrap_up(id, &call)?, Some(successor));
+                let request = store.request(successor, &call)?;
+                assert_eq!(request.parent, Some(id));
+                assert!(
+                    request.fresh_continuation.is_none(),
+                    "wrap-up must resume the provider session"
+                );
+                let task = &request.tasks[0];
+                let (budget, policy) = crate::writer_budget_limits(
+                    &provenant_confinement::run_config::RunConfig::default(),
+                    "p",
+                    &task.profile,
+                    task.context.as_ref(),
+                    None,
+                );
+                assert_eq!(budget.ok_or("remaining grace")?.value, 99_999);
+                assert_eq!(policy.action, provenant_records::BudgetAction::Stop);
+                assert_eq!(store.record(id, &call)?.superseded_by.is_some(), true);
+            }
+            return Ok(());
+        }
         let AttemptState::Terminal {
             extra,
             outcome,
@@ -5820,4 +6035,23 @@ mod friction_tests {
             "cancelled during delivery"
         );
     }
+}
+
+fn soft_budget_wrap_up(record: &AttemptRecord, usage: &UsageRecord) -> bool {
+    let Some(limits) = &record.limits else {
+        return false;
+    };
+    let Some(budget) = &limits.token_budget else {
+        return false;
+    };
+    let policy = limits.budget_policy.unwrap_or_default();
+    policy.action == provenant_records::BudgetAction::WrapUp
+        && crate::token_budget::used(usage).is_some_and(|used| {
+            used > budget.value && used < budget_ceiling(budget.value, policy.grace)
+        })
+}
+
+fn budget_ceiling(budget: u64, grace: provenant_records::BudgetGrace) -> u64 {
+    let extra = u128::from(budget) * u128::from(grace.millionths()) / 1_000_000;
+    budget.saturating_add(u64::try_from(extra).unwrap_or(u64::MAX))
 }

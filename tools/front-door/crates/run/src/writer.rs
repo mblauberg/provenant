@@ -306,6 +306,75 @@ impl WriterLaunch {
         status_paths(&output)
     }
 
+    /// A budget clean point needs both no edits and a locally recorded push of
+    /// the effective lane head. An unreadable Git fact is not proof of either.
+    pub(crate) fn budget_clean_point(&self, attempt: &Directory) -> Result<bool> {
+        let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+        let (head, native) = self.effective_head(attempt, self.base)?;
+        let repo = self.worktree.repo();
+        let source = crate::objects::bound_source(attempt)?
+            .ok_or(RunError::Validation("clean point needs private Git state"))?;
+        let index_dir = if native {
+            repo.private_dir()
+        } else {
+            &source.refs
+        };
+        index_dir.read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
+        let index = index_dir.current_path()?.join("index");
+        let objects = source.objects.current_path()?;
+        let alternate = repo.common_git_dir().join("objects");
+        let clean = crate::objects::with_clean_view(&git, repo, head, None, |_, path| {
+            let run = |args: &[&str]| {
+                crate::objects::execute_bounded(
+                    &git,
+                    path,
+                    repo.root_path(),
+                    &args.iter().map(OsString::from).collect::<Vec<_>>(),
+                    None,
+                    crate::objects::Execution {
+                        object_directory: Some(&objects),
+                        index_file: Some(&index),
+                        alternate_directory: Some(&alternate),
+                        ..Default::default()
+                    },
+                )
+            };
+            run(&["update-ref", "HEAD", &head.to_string()])?;
+            Ok(run(&[
+                "--no-optional-locks",
+                "--work-tree",
+                repo.root_path()
+                    .to_str()
+                    .ok_or(RunError::Validation("worktree path"))?,
+                "status",
+                "--porcelain",
+                "-z",
+                "-uall",
+            ])?
+            .is_empty())
+        })?;
+        if !clean {
+            return Ok(false);
+        }
+        let upstream_dir = if native {
+            repo.common_git_dir().to_path_buf()
+        } else {
+            source.refs.current_path()?
+        };
+        let upstream = crate::objects::command(
+            &git,
+            &upstream_dir,
+            repo.root_path(),
+            &[
+                "rev-parse".into(),
+                "--verify".into(),
+                format!("{}@{{upstream}}", self.branch.as_str()).into(),
+            ],
+            None,
+        )?;
+        Ok(std::str::from_utf8(&upstream).is_ok_and(|tip| tip.trim() == head.to_string()))
+    }
+
     /// Select the lane head while settlement holds writer exclusion. Native Git
     /// advances the shared branch without updating the private candidate ref.
     fn effective_head(&self, attempt: &Directory, base: GitOid) -> Result<(GitOid, bool)> {

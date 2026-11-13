@@ -871,6 +871,20 @@ impl RunStore {
                 .map_err(|_| RunError::Validation("attempt work key"))?,
         );
         validate_attempt(&record)?;
+        // A budget wrap-up is one run-internal same-session successor. Graph
+        // observations already follow this field and wait on the successor.
+        record.superseded_by = self
+            .db
+            .query_row(
+                "SELECT id FROM attempts WHERE continues=?1 AND operation=?2 AND refused=0",
+                params![id.to_string(), format!("budget-wrap-up-{id}")],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|id| {
+                AttemptId::parse(&id).map_err(|_| RunError::Validation("wrap-up successor ID"))
+            })
+            .transpose()?;
         let receipt: Option<(i64, Vec<u8>)> = self
             .db
             .query_row(
@@ -909,6 +923,18 @@ impl RunStore {
             if delivery.head.is_some() && delivery.head == record.head {
                 record.delivery = Some(delivery);
             }
+        }
+        if let Ok(attempt) = self.attempt_dir(record.run_id, id, false)
+            && let Some(raw) = crate::artifacts::read_sealed_observed(
+                &attempt,
+                "budget-overrun.json",
+                RECORD_LIMIT,
+            )?
+        {
+            record.extra.insert(
+                "budget_overrun".into(),
+                crate::db::decode::<serde_json::Value>(&raw)?,
+            );
         }
         let (checkpoint, checkpoint_readable) = match self.attempt_dir(record.run_id, id, false) {
             Ok(directory) => {

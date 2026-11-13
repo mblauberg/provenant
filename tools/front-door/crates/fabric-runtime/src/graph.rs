@@ -843,6 +843,7 @@ fn node_context(plan: &PlannedGraph, node: &PlannedNode) -> provenant_records::r
     let graph = plan.context.as_ref().unwrap_or(&defaults);
     let context = node.context.as_ref().unwrap_or(&defaults);
     provenant_records::run::WorkContext {
+        budget_sources: context.budget_sources.clone(),
         graph_template_launch: false,
         writer_predecessor: None,
         extra: Default::default(),

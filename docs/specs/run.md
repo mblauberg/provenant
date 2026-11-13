@@ -774,50 +774,63 @@ presence alone does not block a restart.
 
 ## A writer stops on a token budget
 
-A writer lane is bounded by a token budget, not by the wall clock alone: the
-host `[domains.run] writer_token_budget` (default 500000, 0 for none), replaced
-per project under `[domains.run.projects."PROJECT_ID"]`. The guardian sums the
-fresh tokens the provider reports while the attempt runs, one figure per
-provider call; cache reads do not count. When the sum passes the budget it stops
-the provider with the typed stop `token_budget`, and the attempt settles
-`timed_out` with a reason naming the budget and its source (`project`, `host` or
-`default`); a host setting equal to the default still reports `host`. If the
-lane stopped with uncommitted work, the host attempts a bounded commit with
-message `stopped on budget`, after custody proves no provider process can still
-write, and before publishing the branch. Settlement selects the lane's effective
-head first, including commits made through native Git, and uses its matching
-index for the snapshot. A clean worktree creates no snapshot; a snapshot of
-remaining edits descends from that head. The resulting head is durably pinned
-for import and replay. An in-progress merge is left to the
-existing stopped-merge handling. Settlement reports a skipped or failed commit;
-a Git error does not replace the budget outcome. At 90% the host uses the
-existing steer capability matrix. All current lane adapters are
-`continuation_only` or `unsupported`: the warning records an unsupported
-control receipt, and is not delivered to the lane. `provenant run --explain`
-shows the budget, its source and the providers it is enforced for. Claude
-enforces the budget from live usage. Codex reports usage in each
-`turn.completed` frame, so the guardian can stop it after a completed turn
-passes the budget; it cannot interrupt a turn mid-flight. Completed-turn
-accounting subtracts cached input. Other providers without live usage are also
-not enforced, and launch warnings or receipt notes report this. A real Codex
-writer given a budget of 1 finished its whole first turn (about 149,000 tokens
-over 132 seconds and ten commits) before the host stopped it with
-`terminal_cause: token_budget`, so a Codex lane can overrun its budget by up to
-one turn. Publishing the branch here means importing the lane's commits to the
-local branch; the stop itself does not push to the remote. A cherry-pick, revert
-or rebase in progress is left uncommitted like a merge, with a settlement note.
-Time a lane spends queued for
-a build slot stays off the wall deadline, up to `lanes.slot_wait_seconds`
-(default 7200) in total.
-- Why (default): a long writer should stop on what it spends, and a stuck lane must not
-  wait or run forever.
-- Test: `crates/supervisor/src/machine.rs::a_token_budget_stop_is_a_typed_stop`;
-  `crates/providers/src/claude.rs::live_usage_counts_each_call_once_with_fresh_input`;
-  `crates/providers/src/codex.rs::a_completed_turn_reports_its_fresh_input_and_output`;
-  `crates/run/src/token_budget.rs::fresh_tokens_count_towards_the_budget_and_cache_reads_are_ignored`;
+A writer's fresh-token target defaults to 1,000,000 (0 disables it). Cache
+reads do not count. Each field resolves independently, nearest first: run
+(`--set attempt.token_budget=N`, `--set attempt.on_budget="warn"`,
+`--set attempt.budget_grace=0.10`), template attempt fields, tier,
+project, host, then the compiled default. `lanes.token_budget`,
+`lanes.budget_action` and `lanes.budget_grace` are the harness knobs. Host and
+project domain settings are `writer_token_budget`, `writer_budget_action` and
+`writer_budget_grace` under `domains.run` and `domains.run.projects.PROJECT`;
+`domains.run.writer_budget_tiers.TIER` supplies `token_budget`, `on_budget`
+and `budget_grace` for a routing tier. `run --explain` and the attempt's status
+limits retain the winning source for the target, action and grace separately.
+
+The default action is `wrap_up`, with grace 0.10. On a crossing while work is
+dirty, the host ends the provider invocation and resumes the same provider
+session once through the existing resume path. The short continuation prompt
+asks the writer to commit, push and report, and states its remaining fresh-token
+allowance: target × (1 + grace), less fresh tokens already spent. The resumed
+attempt has a hard allowance and cannot request another budget wrap-up.
+Admitting the successor precedes custody release; launching it follows release
+through the ordinary settlement reaction, including recovery replay. Graph
+observations follow that successor. No live steer or fresh graph restart is
+claimed. If the reported usage has already exhausted grace, the hard stop
+applies immediately. Provider turns may therefore overrun the target or grace.
+
+`warn` records the crossing on the attempt, exposes it in status and notifies
+the submitting chair when one is bound; it never stops the lane for tokens.
+`stop` preserves the hard-stop behaviour for dirty unfinished work. At either
+hard boundary, the typed stop is `token_budget` and an interrupted attempt
+settles `timed_out`. After custody proves the provider absent, the host attempts
+a bounded snapshot of remaining edits and publishes the resulting local branch.
+A Git operation in progress is preserved, and a failed or skipped snapshot is
+reported without replacing the budget outcome. The host does not push a budget
+snapshot to a remote.
+
+Natural completion takes precedence over every action. A clean point, meaning
+no uncommitted paths and a locally recorded upstream equal to the effective
+lane head, also leaves the lane to finish on its own outcome. Neither case
+creates a budget snapshot or reclassifies completion as `timed_out`. Unknown
+Git state is not proof of a clean point. The first wrap-up boundary preserves
+edits without a snapshot and settles as a resumable intermediate outcome; the
+successor's natural completion is the lane's result.
+
+The guardian counts one fresh usage figure per provider call. Claude reports
+live usage; Codex reports completed-turn usage and cannot be interrupted by
+tokens mid-turn. Providers without live usage get an advisory target only.
+At 90% the host records the warning through the existing control capability
+matrix; current lane adapters cannot receive that warning as a live steer.
+Time queued for a build slot stays off the wall deadline, up to
+`lanes.slot_wait_seconds` (default 7200) in total.
+- Why (default): preserve a writer's valuable wrap-up while bounding extra spend.
+- Test: `crates/supervisor/src/guardian/tests.rs::budget_actions_preserve_clean_points_and_natural_completion`;
+  `crates/run/src/limits.rs::every_budget_field_resolves_independently_and_zero_remains_an_override`;
+  `crates/run/src/holder.rs::budget_wrap_up_resumes_once_with_remaining_grace_and_natural_completion_wins`;
   `crates/run/src/holder.rs::writer_token_budget_stop_commits_uncommitted_work_and_publishes_branch`;
-  `crates/confinement/src/run_config.rs::a_host_setting_equal_to_the_default_still_reports_host`
-- Owner: `crates/supervisor/src/guardian.rs`, `crates/run/src/token_budget.rs`
+  `crates/run/src/token_budget.rs::fresh_tokens_count_towards_the_budget_and_cache_reads_are_ignored`
+- Owner: `crates/supervisor/src/guardian.rs`, `crates/run/src/token_budget.rs`,
+  `crates/run/src/holder.rs`, `crates/run/src/limits.rs`
 
 ## A writer hands off at a context threshold
 
@@ -836,8 +849,9 @@ one becomes a stopped-early handoff naming the gap. The host commits nothing;
 commits and uncommitted edits stay on the worktree. The graph then restarts
 the node in place, fresh, on the same worktree with that handoff in its brief,
 on another eligible route as for any stopped writer; each restart spends the
-graph's continuation budget. A token budget stop takes precedence when both
-are due.
+graph's continuation budget. A dirty-work budget boundary takes precedence
+when both are due. Budget wrap-up resumes the same provider session and is
+separate from this fresh context handoff; `warn` never requests a token stop.
 - Why (default off): whether a fresh restart keeps enough working state is
   untested, so restart stays off until a trial shows it does not lower
   completion.

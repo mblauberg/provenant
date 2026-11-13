@@ -1,7 +1,10 @@
 //! The limits of one lane, resolved once. Enforcement, the lane preamble and
 //! `status` all read the record this builds, so they cannot disagree.
 use provenant_confinement::run_config::RunConfig;
-use provenant_records::{LaneLimits, Limit, LimitSource, LimitStrength, run::TaskRequest};
+use provenant_records::{
+    BudgetAction, BudgetGrace, BudgetPolicy, LaneLimits, Limit, LimitSource, LimitStrength,
+    run::{HarnessProfile, RequestedRoute, TaskRequest, WorkContext},
+};
 use std::path::Path;
 
 /// The task setting that carries `retry --extend` raises to the next launch.
@@ -33,19 +36,25 @@ pub fn lane_limits(
             .knob_u64(name)
             .and_then(|value| nonzero(Limit::new(value, source, LimitStrength::Default)))
     };
-    let token_budget = writer
-        .then(|| {
-            RunConfig::read(state_root)
-                .unwrap_or_default()
-                .writer_token_budget_for(project)
-        })
-        .and_then(nonzero)
-        .map(|mut limit| {
-            if !live {
-                limit.strength = LimitStrength::Advisory;
+    let config = RunConfig::read(state_root).unwrap_or_default();
+    let tier = task
+        .context
+        .as_ref()
+        .and_then(|context| context.tier.as_deref())
+        .or_else(|| match &task.route {
+            RequestedRoute::Named { name, .. } | RequestedRoute::Review { name, .. } => {
+                Some(name.as_str())
             }
-            limit
+            _ => None,
         });
+    let (token_budget, budget_policy) =
+        writer_budget_limits(&config, project, &task.profile, task.context.as_ref(), tier);
+    let token_budget = writer.then_some(token_budget).flatten().map(|mut limit| {
+        if !live {
+            limit.strength = LimitStrength::Advisory;
+        }
+        limit
+    });
     let timeout = task.provider_timeout_seconds;
     let deadline_seconds = match caps.runtime_seconds {
         Some(cap) if cap < timeout => {
@@ -59,6 +68,7 @@ pub fn lane_limits(
     };
     let mut limits = LaneLimits {
         token_budget,
+        budget_policy: writer.then_some(budget_policy),
         context_handoff: writer
             .then(|| knob("lanes.context_handoff_tokens", LimitSource::Template))
             .flatten(),
@@ -75,6 +85,90 @@ pub fn lane_limits(
         }
     }
     limits
+}
+
+/// Resolve the budget and each policy field independently. This is shared by
+/// admission and `run --explain`, so both show the same winning sources.
+pub fn writer_budget_limits(
+    config: &RunConfig,
+    project: &str,
+    profile: &HarnessProfile,
+    context: Option<&WorkContext>,
+    tier: Option<&str>,
+) -> (Option<Limit>, BudgetPolicy) {
+    let host = config.writer_token_budget_for(project);
+    let (action, action_source) = config.writer_budget_action_for(project);
+    let (grace, grace_source) = config.writer_budget_grace_for(project);
+    let mut budgets = vec![(host.source, host.value)];
+    let mut actions = vec![(action_source, action)];
+    let mut graces = vec![(grace_source, grace)];
+    if let Some(tier) = tier.and_then(|tier| config.writer_budget_tier_for(tier)) {
+        if let Some(value) = tier.token_budget {
+            budgets.push((LimitSource::Tier, value));
+        }
+        if let Some(value) = tier.on_budget {
+            actions.push((LimitSource::Tier, value));
+        }
+        if let Some(value) = tier.budget_grace {
+            graces.push((LimitSource::Tier, value));
+        }
+    }
+    let source = |field: &str, knob: &str| -> LimitSource {
+        context
+            .and_then(|context| context.budget_sources.get(field).copied())
+            .or_else(|| {
+                profile
+                    .extra
+                    .get("budget_knob_sources")
+                    .and_then(|sources| sources.get(knob))
+                    .and_then(|source| serde_json::from_value(source.clone()).ok())
+            })
+            .unwrap_or(LimitSource::Default)
+    };
+    let source_budget = source("token_budget", "lanes.token_budget");
+    if source_budget != LimitSource::Default
+        && let Some(value) = profile.knob_u64("lanes.token_budget")
+    {
+        budgets.push((source_budget, value));
+    }
+    let source_action = source("on_budget", "lanes.budget_action");
+    if source_action != LimitSource::Default
+        && let Some(value) = profile
+            .knobs
+            .get("lanes.budget_action")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<BudgetAction>(value).ok())
+    {
+        actions.push((source_action, value));
+    }
+    let source_grace = source("budget_grace", "lanes.budget_grace");
+    if source_grace != LimitSource::Default
+        && let Some(value) = profile
+            .knobs
+            .get("lanes.budget_grace")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<BudgetGrace>(value).ok())
+    {
+        graces.push((source_grace, value));
+    }
+    let mut budget = Limit::resolve(budgets, LimitStrength::Default);
+    let mut policy = BudgetPolicy::resolve(actions, graces);
+    if let Some(remaining) = profile
+        .extra
+        .get("budget_wrap_up")
+        .and_then(|wrap| wrap.get("remaining"))
+        .and_then(serde_json::Value::as_u64)
+    {
+        budget = Some(Limit::new(
+            remaining,
+            budget
+                .as_ref()
+                .map_or(LimitSource::Launch, |budget| budget.source),
+            LimitStrength::Default,
+        ));
+        policy.action = BudgetAction::Stop;
+    }
+    (budget.filter(|budget| budget.value > 0), policy)
 }
 
 /// Limits with only a deadline, for tests that need an allowance.
@@ -155,7 +249,10 @@ mod tests {
         let bare = lane_limits(&task, bare.path(), "p", "claude", HostCaps::default());
         assert_eq!(
             found(&bare.token_budget),
-            Some((500_000, LimitSource::Default))
+            Some((
+                provenant_confinement::run_config::DEFAULT_WRITER_TOKEN_BUDGET,
+                LimitSource::Default
+            ))
         );
     }
 
@@ -169,7 +266,15 @@ mod tests {
             crate::launch::capture_plan(&task, &limits).token_budget,
             777
         );
-        assert!(limits.preamble().contains("after 777 fresh tokens"));
+        assert!(
+            limits
+                .preamble()
+                .contains(&limits.token_budget.as_ref().unwrap().value.to_string())
+        );
+        assert_eq!(
+            crate::launch::capture_plan(&task, &limits).budget_action,
+            limits.budget_policy.unwrap().action
+        );
         // A provider that reports no live usage is told, not stopped.
         let blind = lane_limits(&task, state.path(), "p", "opencode", HostCaps::default());
         assert_eq!(crate::launch::capture_plan(&task, &blind).token_budget, 0);
@@ -199,5 +304,77 @@ mod tests {
             Some((600, LimitSource::Host))
         );
         assert!(limits.preamble().contains("after 5000 fresh tokens"));
+    }
+}
+
+#[cfg(test)]
+mod budget_invariants {
+    use super::*;
+
+    #[test]
+    fn every_budget_field_resolves_independently_and_zero_remains_an_override() {
+        let config: RunConfig = toml_edit::de::from_str(
+            r#"
+writer_token_budget = 100
+writer_budget_action = "stop"
+writer_budget_grace = 0.01
+[projects.p]
+writer_token_budget = 200
+writer_budget_action = "warn"
+writer_budget_grace = 0.02
+[writer_budget_tiers.junior]
+token_budget = 300
+on_budget = "stop"
+budget_grace = 0.03
+"#,
+        )
+        .unwrap();
+        let mut profile = HarnessProfile::default();
+        let mut context = WorkContext::default();
+        let (budget, policy) =
+            writer_budget_limits(&config, "p", &profile, Some(&context), Some("junior"));
+        assert_eq!(budget.unwrap().source, LimitSource::Tier);
+        assert_eq!(
+            (policy.action_source, policy.grace_source),
+            (LimitSource::Tier, LimitSource::Tier)
+        );
+        for source in [LimitSource::Template, LimitSource::Launch] {
+            context.budget_sources = ["token_budget", "on_budget", "budget_grace"]
+                .into_iter()
+                .map(|field| (field.into(), source))
+                .collect();
+            profile
+                .knobs
+                .insert("lanes.token_budget".into(), 400.into());
+            profile
+                .knobs
+                .insert("lanes.budget_action".into(), serde_json::json!("wrap_up"));
+            profile
+                .knobs
+                .insert("lanes.budget_grace".into(), serde_json::json!(0.04));
+            let (budget, policy) =
+                writer_budget_limits(&config, "p", &profile, Some(&context), Some("junior"));
+            assert_eq!(
+                (
+                    budget.unwrap().source,
+                    policy.action_source,
+                    policy.grace_source
+                ),
+                (source, source, source)
+            );
+        }
+        profile.knobs.insert("lanes.token_budget".into(), 0.into());
+        assert!(
+            writer_budget_limits(&config, "p", &profile, Some(&context), Some("junior"))
+                .0
+                .is_none()
+        );
+        profile
+            .extra
+            .insert("budget_wrap_up".into(), serde_json::json!({"remaining":17}));
+        let (budget, policy) =
+            writer_budget_limits(&config, "p", &profile, Some(&context), Some("junior"));
+        assert_eq!(budget.unwrap().value, 17);
+        assert_eq!(policy.action, BudgetAction::Stop);
     }
 }

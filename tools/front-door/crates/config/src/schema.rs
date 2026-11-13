@@ -248,6 +248,7 @@ pub fn schema<T: Serialize>(
                 Kind::CensusIgnoreList => "census_ignore_list",
                 Kind::Enum => "enum",
                 Kind::Int => "int",
+                Kind::Fraction => "fraction",
             },
             min: spec.min,
             max: spec.max,

@@ -962,6 +962,9 @@ pub struct CapturePlan {
     /// it runs. 0 is no budget.
     #[serde(default)]
     pub token_budget: u64,
+    /// The resolved budget action; warnings never authorise a stop.
+    #[serde(default)]
+    pub budget_action: provenant_records::BudgetAction,
     /// Context size, in tokens one provider call sent, at which a writer is
     /// stopped so a fresh attempt continues from its handoff. 0 is off; a
     /// provider that reports no context figure is never stopped for it.
@@ -994,6 +997,7 @@ impl Default for CapturePlan {
             root_flush_ms: crate::machine::DEFAULT_ROOT_FLUSH_MS,
             silence_ms: default_silence_ms(),
             token_budget: 0,
+            budget_action: provenant_records::BudgetAction::default(),
             context_handoff: 0,
             slot_wait_ms: default_slot_wait_ms(),
         }

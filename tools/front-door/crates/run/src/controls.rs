@@ -2255,7 +2255,7 @@ impl RunStore {
     /// once; `expected_generation` is 0 before that and 1 after. The route,
     /// access and timeout come from the prior task, never from the caller.
     pub fn resume(&self, input: &Resume, call: &Request<'_>) -> Result<RunRecord> {
-        self.resume_mode(input, call, None, None, None)
+        self.resume_mode(input, call, None, None, None, None)
             .map(|(run, _)| run)
     }
     /// Same lineage, route, authority and writer, without provider continuation.
@@ -2265,7 +2265,7 @@ impl RunStore {
         reason: &str,
         call: &Request<'_>,
     ) -> Result<RunRecord> {
-        self.resume_mode(input, call, Some(reason), None, None)
+        self.resume_mode(input, call, Some(reason), None, None, None)
             .map(|(run, _)| run)
     }
     /// A fresh fallback may replace a vanished or reassigned writer only with
@@ -2278,8 +2278,15 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<RunRecord> {
         let branch = self.fresh_writer_branch(input, writer)?;
-        self.resume_mode(input, call, Some(reason), Some((writer, &branch)), None)
-            .map(|(run, _)| run)
+        self.resume_mode(
+            input,
+            call,
+            Some(reason),
+            Some((writer, &branch)),
+            None,
+            None,
+        )
+        .map(|(run, _)| run)
     }
     /// Prepare against the canonical continuation request before recording it.
     /// Replays retain their accepted IDs and use the ordinary launch path.
@@ -2300,7 +2307,19 @@ impl RunStore {
             Some(reason),
             writer.zip(branch.as_deref()),
             Some(providers),
+            None,
         )
+    }
+    /// Budget wrap-up is a same-session continuation with a single remaining
+    /// allowance; its sealed profile prevents another wrap-up continuation.
+    pub(crate) fn resume_budget_wrap_up(
+        &self,
+        input: &Resume,
+        remaining: u64,
+        call: &Request<'_>,
+    ) -> Result<RunRecord> {
+        self.resume_mode(input, call, None, None, None, Some(remaining))
+            .map(|(run, _)| run)
     }
     fn fresh_writer_branch(&self, input: &Resume, writer: &WriterRequest) -> Result<String> {
         let launch = crate::prepare_writer_with_facts(
@@ -2503,6 +2522,7 @@ impl RunStore {
         fresh: Option<&str>,
         writer: Option<(&WriterRequest, &str)>,
         providers: Option<&dyn Providers>,
+        budget_remaining: Option<u64>,
     ) -> Result<(RunRecord, Option<PreparedStart>)> {
         let prior = self.record(input.prior, call)?;
         if !matches!(prior.state, AttemptState::Terminal { .. }) {
@@ -2557,7 +2577,13 @@ impl RunStore {
                 fresh_continuation: fresh.map(str::to_owned),
                 schema_version: 1,
                 tasks: vec![TaskRequest {
-                    context: None,
+                    context: budget_remaining
+                        .and(task.context.clone())
+                        .map(|mut context| {
+                            // A run-internal resume is not a new graph launch ordinal.
+                            context.attempt = None;
+                            context
+                        }),
                     extra: extensions(task, &input.extend),
                     build_heavy: task.build_heavy,
                     title: None,
@@ -2565,7 +2591,16 @@ impl RunStore {
                     head: task.head.clone(),
                     source_head: task.source_head.clone(),
                     base_ref: task.base_ref.clone(),
-                    profile: task.profile.clone(),
+                    profile: {
+                        let mut profile = task.profile.clone();
+                        if let Some(remaining) = budget_remaining {
+                            profile.extra.insert(
+                                "budget_wrap_up".into(),
+                                serde_json::json!({"remaining":remaining}),
+                            );
+                        }
+                        profile
+                    },
                     task_id: prior.task_id,
                     prompt_digest: provenant_records::CanonicalV1::file_digest(
                         input.prompt.as_bytes(),

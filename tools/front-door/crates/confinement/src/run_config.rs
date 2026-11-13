@@ -5,7 +5,7 @@ use crate::permissions::{
 };
 use crate::review_exempt::{MAX_PATTERNS, ReviewExempt, valid_pattern};
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
-use provenant_records::{Limit, LimitSource, LimitStrength};
+use provenant_records::{BudgetAction, BudgetGrace, Limit, LimitSource, LimitStrength};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -79,6 +79,15 @@ pub struct RunConfig {
     /// number.
     #[serde(default)]
     pub writer_token_budget: Option<u64>,
+    /// Per-risk-tier writer token budget overrides.
+    #[serde(default)]
+    pub writer_budget_tiers: BTreeMap<String, WriterBudgetTier>,
+    /// Default response when a writer passes its token budget.
+    #[serde(default)]
+    pub writer_budget_action: Option<BudgetAction>,
+    /// Fraction above the token budget allowed before the host acts.
+    #[serde(default)]
+    pub writer_budget_grace: Option<BudgetGrace>,
     /// Warning threshold for encoded bytes in the applied write-grant ledger.
     #[serde(default = "default_write_grant_limit_bytes")]
     pub write_grant_limit_bytes: u64,
@@ -190,7 +199,7 @@ pub fn current_process_is_sandboxed() -> bool {
     provenant_os::sys::profile::current_process_is_sandboxed()
 }
 /// Default writer token budget.
-pub const DEFAULT_WRITER_TOKEN_BUDGET: u64 = 500_000;
+pub const DEFAULT_WRITER_TOKEN_BUDGET: u64 = 1_000_000;
 fn default_profile_limit_bytes() -> usize {
     512 * 1024
 }
@@ -238,9 +247,23 @@ pub struct ProjectRunConfig {
     /// Replaces the host writer token budget for this project.
     #[serde(default)]
     pub writer_token_budget: Option<u64>,
+    /// Replaces the host writer budget action for this project.
+    #[serde(default)]
+    pub writer_budget_action: Option<BudgetAction>,
+    /// Replaces the host writer budget grace for this project.
+    #[serde(default)]
+    pub writer_budget_grace: Option<BudgetGrace>,
     /// Replaces the host `sandbox_cache_reads` for this project.
     #[serde(default)]
     pub sandbox_cache_reads: Option<Vec<PathBuf>>,
+}
+/// Host or project defaults for a writer's token budget at one risk tier.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WriterBudgetTier {
+    pub token_budget: Option<u64>,
+    pub on_budget: Option<BudgetAction>,
+    pub budget_grace: Option<BudgetGrace>,
 }
 fn default_review_exempt() -> Vec<String> {
     DEFAULT_REVIEW_EXEMPT
@@ -259,6 +282,9 @@ impl Default for RunConfig {
             profile_limit_bytes: default_profile_limit_bytes(),
             grant_limit: default_grant_limit(),
             writer_token_budget: None,
+            writer_budget_tiers: BTreeMap::new(),
+            writer_budget_action: None,
+            writer_budget_grace: None,
             write_grant_limit_bytes: default_write_grant_limit_bytes(),
             argv_prompt_limit_bytes: default_argv_prompt_limit_bytes(),
             continuation_copy_limit_bytes: default_continuation_copy_limit_bytes(),
@@ -474,6 +500,43 @@ impl RunConfig {
         ];
         Limit::resolve(layers.into_iter().flatten(), LimitStrength::Default)
             .unwrap_or_else(|| Limit::new(0, LimitSource::Default, LimitStrength::Default))
+    }
+
+    /// The action and its source for `project`, with project taking precedence
+    /// over host and the compiled `wrap_up` default.
+    pub fn writer_budget_action_for(&self, project: &str) -> (BudgetAction, LimitSource) {
+        if let Some(action) = self
+            .projects
+            .get(project)
+            .and_then(|settings| settings.writer_budget_action)
+        {
+            (action, LimitSource::Project)
+        } else if let Some(action) = self.writer_budget_action {
+            (action, LimitSource::Host)
+        } else {
+            (BudgetAction::default(), LimitSource::Default)
+        }
+    }
+
+    /// The action grace and its source for `project`, with project taking
+    /// precedence over host and the compiled 0.10 default.
+    pub fn writer_budget_grace_for(&self, project: &str) -> (BudgetGrace, LimitSource) {
+        if let Some(grace) = self
+            .projects
+            .get(project)
+            .and_then(|settings| settings.writer_budget_grace)
+        {
+            (grace, LimitSource::Project)
+        } else if let Some(grace) = self.writer_budget_grace {
+            (grace, LimitSource::Host)
+        } else {
+            (BudgetGrace::default(), LimitSource::Default)
+        }
+    }
+
+    /// The explicitly configured host override for `tier`, if one exists.
+    pub fn writer_budget_tier_for(&self, tier: &str) -> Option<&WriterBudgetTier> {
+        self.writer_budget_tiers.get(tier)
     }
 
     /// The review-exempt paths that apply to `project`: its own list when it
@@ -692,6 +755,14 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("profile_limit_bytes", "int"),
     FieldMetadata::new("grant_limit", "int"),
     FieldMetadata::new("writer_token_budget", "int"),
+    FieldMetadata::new("writer_budget_tiers.{tier}.token_budget", "int"),
+    FieldMetadata::enumeration(
+        "writer_budget_tiers.{tier}.on_budget",
+        &["wrap_up", "warn", "stop"],
+    ),
+    FieldMetadata::new("writer_budget_tiers.{tier}.budget_grace", "fraction"),
+    FieldMetadata::enumeration("writer_budget_action", &["wrap_up", "warn", "stop"]),
+    FieldMetadata::new("writer_budget_grace", "fraction"),
     FieldMetadata::int(
         "write_grant_limit_bytes",
         1,

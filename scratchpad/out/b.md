@@ -1,0 +1,44 @@
+# Slice B: soft writer budgets (#3257)
+
+Implemented `wrap_up` (default), `warn` and `stop`, the 1,000,000-token default,
+and 0.10 default grace. Budget, action and grace independently resolve run >
+template > tier > project > host > default. Zero disables the target. Explanation
+and status retain source metadata; status also reads the sealed overrun record.
+Warn records the crossing and posts a bound-chair inbox notice without stopping
+for tokens. Missing notice delivery is a guardian warning.
+
+Wrap-up uses the existing RunStore same-session resume, admitted once before
+predecessor custody releases and launched by the durable settlement reaction
+once custody drops. Its prompt carries the remaining grace and its persisted
+profile makes that allowance a hard stop. The graph follows the run-internal
+successor. Natural completion wins and skips budget snapshots; a clean effective
+index plus a locally recorded pushed upstream lets the writer finish itself.
+Clean-point checks use a clean Git view with the effective private/native index.
+
+Supporting files outside the owned list: records/run.rs and fabric-runtime/graph.rs
+carry typed budget source metadata; run controls/reader/writer and CLI holder/launch
+connect resume, overrun status, clean points and forwarded holder hooks;
+src graph_interface and fabric interface/owner/settlement carry typed controls,
+explanation and the ordinary resume launch. config/schema.rs exposes fractional
+knobs. These are narrow prerequisites for the owned outcome. No other worktree,
+shared branch, pull request, issue, or installed host config was changed.
+
+Tests: added the action × clean point × natural completion invariant, independent
+per-field layer/zero invariants, and a settlement regression for one same-session
+continuation with remaining grace and no snapshot. Rewrote the three #3251
+census/journal timing rows to test coalescing, eventual observation, spacing and
+independent retry, rather than exact walk counts and timing samples. Rephrased
+budget accounting test naming and preamble assertions to avoid hard-stop prose
+coupling. No tests deleted.
+
+Verification at implementation: cargo fmt and git diff --check. The sole local
+cargo check -p provenant --tests found an omitted Kind::Fraction schema match arm;
+fixed it and audited the other Kind matches. It was not rerun. Tests, clippy and
+nextest were not run locally; pushed-branch CI owns compilation and execution.
+Integrated review/full CI remain the batch chair's gate. Current branch/CI evidence
+is in the final schema-v2 handoff collected by the host.
+
+Residual adapter: the existing RunStore::resume path and its predecessor/successor
+records are deliberately reused for same-provider-session continuation. No new
+provider adapter or fresh graph-restart mechanism was introduced. The integration
+chair should reconcile this narrow bridge with the other identity cut-over slices.

@@ -16,6 +16,8 @@ pub enum LimitSource {
     Project,
     /// The template the node expands from.
     Template,
+    /// The risk tier selected for this lane.
+    Tier,
     /// The launch request, set by the chair or the owner.
     Launch,
 }
@@ -49,6 +51,7 @@ impl LimitSource {
             Self::Host => "host",
             Self::Project => "project",
             Self::Template => "template",
+            Self::Tier => "tier",
             Self::Launch => "launch",
         }
     }
@@ -59,9 +62,135 @@ impl LimitSource {
             Self::Default => 0,
             Self::Host => 1,
             Self::Project => 2,
-            Self::Template => 3,
-            Self::Launch => 4,
+            Self::Tier => 3,
+            Self::Template => 4,
+            Self::Launch => 5,
         }
+    }
+}
+
+/// What the host does when a writer passes its token budget.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetAction {
+    /// Continue once through the existing resume path to let the writer wrap up.
+    #[default]
+    WrapUp,
+    /// Report the crossed budget without stopping the lane.
+    Warn,
+    /// Stop the lane as soon as the supervisor can enforce the limit.
+    Stop,
+}
+
+impl BudgetAction {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WrapUp => "wrap_up",
+            Self::Warn => "warn",
+            Self::Stop => "stop",
+        }
+    }
+}
+
+/// A bounded fractional grace above a token budget, stored in millionths so
+/// policy records retain equality and serialize the user-facing fraction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BudgetGrace(u64);
+
+impl BudgetGrace {
+    pub const SCALE: u64 = 1_000_000;
+    pub const DEFAULT: Self = Self(100_000);
+
+    /// Construct a grace fraction in the inclusive range 0..=1.
+    pub fn from_fraction(value: f64) -> Option<Self> {
+        let scaled = value * Self::SCALE as f64;
+        if !value.is_finite() || value < 0.0 || !scaled.is_finite() || scaled > u64::MAX as f64 {
+            return None;
+        }
+        Some(Self(scaled.round() as u64))
+    }
+
+    /// Return the fraction represented by this fixed-point value.
+    pub const fn as_fraction(self) -> f64 {
+        self.0 as f64 / Self::SCALE as f64
+    }
+
+    /// Return the integer millionths used by this fixed-point value.
+    pub const fn millionths(self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for BudgetGrace {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl Serialize for BudgetGrace {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_f64(self.as_fraction())
+    }
+}
+
+impl<'de> Deserialize<'de> for BudgetGrace {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = f64::deserialize(deserializer)?;
+        Self::from_fraction(value).ok_or_else(|| {
+            serde::de::Error::custom("budget grace must be a finite nonnegative fraction")
+        })
+    }
+}
+
+/// The resolved soft-budget behaviour and the winning source for each field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BudgetPolicy {
+    pub action: BudgetAction,
+    pub action_source: LimitSource,
+    pub grace: BudgetGrace,
+    pub grace_source: LimitSource,
+}
+
+impl Default for BudgetPolicy {
+    fn default() -> Self {
+        Self {
+            action: BudgetAction::default(),
+            action_source: LimitSource::Default,
+            grace: BudgetGrace::default(),
+            grace_source: LimitSource::Default,
+        }
+    }
+}
+
+impl BudgetPolicy {
+    /// Resolve each policy field from its nearest configured layer. The order
+    /// is launch, template, tier, project, host, then the compiled default.
+    pub fn resolve(
+        actions: impl IntoIterator<Item = (LimitSource, BudgetAction)>,
+        graces: impl IntoIterator<Item = (LimitSource, BudgetGrace)>,
+    ) -> Self {
+        let mut policy = Self::default();
+        if let Some((source, action)) = actions
+            .into_iter()
+            .max_by_key(|(source, _)| source.precedence())
+        {
+            policy.action = action;
+            policy.action_source = source;
+        }
+        if let Some((source, grace)) = graces
+            .into_iter()
+            .max_by_key(|(source, _)| source.precedence())
+        {
+            policy.grace = grace;
+            policy.grace_source = source;
+        }
+        policy
     }
 }
 
@@ -123,6 +252,9 @@ pub struct LaneLimits {
     /// Fresh tokens a writer may spend before the host stops it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<Limit>,
+    /// Resolved action and grace for the writer token budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_policy: Option<BudgetPolicy>,
     /// Context tokens at which a writer is handed off to a fresh attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_handoff: Option<Limit>,
@@ -166,10 +298,26 @@ impl LaneLimits {
         let mut text = String::new();
         for (name, limit) in self.named().filter(|(_, limit)| limit.enforced()) {
             let line = match name {
-                "token_budget" => format!(
-                    "The host stops this lane after {} fresh tokens (cache reads do not count) and commits uncommitted work.",
-                    limit.value
-                ),
+                "token_budget" => {
+                    let policy = self.budget_policy.unwrap_or_default();
+                    let action = match policy.action {
+                        BudgetAction::WrapUp => format!(
+                            "resumes this session once to commit, push and report, with {}% grace",
+                            policy.grace.as_fraction() * 100.0
+                        ),
+                        BudgetAction::Warn => "warns and lets this lane continue".into(),
+                        BudgetAction::Stop => {
+                            "stops dirty work and snapshots remaining edits".into()
+                        }
+                    };
+                    format!(
+                        "After {} fresh tokens (source: {}; cache reads do not count), the host {action} (action source: {}; grace source: {}). Natural completion and a clean pushed worktree keep the lane's own outcome.",
+                        limit.value,
+                        limit.source.as_str(),
+                        policy.action_source.as_str(),
+                        policy.grace_source.as_str()
+                    )
+                }
                 "context_handoff" => format!(
                     "The host stops this lane for a fresh attempt when one call's context passes {} tokens.",
                     limit.value
@@ -220,8 +368,9 @@ mod tests {
             ..LaneLimits::default()
         };
         let preamble = limits.preamble();
-        assert!(preamble.contains("after 123 fresh tokens"), "{preamble}");
-        assert!(preamble.contains("after 60 seconds"), "{preamble}");
+        for (_, limit) in limits.named().filter(|(_, limit)| limit.enforced()) {
+            assert!(preamble.contains(&limit.value.to_string()), "{preamble}");
+        }
         assert!(!preamble.contains("repair"), "{preamble}");
     }
 }

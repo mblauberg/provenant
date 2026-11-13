@@ -364,6 +364,56 @@ impl Holder for HostHolder<'_> {
         );
         Ok(())
     }
+    fn budget_warning(&self, context: &[u8], tokens: u64, budget: u64) -> custody::Result<()> {
+        self.inner.budget_warning(context, tokens, budget)
+    }
+    fn budget_clean_point(&self, context: &[u8]) -> custody::Result<bool> {
+        self.inner.budget_clean_point(context)
+    }
+    fn budget_crossed(&self, context: &[u8], tokens: u64, budget: u64) -> custody::Result<()> {
+        self.inner.budget_crossed(context, tokens, budget)?;
+        let notify = || -> Result<(), Box<dyn std::error::Error>> {
+            let (holder, runs) = run::HolderContext::open(context)?;
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = run::Request {
+                clock: &clock,
+                cancel: &cancel,
+            };
+            let request = runs.request(holder.run_id, &call)?;
+            let Some(chair) = request.chair else {
+                return Ok(());
+            };
+            let Some(fabric) = self.fabric(context)? else {
+                return Ok(());
+            };
+            let record = runs.record(holder.attempt_id, &call)?;
+            let digest = provenant_records::CanonicalV1::record_digest(
+                "budget-overrun-notice",
+                1,
+                &holder.attempt_id,
+            )?;
+            let mut id = [0; 16];
+            id.copy_from_slice(&digest.as_bytes()[..16]);
+            let inbox_call = provenant_fabric_store::Request {
+                clock: &clock,
+                cancel: &cancel,
+            };
+            let inbox =
+                provenant_fabric_store::Store::open(&fabric.context.roots.state, &inbox_call)?;
+            inbox.send(&provenant_fabric_store::Message {
+                extra: Default::default(), header: provenant_records::RecordHeader::V1,
+                project: holder.project_id, id: provenant_core::MessageId::from_bytes(id),
+                sender: holder.actor_id, recipients: vec![chair.actor], conversation: None,
+                kind: provenant_fabric_store::MessageKind::Note,
+                body: format!("Writer {} crossed its token target: {tokens} fresh tokens, budget {budget}. Its configured budget action applies; status records the overrun.", holder.attempt_id),
+                artifacts: Vec::new(), reply_to: None, created_at: record.queued_at,
+            }, &inbox_call)?;
+            Ok(())
+        };
+        notify()
+            .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error.to_string())))
+    }
     fn provider_exited(&self, context: &[u8], reason: Option<StopReason>) -> custody::Result<()> {
         self.inner.provider_exited(context, reason)?;
         self.stop()

@@ -183,6 +183,15 @@ fn launch_input(input: &Value) -> Result<Value, FacadeError> {
             attempt[field] = value.clone();
         }
     }
+    // Retain provenance when these run controls are merged onto a template.
+    for field in ["token_budget", "on_budget", "budget_grace"] {
+        if attempt.get(field).is_some() {
+            if !attempt["budget_sources"].is_object() {
+                attempt["budget_sources"] = json!({});
+            }
+            attempt["budget_sources"][field] = json!("launch");
+        }
+    }
     let typed: provenant_fabric_runtime::graph::AttemptSpec =
         decode_input(attempt.clone(), "attempt")?;
     if typed.names_cloud_placement() {
@@ -1485,11 +1494,71 @@ impl Factory {
                 &document,
                 &self.context.config.graph.limits,
             );
-            return Ok(if skipped.is_empty() {
-                json!({"document":document})
-            } else {
-                json!({"document":document, "skipped":skipped})
-            });
+            let config = provenant_config::read(&self.context.roots).map_err(|error| {
+                FacadeError::DispatchRefused {
+                    fact: None,
+                    disk: None,
+                    reason: error.to_string(),
+                }
+            })?;
+            let run_config = provenant_confinement::run_config::RunConfig::read(
+                self.context.roots.state.as_path(),
+            )
+            .unwrap_or_default();
+            let expanded = document
+                .expanded(&self.context.config.graph.limits)
+                .map_err(|error| FacadeError::DispatchRefused {
+                    fact: None,
+                    disk: None,
+                    reason: error.to_string(),
+                })?;
+            let mut writer_budgets = Vec::new();
+            for node in &expanded.nodes {
+                if node.access != provenant_fabric_runtime::graph::AccessMode::WorktreeWrite {
+                    continue;
+                }
+                let spec = node.attempt.clone().unwrap_or_default();
+                let profile = config
+                    .dispatch_profile(&spec.lane_knobs())
+                    .map_err(|error| FacadeError::DispatchRefused {
+                        fact: None,
+                        disk: None,
+                        reason: error.to_string(),
+                    })?;
+                let mut context = node.context.clone().unwrap_or_default();
+                for (field, configured) in [
+                    ("token_budget", spec.token_budget.is_some()),
+                    ("on_budget", spec.on_budget.is_some()),
+                    ("budget_grace", spec.budget_grace.is_some()),
+                ] {
+                    if configured {
+                        context.budget_sources.insert(
+                            field.into(),
+                            spec.budget_sources
+                                .get(field)
+                                .copied()
+                                .unwrap_or(provenant_records::LimitSource::Template),
+                        );
+                    }
+                }
+                let tier = context
+                    .tier
+                    .as_deref()
+                    .or_else(|| node.route.as_ref().and_then(|route| route.alias.as_deref()));
+                let (token_budget, policy) = provenant_run::writer_budget_limits(
+                    &run_config,
+                    &self.context.identity.project.to_string(),
+                    &profile,
+                    Some(&context),
+                    tier,
+                );
+                writer_budgets.push(
+                    json!({"node":node.id,"token_budget":token_budget,"budget_policy":policy}),
+                );
+            }
+            return Ok(
+                json!({"document":document, "skipped":skipped, "writer_budgets":writer_budgets}),
+            );
         }
         self.launch_submission(document, input, budget, cancel, announce)
     }

@@ -531,8 +531,14 @@ fn run_input(
             let (key, value) = item
                 .split_once('=')
                 .ok_or_else(|| cli_input_error("--set expects NAME=TOML_VALUE"))?;
+            let value_text =
+                if key == "attempt.on_budget" && matches!(value, "wrap_up" | "warn" | "stop") {
+                    format!("{value:?}")
+                } else {
+                    value.to_owned()
+                };
             let parsed: Value =
-                toml_edit::de::from_str(&format!("value = {value}")).map_err(|_| {
+                toml_edit::de::from_str(&format!("value = {value_text}")).map_err(|_| {
                     let safe = matches!(
                         key,
                         "attempt"
@@ -602,7 +608,8 @@ fn validate_set_path(key: &str) -> Result<(), Box<provenant_records::diagnostic:
         )),
         "host" | "account" | "confidential" | "provider_timeout" | "capabilities"
         | "capability" | "build_heavy" | "build_weight" | "write_roots" | "write_root"
-        | "local_cargo" | "preset" | "isolation" | "supervision" | "receipts" | "sandbox" => Ok(()),
+        | "local_cargo" | "preset" | "isolation" | "supervision" | "receipts" | "sandbox"
+        | "token_budget" | "on_budget" | "budget_grace" => Ok(()),
         _ if path.starts_with("mode.") => {
             Err(cli_input_error("use --mode for attempt access mode"))
         }

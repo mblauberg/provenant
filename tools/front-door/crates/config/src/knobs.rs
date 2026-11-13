@@ -30,6 +30,7 @@ pub(crate) enum Kind {
     CensusIgnoreList,
     Enum,
     Int,
+    Fraction,
 }
 #[derive(Deserialize)]
 pub(crate) struct Spec {
@@ -148,6 +149,31 @@ impl<D> crate::ResolvedConfig<D> {
                 },
             );
         }
+        let launch_overrides: std::collections::BTreeSet<&str> = overrides
+            .iter()
+            .filter_map(|entry| entry.split_once('=').map(|(name, _)| name))
+            .collect();
+        let budget_knob_sources = [
+            "lanes.token_budget",
+            "lanes.budget_action",
+            "lanes.budget_grace",
+        ]
+        .into_iter()
+        .filter_map(|name| {
+            let knob = knobs.get(name)?;
+            let source = match knob.source {
+                KnobSource::Override if launch_overrides.contains(name) => "launch",
+                KnobSource::Override => "host",
+                KnobSource::Default | KnobSource::Profile => "default",
+            };
+            Some((name.to_owned(), Value::String(source.into())))
+        })
+        .collect::<serde_json::Map<_, _>>();
+        let mut extra = provenant_records::ExtraFields::default();
+        extra.insert(
+            "budget_knob_sources".into(),
+            Value::Object(budget_knob_sources),
+        );
         Ok(provenant_records::run::HarnessProfile {
             name: profile_name(self.profile).into(),
             knobs: knobs
@@ -155,6 +181,7 @@ impl<D> crate::ResolvedConfig<D> {
                 .map(|(name, knob)| (name, knob.value))
                 .collect(),
             overrides: overrides.to_vec(),
+            extra,
             ..Default::default()
         })
     }
@@ -269,6 +296,17 @@ fn check(spec: &Spec, value: &Value) -> Result<(), &'static str> {
                 Ok(())
             }
         }
+        Value::Number(number) if spec.kind == Kind::Fraction => {
+            let value = number.as_f64().ok_or("type")?;
+            if !value.is_finite()
+                || spec.min.is_some_and(|min| value < min as f64)
+                || spec.max.is_some_and(|max| value > max as f64)
+            {
+                Err("outside_allowed_range")
+            } else {
+                Ok(())
+            }
+        }
         _ => Err("type"),
     }
 }
@@ -286,6 +324,9 @@ fn from_toml(item: &Item) -> Option<Value> {
             .collect::<Option<serde_json::Map<_, _>>>()
             .map(Value::Object),
         toml_edit::Value::Integer(n) => Some(Value::from(*n.value())),
+        toml_edit::Value::Float(n) => serde_json::Number::from_f64(*n.value())
+            .map(Value::Number)
+            .or(Some(Value::Null)),
         toml_edit::Value::String(s) => Some(Value::from(s.value().as_str())),
         _ => None,
     }
@@ -299,6 +340,12 @@ fn parse_cli(spec: &Spec, text: &str) -> Result<Value, &'static str> {
     }
     if spec.kind == Kind::Int {
         return text.parse::<i64>().map(Value::from).map_err(|_| "type");
+    }
+    if spec.kind == Kind::Fraction {
+        let value = text.parse::<f64>().map_err(|_| "type")?;
+        return serde_json::Number::from_f64(value)
+            .map(Value::Number)
+            .ok_or("type");
     }
     Ok(Value::from(text))
 }
@@ -471,6 +518,9 @@ fn apply(doc: &mut DocumentMut, edit: KnobEdit) -> Result<(), ConfigError> {
                         }
                     }
                     toml_edit::value(array)
+                }
+                Value::Number(n) if spec.kind == Kind::Fraction => {
+                    toml_edit::value(n.as_f64().ok_or_else(|| invalid(name, "type"))?)
                 }
                 Value::Number(n) => toml_edit::value(n.as_i64().unwrap_or_default()),
                 Value::String(s) => toml_edit::value(s.as_str()),
