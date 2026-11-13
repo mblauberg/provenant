@@ -1288,8 +1288,11 @@ replacements or a guarantee against unknown secret formats.
 `output` scans the whole artifact for known shapes before paging, including
 older artifacts. Its offsets and digest refer to those filtered bytes. Prompt
 reads are lossless and need dispatch-equivalent authority. A terminal attempt with no requested
-output is `NOT_FOUND`. [CLI](cli.md#waits-are-readers) owns wait budgets and
-reader cancellation; a wait selection excludes the caller and its ancestors.
+output is `NOT_FOUND`. `output` and `wait` take `NAME[/NODE[#N]]` targets, as
+in [CLI](cli.md#targets), which also owns wait budgets and reader cancellation
+([Waits are readers](cli.md#waits-are-readers)). A wait with no target selects
+the project's running graphs; inside a lane a wait names its targets, so a
+lane never waits on itself or its ancestors by default.
 - Why (default): attention must never wait behind a running sibling.
 - Test: `crates/run/src/tests.rs::create_publish_and_read_exact_bounded_facts`;
   `crates/fabric-runtime/src/runs.rs::input_required_wakes_all_without_waiting_for_a_sibling`

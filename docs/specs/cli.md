@@ -17,9 +17,9 @@ clap does not expose those rules through public getters. Compact help uses
 command markers and the grammar's descriptions. Graph submission uses the same
 template compiler for CLI and MCP.
 
-Waits, lane watches and time-based `--since` filters share a whole-number span
-grammar: bare seconds or the suffix `s`, `m`, `h` or `d`. Waits and watches
-retain their four-hour runtime limit; since filters also accept dates and
+Waits and time-based `--since` filters share a whole-number span
+grammar: bare seconds or the suffix `s`, `m`, `h` or `d`. Waits retain their
+four-hour runtime limit; since filters also accept dates and
 RFC3339 timestamps. Git-revision and console-cursor `--since` options keep
 their own types.
 
@@ -43,10 +43,9 @@ and otherwise says how many lines it omitted. `next` is the only source of the
 next command: when a command has none, none is printed. Errors keep their
 repair command and are never compacted.
 
-The default `status` listing never omits an active or needs-attention lane;
-only settled lanes are left out, with their count. The `run` receipt prints one
-`lane: GRAPH/NODE/ATTEMPT` line per launched node (`--json`: `lane_ids`). A
-launch refused before admission prints its recorded route and reason.
+The default `status` listing never omits an active or needs-attention graph;
+only settled graphs are left out, with their count. A launch refused before
+admission prints its recorded route and reason.
 
 Global `--full` means complete detail for the command and nothing else; it
 does not widen `status` to `--all`. `--json` keeps the machine envelope and
@@ -64,70 +63,67 @@ locally or over the existing peer paging protocol. Peer tail scans share a
 30-second budget and reject changed artifact digests. The JSON envelope keeps
 `bytes`.
 
-The core verbs are `run`, `status`, `output`, `steer`, `stop`, `retry`,
-`edit`, `templates`, `land` and `quota`. `run [BRIEF] --use TEMPLATE` submits a
-graph; `--file` accepts a graph document or text brief and `--explain` inspects
-compilation without starting work. `--wait` observes settlement. Inside a lane,
-`run` adds a child node. `retry` continues or redoes a target; `stop` requests
-cancellation. `output --trace` shows the timeline and `edit --file PATCH`
-applies a revisioned graph patch. The help catalogue owns exact arguments.
-The [2.0.0 command tree](#200-command-tree) replaces this surface at the cut-over.
+## Command tree
 
-## 2.0.0 command tree
-
-This section is the command tree for the 2.0.0 cut-over (#3078, wave 3).
-The wave-3 slices implement it as written; the generated references describe
-the released surface until then, and match this tree after it. A flag or
-spelling this tree drops is gone, with no alias, per
-[ADR 0035](../adr/0035-four-hard-boundaries-and-flexible-everything-else.md).
+The help catalogue owns exact arguments and bounds; this tree names the verbs
+that act on graph work and how they read. A flag or spelling not listed here
+is gone, with no alias, per
+[ADR 0035](../adr/0035-four-hard-boundaries-and-flexible-everything-else.md);
+[Removed spellings](#removed-spellings) lists those that still print their
+replacement.
 
 ### Core verbs
 
 ```text
 run TEMPLATE [BRIEF] [--name NAME] [--brief-file PATH] [--set PARAM=VALUE]...
-    [--host HOST] [--model MODEL | --tier TIER] [--effort EFFORT]
+    [--host HOST] [--model MODEL | --route ROUTE] [--effort EFFORT]
     [--account ACCOUNT] [--mode read-only|worktree-write]
-    [--worktree PATH | --branch BRANCH [--base REF]] [--write-scope PATH]...
+    [--worktree PATH | --branch BRANCH --base REF] [--write-scope PATH]...
     [--over ITEM]... [--detached] [--explain]
 run --file GRAPH [--name NAME] [the placement and route flags above]
-wait [TARGET]... [--pr NUMBER]... [--any] [--follow] [--timeout SPAN] [--host HOST]
-status [TARGET]... [--all] [--limit N] [--cursor CURSOR] [--host HOST]
+wait [TARGET]... [--pr NUMBER]... [--any] [--follow] [--timeout SPAN]
+status [TARGET]... [--all] [--limit N] [--cursor CURSOR]
 output TARGET [--part PART] [--to FILE | --path] [--offset N | --tail N]
-    [--max-bytes N] [--host HOST]
-trace TARGET [--host HOST]
-stop TARGET [--reason TEXT] [--host HOST]
-retry TARGET [--brief TEXT | --prompt-file PATH | --prompt-stdin]
-    [--extend KEY=VALUE]... [--no-fallback] [--operation-id ID] [--host HOST]
-steer TARGET --text-stdin [--operation-id ID] [--host HOST]
+    [--max-bytes N]
+trace TARGET
+stop TARGET [--reason TEXT]
+retry TARGET [--brief TEXT | --extend KEY=VALUE...]
+steer TARGET --text-stdin [--operation-id ID]
 edit NAME --file PATCH
 templates [TEMPLATE] [--file PATH]
 land NUMBER... [--batch] [--shadow] [--tier TIER] [--head REV] [--wait[=SPAN]]
     [--poll SECONDS] [--explain]
 reconcile [TARGET]... [--abandon TARGET --reason TEXT]
 telemetry value [--account ACCOUNT] [--window WINDOW] [--since WHEN]
-telemetry cost [TARGET] [--by route|account|node|role|preset|pr|band|day]
+telemetry cost [TARGET] [--by route|account|model|graph|node] [--since WHEN]
 ```
 
 `run` needs a template, so a brief is never mistaken for a template name.
 `templates` lists the templates `run` accepts. `--file` takes a graph
 document and nothing else; `--brief-file` reads a brief from a file, or from
 standard input given `-`, and conflicts with `BRIEF`. Inside a lane, `run` adds
-a child node to the calling graph, and `--name` names that node.
+a child node to the calling graph, and `--name` names that node. `--explain`
+inspects compilation without starting work.
+
+`--route` takes a tier (`junior`, `senior`, `principal`) for every node, or a
+role map such as `--route writer=junior,review=senior`; a role it does not
+name keeps the template's tier. An unknown tier or role is invalid input that
+lists the valid values. [Routing](routing.md) owns the role names and tier
+defaults.
 
 `--set PARAM=VALUE` binds a template parameter, and the template's declaration
 types the value: a string takes the text as written, with no quoting; an
 integer, number or boolean parses as that type; a list or table takes a TOML
-value. A parameter the template does not declare, or a value that does not
-parse as its type, is invalid input (exit 2). `--set attempt.FIELD=VALUE` binds
-an attempt field, typed by that field.
+value. A value that does not parse as its type is invalid input (exit 2).
+`--set attempt.FIELD=VALUE` binds an attempt field, typed by that field.
 
 `wait` is the only verb that waits for graph work. `land --wait` remains
 because waiting for CI on a pinned head is part of the merge decision; the
 Fabric primitives keep their own waits.
 
-The two added telemetry leaves come from #2225: `telemetry value` reports plan
-value per account and window, and `telemetry cost` reports the cost of a
-target, or of the project grouped by `--by`, in bounded rows and inside a lane.
+`telemetry value` reports plan value per account and window, and
+`telemetry cost` reports the cost of a target, or of the project grouped by
+`--by`, in bounded rows and inside a lane.
 
 ### Targets
 
@@ -136,6 +132,10 @@ Every verb that acts on graph work takes one target form:
 ```text
 NAME[/NODE[#N]]
 ```
+
+These are `status`, `wait`, `output`, `trace`, `stop`, `retry`, `steer`,
+`reconcile`, `console detail`, `lane deliver`, `pr open --from-attempt` and
+`--review`, and `telemetry cost` and `trace`; `edit` takes a `NAME`.
 
 - `NAME` is a graph's name: a lowercase ASCII letter, then lowercase letters,
   digits and single hyphens, at most 48 bytes, not ending in a hyphen. A name
@@ -150,60 +150,64 @@ NAME[/NODE[#N]]
 None of `/`, `#` or a name character needs quoting in POSIX shells or default
 zsh. A zsh with `EXTENDED_GLOB` set needs a `NAME/NODE#N` target quoted.
 
-A bare `NAME` names the whole graph. In a one-node graph the graph and its
-node are the same work, so every verb accepts a bare `NAME`, including
+A target resolves by reading its own graph's checkpoint and nothing else, then
+the attempt its work key names; another graph's damaged checkpoint never
+blocks it. A bare `NAME` names the whole graph. In a one-node graph the graph
+and its node are the same work, so every verb accepts a bare `NAME`, including
 `output` and `steer`. In a graph with more than one node, `output` and `steer`
 refuse a bare `NAME` with `AMBIGUOUS_TARGET` and list its nodes; `status`,
-`wait`, `trace`, `stop`, `retry` and `edit` act on the whole graph. `retry`
-recovers a graph's failed and stopped nodes, starts a node's next attempt, or
-continues an attempt's provider session, according to the target's depth.
+`wait`, `trace`, `stop` and `retry` act on the whole graph. `retry` recovers a
+graph's failed and stopped nodes, or starts a node's next attempt, according
+to the target's depth; it starts a new provider session.
 
-A target names work on the local host. Work launched here with
-`run --host HOST` keeps its graph here, so it needs no qualifier. A graph that
-a session on another host launched is addressed with `--host HOST`, where
-`HOST` is a configured peer label or host ID; the flag applies to every target
-on the command line. An unknown label is `UNKNOWN_HOST`. A target that
-resolves to nothing is `NOT_FOUND`.
+A target names work recorded on the local host. Work launched here with
+`run --host HOST` keeps its graph here, so it needs no qualifier. A target
+that resolves to nothing is `NOT_FOUND` (exit 2). Inside a lane, targets name
+the calling graph's own nodes, and the graph owner resolves them.
 
-The following target spellings are removed with no alias: attempt IDs,
-`RUN/ATTEMPT`, `RUN/TASK/ATTEMPT`, `HOST/ATTEMPT`, graph and node IDs, and the
-`lane:ID`, `graph:ID`, `operation:ID` and `land:NUMBER` prefixes. Pull request
-numbers stay positional on `land` and `pr`, and `wait` takes them with `--pr`.
+Attempt IDs, `RUN/ATTEMPT`, `RUN/TASK/ATTEMPT`, `HOST/ATTEMPT`, hex prefixes
+and the `lane:ID`, `graph:ID`, `operation:ID` and `land:NUMBER` prefixes are
+not targets. Pull request numbers stay positional on `land` and `pr`, and
+`wait` takes them with `--pr`.
 
 ### Names and replay
 
-`--name` is the handle and the replay key. `run --name NAME` creates a graph
-named `NAME` when the project has none. When a graph of that name exists and
-the input matches, `run` starts nothing and returns the existing graph's handle
-and state with exit 0, whether the graph is running or settled. The input is
-what the caller supplied, normalised: the template name or graph document
-digest, the brief, each `--set` binding, and every placement and route flag.
-A template layer edited since the first call does not break replay, so a
-resumed session finds its graph.
+`--name` is a handle. `run --name NAME` creates a graph named `NAME` when the
+project has none. Each launch records a replay digest of the template name or
+graph document digest, the brief, each typed `--set` binding, the placement
+and route flags, and the source commit. When a graph in the name's family
+(`NAME`, `NAME-2`, …) has the same digest, `run` starts nothing and returns
+that graph's handle and state with exit 0, whether it is running or settled.
+When none matches, `run` launches the next free `NAME-k` and prints one line
+saying so; a name conflict is never an error. A name with no room for a suffix
+within 48 bytes is refused in one line.
 
-When the input differs, `run` refuses in one line with code `NAME_CONFLICT`
-(exit 1), naming the first differing field:
+Without `--name`, `run` assigns `TEMPLATE-K`, with dots in the template name
+turned into hyphens, where `K` is the project's next unused number for that
+template, and never replays. A name stays held until retention removes its
+graph's records. [Run](run.md#operation-ids) owns the digest.
 
-```text
-NAME_CONFLICT: graph fix-login exists with a different brief; next: provenant status fix-login
-```
+### Budgets
 
-Without `--name`, `run` assigns `TEMPLATE-K`, where `K` is the project's next
-unused number for that template, and never replays. A graph document may carry
-a `name` field; a different `--name` on the same call is invalid input. A name
-stays held until retention removes its graph's records.
+An attempt's token budget is an attempt field, set per run with
+`--set attempt.token_budget=N` (`0` for none) and
+`--set attempt.on_budget=wrap_up|warn|stop`, or per template or project
+through the same field. The compiled default is 1,000,000 tokens with a grace
+of 0.10 before the action applies; configuration overrides both. `run` has
+no budget flags.
 
 ### Waits
 
-`wait` with no target waits for the calling session's unsettled graphs, under
-the rules in [Waits count only new settlements](#waits-count-only-new-settlements).
+`wait` with no target waits for the project's running graphs; a paused graph
+waits on its owner and is left out. Inside a lane, `wait` names its targets.
 `--any` returns at the first target to settle or need input; otherwise `wait`
 returns when every target has. `--pr NUMBER` is satisfied when the pull
 request's required checks on its current head reach a verdict, or when it is
 merged or closed. `--timeout` takes a span, defaults to
-`domains.wait.timeout_seconds` and is at most four hours. `--follow` streams
-one line per transition, as in [Watch is one stable line per event](#watch-is-one-stable-line-per-event).
-Neither expiry nor cancelling a wait stops the work.
+`domains.wait.timeout_seconds` and is at most four hours. `--follow` prints
+one line per transition before the result. A failed read is retried until the
+deadline rather than ending the wait. Neither expiry nor cancelling a wait
+stops the work.
 
 | Exit | Meaning |
 |---|---|
@@ -211,7 +215,7 @@ Neither expiry nor cancelling a wait stops the work.
 | 1 | A target settled without success: failed, stopped or lost, or a pull request whose checks failed or that closed unmerged. The result names it. |
 | 2 | Invalid input, including a target that is not found or is ambiguous. `wait` resolves every target before it starts. |
 | 5 | A target needs input: an open owner ask, or a lane waiting to be steered. |
-| 124 | The budget expired with targets unsettled, including any held by an unreachable peer; the result names them and their hosts. |
+| 124 | The budget expired with targets unsettled; the result names them. |
 | 130 | The wait was cancelled. |
 
 ### Output defaults
@@ -220,194 +224,52 @@ Human output stays compact, as in [Agent output](#agent-output); `--json`
 keeps the envelope and `--full` shows complete detail.
 
 - `run` prints at most two lines: `NAME STATE MODEL WORKTREE`, then
-  `next: provenant wait NAME`. The first line prints once the graph is saved,
-  before writer binding.
+  `next: provenant wait NAME`.
 - `status` with no target lists the project's graphs, one line each:
-  `NAME STATE TEMPLATE NODES AGE`. It shows every unsettled graph, then graphs
-  settled in the last 24 hours, newest first, at most 20 rows with an
-  omission count. `--all` drops the age filter and pages with `--limit` and
-  `--cursor`.
+  `NAME STATE TEMPLATE NODES AGE`. It prints every unsettled graph, then
+  graphs settled in the last 24 hours, newest first, up to 20 rows in all, and
+  says how many settled graphs it left out. Active rows are never left out,
+  even past the row limit. `--all` drops the age filter and pages with
+  `--limit` and `--cursor`. A stopped, paused or failed graph's line names its
+  cause, within `SUMMARY_ROW_BYTES`. `--json` returns
+  `{graphs, omitted, next_cursor}`.
 - `status TARGET` prints the graph line, then one line per node with its newest
-  attempt as `NAME/NODE#N STATE MODEL`, at most 20 nodes with an omission count.
+  attempt as `NAME/NODE#N STATE MODEL`.
 - `wait` prints one line per target when it returns: `TARGET STATE`, with the
   settlement cause when it is not success.
 - `stop`, `retry`, `steer` and `edit` print one line with the target and its
-  new state; `retry` names the new attempt as `NAME/NODE#N`.
+  new state.
 
-### Leaf dispositions
+### Removed spellings
 
-Each command in today's `provenant help --all` is
-kept, renamed or removed as follows. "Unchanged" means no change to the leaf
-or its arguments. `wait`, `telemetry value` and `telemetry cost` are added.
-No leaf is renamed: where a command's job moves, the old leaf is removed and
-the row names its replacement.
+These spellings exit 2 with one line naming the replacement. The table in
+`crates/cli/src/lib.rs` (`REMOVED`) is the source.
 
-Beyond the table, these flags are removed: `--operation-id` on `run` and
-`stop`, `--use` on `run`, and every `--wait` except `land --wait` and the
-Fabric primitives' waits. Stopping settled work reports its state and changes nothing, so `stop` needs no replay key.
-`retry`, `steer` and the inbox, chair and Fabric writes keep `--operation-id`.
+| Spelling | Replacement |
+|---|---|
+| `dispatch`, `review`, `run --use` | `run TEMPLATE BRIEF` |
+| `lanes`, `fabric graph` | `status` |
+| `resume`, `redo`, `retry --node` | `retry NAME/NODE` |
+| `continue` | `retry NAME/NODE#N` |
+| `cancel`, `stop --operation-id` | `stop NAME` |
+| `preset` | `templates` |
+| `stats`, `status --stats`, `status --by` | `telemetry cost --by node` |
+| `pr land` | `land NUMBER --wait` |
+| `quota usage` | `telemetry cost --by account` |
+| `config migrate` | `config check` |
+| `telemetry backfill` | nothing; this binary reads no format-1 store |
+| `run --tier` | `run --route` |
+| `run --operation-id` | `run --name` |
+| `run --wait`, `status --wait`, `stop --wait`, `retry --wait` | `wait NAME` |
+| `status --until`, `status --follow` | `wait --any`, `wait --follow` |
+| `status --target`, `status --id` | `status NAME`, `wait --pr NUMBER` |
+| `output --trace` | `trace NAME` |
+| `reconcile --id` | `reconcile NAME` |
+| `telemetry stats --run-id`, `--by`, `--detail` | `telemetry cost` |
+| `telemetry trace --run` | `telemetry trace NAME` |
+| `pr status --wait` | `pr watch NUMBER` |
 
-| Leaf | Disposition | Change |
-|---|---|---|
-| `help` | kept | unchanged |
-| `root` | kept | unchanged |
-| `process-tree` | kept | unchanged |
-| `ask` | kept | unchanged |
-| `inbox` | kept | unchanged |
-| `inbox close` | kept | unchanged |
-| `inbox acknowledge` | kept | unchanged |
-| `answer` | kept | unchanged |
-| `accounts` | kept | unchanged |
-| `accounts list` | kept | unchanged |
-| `accounts register` | kept | unchanged |
-| `accounts sync` | kept | unchanged |
-| `accounts set` | kept | unchanged |
-| `hosts` | kept | unchanged |
-| `hosts doctor` | kept | unchanged |
-| `config` | kept | unchanged |
-| `config check` | kept | unchanged |
-| `config show` | kept | unchanged |
-| `config schema` | kept | unchanged |
-| `config apply` | kept | unchanged |
-| `config history` | kept | unchanged |
-| `config migrate` | removed | retired keys are reported by `config check`; no migration chain |
-| `config set` | kept | unchanged |
-| `config unset` | kept | unchanged |
-| `fabric` | kept | unchanged |
-| `fabric mcp` | kept | served only when configured |
-| `fabric identity` | kept | unchanged |
-| `fabric mail` | kept | unchanged |
-| `fabric mail send` | kept | unchanged |
-| `fabric mail read` | kept | unchanged |
-| `fabric mail mark-read` | kept | unchanged |
-| `fabric events` | kept | unchanged |
-| `fabric events read` | kept | unchanged |
-| `fabric events note` | kept | unchanged |
-| `fabric claim` | kept | unchanged |
-| `fabric claim acquire` | kept | unchanged |
-| `fabric claim renew` | kept | unchanged |
-| `fabric claim verify` | kept | unchanged |
-| `fabric claim release` | kept | unchanged |
-| `fabric claim list` | kept | unchanged |
-| `install` | kept | unchanged |
-| `upgrade` | kept | unchanged |
-| `uninstall` | kept | unchanged |
-| `route` | kept | unchanged |
-| `route list` | kept | unchanged |
-| `route resolve` | kept | unchanged |
-| `route set` | kept | unchanged |
-| `route remove` | kept | unchanged |
-| `route reset` | kept | unchanged |
-| `route pacing` | kept | unchanged |
-| `route override` | kept | unchanged |
-| `route override set` | kept | unchanged |
-| `route override list` | kept | unchanged |
-| `route override clear` | kept | unchanged |
-| `route exclude` | kept | unchanged |
-| `route exclude add` | kept | unchanged |
-| `route exclude remove` | kept | unchanged |
-| `route exclude list` | kept | unchanged |
-| `run` | kept | template becomes the first positional; `--name` replaces `--operation-id`; `--use` and `--wait` removed; `--file` takes only a graph document; `--brief-file` reads a brief |
-| `status` | kept | takes `TARGET...`; `--target`, `--wait`, `--until`, `--follow`, `--stats` and `--by` removed |
-| `land` | kept | unchanged |
-| `output` | kept | takes `TARGET`; `--trace` removed (use `trace`) |
-| `trace` | kept | takes `TARGET`: a graph, node or attempt |
-| `stop` | kept | takes `TARGET`; `--operation-id` and `--wait` removed |
-| `retry` | kept | takes `TARGET`; `--node` and `--wait` removed |
-| `steer` | kept | takes `TARGET` |
-| `edit` | kept | takes `NAME` |
-| `templates` | kept | unchanged |
-| `lane` | kept | unchanged |
-| `lane deliver` | kept | takes `TARGET` |
-| `reconcile` | kept | takes `TARGET...`; `--id` removed; `--abandon` takes a target |
-| `telemetry` | kept | unchanged |
-| `telemetry stats` | kept | `--run-id`, `--by` and `--detail` removed (use `telemetry cost`) |
-| `telemetry trace` | kept | takes `[TARGET]`; `--run` removed |
-| `telemetry prices` | kept | unchanged |
-| `telemetry prices refresh` | kept | unchanged |
-| `telemetry ingest` | kept | unchanged |
-| `telemetry mileage` | kept | effective rates move to `telemetry value` |
-| `telemetry backfill` | removed | format-1 backfill; the format-2 binary reads no format-1 store |
-| `telemetry experiments` | kept | unchanged |
-| `telemetry experiments show` | kept | unchanged |
-| `native` | kept | unchanged |
-| `native start` | kept | unchanged |
-| `native end` | kept | unchanged |
-| `quota` | kept | unchanged |
-| `quota show` | kept | unchanged |
-| `quota usage` | removed | use `telemetry cost --by account` |
-| `quota history` | kept | unchanged |
-| `quota display` | kept | unchanged |
-| `quota tick` | kept | unchanged |
-| `console` | kept | unchanged |
-| `console changes` | kept | unchanged |
-| `console tree` | kept | unchanged |
-| `console board` | kept | unchanged |
-| `console detail` | kept | takes `TARGET` |
-| `console search` | kept | unchanged |
-| `console overview` | kept | unchanged |
-| `console open` | kept | unchanged |
-| `console projects` | kept | unchanged |
-| `console sessions` | kept | unchanged |
-| `chair` | kept | unchanged |
-| `chair summary` | kept | unchanged |
-| `chair summary show` | kept | unchanged |
-| `chair summary diff` | kept | unchanged |
-| `chair summary update` | kept | unchanged |
-| `chair log` | kept | unchanged |
-| `chair log append` | kept | unchanged |
-| `chair log list` | kept | unchanged |
-| `chair message` | kept | unchanged |
-| `chair switch` | kept | unchanged |
-| `worktree` | kept | unchanged |
-| `worktree seed-build` | kept | unchanged |
-| `worktree create` | kept | unchanged |
-| `worktree list` | kept | unchanged |
-| `worktree doctor` | kept | unchanged |
-| `worktree remove` | kept | unchanged |
-| `pr` | kept | unchanged |
-| `pr contributions` | kept | unchanged |
-| `pr watch` | kept | takes one or more numbers |
-| `pr open` | kept | `--from-attempt` and `--review` take targets |
-| `pr status` | kept | `--wait` removed (use `pr watch`) |
-| `gc` | kept | unchanged |
-| `tick` | kept | unchanged |
-| `disk` | kept | unchanged |
-| `disk report` | kept | unchanged |
-| `cloud` | kept | unchanged |
-| `cloud launch` | kept | unchanged |
-| `cloud collect` | kept | unchanged |
-| `workflow` | kept | unchanged |
-| `workflow review` | kept | unchanged |
-| `workflow receipt` | kept | unchanged |
-| `workflow receipt show` | kept | unchanged |
-| `workflow receipt save` | kept | unchanged |
-| `workflow session` | kept | unchanged |
-| `workflow session save` | kept | unchanged |
-| `workflow session show` | kept | unchanged |
-| `workflow session diff` | kept | unchanged |
-| `workflow session handoff` | kept | unchanged |
-| `tracker` | kept | unchanged |
-| `tracker lint` | kept | unchanged |
-| `check` | kept | unchanged |
-| `check config` | kept | unchanged |
-| `check install` | kept | unchanged |
-| `check release` | kept | unchanged |
-| `check writing` | kept | unchanged |
-| `hook` | kept | unchanged |
-| `hook claude` | kept | unchanged |
-| `hook claude chair-prompt` | kept | unchanged |
-| `hook claude chair-start` | kept | unchanged |
-| `hook claude chair-stop` | kept | unchanged |
-| `hook claude pre-tool-use` | kept | unchanged |
-| `hook claude pre-compact` | kept | unchanged |
-| `hook claude compact` | kept | unchanged |
-| `hook claude session-start` | kept | unchanged |
-| `hook claude stop` | kept | unchanged |
-| `hook claude worktree-create` | kept | unchanged |
-| `hook claude worktree-remove` | kept | unchanged |
-| `hook git` | kept | unchanged |
-| `hook git pre-push` | kept | unchanged |
+`--host` is accepted only on `run`.
 
 ## Console catalogue and peer coverage
 
@@ -552,33 +414,40 @@ duplicate or conflicting options fail with exit 2, and paths stay raw bytes.
 
 ### Targets and manifests never guess
 
-An ambiguous target fails and lists candidates rather than picking the newest.
-CLI and Fabric submissions share one typed request model. Manifest validation
+Every target verb parses one grammar, `NAME[/NODE[#N]]`, and a target prints
+back as the text that parsed it. Resolution reads only the named graph's
+checkpoint. An ambiguous target fails and lists candidates rather than picking
+the newest. A removed spelling fails in one line naming its replacement. CLI
+and Fabric submissions share one typed request model. Manifest validation
 rejects conflicting task settings rather than silently choosing a source.
-- Why (default): cancel and resume act on exactly one attempt, and one request shape
-  serves CLI and MCP.
-- Test: `crates/run/src/service.rs::bare_target_resolves_attempts_and_unambiguous_runs`
-- Owner: `crates/run/src/service.rs`, `crates/cli/src/run.rs`
+- Why (default): `stop`, `retry` and `steer` act on exactly one piece of work,
+  and one request shape serves CLI and MCP.
+- Test: `crates/cli/src/lib.rs::every_target_verb_parses_the_generated_target_table_alike`;
+  `crates/cli/src/lib.rs::each_removed_spelling_exits_2_with_one_line_naming_its_replacement`;
+  `crates/cli/src/target.rs::round_trips_through_display`;
+  `crates/cli/src/target.rs::resolution_reads_only_the_named_graph`;
+  `crates/cli/src/target.rs::a_bare_name_is_one_attempt_only_in_a_one_node_graph`
+- Owner: `crates/cli/src/target.rs`, `crates/cli/src/lib.rs`
 
 ### Status targets
 
-Status selection follows [status selection](#status-selection). An exact run,
-task or attempt target uses the shared resolver and may select older terminal
-records. The output reports the project's review-exempt paths from configuration;
-it never invents an uncommitted-work exemption.
+Status selection follows [status selection](#status-selection). A target
+selects its graph, node or attempt rows from that graph's checkpoint and may
+select settled records of any age.
 
 - Test: `src/fabric/unified.rs::unified_status_uses_one_row_contract_and_selects_attempts`
-- Owner: `crates/cli/src/run.rs`
+- Owner: `src/fabric/unified.rs`
 
 ### Output references and bounded tails
 
-Output resolves the requested attempt on its owning host. Reads are bounded,
-and a clamped tail reports its effective bound. `provenant help --all` owns target syntax and read limits.
-- Why (default): a chair can inspect a precise attempt without copying a full target or
+Output reads one attempt, and `NAME/NODE#N` names the same attempt for
+`output` and `steer`. Reads are bounded, and a clamped tail reports its
+effective bound. `provenant help --all` owns read limits.
+- Why (default): a chair can inspect a precise attempt without copying an ID or
   opening a shell on its host.
 - Test: `crates/cli/src/run/tests_access.rs::paged_output_never_splits_a_character`;
-  `src/fabric/unified.rs::peer_output_follows_host_qualified_subtree_attempts`
-- Owner: `crates/cli/src/run.rs`, `crates/cli/src/run/remote.rs`
+  `crates/cli/src/target.rs::steer_and_output_reach_the_same_numbered_attempt`
+- Owner: `src/fabric/unified.rs`, `crates/cli/src/run.rs`
 
 ### Settled attempt provenance receipts
 
@@ -601,7 +470,7 @@ text encoding.
 - Test: `tests/graph_provider.rs::receipt_output_resolves_run_task_and_attempt`;
   `tests/graph_provider.rs::receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts`;
   `tests/graph_provider.rs::receipt_output_reports_unknown_route_for_settled_lost_attempt`;
-  `crates/cli/src/lib.rs::bounded_waits_counts_and_byte_windows`
+  `crates/cli/src/lib.rs::wait_and_output_bounds`
 - Owner: `crates/cli/src/run.rs`
 
 ### Positional route resolution
@@ -671,58 +540,53 @@ and its fallback receipt; account and quota guards still apply.
 
 ### Waits are readers
 
-Every wait has an explicit budget. A lane needing input can satisfy a wait.
-Neither expiry nor cancelling a wait stops the work. `provenant help --all` and the MCP `tools/list` response own the accepted
+Every wait has an explicit budget, and a timeout exits 124. A target needing
+input satisfies a wait (exit 5). Neither expiry nor cancelling a wait stops the
+work: `wait` only reads checkpoints and pull request state. `--any` returns at
+the first target to settle; otherwise the wait returns when every target has.
+`provenant help --all` and the MCP `tools/list` response own the accepted
 bounds.
 - Why (default): an impatient reader must never kill a healthy lane.
-- Test: `crates/cli/src/lib.rs::bounded_waits_counts_and_byte_windows`;
+- Test: `src/status_wait.rs::any_returns_at_the_first_settlement_and_takes_its_verdict`;
+  `src/status_wait.rs::all_waits_for_every_target_and_a_timeout_is_124`;
+  `crates/cli/src/lib.rs::wait_and_output_bounds`;
   `crates/supervisor/tests/custody.rs::cancelled_reader_preserves_healthy_custody_and_cancel_escalates`
-- Owner: `crates/cli/src/lib.rs`
+- Owner: `src/status_wait.rs`
 
 ### Waits count only new settlements
 
-An unqualified lane wait counts a lane only if it was unsettled when the wait started
-or settled since, so a settled older attempt never satisfies a wait on a newer
-one. The wait starts at command entry, not at the first answer, so a lane
-that settles while a peer is unreachable still counts when the peer returns.
-Time-filtered waits select by settlement time rather than queue order. An
-exactly named attempt counts whenever it settled. If every named lane has
-already settled, the wait returns their terminal rows immediately, including
-rows older than `--since`. Mixed pending and settled selections keep the
-pending-only rule. Session selection narrows
-listings and waits consistently, including on peers. An unqualified wait
-resumes after the calling session's last acknowledged settlements. A committed
-terminal attempt remains `settling` in local and peer wait views until its
-custody release is durable; a terminal wait result therefore permits host pickup.
-
-Each poll shares one deadline across all peer reads, including lookups of
-previously observed running lanes that have moved off the page. Reads consume
-the remaining budget, including child termination and reap time. A zero-budget
-wait still makes its first bounded read. Failed or incomplete bounded scans
-refuse rather than silently omitting lanes.
-- Why (default): a stale settlement must never wake a chair that waits for newer work,
-  and selecting by session removes hand-copied ID lists.
-- Test: `crates/cli/src/run/watch.rs::a_settled_older_attempt_never_satisfies_a_wait_on_a_newer_one`;
-  `crates/cli/src/run/watch.rs::a_named_attempt_counts_whenever_it_settled`;
-  `crates/cli/src/run/watch.rs::since_counts_settlements_before_arming`;
-  `crates/cli/src/run/remote.rs::a_peer_call_is_capped_by_the_time_left_and_the_peer_limit`
-- Owner: `crates/cli/src/run/watch.rs`, `crates/cli/src/run.rs`, `crates/cli/src/run/remote.rs`
+A target settles by its own row: a graph by the graph's state, a node by the
+node's state and `NAME/NODE#N` by that attempt. A node running a new attempt
+is unsettled even when an older attempt settled, so a settled older attempt
+never satisfies a wait on a newer one. Every target resolves before
+the wait starts, and an unknown target exits 2 without waiting. A wait with no
+target takes the graphs running when it starts.
+- Why (default): a stale settlement must never wake a chair that waits for newer work.
+- Test: `src/status_wait.rs::a_target_settles_by_its_own_row`;
+  `tests/status_wait.rs::an_unknown_target_fails_before_waiting`;
+  `tests/status_wait.rs::a_settled_graph_ends_the_wait_and_no_work_is_nothing_to_wait_for`
+- Owner: `src/status_wait.rs`
 
 ### Watch is one stable line per event
 
-A lane watch uses the same selection rules as a wait and emits each observed
-state transition once. Event lines contain stable identifiers rather than free
-text and are flushed immediately. Newly dispatched lanes join the watch.
-The final event distinguishes settlement from timeout.
+`wait --follow` prints each observed transition once, as one line naming the
+target and its new state, then the result. Repeated reads of an unchanged
+target print nothing.
 - Why (default): a chair must be told when work settles without polling for it.
-- Test: `crates/cli/src/run/watch.rs::watch_emits_each_state_once_and_ends_when_all_settle`;
-  `crates/cli/src/run/watch.rs::watch_times_out_with_pending_lanes_and_names_the_host`
-- Owner: `crates/cli/src/run/watch.rs`, `src/lib.rs`
+- Test: `src/status_wait.rs::any_returns_at_the_first_settlement_and_takes_its_verdict`
+- Owner: `src/status_wait.rs`
 
 ### Status selection
 
-Status prioritises active work and recent settlements. Human and structured
-output use the same selection; historical reads are paged.
+Status never leaves out active work: every unsettled graph is listed, and
+only settled graphs fall to the row limit and the 24-hour filter, with their
+count printed. A stopped or failed graph's line names its cause in one bounded
+line. Human and structured output use the same selection; historical reads are
+paged.
+- Why (default): a chair acting on a listing must see everything still running.
+- Test: `src/fabric/unified.rs::the_listing_never_hides_active_work_and_counts_what_it_omits`;
+  `src/fabric/unified.rs::a_stop_cause_is_one_bounded_line_that_names_it`
+- Owner: `src/fabric/unified.rs`
 
 ## Guards
 
