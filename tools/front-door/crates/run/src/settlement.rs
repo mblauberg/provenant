@@ -2196,7 +2196,17 @@ impl crate::RunStore {
         explicit: bool,
         stalled: &dyn Fn(&Directory, Scope) -> bool,
     ) -> Result<Vec<(provenant_core::AttemptId, crate::Reconciled)>> {
-        self.run(run, call)?;
+        call.check()?;
+        // A run is derived from its attempt records, but recovery must inspect
+        // those records independently so one corrupt record cannot hide siblings.
+        let exists: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attempts WHERE run=?1 AND project=?2 AND refused=0)",
+            rusqlite::params![run.to_string(), self.context.project_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(RunError::NotFound);
+        }
         let mut query = self.db.prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 AND refused=0 AND (terminal=0 OR tmp_retained=1) ORDER BY sequence")?;
         let rows = query.query_map(
             rusqlite::params![run.to_string(), self.context.project_id.to_string()],
