@@ -335,12 +335,9 @@ impl RunStore {
             // A lock, not an assertion: observers stop reporting this phase if
             // the launcher dies. Failing to take it only loses the report.
             let seeding = seed_attempt
-                .lock(
+                .try_lock(
                     std::ffi::OsStr::new(crate::writer::SEED_WAIT_LOCK),
                     provenant_os::fs::LockMode::Exclusive,
-                    call.lock_budget(),
-                    &setup_cancel,
-                    call.clock,
                 )
                 .ok();
             #[cfg(feature = "fixture")]

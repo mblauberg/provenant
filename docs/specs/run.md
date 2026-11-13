@@ -17,18 +17,32 @@ the applied effort and effective network access.
 
 ## Cargo home seed
 
-An opted-in writer on a filesystem that clones may seed its private Cargo registry and Git store from
-the host stores independently. It must never replace an existing store or publish
-a partially cloned tree. Unsupported entries or clone failures must fall back without
-blocking the lane. Each attempt reports the seed outcome and reason on a best-effort basis.
-- Why (default): a seed must preserve lane isolation and leave Cargo usable when cloning
-  is unavailable, while making the outcome observable.
-- Test: `crates/run/src/cargo_seed.rs::existing_registry_is_never_replaced`;
-  `crates/run/src/cargo_seed.rs::failed_clone_removes_partial_tree`;
-  `crates/run/src/cargo_seed.rs::registry_clone_is_private`;
-  `crates/run/src/writer.rs::cargo_setup_record_reports_writer_and_read_only_outcomes`;
-  `src/compose_tests.rs::writer_dispatch_uses_lane_cache_and_narrow_provider_state`
-- Owner: `crates/run/src/cargo_seed.rs`, `crates/run/src/writer.rs`
+Writers share downloaded registry and Git data in a host-managed lane-only
+store, separate from the host's trusted `~/.cargo`. Each writer keeps a private
+`CARGO_HOME` for configuration and credentials and links only the download
+stores and Cargo's package-cache locks to that shared store. Cargo serialises
+concurrent cache mutation; automatic cache cleanup is disabled in lanes.
+The launcher anchors and revalidates an existing shared download root before
+compiling the profile; a substituted symlink cannot redirect that grant to
+the host registry. Startup never copies or traverses the host registry. Existing private stores
+are retained without walking or deleting them; fresh lane homes use sharing.
+An absent host Git store is normal when the host has no Git dependencies and
+is no longer a seed failure: the lane store is created empty.
+- Why (default): registry-sized launch work delays every lane; sharing only
+  lane downloads avoids allowing a lane to poison sources the host builds
+  outside confinement. Private configuration and targets remain isolated.
+- Test: `crates/run/src/cargo_seed.rs::download_stores_are_shared_without_reading_host_registry`;
+  `crates/run/src/cargo_seed.rs::existing_private_downloads_are_retained_without_a_walk`;
+  `crates/providers/src/tests_lane_toolchains.rs::no_lane_can_write_shared_toolchain_stores`;
+  `crates/run/src/writer.rs::cargo_setup_tests`
+- Owner: `crates/run/src/cargo_seed.rs`, `crates/providers/src/launch.rs`
+
+Fresh provider-home preparation must not copy or scan sessions, rollouts or
+other history. Confined Codex homes receive selected authentication and skill
+links; native Codex retains the selected login's home. Resume and post-exit
+model observation have separate bounded history readers.
+- Test: `crates/providers/src/tests_lane_toolchains.rs::fresh_codex_home_setup_never_includes_provider_history`
+- Owner: `crates/providers/src/launch.rs`, `crates/providers/src/codex.rs`
 
 ## Cargo target seed
 
@@ -47,8 +61,15 @@ must never execute a writer-controlled toolchain outside confinement and must
 fall back when the lane compiler cannot be verified, recording a stable
 `detail` code for the refusal (never an environment value). Mismatches
 and clone failures leave the target empty and are reported in
-`cargo-target-setup.json`. Existing targets are retained. A clone is private and
-writable; no lane may write the published generation. Preparation holds the
+`cargo-target-setup.json`. Existing targets are retained. Native and confined lanes receive the same
+Cargo home, rustup home and target selectors before verification. Compiler
+metadata has a two-second process timeout; target selection, cloning and
+partial-stage cleanup share a further two-second cooperative budget, checked
+between filesystem operations. Store and seed-phase locks are non-blocking.
+An exhausted budget leaves any private partial stage unpublished and records
+`seed_budget_exhausted`; a later attempt cleans it within the same budget.
+Individual filesystem operations can exceed that budget under host I/O load.
+A clone is private and writable; no lane may write the published generation. Preparation holds the
 store lock until cloning finishes, so GC cannot remove the source mid-clone.
 - Test: `crates/run/src/cargo_seed.rs::tests`;
   `crates/run/src/target_seed.rs::lane_probe_tests`;
@@ -60,7 +81,8 @@ store lock until cloning finishes, so GC cannot remove the source mid-clone.
 
 ## Lane build output
 
-A lane builds with `CARGO_INCREMENTAL=0` and `CARGO_PROFILE_DEV_DEBUG=line-tables-only`
+A lane defaults to at most two compiler jobs per build, with explicit job
+settings retained. A lane builds with `CARGO_INCREMENTAL=0` and `CARGO_PROFILE_DEV_DEBUG=line-tables-only`
 unless `domains.fabric.lanes` or the lane environment says otherwise. Idle Cargo
 profile directories in lane caches are collected least recently used first until
 the allocated bytes of all profile directories, idle and busy, are within
@@ -1191,8 +1213,8 @@ its size.
 Accepted risk: a hard link the host itself created inside a lane-writable tree
 is writable through its alias, so a write through the alias modifies the file
 outside the tree, and launch does not look for it. Host code that seeds a lane tree must therefore copy or clone (`clonefile`), never hard-link,
-from a shared store. The Cargo target and registry seeds clone, retained
-provider state is copied with hard-link refusal, and the pnpm store is
+from a shared store. Cargo target seeds clone and shared lane downloads use symbolic links
+with shared locks, retained provider state is copied with hard-link refusal, and the pnpm store is
 read-only to the lane, so no host path creates such a link today.
 - Why (default): a writable hard link could modify data outside the granted tree, but
   only a link made by something other than the lane can exist, and only the

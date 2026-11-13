@@ -161,7 +161,7 @@ pub(crate) fn lane_rustc_metadata_cancellable(
     use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
     let argv = [resolved.into_os_string(), "-vV".into()];
     let env = [("HOME".into(), home.as_os_str().into())];
-    let mut options = ExecOptions::new(&argv, home, std::time::Duration::from_secs(30));
+    let mut options = ExecOptions::new(&argv, home, std::time::Duration::from_secs(2));
     options.cancel = cancel;
     options.process_group = true;
     options.env = Some(&env);
