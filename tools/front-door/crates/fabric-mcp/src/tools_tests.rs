@@ -513,7 +513,7 @@ fn result_limit_preserves_mutation_receipts_and_rejects_oversized_observations()
 fn graph_documents_use_the_run_interface_and_paths_are_rejected() {
     for arguments in [
         json!({"op":"run","document":{"id":"test","nodes":[]}}),
-        json!({"op":"run","brief":"Inspect the parser","use":"explore","operation_id":"retry-run"}),
+        json!({"op":"run","brief":"Inspect the parser","template":"explore","idempotency_key":"retry-run"}),
         json!({"op":"edit","id":"test","patch":{"nodes":[]}}),
         json!({"op":"status","id":"test","stats":true,"by":"tier","wait_seconds":1}),
         json!({"op":"status","stats":true,"by":"template"}),
@@ -528,6 +528,13 @@ fn graph_documents_use_the_run_interface_and_paths_are_rejected() {
         assert!(ToolCall::parse("fabric_run", unknown).is_err());
     }
     assert!(ToolCall::parse("fabric_graph", json!({"op":"status","id":"test"})).is_err());
+    assert!(
+        ToolCall::parse(
+            "fabric_run",
+            json!({"op":"run","brief":"Inspect","operation_id":"retired"})
+        )
+        .is_err()
+    );
     assert!(ToolCall::parse("fabric_run", json!({"op":"run","document":"graph.json"})).is_err());
 }
 
@@ -671,11 +678,16 @@ fn removed_tools_are_unknown_and_merged_operations_are_typed() {
 fn request_correlation_mcp_accepts_links_but_rejects_caller_coverage() {
     let mut input = json!({"op":"ask","session":"chair-a","request":{
         "kind":"question","title":"Repair","body":"Which repair?",
-        "work":{"run_id":"00000000000000000000000000000001",
+        "work":{"graph":"repair","node":"review",
             "attempt_id":"00000000000000000000000000000002",
             "repository":{"relative_to_root":{"encoding":"utf8","path":"repo/.git"}},
             "head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}});
     assert!(ToolCall::parse("fabric_inbox", input.clone()).is_ok());
+    for retired in ["run_id", "task_id"] {
+        let mut forged = input.clone();
+        forged["request"]["work"][retired] = json!("00000000000000000000000000000001");
+        assert!(ToolCall::parse("fabric_inbox", forged).is_err());
+    }
     input["request"]["work_coverage"] = json!("verified");
     assert!(ToolCall::parse("fabric_inbox", input).is_err());
 }
@@ -921,6 +933,12 @@ fn lane_runs_keep_explicit_retry_identity_and_new_calls_have_new_identity() {
         serde_json::to_value(lane_run_request(&explicit).unwrap()).unwrap(),
         serde_json::to_value(lane_run_request(&explicit).unwrap()).unwrap()
     );
+    let routed =
+        lane_run_request(&json!({"op":"run", "brief":"inspect", "route":"senior"})).unwrap();
+    assert_eq!(serde_json::to_value(routed).unwrap()["tier"], "senior");
+    let nested =
+        lane_run_request(&json!({"op":"run", "document":{"use":"task", "tier":"junior"}})).unwrap();
+    assert_eq!(serde_json::to_value(nested).unwrap()["tier"], "junior");
     for access in [json!(false), json!({}), json!("writer"), Value::Null] {
         let mut invalid = request.clone();
         invalid["access"] = access;

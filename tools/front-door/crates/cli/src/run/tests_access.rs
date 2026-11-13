@@ -522,7 +522,11 @@ fn opencode_stderr_quota_settles_and_records_refusal() -> Result<(), Box<dyn std
     };
     let mut exit = clean_exit();
     exit.termination = Some(provenant_os::exec::Termination::Exit(1));
-    let decoded = Registry::default().decode_captures(
+    let decoded = Registry {
+        state_root: Some(&state),
+        ..Default::default()
+    }
+    .decode_captures(
         &route,
         &output.stdout.bytes,
         &output.stderr.bytes,
@@ -590,7 +594,11 @@ fn opencode_stderr_quota_text_does_not_overturn_a_successful_run()
     let provider_state = state.join("attempts/attempt/provider-state");
     let mut exit = clean_exit();
     exit.termination = Some(provenant_os::exec::Termination::Exit(0));
-    let decoded = Registry::default().decode_captures(
+    let decoded = Registry {
+        state_root: Some(&state),
+        ..Default::default()
+    }
+    .decode_captures(
         &opencode_decode_route(),
         include_bytes!("../../../../tests/fixtures/providers/opencode/v2.2.0-success.jsonl"),
         b"AI.Error.QuotaExceeded: Go usage limit exceeded retryAfterMs=60000\n",

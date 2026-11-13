@@ -1557,10 +1557,17 @@ mod tests {
                 .filter_map(|entry| entry.command.strip_prefix("provenant "))
                 .filter(|path| !path.contains(' ') && *path != "help")
                 .collect::<std::collections::BTreeSet<_>>();
-            assert!(
-                actual.len() <= 10,
-                "compact help has {} verbs",
-                actual.len()
+            let marked = command_model()
+                .get_subcommands()
+                .filter(|command| command.get::<metadata::CoreCommand>().is_some())
+                .map(|command| command.get_name().to_owned())
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                actual,
+                marked
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<std::collections::BTreeSet<_>>()
             );
             assert!(text.contains("help --all"));
         }
@@ -1997,10 +2004,10 @@ mod tests {
             ),
             (vec!["land", "--head"], "--head", "provenant land"),
             (vec!["output"], "target", "provenant output"),
-            (vec!["stop"], "target", "provenant stop NAME"),
-            (vec!["retry"], "target", "provenant retry NAME"),
+            (vec!["stop"], "target", "provenant stop"),
+            (vec!["retry"], "target", "provenant retry"),
             (vec!["steer"], "target", "provenant steer"),
-            (vec!["edit"], "name", "provenant edit NAME"),
+            (vec!["edit"], "name", "provenant edit"),
             (vec!["route", "resolve"], "route", "provenant route resolve"),
             (vec!["pr", "watch"], "number", "provenant pr watch"),
             (vec!["config"], "subcommand", "provenant config show"),
@@ -2153,6 +2160,7 @@ mod tests {
         let words: Vec<&str> = words.iter().map(String::as_str).collect();
         match (words.as_slice(), flag) {
             (["steer"], _) => vec!["--text-stdin"],
+            (["edit"], _) => vec!["--file", "patch.json"],
             (["pr", "open"], "--review") => {
                 vec!["--from-attempt", "fix-login", "--summary-file", "s.md"]
             }
@@ -2349,8 +2357,9 @@ mod tests {
     }
     #[test]
     fn control_commands_require_piped_text_and_a_channel() {
-        let attempt = "11111111111111111111111111111111";
+        let attempt = "fix-login/implement#1";
         valid(&["steer", attempt, "--text-stdin", "--operation-id", "s-1"]);
+        invalid(&["steer", "11111111111111111111111111111111", "--text-stdin"]);
         invalid(&["steer", attempt]);
         valid(&[
             "chair",
@@ -2603,10 +2612,10 @@ mod tests {
             .commands
             .iter()
             .find(|command| command.command == "provenant status");
-        assert!(
-            status
-                .is_some_and(|command| { command.arguments.iter().any(|arg| arg.name == "wait") })
-        );
+        let status = status.expect("status help");
+        assert!(!status.arguments.iter().any(|arg| arg.name == "wait"));
+        invalid(&["status", "--wait"]);
+        valid(&["wait", "fix-login"]);
         let ParseOutcome::Help { catalog, .. } = parsed(&["help", "reconcile", "--json"]) else {
             panic!("reconcile help")
         };

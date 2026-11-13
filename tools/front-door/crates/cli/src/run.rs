@@ -584,12 +584,17 @@ impl Registry<'_> {
             return Ok(failed("provider outcome is malformed"));
         };
         events.extend(outcome.final_events().iter().cloned());
+        let state_root = self
+            .state_root
+            .or_else(|| self.roots.map(|roots| roots.state.as_path()));
         let quota_evidence = QuotaEvidence::read(provider_state)?;
         if let Some(evidence) = &quota_evidence {
-            if let Some(state_root) = provider_state.ancestors().nth(5) {
-                evidence.apply(state_root, route, true)?;
-            } else {
-                return Err("quota evidence has no state root".into());
+            if evidence.shared {
+                evidence.apply(
+                    state_root.ok_or("quota evidence has no state root")?,
+                    route,
+                    true,
+                )?;
             }
             events.insert(
                 0,
@@ -905,7 +910,7 @@ impl Registry<'_> {
             let lane = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some();
             if quota_evidence.is_none() && !lane && (pool.is_some() || route.account_key.is_some())
             {
-                if let Some(state_root) = provider_state.ancestors().nth(5) {
+                if let Some(state_root) = state_root {
                     let now = SystemClock::new().unix_seconds();
                     let resets = resets_in_seconds
                         .and_then(|seconds| i64::try_from(seconds).ok())
@@ -1006,7 +1011,7 @@ impl Registry<'_> {
         }
         if decoded.outcome == run::Outcome::Succeeded
             && std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_none()
-            && let Some(state_root) = provider_state.ancestors().nth(5)
+            && let Some(state_root) = state_root
         {
             // Housekeeping must not change a successful lane's outcome.
             let _ = crate::quota::persist_provider_success(

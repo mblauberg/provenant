@@ -1275,6 +1275,9 @@ pub fn lane_run_request(
     if !node.is_object()
         || node.get("nodes").is_some()
         || node.get("templates").is_some()
+        // A child document selects its route through `tier`; `route` is the
+        // top-level invocation option and must not be silently discarded.
+        || input.get("document").is_some_and(|document| document.get("route").is_some())
         || input.get("over").is_some()
         || input
             .get("set")

@@ -513,7 +513,7 @@ fn request_content(bytes: &[u8]) -> Result<RequestDraft, Error> {
     ) || !known(&value["supersedes"], &["id", "expect_revision"])
         || !known(
             &value["work"],
-            &["run_id", "task_id", "attempt_id", "repository", "head"],
+            &["graph", "node", "attempt_id", "repository", "head"],
         )
         || !known(&value["work"]["repository"], &["relative_to_root"])
         || !known(
@@ -1339,12 +1339,18 @@ mod tests {
             "kind": "decision", "title": "Repair", "body": "Choose a repair",
             "supersedes": {"id": "01".repeat(16), "expect_revision": 1},
             "work": {
-                "run_id": "02".repeat(16),
+                "graph": "repair",
+                "node": "review",
                 "repository": {"relative_to_root": {"encoding": "utf8", "path": "repo"}}
             },
             "options": [{"id": "repair", "label": "Repair", "description": "Fix the check"}]
         });
         assert!(request_content(&serde_json::to_vec(&value).unwrap()).is_ok());
+        for retired in ["run_id", "task_id"] {
+            let mut forged = value.clone();
+            forged["work"][retired] = serde_json::json!("02".repeat(16));
+            assert!(request_content(&serde_json::to_vec(&forged).unwrap()).is_err());
+        }
         for path in [
             "",
             "/supersedes",

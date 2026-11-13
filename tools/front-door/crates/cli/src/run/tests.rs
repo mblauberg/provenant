@@ -580,8 +580,8 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
     let initial = submit(&session, &edge, submission("context-base"), &call)
         .err()
         .ok_or("unknown fixture adapter must refuse its initial launch")?;
-    assert_eq!(initial.status, Status::Refused);
-    assert_eq!(initial.kind, ErrorKind::Refused);
+    assert_eq!(initial.status, Status::Refused, "{initial:?}");
+    assert_eq!(initial.kind, ErrorKind::Refused, "{initial:?}");
     let operation = session
         .store
         .operation(&OperationId::parse("context-ref-replay")?, &call)?

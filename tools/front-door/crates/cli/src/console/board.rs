@@ -447,12 +447,15 @@ mod tests {
             clock: &clock,
             cancel: &cancel,
         };
+        let selected: AttemptId =
+            serde_json::from_value(first["lanes"][0]["lane_id"]["attempt_id"].clone())?;
+        let selected_request = store.request(selected, &call)?;
         ChairIndex::open(&roots.state, &chair_call)?.submit(
             project,
             first["lanes"][0]["lane_id"]["key"]["graph"]
                 .as_str()
                 .ok_or("missing graph")?,
-            &request,
+            &selected_request,
             &chair_call,
         )?;
         assert_eq!(

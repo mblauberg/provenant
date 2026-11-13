@@ -480,7 +480,10 @@ mod tests {
             let provider_state = state.join("attempts/attempt/provider-state");
             let route = quota_test_route();
             let decoded = run::Providers::decode_captures(
-                &Registry::default(),
+                &Registry {
+                    state_root: Some(&state),
+                    ..Default::default()
+                },
                 &route,
                 b"",
                 b"",
@@ -537,7 +540,10 @@ mod tests {
         let route = quota_test_route();
         let decode = || {
             run::Providers::decode_captures(
-                &Registry::default(),
+                &Registry {
+                    state_root: Some(&state),
+                    ..Default::default()
+                },
                 &route,
                 b"",
                 b"",
@@ -580,7 +586,10 @@ mod tests {
         .write(&Directory::open_anchor(&attempt)?)?;
         let route = quota_test_route();
         let decoded = run::Providers::decode_captures(
-            &Registry::default(),
+            &Registry {
+                state_root: Some(&state),
+                ..Default::default()
+            },
             &route,
             b"",
             b"",
@@ -672,7 +681,10 @@ mod tests {
         let provider_state = attempt.join("provider-state");
         for _ in 0..2 {
             let decoded = run::Providers::decode_captures(
-                &Registry::default(),
+                &Registry {
+                    state_root: Some(&state),
+                    ..Default::default()
+                },
                 &quota_test_route(),
                 b"",
                 b"",

@@ -28,7 +28,16 @@ fn generated_schema_snapshot_is_checked_in() {
         assert!(tool.get("description").and_then(Value::as_str).is_some());
         let input_schema = &tool["inputSchema"];
         assert_eq!(input_schema["type"], "object");
-        assert!(input_schema.get("properties").is_some());
+        let shapes = input_schema["oneOf"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_else(|| std::slice::from_ref(input_schema));
+        assert!(!shapes.is_empty());
+        for shape in shapes {
+            assert_eq!(shape["type"], "object");
+            assert!(shape["properties"].is_object());
+            assert_eq!(shape["additionalProperties"], false);
+        }
     }
     let all = all_catalogue();
     assert!(all.len() >= tools.len());
@@ -536,7 +545,10 @@ fn walk(
     }
     for candidate in candidates(root, schema, value, false) {
         if let Some(changed) = replace(request, path, candidate) {
-            compare(tool, root, &changed, path, false, counts);
+            // A branch-invalid value can still be valid through another arm
+            // of an enclosing union (for example a string/object route).
+            let valid = accepts(root, root, &changed);
+            compare(tool, root, &changed, path, valid, counts);
         }
     }
     if let (Some(object), Some(properties)) = (
