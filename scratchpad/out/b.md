@@ -52,3 +52,11 @@ Residual adapter: the existing RunStore::resume path and its predecessor/success
 records are deliberately reused for same-provider-session continuation. No new
 provider adapter or fresh graph-restart mechanism was introduced. The integration
 chair should reconcile this narrow bridge with the other identity cut-over slices.
+
+Later CI evidence: lane run 43419732238 found the CLI launch failure needed
+conversion at the settlement edge; repaired. Run 43420203940 passed workspace
+compilation/lint, then strict reference generation found the compact key list
+had grown beyond its existing surface policy. Kept the three daily budget knobs
+in the compact list and left domain/tier/project variants in the advanced schema.
+Both pure reference renderers were checked successfully without invoking Cargo.
+Final exact-head CI evidence is recorded in the collected schema-v2 handoff.
