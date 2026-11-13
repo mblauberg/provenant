@@ -192,7 +192,7 @@ fn emit_unpublished<T: Serialize>(
             Outcome::Error,
             "RESULT_TOO_LARGE",
             "result exceeds 1 MiB; no artefact was written",
-            Some("narrow it with --since and --until, or drop --detail"),
+            Some("narrow it with --since and --until"),
             globals,
         ),
         Err(_) => {
@@ -1157,66 +1157,20 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Run(cmd) => graph_interface::run(*cmd, globals, process.workers()),
         Command::Edit(cmd) => graph_interface::edit(cmd, globals, process.workers()),
         Command::Templates(cmd) => graph_interface::templates(cmd, globals, process.workers()),
-        Command::Trace { graph } => fabric::unified_graph_trace(&graph, globals, process.workers()),
-        Command::Stats(cmd) => {
-            graph_interface::stats("stats", cmd.id, cmd.by, globals, process.workers())
-        }
+        Command::Trace(cmd) => fabric::unified_graph_trace(&cmd.target, globals, process.workers()),
         Command::Status(cmd) if cmd.session_stream => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::status_session_stream(cmd, edge, &mut io::stdout().lock())
         }),
-        Command::Status(cmd) if cmd.stats => {
-            graph_interface::stats("status", cmd.id, cmd.by, globals, process.workers())
+        Command::Status(cmd) if cmd.targets.is_empty() && !provenant_cli::fabric::in_lane() => {
+            fabric::graph_listing(&cmd, globals, process.workers())
         }
-        Command::Status(cmd)
-            if cmd.wait.is_some()
-                && cmd.target.is_empty()
-                && cmd
-                    .id
-                    .as_deref()
-                    .is_some_and(|id| id.starts_with("operation:")) =>
-        {
-            run_edge(&inv.leaf, globals, |edge| {
-                let mut reply = provenant_cli::run::status(cmd, globals.json, edge);
-                if reply.result.error.is_none() {
-                    reply.result.status = provenant_records::Outcome::Failed;
-                    reply.result.data["condition_met"] = serde_json::json!(true);
-                    reply.result.data["timed_out"] = serde_json::json!(false);
-                }
-                reply
-            })
-        }
-        Command::Status(cmd) if provenant_cli::fabric::in_lane() && cmd.target.is_empty() => {
-            fabric::unified_graph_command(
-                cmd.id.as_deref().unwrap_or(""),
-                fabric::GraphCommand::Status { wait: cmd.wait },
-                globals,
-                process.workers(),
-            )
-            .unwrap_or(3)
-        }
-        Command::Status(cmd) if cmd.wait.is_some() || !cmd.target.is_empty() => {
-            status_wait::run(cmd, globals)
-        }
-        Command::Status(cmd) => {
-            if let Some(id) = &cmd.id
-                && let Some(code) = fabric::unified_graph_command(
-                    id,
-                    fabric::GraphCommand::Status { wait: None },
-                    globals,
-                    process.workers(),
-                )
-            {
-                return code;
-            }
-            run_edge(&inv.leaf, globals, |edge| {
-                let all_graphs = cmd.id.is_none();
-                let mut reply = provenant_cli::run::status(cmd, globals.json, edge);
-                if all_graphs {
-                    fabric::append_graph_status(&mut reply, globals, process.workers());
-                }
-                reply
-            })
-        }
+        Command::Status(cmd) => fabric::unified_graph_command(
+            &cmd.targets,
+            fabric::GraphCommand::Status,
+            globals,
+            process.workers(),
+        ),
+        Command::Wait(cmd) => status_wait::run(cmd, globals),
         Command::Land {
             numbers,
             head,
@@ -1243,62 +1197,30 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             process.workers(),
         ),
         Command::Output(cmd) => run_edge(&inv.leaf, globals, |edge| {
-            if let Some(reply) =
-                fabric::unified_graph_output(&cmd, edge, globals, process.workers())
-            {
-                return reply;
-            }
-            provenant_cli::run::output(cmd, edge)
+            fabric::unified_graph_output(&cmd, edge, globals, process.workers())
         }),
-        Command::Stop(cmd) => {
-            if provenant_cli::fabric::in_lane() {
-                return run_edge(&inv.leaf, globals, |edge| {
-                    provenant_cli::run::cancel(cmd, edge)
-                });
-            }
-            if let Some(code) = fabric::unified_graph_command(
-                &fabric::target_text(&cmd.target),
-                fabric::GraphCommand::Stop {
-                    reason: cmd.reason.clone(),
-                    wait: cmd.wait,
-                },
-                globals,
-                process.workers(),
-            ) {
-                return code;
-            }
-            fail(
-                &inv.leaf,
-                Outcome::Refused,
-                "GRAPH_REQUIRED",
-                "retained non-graph lanes are read-only; use `provenant reconcile --id <attempt>` to recover one",
-                globals,
-            )
+        Command::Stop(cmd) if provenant_cli::fabric::in_lane() => {
+            run_edge(&inv.leaf, globals, |_| {
+                provenant_cli::run::stop_from_lane(&cmd.target)
+            })
         }
-        Command::Retry(cmd) => {
-            if let Some(code) = fabric::unified_graph_command(
-                &fabric::target_text(&cmd.attempt.0),
-                fabric::GraphCommand::Retry {
-                    extend: &cmd.extend,
-                    node: cmd.node.as_deref(),
-                    brief: cmd.brief.as_deref(),
-                    legacy_prompt: cmd.prompt.prompt_file.is_some() || cmd.prompt.prompt_stdin,
-                    no_fallback: cmd.no_fallback,
-                    wait: cmd.wait,
-                },
-                globals,
-                process.workers(),
-            ) {
-                return code;
-            }
-            fail(
-                &inv.leaf,
-                Outcome::Refused,
-                "GRAPH_REQUIRED",
-                "retry target was not found in a graph; retained non-graph lanes are read-only",
-                globals,
-            )
-        }
+        Command::Stop(cmd) => fabric::unified_graph_command(
+            std::slice::from_ref(&cmd.target),
+            fabric::GraphCommand::Stop {
+                reason: cmd.reason.as_deref(),
+            },
+            globals,
+            process.workers(),
+        ),
+        Command::Retry(cmd) => fabric::unified_graph_command(
+            std::slice::from_ref(&cmd.target),
+            fabric::GraphCommand::Retry {
+                extend: &cmd.extend,
+                brief: cmd.brief.as_deref(),
+            },
+            globals,
+            process.workers(),
+        ),
         Command::Lane(cmd) => run_edge(&inv.leaf, globals, |edge| {
             let mut reply = provenant_cli::run::lane(cmd, edge);
             if let Err(error) =
@@ -1313,7 +1235,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             reply
         }),
         Command::Reconcile(cmd) => run_edge(&inv.leaf, globals, |edge| {
-            let all = cmd.id.is_empty() && cmd.abandon.is_none();
+            let all = cmd.targets.is_empty() && cmd.abandon.is_none();
             let mut reply = provenant_cli::run::reconcile(cmd, edge);
             if all {
                 let issue = match settlement::reconcile_refusal_notices(edge) {
@@ -1346,24 +1268,8 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             reply
         }),
         Command::Telemetry(provenant_cli::Telemetry::Stats(cmd)) => {
-            if stats_dispatch(&cmd) == StatsDispatch::Usage {
+            if cmd.usage {
                 usage::run(&cmd, globals)
-            } else if stats_dispatch(&cmd) == StatsDispatch::MergedPullRequests {
-                let merged = match pr::contributions::merged_prs(globals, cmd.since, cmd.until) {
-                    Ok(merged) => merged,
-                    Err(error) => {
-                        return fail(
-                            "telemetry stats",
-                            Outcome::Error,
-                            "MERGED_PR_READ",
-                            &error.to_string(),
-                            globals,
-                        );
-                    }
-                };
-                run_edge_emitting(&inv.leaf, globals, Workspace::Project, false, |edge| {
-                    provenant_cli::run::stats_by_pr(cmd, edge, merged)
-                })
             } else {
                 run_edge_emitting(&inv.leaf, globals, Workspace::Project, false, |edge| {
                     provenant_cli::run::stats(cmd, edge)
@@ -1402,16 +1308,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 provenant_cli::telemetry_value::cost(cmd, edge)
             })
         }
-        Command::Steer(args) => {
-            if let Some(code) = fabric::unified_graph_steer(&args, globals, process.workers()) {
-                return code;
-            }
-            human_inbox(
-                provenant_cli::inbox::HumanCommand::Steer(args),
-                &inv.leaf,
-                globals,
-            )
-        }
+        Command::Steer(args) => fabric::unified_graph_steer(&args, globals, process.workers()),
         Command::Chair(provenant_cli::Chair::Message(args)) => human_inbox(
             provenant_cli::inbox::HumanCommand::ChairMessage(args),
             &inv.leaf,
@@ -1427,9 +1324,6 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 usage: false,
                 since: None,
                 until: None,
-                run_id: None,
-                by: None,
-                detail: false,
             };
             let mut reply = provenant_cli::run::stats(stats, edge);
             if let Some(pipeline) = reply.result.data.get("pipeline") {
@@ -1592,49 +1486,6 @@ mod session_warning_tests {
     }
 }
 
-#[cfg(test)]
-mod telemetry_stats_dispatch_tests {
-    #[test]
-    fn grouped_stats_dispatch_to_the_matching_reader() {
-        for (dimension, expected) in [
-            ("pr", super::StatsDispatch::MergedPullRequests),
-            ("node", super::StatsDispatch::Project),
-            ("pattern", super::StatsDispatch::Project),
-        ] {
-            let provenant_cli::ParseOutcome::Invocation(invocation) = provenant_cli::parse(
-                ["telemetry", "stats", "--by", dimension]
-                    .into_iter()
-                    .map(std::ffi::OsString::from),
-            ) else {
-                panic!("stats invocation for {dimension}");
-            };
-            let provenant_cli::Command::Telemetry(provenant_cli::Telemetry::Stats(command)) =
-                invocation.command
-            else {
-                panic!("stats command for {dimension}");
-            };
-            assert_eq!(super::stats_dispatch(&command), expected, "{dimension}");
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StatsDispatch {
-    Usage,
-    MergedPullRequests,
-    Project,
-}
-
-fn stats_dispatch(command: &provenant_cli::Stats) -> StatsDispatch {
-    if command.usage {
-        StatsDispatch::Usage
-    } else if command.by == Some(provenant_cli::StatsBy::Pr) {
-        StatsDispatch::MergedPullRequests
-    } else {
-        StatsDispatch::Project
-    }
-}
-
 /// Run one parsed command line and count it, returning the exit status.
 // CLI reporting measures real elapsed time for operational diagnostics.
 #[allow(clippy::disallowed_methods)]
@@ -1676,11 +1527,11 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     }) {
         provenant_sqlite::set_busy_timeout(timeout);
     }
+    // Whether a status read waited: telemetry separates waits from reads.
     let status_wait = match &parsed {
         ParseOutcome::Invocation(inv) => match &inv.command {
-            Command::Status(args) if !args.stats && !args.session_stream => {
-                Some(args.wait.is_some())
-            }
+            Command::Status(args) if !args.session_stream => Some(false),
+            Command::Wait(_) => Some(true),
             _ => None,
         },
         _ => None,
@@ -1688,8 +1539,8 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     let read_only_graph = match &parsed {
         ParseOutcome::Invocation(inv) => {
             matches!(&inv.command, Command::Run(args) if args.explain)
-                || (matches!(&inv.command, Command::Status(_)) && status_wait.is_none())
-                || matches!(&inv.command, Command::Templates(_) | Command::Stats(_))
+                || matches!(&inv.command, Command::Status(args) if args.session_stream)
+                || matches!(&inv.command, Command::Templates(_))
         }
         _ => false,
     };

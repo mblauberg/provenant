@@ -3,9 +3,9 @@ use super::git::{Git, plain_ref};
 use super::{Refused, Result, code_of, execute_with, successful};
 use crate::{emit, fail, roots};
 use provenant_cli::{
-    Attempt, Globals, PrOpen, Target,
+    Globals, PrOpen,
     pr_body::{self, Body},
-    run::{AttemptFacts, Edge, attempt_facts},
+    run::{AttemptFacts, Edge, attempt_facts, review_attempt_facts},
 };
 use provenant_core::GitOid;
 use provenant_records::{CommandResult, Outcome};
@@ -103,26 +103,14 @@ fn plan(
         )
         .into());
     }
-    let reviews: Vec<Attempt> = if command.review.is_empty() {
-        author
-            .reviews
-            .iter()
-            .map(|id| {
-                Attempt(Target {
-                    selection: None,
-                    run: None,
-                    task: None,
-                    attempt: Some(*id),
-                })
-            })
-            .collect()
-    } else {
-        command.review.clone()
-    };
-    let reviews: Vec<AttemptFacts> = if reviews.is_empty() {
+    // Reviews named on the command resolve as targets; the receipt's own
+    // reviews are already attempt ids.
+    let reviews: Vec<AttemptFacts> = if !command.review.is_empty() {
+        attempt_facts(&edge, &command.review).map_err(fail)?
+    } else if author.reviews.is_empty() {
         Vec::new()
     } else {
-        attempt_facts(&edge, &reviews).map_err(fail)?
+        review_attempt_facts(&edge, &author.reviews).map_err(fail)?
     };
     let branch = command
         .branch

@@ -428,67 +428,72 @@ fn merge_with(
         .map(str::to_owned))
 }
 pub fn run(command: Pr, globals: &Globals, _workers: &dyn WorkerObserver) -> u8 {
-    let (leaf, number) = match command {
-        Pr::Watch { number } => ("pr watch", number),
+    let numbers = match command {
+        Pr::Watch { numbers } => numbers,
         Pr::Open(command) => return open::run(*command, globals),
-        Pr::Status { numbers, wait } => return status::run(numbers, wait, globals),
+        Pr::Status { numbers } => return status::run(numbers, globals),
         Pr::Contributions { number, bind } => return contributions::run(number, bind, globals),
     };
-    let mut captured = None;
-    let result = (|| -> Result<()> {
-        let project = roots::selected_project(globals.project.as_deref(), true)?;
-        let number = number.to_string();
-        let pull = rest_pull(&|argv| execute(&project, argv), &number)?;
-        let current = pull.head.sha;
-        captured = Some(current);
-        let repository = pull
-            .base
-            .repo
-            .map(|repo| repo.full_name)
-            .ok_or("pull request base repository is unavailable")?;
-        let state = roots::resolve(globals, roots::Workspace::Project, roots::Product::Optional)?
-            .roots
-            .state;
-        watch(&project, state.as_path(), &number, current, &repository)?;
-        Ok(())
-    })();
-    let Some(head) = captured else {
-        return fail(
-            leaf,
-            Outcome::Error,
-            "PR",
-            &result.err().map_or_else(
-                || "pull request head is unavailable".into(),
-                |error| error.to_string(),
-            ),
-            globals,
-        );
-    };
-    let (outcome, status) = if result.is_ok() {
-        (Outcome::Ok, "pass")
+    const LEAF: &str = "pr watch";
+    // Each pull request is watched in turn; the result reports every head.
+    let mut pulls = Vec::new();
+    let mut human = String::new();
+    let mut failures = Vec::new();
+    for number in numbers {
+        let mut captured = None;
+        let result = (|| -> Result<()> {
+            let project = roots::selected_project(globals.project.as_deref(), true)?;
+            let number = number.to_string();
+            let pull = rest_pull(&|argv| execute(&project, argv), &number)?;
+            let current = pull.head.sha;
+            captured = Some(current);
+            let repository = pull
+                .base
+                .repo
+                .map(|repo| repo.full_name)
+                .ok_or("pull request base repository is unavailable")?;
+            let state =
+                roots::resolve(globals, roots::Workspace::Project, roots::Product::Optional)?
+                    .roots
+                    .state;
+            watch(&project, state.as_path(), &number, current, &repository)?;
+            Ok(())
+        })();
+        let Some(head) = captured else {
+            return fail(
+                LEAF,
+                Outcome::Error,
+                "PR",
+                &result.err().map_or_else(
+                    || format!("pull request #{number} head is unavailable"),
+                    |error| format!("#{number}: {error}"),
+                ),
+                globals,
+            );
+        };
+        let status = if result.is_ok() { "pass" } else { "fail" };
+        if let Err(error) = result {
+            failures.push(format!("fail #{number} {head}: {error}"));
+        }
+        human.push_str(&format!("{status} #{number} {head}\n"));
+        pulls.push(serde_json::json!({"number": number, "head": head, "result": status}));
+    }
+    let outcome = if failures.is_empty() {
+        Outcome::Ok
     } else {
-        (Outcome::Error, "fail")
+        Outcome::Error
     };
-    let mut report = CommandResult::new(
-        leaf,
-        outcome,
-        serde_json::json!({"number": number, "head": head, "result": status}),
-    );
-    if let Err(error) = result {
+    let mut report = CommandResult::new(LEAF, outcome, serde_json::json!({"pulls": pulls}));
+    if !failures.is_empty() {
         report.error = Some(provenant_records::CommandError {
             diagnostic: None,
             code: "PR".into(),
-            message: format!("fail #{number} {head}: {error}"),
+            message: failures.join("; "),
             cause: None,
             repair: None,
         });
     }
-    emit(
-        &report,
-        globals,
-        &format!("{status} #{number} {head}\n"),
-        true,
-    )
+    emit(&report, globals, &human, true)
 }
 
 #[cfg(test)]
