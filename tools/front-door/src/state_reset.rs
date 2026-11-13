@@ -165,6 +165,11 @@ pub(crate) fn plan(state: &Path, receipt_format: Option<u64>) -> io::Result<Opti
             "reset requires a Provenant install directory or receipt",
         ));
     }
+    // The current OS capability can retire regular owner locks, but cannot
+    // unlink a lock-named symlink. Refuse before any archive move or deletion.
+    for entry in &entries {
+        check_removal(&entry.parent, &entry.name)?;
+    }
     Ok(Some(Plan {
         root,
         state: state.into(),
@@ -255,6 +260,31 @@ fn create_path(root: &Directory, path: &Path) -> io::Result<Directory> {
     }
     Ok(dir)
 }
+fn check_removal(parent: &Directory, name: &OsStr) -> io::Result<()> {
+    let Some(value) = metadata(parent, name)? else {
+        return Ok(());
+    };
+    if provenant_os::fs::is_reserved_lock_name(name)
+        && (value.kind != FileKind::Regular || !name.as_encoded_bytes().ends_with(b".lock"))
+    {
+        return Err(io::Error::other(format!(
+            "unsupported lock-named entry {} requires explicit removal before reset",
+            name.to_string_lossy()
+        )));
+    }
+    if value.kind == FileKind::Directory
+        && !["tmp", "provider-state", "scratch", "provider-history"]
+            .iter()
+            .any(|part| name == *part)
+    {
+        let directory = fs(parent.open_verified_directory(name))?;
+        for child in fs(directory.entries())? {
+            check_removal(&directory, &fs(child)?)?;
+        }
+    }
+    Ok(())
+}
+
 fn remove_entry(parent: &Directory, name: &OsStr) -> io::Result<()> {
     let Some(before) = metadata(parent, name)? else {
         return Ok(());

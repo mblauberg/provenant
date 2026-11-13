@@ -117,7 +117,10 @@ contributions and `admission.sqlite3` (leases reference dropped runs), including
 SQLite companions. Owned macOS `pv-*` links to those attempts' tmp directories
 are unlinked. All removals use a held state-root directory capability, restore
 owner access to read-only directories and treat absent entries as removed.
-Symlinked `fabric` refuses; dropped symlinks are unlinked without following them.
+Symlinked `fabric` refuses. Dropped symlinks are unlinked without following them,
+except lock-named symlinks: the current OS capability cannot unlink those, so
+preflight refuses them before any archive move or deletion. They require
+explicit removal before reset.
 
 Before removing any dropped tree, provider archives from its actual
 `attempts/<id>/provider-history` layout (including run-keyed and child stores)

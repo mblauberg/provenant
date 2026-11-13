@@ -67,7 +67,8 @@ successful installation. If installation fails, the agents stay stopped; rerun
 the same acknowledged install before opening sessions. Provider archives move
 out of the dropped tree to `provider-history/format-1/`, retaining their relative
 attempt paths. Admission leases are dropped with the run stores. Read-only tmp
-directories and partial removal can be retried safely.
+directories and partial removal can be retried safely. A lock-named symlink
+refuses before deletion; remove that link explicitly before retrying.
 
 From a format-2 binary, `provenant upgrade` preflights every configured host
 before installing any host and never prompts while capturing installer output.
