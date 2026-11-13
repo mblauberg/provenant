@@ -1183,7 +1183,22 @@ pub(super) fn prepare(
     };
     let mut local = Vec::with_capacity(patch.nodes.len());
     let mut uses = Vec::new();
-    for raw in &patch.nodes {
+    let mut authored = compiler.bounded_plan_consumers(&patch.nodes);
+    if matches!(mode, Preparation::FinalFragment)
+        && parent.is_some_and(|node| {
+            node.plan.is_some()
+                || node
+                    .extra
+                    .get(template::TEMPLATE_FIELD)
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| name == "plan" || name.starts_with("plan."))
+        })
+    {
+        for node in &mut authored {
+            Compiler::mark_bounded_implementation(node);
+        }
+    }
+    for raw in &authored {
         let mut node = compiler.compile(raw)?;
         let used = raw.get("use").and_then(Value::as_str);
         let trusted = used.is_some_and(|name| {

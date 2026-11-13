@@ -584,7 +584,7 @@ pub(super) fn apply_attempt_observation(
                         ) {
                             SettlementFallback::Continue => true,
                             SettlementFallback::Fail { code, message } => {
-                                fail_node(progress, code, message);
+                                fail_node(progress, code.map(str::to_owned), message);
                                 false
                             }
                         }

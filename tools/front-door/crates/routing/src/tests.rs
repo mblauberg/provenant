@@ -600,6 +600,7 @@ fn go_alias_quota_case(
 mod alternatives;
 mod availability;
 mod bare_model;
+mod depletion_age;
 mod exclusions;
 mod ladder;
 mod policies;

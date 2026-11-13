@@ -1,3 +1,6 @@
 doc = "Implement the approved plan, verify its acceptance items, commit and hand off."
 brief = "Implement the approved plan, verify its acceptance items, commit and hand off."
 tier = "junior"
+
+[parameters]
+bounded = { type = "boolean", default = true, doc = "The brief is an existing plan output." }

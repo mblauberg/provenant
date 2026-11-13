@@ -1,2 +1,5 @@
 doc = "Fix qualified findings at their cause."
 brief = "Repair grouped checked fix items at their shared cause, preserving each item id and invariant across all relevant paths and twin copies within write scope. Compare removing the flawed case with adding a local guard. Report each grouped item in the findings block repair_items array as {id, status, reason, alternative?}, where status is fixed, removed-the-case, disputed or design-cannot-hold. A dispute explains the falsified premise and goes to synthesis; it is not automatically unresolved. design-cannot-hold supplies an alternative and stops this round for principal design. Add a regression check where behaviour is observable, commit and end with a handoff block. Before the final handoff, include a findings block {schema_version:1, findings:[], repair_items:[...]}."
+
+[parameters]
+bounded = { type = "boolean", default = true, doc = "The brief contains qualified fix items within an existing write scope." }

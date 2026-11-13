@@ -322,19 +322,6 @@ fn fallback_cause(outcome: AttemptOutcome) -> Option<provenant_records::StopCaus
     }
 }
 
-/// The step a node's `on_stop` names for a fallback outcome, when it moves the
-/// stop somewhere other than the next route.
-fn on_stop_holds(
-    node: &PlannedNode,
-    outcome: AttemptOutcome,
-) -> Option<provenant_records::StopCause> {
-    fallback_cause(outcome).filter(|cause| {
-        node.on_stop
-            .get(*cause)
-            .is_some_and(|step| step != provenant_records::NextStep::NewRoute)
-    })
-}
-
 /// A settled review task can be independently re-attempted without changing
 /// the panel topology. An unresolved launch is never eligible.
 pub(super) fn review_substitution(node: &PlannedNode, attempt: &GraphAttempt) -> bool {
@@ -372,15 +359,7 @@ pub(crate) fn live_fallback_allowed(
 ) -> bool {
     use provenant_records::run::PreparationFailure;
     if launched {
-        return provenant_routing::FallbackPolicy {
-            outcome: routing_outcome(outcome),
-            handoff: provenant_routing::FallbackHandoff::Launched,
-            custody_released: false,
-            read_only: access == AccessMode::ReadOnly,
-            budget_remaining: true,
-            pinned: false,
-        }
-        .allows_switch();
+        return false;
     }
     let Some(evidence) = evidence else {
         return false;
@@ -401,7 +380,7 @@ pub(crate) fn live_fallback_allowed(
             budget_remaining: true,
             pinned: false,
         }
-        .allows_switch()
+        .allows_preparation_switch()
 }
 
 pub(crate) fn fallback_denial(
@@ -559,20 +538,6 @@ pub(super) fn next_attempt_transition(
             });
         }
         Some(last)
-            if let Some(cause) = last.outcome.and_then(|outcome| {
-                fallback_candidate(outcome, node.access, last.launched)
-                    .then(|| on_stop_holds(node, outcome))
-                    .flatten()
-            }) =>
-        {
-            return NextAttemptDecision::Ready(NextAttempt::Fail {
-                code: Some("on_stop_held"),
-                message: Some(format!(
-                    "on_stop keeps a {cause} stop off the next route; return to the chair"
-                )),
-            });
-        }
-        Some(last)
             if last
                 .outcome
                 .is_some_and(|outcome| fallback_candidate(outcome, node.access, last.launched)) =>
@@ -583,31 +548,29 @@ pub(super) fn next_attempt_transition(
             let Some(fallback) = &facts.fallback else {
                 return NextAttemptDecision::ObservePreparationFallback;
             };
-            if !live_fallback_allowed(outcome, last.launched, node.access, fallback.evidence) {
-                let (code, message) = fallback_denial(
-                    last.launched,
-                    node.access,
-                    fallback.unreadable,
-                    outcome,
-                    fallback.cause.as_ref(),
-                );
-                return NextAttemptDecision::Ready(NextAttempt::Fail {
-                    code: Some(code),
-                    message: Some(message),
-                });
-            }
-            if review_preparation_substitution(node, last)
-                && progress
-                    .attempts
-                    .iter()
-                    .filter(|attempt| attempt.review_substitution)
-                    .count()
-                    >= limits.review_substitutions
-            {
-                return NextAttemptDecision::Ready(NextAttempt::Fail {
-                    code: Some("review_substitution_limit"),
-                    message: Some("review substitution limit reached".into()),
-                });
+            match next_step::settlement_fallback_decision(
+                node,
+                usize::from(last.key.route_index),
+                outcome,
+                last.launched,
+                FallbackEvidence {
+                    preparation: fallback.evidence,
+                    unreadable: fallback.unreadable,
+                    review_limit_reached: review_preparation_substitution(node, last)
+                        && progress
+                            .attempts
+                            .iter()
+                            .filter(|attempt| attempt.review_substitution)
+                            .count()
+                            >= limits.review_substitutions,
+                    cause: fallback.cause.as_ref(),
+                    skipped_accounts: &[],
+                },
+            ) {
+                SettlementFallback::Continue => {}
+                SettlementFallback::Fail { code, message } => {
+                    return NextAttemptDecision::Ready(NextAttempt::Fail { code, message });
+                }
             }
             progress.attempts.len()
         }
@@ -1036,7 +999,7 @@ mod tests {
             Vec::new(),
             serde_json::json!({"advance_error_code": "earlier", "advance_error": "kept"}),
         );
-        fail_node(&mut settled, code, message);
+        fail_node(&mut settled, code.map(str::to_owned), message);
         assert_eq!(settled.state, NodeState::Failed);
         assert_eq!(settled.advance_error_code.as_deref(), Some("auth_required"));
         assert_eq!(

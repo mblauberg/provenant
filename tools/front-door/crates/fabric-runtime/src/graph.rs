@@ -62,11 +62,19 @@ mod admission_tests;
 #[cfg(test)]
 mod ask_link_tests;
 #[cfg(test)]
+mod cutover_followup_invariants;
+#[cfg(test)]
 mod cutover_g_tests;
+#[cfg(test)]
+mod fallback_invariants;
+#[cfg(test)]
+mod implement_invariants;
 #[cfg(test)]
 mod next_step_tests;
 #[cfg(test)]
 mod typed_records_tests;
+#[cfg(test)]
+mod when_requirement_invariants;
 #[cfg(test)]
 mod when_tests;
 use budget::*;

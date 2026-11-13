@@ -1,0 +1,97 @@
+//! Bounded briefs keep a direct writer; open briefs must be sized first.
+use super::*;
+use serde_json::json;
+
+#[test]
+fn implementation_is_planned_unless_its_brief_is_already_bounded() {
+    let library = TemplateLibrary::bundled();
+    let compiler = Compiler::new(&library);
+    let limits = crate::config::GraphLimits::default();
+    for (template, bounded, expects_plan) in [
+        ("implement", false, true),
+        ("implement", true, false),
+        ("implement.plan", false, false),
+        ("implement.fix", false, false),
+        ("implement.issue", false, true),
+    ] {
+        let mut raw = json!({"id":"work", "use":template, "brief":"Meet the acceptance criteria",
+            "worktree":"/fixture/writer", "write_scope":["src"]});
+        if bounded {
+            raw["with"] = json!({"bounded":true});
+        }
+        let document: GraphDocument = serde_json::from_value(json!({
+            "schema_version":1, "graph_id":"bounded", "nodes":[compiler.compile(&raw).unwrap()]
+        }))
+        .unwrap();
+        let expanded = document.expanded(&limits).unwrap();
+        let writer = expanded
+            .nodes
+            .iter()
+            .find(|node| node.access == AccessMode::WorktreeWrite)
+            .unwrap();
+        assert_eq!(
+            writer.route.as_ref().unwrap().alias.as_deref(),
+            Some("junior")
+        );
+        assert_eq!(writer.worktree.as_deref(), Some("/fixture/writer"));
+        assert_eq!(writer.write_scope, ["src"]);
+        let planners: Vec<_> = expanded
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.extra
+                    .get(template::TEMPLATE_FIELD)
+                    .and_then(serde_json::Value::as_str)
+                    == Some("plan")
+            })
+            .collect();
+        if expects_plan {
+            let planner = planners.first().expect("an open brief needs a sizing plan");
+            assert_eq!(planner.access, AccessMode::ReadOnly);
+            assert!(writer.depends_on.contains(&planner.id));
+            assert!(writer.inputs.iter().any(
+                |input| input.node == planner.id && input.outputs.contains(&OutputKind::Result)
+            ));
+            let boundary = expanded
+                .nodes
+                .iter()
+                .find(|node| node.id == "work")
+                .unwrap();
+            assert!(
+                boundary
+                    .composite
+                    .as_ref()
+                    .unwrap()
+                    .exports
+                    .iter()
+                    .any(|export| export.node == writer.id
+                        && export.outputs.contains(&OutputKind::Commit))
+            );
+        } else {
+            assert!(planners.is_empty());
+        }
+    }
+    // A plan result bounds the consumer; an arbitrary task's result does not.
+    for source in ["plan", "task"] {
+        let nodes = compiler.compile_all(&[
+            json!({"id":"source", "use":source}),
+            json!({"id":"work", "use":"implement", "inputs":[{"node":"source","outputs":["result"]}],
+                "worktree":"/fixture/writer", "write_scope":["src"]})
+        ]).unwrap();
+        assert_eq!(nodes[1].composite.is_some(), source != "plan");
+    }
+    let over = compiler
+        .compile(
+            &json!({"id":"slices", "use":"implement", "over":["one", "two"],
+        "worktree":"/fixture/writer", "write_scope":["src"]}),
+        )
+        .unwrap();
+    assert!(
+        over.composite
+            .unwrap()
+            .nodes
+            .iter()
+            .all(|node| node.composite.is_none()
+                && node.route.as_ref().unwrap().alias.as_deref() == Some("junior"))
+    );
+}

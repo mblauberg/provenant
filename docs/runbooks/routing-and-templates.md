@@ -128,6 +128,15 @@ evidence. A changed head needs delta review.
 Use `task` for one assignment, `plan` to shape work, `implement`, `review`,
 `batch` (disjoint slices into one integration branch) and `deliver`
 (implementation through landing; grants no publication authority).
+An `implement` brief without a prior plan expands to a read-only senior plan
+and a junior writer. The plan sizes and splits the work into ordered slices;
+the writer consumes its result in the existing worktree. Inspect both nodes
+and their input edge with `--explain`. For a brief already sized as one slice,
+use `provenant run implement "BRIEF" --set bounded=true --explain`.
+`batch` items, `implement.plan`, planner-produced implementation nodes and
+implementation nodes consuming a sibling plan's `result` skip the extra plan.
+A route override alone does not mark a brief as bounded.
+
 Register the writer worktree first (`provenant worktree create delivery --base
 BASE`) or pass `--branch NAME --base REF` to `run`, then bind parameters in a
 reusable document:

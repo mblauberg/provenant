@@ -288,7 +288,9 @@ pub fn fence_provisioning(checkpoint: &mut GraphCheckpoint, node: &str, path: &s
         .iter_mut()
         .flat_map(|expansion| &mut expansion.nodes)
     {
-        if spec.id == node && spec.worktree.as_deref() == Some(path) {
+        if (spec.id == node || spec.id.starts_with(&format!("{node}--")))
+            && spec.worktree.as_deref() == Some(path)
+        {
             spec.extra.insert("provision_worktree".into(), true.into());
         }
     }
@@ -386,6 +388,11 @@ pub fn admit_child_bound(
     patch.idempotency_key = Some(request_key(parent, request)?);
     if let Some((branch, commit)) = writer_base {
         fn bind_writers(node: &mut Value, branch: &str, commit: &str, provision_root: bool) {
+            // A generated planning boundary reads the same host-pinned source
+            // as its writer. Composite expansion passes this to both leaves.
+            if provision_root && node.get("source").is_none_or(Value::is_null) {
+                node["source"] = serde_json::json!({"type":"commit", "commit":commit});
+            }
             let mut boundary = false;
             for pointer in ["/composite/nodes", "/loop/body"] {
                 if let Some(children) = node.pointer_mut(pointer).and_then(Value::as_array_mut) {
@@ -960,17 +967,30 @@ pub fn child_source(
     child: &str,
     limits: &crate::config::GraphLimits,
 ) -> Result<Option<String>, String> {
-    Ok(plans::expand(
+    let expanded = plans::expand(
         document,
         &checkpoint.extensions,
         &checkpoint.expansions,
         limits,
-    )?
-    .nodes
-    .into_iter()
-    .find(|node| node.id == child)
-    .and_then(|node| match node.source {
-        Some(SourceBinding::Commit { commit }) => Some(commit),
-        _ => None,
-    }))
+    )?;
+    let mut id = child;
+    // A planning composite keeps the receipt's logical ID; its commit output
+    // identifies the writer whose checkout the host provisions.
+    for _ in 0..=expanded.nodes.len() {
+        let Some(node) = expanded.nodes.iter().find(|node| node.id == id) else {
+            return Ok(None);
+        };
+        if let Some(SourceBinding::Commit { commit }) = &node.source {
+            return Ok(Some(commit.clone()));
+        }
+        let Some(export) = node.composite.as_ref().and_then(|spec| {
+            spec.exports
+                .iter()
+                .find(|export| export.outputs.contains(&OutputKind::Commit))
+        }) else {
+            return Ok(None);
+        };
+        id = &export.node;
+    }
+    Err("cyclic child commit exports".into())
 }
