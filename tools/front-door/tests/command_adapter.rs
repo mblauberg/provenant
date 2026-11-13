@@ -445,7 +445,7 @@ fn command_dispatch_launches_with_normal_store_semantics() -> Result {
         |ready| *ready,
     )?;
     let evidence = fs::read_to_string(exit)?;
-    let waited = rig.command(&["status", "pass", "--wait=30s", "--until", "all", "--json"])?;
+    let waited = rig.command(&["wait", "pass", "--timeout", "30s", "--json"])?;
     assert_eq!(code(&waited), 0, "{waited:?}");
     let lane = settled(&rig, id)?;
     assert_eq!(
@@ -631,11 +631,12 @@ fn command_timeout_cleans_descendants_and_running_replay_keeps_one_attempt() -> 
     );
     let second = dispatch_with(&rig, "slow", 5, None, false)?;
     assert_eq!(id, attempt_id(&second)?);
-    let waited = rig.command(&["status", "slow", "--wait=30s", "--until", "all", "--json"])?;
-    assert_eq!(code(&waited), 0, "{waited:?}");
+    // The graph settles, unsuccessfully, before the wait's own deadline.
+    let waited = rig.command(&["wait", "slow", "--timeout", "30s", "--json"])?;
+    assert_eq!(code(&waited), 1, "{waited:?}");
     let lane = settled(&rig, id)?;
     assert_eq!(lane["state"], "timed_out", "{lane}");
-    let out = rig.command(&["output", id, "--part", "result", "--json"])?;
+    let out = rig.command(&["output", "slow/command#1", "--part", "result", "--json"])?;
     let result = String::from_utf8_lossy(&out.stdout.bytes);
     assert!(result.contains("VERDICT: FAIL"), "{result}");
     // Custody publishes success only after the recorded descendant census settles.

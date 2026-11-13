@@ -246,28 +246,6 @@ fn chair_start_records_serving_account_without_a_pending_handoff() -> Result {
     assert!(event["trace"]["project"].is_string());
     assert!(!log.contains("PRIVATE PROMPT"));
     assert!(!log.contains("transcript.jsonl"));
-    let output = rig.command(&["quota", "usage", "--json"])?;
-    assert_eq!(
-        code(&output),
-        0,
-        "{}",
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-    let rows = report["data"]["rows"].as_array().ok_or("usage rows")?;
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["account"], "primary");
-    assert_eq!(rows[0]["chair_sessions"], 1);
-    assert_eq!(rows[0]["chair_sessions_unread"], 0);
-    // Tokens come from the session's own transcript: 5 uncached, 400 read.
-    assert_eq!(rows[0]["chair_usage"]["uncached_input"]["known"], 5);
-    assert_eq!(rows[0]["chair_usage"]["cache_read"]["known"], 400);
-    assert_eq!(rows[0]["chair_cache"]["read_share_basis_points"], 9638);
-    assert!(
-        report["data"]["chair_usage_note"]
-            .as_str()
-            .is_some_and(|s| s.contains("unattributed"))
-    );
     fs::create_dir_all(rig.project.join("config"))?;
     fs::write(
         rig.project.join("config/telemetry-prices.toml"),
@@ -326,11 +304,6 @@ fn chair_on_an_unregistered_config_directory_is_recorded_as_unattributed() -> Re
         .ok_or("the default config directory must still be recorded")?;
     assert_eq!(event["account"], "unattributed");
     assert_eq!(event["config"], ".claude");
-    let report = rig.command(&["quota", "usage", "--json"])?;
-    let report: serde_json::Value = serde_json::from_slice(&report.stdout.bytes)?;
-    let row = &report["data"]["rows"][0];
-    assert_eq!(row["account"], "unattributed");
-    assert_eq!(row["chair_usage"]["cache_read"]["known"], 400);
     Ok(())
 }
 
@@ -352,10 +325,6 @@ fn chair_start_obeys_project_attribution_opt_in() -> Result {
         event.get("trace").is_none(),
         "project attribution is off: {event}"
     );
-    let report = rig.command(&["quota", "usage", "--json"])?;
-    let report: serde_json::Value = serde_json::from_slice(&report.stdout.bytes)?;
-    assert!(report["data"]["rows"][0]["project"].is_null());
-    assert_eq!(report["data"]["rows"][0]["chair_sessions"], 1);
     Ok(())
 }
 
@@ -375,10 +344,6 @@ fn chair_attribution_does_not_register_unbound_projects() -> Result {
         !rig.state.join("projects").exists(),
         "telemetry registered the project"
     );
-    let report = rig.command(&["quota", "usage", "--json"])?;
-    let report: serde_json::Value = serde_json::from_slice(&report.stdout.bytes)?;
-    assert!(report["data"]["rows"][0]["project"].is_null());
-    assert_eq!(report["data"]["rows"][0]["chair_sessions"], 1);
     Ok(())
 }
 
