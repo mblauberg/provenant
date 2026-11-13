@@ -858,10 +858,7 @@ pub(crate) fn peer_submit_graph(
         ..
     } = input;
     let task = &task;
-    let digest =
-        provenant_records::CanonicalV1::record_digest("peer-subgraph", 1, &(actor, &operation_id))
-            .map_err(|_| FacadeError::StateCorrupt)?;
-    let graph = format!("peer-{}", &provenant_core::hex(digest.as_bytes())[..48]);
+    let graph = peer_graph_name(actor, &operation_id)?;
     let mut route = match &task.route {
         RequestedRoute::Adapter { provider, name, .. } => {
             serde_json::json!({"adapter":provider,"name":name})
@@ -1017,6 +1014,21 @@ pub(crate) fn peer_submit_graph(
     )
     .map_err(|error| FacadeError::io(format!("advance peer graph: {error}")))?;
     peer_graph_receipt(factory, operation_id, &graph, &run.checkpoint)
+}
+
+/// The receiver's graph for one origin submission. A digest prefix keeps the
+/// name within the 48-byte graph-name bound that chair associations enforce.
+pub(crate) fn peer_graph_name(
+    actor: provenant_core::ActorId,
+    operation_id: &provenant_core::OperationId,
+) -> Result<String, FacadeError> {
+    let digest =
+        provenant_records::CanonicalV1::record_digest("peer-subgraph", 1, &(actor, operation_id))
+            .map_err(|_| FacadeError::StateCorrupt)?;
+    Ok(format!(
+        "peer-{}",
+        &provenant_core::hex(digest.as_bytes())[..40]
+    ))
 }
 
 pub(super) fn peer_graph_receipt(
@@ -1271,10 +1283,7 @@ pub(crate) fn peer_cancel_submission(
     budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<bool, FacadeError> {
-    let digest =
-        provenant_records::CanonicalV1::record_digest("peer-subgraph", 1, &(actor, submission))
-            .map_err(|_| FacadeError::StateCorrupt)?;
-    let graph = format!("peer-{}", &provenant_core::hex(digest.as_bytes())[..48]);
+    let graph = peer_graph_name(actor, submission)?;
     // Absence is not proof of cancellation: the accepted submission may still
     // be arriving. The origin retains its fence and retries after reconnect.
     let checkpoint = provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
@@ -1366,10 +1375,7 @@ pub(super) fn peer_retained_receipt(
     actor: provenant_core::ActorId,
 ) -> Result<Option<SubmissionReceipt>, FacadeError> {
     use provenant_fabric_runtime::graph::FileJournal;
-    let digest =
-        provenant_records::CanonicalV1::record_digest("peer-subgraph", 1, &(actor, operation_id))
-            .map_err(|_| FacadeError::StateCorrupt)?;
-    let graph = format!("peer-{}", &provenant_core::hex(digest.as_bytes())[..48]);
+    let graph = peer_graph_name(actor, operation_id)?;
     FileJournal::read_checkpoint(
         &factory.context.roots.state,
         factory.context.identity.project,

@@ -14,9 +14,7 @@ fn submission_cancellation_drains_only_attached_work() -> TestResult {
     let cancel = CancelToken::new();
     let actor = factory.context.identity.inbox.actor;
     let operation: provenant_core::OperationId = "detached-cancel".parse()?;
-    let digest =
-        provenant_records::CanonicalV1::record_digest("peer-subgraph", 1, &(actor, &operation))?;
-    let graph = format!("peer-{}", &provenant_core::hex(digest.as_bytes())[..48]);
+    let graph = crate::fabric::peer::peer_graph_name(actor, &operation)?;
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let mut checkpoint: graph::GraphCheckpoint = serde_json::from_value(json!({
         "schema_version":1, "graph_id":graph, "plan_digest":"digest", "cancelled":true,
