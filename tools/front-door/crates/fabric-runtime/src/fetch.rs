@@ -80,7 +80,7 @@ pub enum FetchError {
     #[error("fetch directory is visible but directory sync failed for host {host} and work {key}")]
     VisibleDurabilityUnconfirmed {
         host: HostId,
-        key: WorkKey,
+        key: Box<WorkKey>,
         #[source]
         source: FsError,
     },
@@ -267,7 +267,11 @@ pub fn publish_fetch(
             key,
             digest: manifest.digest,
         }),
-        Err(source) => Err(FetchError::VisibleDurabilityUnconfirmed { host, key, source }),
+        Err(source) => Err(FetchError::VisibleDurabilityUnconfirmed {
+            host,
+            key: Box::new(key),
+            source,
+        }),
     }
 }
 
