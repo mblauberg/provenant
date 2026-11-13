@@ -1,1 +1,1 @@
-This release makes lanes behave like native sub-agents. Every lane kind, read-only included, now runs without the macOS sandbox by default, and writers commit and publish their branches. A lane stopped on its token budget keeps its commits, and OpenCode failures explain their cause and fall back to another route. Read Behaviour changes before upgrading.
+This patch release fixes Codex lanes, which failed on 1.11.0 when the Codex home held thousands of sessions.
