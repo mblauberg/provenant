@@ -405,16 +405,23 @@ fn cleared_preparation_injects_host_recorded_github_credentials()
     // Isolate environment clearing from the rest of the test process.
     const CHILD: &str = "PROVENANT_TEST_CLEARED_GITHUB";
     if std::env::var_os(CHILD).is_none() {
-        let status = std::process::Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                std::thread::current().name().unwrap(),
-                "--nocapture",
-            ])
-            .env_clear()
-            .env(CHILD, "1")
-            .status()?;
-        assert!(status.success());
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        let argv = vec![
+            std::env::current_exe()?.into_os_string(),
+            "--exact".into(),
+            std::thread::current().name().unwrap().into(),
+            "--nocapture".into(),
+        ];
+        let cwd = std::env::current_dir()?;
+        let environment = [(CHILD.into(), "1".into())];
+        let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(60));
+        options.env = Some(&environment);
+        let result = SystemExecutor::new(1)?.execute(options)?;
+        assert!(
+            matches!(result.termination, Termination::Exit(0)) && !result.timed_out,
+            "{}",
+            String::from_utf8_lossy(&result.stdout.bytes)
+        );
         return Ok(());
     }
     use std::os::unix::fs::PermissionsExt;
