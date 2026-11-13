@@ -3696,6 +3696,11 @@ fn launch_route_record(
         "named_route"
     };
     let mut record = RouteRecord::from_resolved(route, account_label, source);
+    if let Some(warning) = route.extra.get("effort_warning") {
+        record
+            .extra
+            .insert("effort_warning".into(), warning.clone());
+    }
     if let provenant_records::RouteReadiness::Ready { extra, .. } = &route.readiness
         && let Some(state) = extra.get("availability_warning").and_then(|v| v.as_str())
     {

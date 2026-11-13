@@ -257,10 +257,8 @@ fn effort_errors_report_recorded_controls_and_nearest_models()
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
     let context = context(&catalogue, &config, now()?);
-    for (model, expected) in [
-        ("codex/gpt-6-luna", "supported efforts: low"),
-        ("opencode/opencode-go/glm-5.3-flash", "takes no effort"),
-    ] {
+    {
+        let (model, expected) = ("codex/gpt-6-luna", "supported efforts: low");
         let mut query = request(model)?;
         query.effort = Some("unsupported".into());
         let error = resolve(&query, &context).expect_err("effort must be refused");
