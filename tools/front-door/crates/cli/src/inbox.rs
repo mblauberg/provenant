@@ -945,35 +945,69 @@ fn host_wide(
     }
 }
 
-/// Select a unique live graph attempt before reading or delivering steering text.
-/// Reservations without a reference still count towards ambiguity.
-pub fn live_steer_reference<'a>(
+/// Select a unique graph attempt before reading or delivering steering text.
+/// Reservations without a reference still count towards ambiguity. A selected
+/// historical reference remains selectable so the owner can follow its sealed
+/// supersession chain and reject a terminal current target.
+pub fn live_steer_attempt<'a>(
     checkpoint: &'a provenant_fabric_runtime::graph::GraphCheckpoint,
     node: Option<&str>,
     selected_reference: Option<&str>,
-) -> Result<&'a str, &'static str> {
+) -> Result<
+    (
+        &'a provenant_fabric_runtime::graph::NodeProgress,
+        &'a provenant_fabric_runtime::graph::GraphAttempt,
+    ),
+    String,
+> {
     use provenant_fabric_runtime::graph::AttemptState;
     if node.is_some_and(|id| !checkpoint.nodes.iter().any(|node| node.id == id)) {
-        return Err("target node was not found");
+        return Err("target node was not found".into());
     }
-    let mut live = checkpoint
+    let mut candidates = checkpoint
         .nodes
         .iter()
         .filter(|candidate| node.is_none_or(|id| candidate.id == id))
-        .flat_map(|candidate| &candidate.attempts)
-        .filter(|attempt| attempt.state != AttemptState::Terminal)
-        .filter(|attempt| {
-            selected_reference
-                .is_none_or(|reference| attempt.attempt_ref.as_deref() == Some(reference))
+        .flat_map(|candidate| {
+            candidate.attempts.iter().filter_map(move |attempt| {
+                let selected = selected_reference.is_some_and(|reference| {
+                    attempt.attempt_ref.as_deref().is_some_and(|stored| {
+                        stored == reference || stored.rsplit('/').next() == Some(reference)
+                    })
+                });
+                let live = selected_reference.is_none() && attempt.state != AttemptState::Terminal;
+                (selected || live).then_some((candidate, attempt))
+            })
         });
-    let first = live.next().ok_or("target has no live attempt")?;
-    if live.next().is_some() {
-        return Err("target has several live attempts; select graph/node or an attempt ID");
+    let (selected_node, selected_attempt) = candidates.next().ok_or_else(|| {
+        if selected_reference.is_some() {
+            "target has no matching attempt".to_owned()
+        } else {
+            "target has no live attempt".to_owned()
+        }
+    })?;
+    if candidates.next().is_some() {
+        return Err("target has several live attempts; select graph/node or an attempt ID".into());
     }
-    first
-        .attempt_ref
-        .as_deref()
-        .ok_or("live attempt has no resolved attempt ID yet; retry after launch resolves")
+    if selected_node.state == provenant_fabric_runtime::graph::NodeState::Blocked
+        && selected_attempt.state != AttemptState::Terminal
+        && selected_attempt.attempt_ref.is_none()
+        && matches!(
+            selected_node.advance_error_code.as_deref(),
+            Some("launch_refused" | "launch_retry_exhausted")
+        )
+    {
+        let detail = selected_node
+            .advance_error
+            .as_deref()
+            .map(provenant_records::diagnostic::safe_text)
+            .unwrap_or_else(|| "launch was refused".into());
+        return Err(format!(
+            "launch was refused for node {}: {detail}",
+            selected_node.id
+        ));
+    }
+    Ok((selected_node, selected_attempt))
 }
 
 fn execute(
@@ -1223,6 +1257,23 @@ fn execute(
         },
     )?)
 }
+/// Map an inbox receipt consistently at every CLI entry point.
+pub fn control_result(path: &str, data: InboxResult) -> CommandResult<Option<InboxResult>> {
+    if let Some(receipt) = data.unsupported_control() {
+        let message = receipt.refusal_message();
+        let mut result = CommandResult::new(path, Outcome::Refused, Some(data));
+        result.error = Some(CommandError {
+            diagnostic: None,
+            code: provenant_records::control::CONTROL_UNSUPPORTED.into(),
+            message,
+            cause: None,
+            repair: Some("Read `provenant help --all --json` provider_controls for what each provider supports; use `provenant retry` to continue a lane.".into()),
+        });
+        result
+    } else {
+        CommandResult::new(path, Outcome::Ok, Some(data))
+    }
+}
 pub fn run(
     command: HumanCommand,
     path: &str,
@@ -1232,29 +1283,7 @@ pub fn run(
     cwd: &Path,
 ) -> u8 {
     let result = match execute(command, roots.clone(), home, cwd) {
-        Ok(InboxResult::Control { receipt })
-            if receipt.state == provenant_records::control::ControlState::Unsupported =>
-        {
-            // Refused before any side effect; the receipt still names the reason.
-            let message = receipt.refusal_message();
-            let mut result = CommandResult::new(
-                path,
-                Outcome::Refused,
-                Some(InboxResult::Control { receipt }),
-            );
-            result.error = Some(CommandError {
-            diagnostic: None,
-                code: provenant_records::control::CONTROL_UNSUPPORTED.into(),
-                message,
-                cause: None,
-                repair: Some(
-                    "Read `provenant help --all --json` provider_controls for what each provider supports; use `provenant retry` to continue a lane."
-                        .into(),
-                ),
-            });
-            result
-        }
-        Ok(data) => CommandResult::new(path, Outcome::Ok, Some(data)),
+        Ok(data) => control_result(path, data),
         Err(error) => {
             let (status, code) = error.outcome_code();
             let mut result = CommandResult::new(path, status, None);
@@ -1329,44 +1358,113 @@ mod tests {
                     "attempt_ref":format!("{host}/{attempt}"), "outcome":null, "launch_actor":"fixture"}]}]
         })).unwrap();
         assert_eq!(
-            live_steer_reference(&checkpoint, None, None).unwrap(),
-            reference
+            live_steer_attempt(&checkpoint, None, None)
+                .unwrap()
+                .1
+                .attempt_ref
+                .as_deref(),
+            Some(reference.as_str())
         );
         assert_eq!(
-            live_steer_reference(&checkpoint, Some("task"), None).unwrap(),
-            reference
+            live_steer_attempt(&checkpoint, Some("task"), None)
+                .unwrap()
+                .0
+                .id,
+            "task"
         );
         assert!(matches!(
-            live_steer_reference(&checkpoint, Some("missing"), None),
-            Err("target node was not found")
+            live_steer_attempt(&checkpoint, Some("missing"), None),
+            Err(message) if message == "target node was not found"
         ));
         let mut second = checkpoint.nodes[0].clone();
         second.id = "other".into();
         checkpoint.nodes.push(second);
-        let error = live_steer_reference(&checkpoint, None, None).unwrap_err();
+        let error = live_steer_attempt(&checkpoint, None, None).unwrap_err();
         assert!(error.to_string().contains("several live attempts"));
         assert_eq!(
-            live_steer_reference(&checkpoint, Some("task"), None).unwrap(),
-            reference
+            live_steer_attempt(&checkpoint, Some("task"), None)
+                .unwrap()
+                .1
+                .attempt_ref
+                .as_deref(),
+            Some(reference.as_str())
         );
         checkpoint.nodes[0].attempts[0].attempt_ref = None;
         assert!(
-            live_steer_reference(&checkpoint, None, None)
+            live_steer_attempt(&checkpoint, None, None)
                 .unwrap_err()
                 .contains("several live attempts")
         );
-        assert!(
-            live_steer_reference(&checkpoint, Some("task"), None)
-                .unwrap_err()
-                .to_string()
-                .contains("no resolved attempt ID")
+        assert_eq!(
+            live_steer_attempt(&checkpoint, Some("task"), None)
+                .unwrap()
+                .1
+                .attempt_ref
+                .as_deref(),
+            None
         );
         checkpoint.nodes[0].attempts[0].state = AttemptState::Terminal;
         assert!(
-            live_steer_reference(&checkpoint, Some("task"), None)
+            live_steer_attempt(&checkpoint, Some("task"), None)
                 .unwrap_err()
-                .to_string()
                 .contains("no live attempt")
+        );
+    }
+
+    #[test]
+    fn blocked_unresolved_graph_reservation_reports_launch_refusal_and_node() {
+        use provenant_fabric_runtime::graph::{GraphCheckpoint, NodeState};
+        let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "graph_id":"g", "plan_digest":"digest",
+            "nodes":[{"id":"task", "state":"blocked", "worktree":null,
+                "advance_error_code":"launch_retry_exhausted",
+                "advance_error":"node task: the launch failed: command unavailable",
+                "attempts":[{"key":{"graph_id":"g", "node_id":"task", "route_index":0},
+                    "launched":true, "route":{"alias":"senior"}, "state":"starting",
+                    "attempt_ref":null, "outcome":null, "launch_actor":"fixture"}]}]
+        }))
+        .unwrap();
+        for code in ["launch_refused", "launch_retry_exhausted"] {
+            checkpoint.nodes[0].advance_error_code = Some(code.into());
+            let error = live_steer_attempt(&checkpoint, Some("task"), None).unwrap_err();
+            assert!(error.contains("launch was refused"));
+            assert!(error.contains("task"));
+        }
+        checkpoint.nodes[0].state = NodeState::Running;
+        assert!(live_steer_attempt(&checkpoint, Some("task"), None).is_ok());
+    }
+
+    #[test]
+    fn unsupported_steer_receipt_maps_to_refusal_with_continuation_alternative() {
+        use provenant_records::control::{
+            ControlKind, ControlReceipt, ControlState, ControlSupport, LaunchKind,
+        };
+        let receipt = InboxResult::Control {
+            receipt: ControlReceipt {
+                extra: Default::default(),
+                operation_id: "steer-operation".parse().unwrap(),
+                control: ControlKind::Steer,
+                target: "attempt".into(),
+                launch: LaunchKind::Lane,
+                support: ControlSupport::ContinuationOnly,
+                transport: None,
+                state: ControlState::Unsupported,
+                reason: ControlSupport::ContinuationOnly.reason().into(),
+                message_id: None,
+            },
+        };
+        let result = control_result("steer", receipt);
+        assert_eq!(result.status, Outcome::Refused);
+        assert_eq!(
+            result.error.as_ref().map(|error| error.code.as_str()),
+            Some(provenant_records::control::CONTROL_UNSUPPORTED)
+        );
+        assert!(
+            result
+                .error
+                .as_ref()
+                .and_then(|error| error.repair.as_deref())
+                .is_some_and(|repair| repair.contains("provenant retry"))
         );
     }
 
