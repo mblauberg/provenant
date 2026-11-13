@@ -243,13 +243,8 @@ pub struct HolderContext {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SealedTask {
     pub request_digest: provenant_core::Digest,
-    #[serde(default = "legacy_network")]
     pub effective_network: NetworkAccess,
-    #[serde(default)]
     pub effective_database_ipc: bool,
-}
-fn legacy_network() -> NetworkAccess {
-    NetworkAccess::Provider
 }
 impl SealedTask {
     /// Restore host-sealed launch policy before validating the next generation.

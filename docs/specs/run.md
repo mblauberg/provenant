@@ -490,7 +490,7 @@ successful publication moves those files forward again, so files, index and HEAD
 always describe one commit.
 
 A chair can release an unsettleable writer fence with
-`provenant reconcile --abandon RUN/ATTEMPT --reason TEXT`. Ordinary reconcile
+`provenant reconcile --abandon NAME/NODE#N --reason TEXT`. Ordinary reconcile
 continues retrying by default. A never-dispatched queued attempt can also be
 abandoned when it has no process evidence, writer fence or worktree custody;
 it is withdrawn as cancelled before recording abandonment. Other abandonment

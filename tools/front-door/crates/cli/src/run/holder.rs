@@ -829,7 +829,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_seal_records_root_network_and_legacy_defaults_restrictively()
+    fn launch_seal_records_root_network_and_refuses_an_incomplete_seal()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_confinement::permissions::NetworkAccess;
         let temp = tempfile::tempdir()?;
@@ -854,25 +854,22 @@ mod tests {
             let restored: run::SealedTask = serde_json::from_value(serde_json::to_value(sealed)?)?;
             assert_eq!(restored.effective_database_ipc, database);
         }
-        let mut json = serde_json::to_value(seal_launch_task(child.request.digest()?, &task))?;
-        json.as_object_mut()
-            .ok_or("sealed task")?
-            .remove("effective_network");
-        json.as_object_mut()
-            .ok_or("sealed task")?
-            .remove("effective_database_ipc");
-        let old: run::SealedTask = serde_json::from_value(json.clone())?;
-        assert_eq!(old.effective_network, NetworkAccess::Provider);
-        assert!(!old.effective_database_ipc);
-        old.apply_access(&mut task);
-        assert!(!task.access.database_ipc);
-        json["effective_database_ipc"] = serde_json::Value::Null;
-        assert!(serde_json::from_value::<run::SealedTask>(json.clone()).is_err());
-        json.as_object_mut()
-            .ok_or("sealed task")?
-            .remove("effective_database_ipc");
-        json["effective_network"] = serde_json::Value::Null;
-        assert!(serde_json::from_value::<run::SealedTask>(json).is_err());
+        // A seal missing either effective bound is refused, never defaulted.
+        let json = serde_json::to_value(seal_launch_task(child.request.digest()?, &task))?;
+        for field in ["effective_network", "effective_database_ipc"] {
+            let mut missing = json.clone();
+            missing.as_object_mut().ok_or("sealed task")?.remove(field);
+            assert!(
+                serde_json::from_value::<run::SealedTask>(missing).is_err(),
+                "{field}"
+            );
+            let mut null = json.clone();
+            null[field] = serde_json::Value::Null;
+            assert!(
+                serde_json::from_value::<run::SealedTask>(null).is_err(),
+                "{field}"
+            );
+        }
         Ok(())
     }
 
