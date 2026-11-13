@@ -2994,7 +2994,7 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
     };
 
     // Create a real receipt, then turn it into the old format-1 receipt.
-    let installed = install(&["--yes"])?;
+    let installed = install(&[])?;
     assert_eq!(code(&installed), 0, "{installed:?}");
     let receipt_path = state.join("install/receipt.json");
     let mut receipt: serde_json::Value = serde_json::from_slice(&fs::read(&receipt_path)?)?;
