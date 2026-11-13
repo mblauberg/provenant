@@ -1277,10 +1277,9 @@ impl F3Facade for FakeFacade {
         let record: provenant_records::run::AttemptRecord = serde_json::from_value(json!({
             "schema_version": 1,
             "attempt_id": target.attempt,
-            "run_id": provenant_core::RunId::from_bytes([2; 16]),
             "project_id": ProjectId::from_bytes([3; 16]),
-            "task_id": provenant_core::TaskId::from_bytes([4; 16]),
-            "operation_id": "output-fixture",
+            "key": {"project": ProjectId::from_bytes([3; 16]), "graph": "output-fixture",
+                "node": "lane", "attempt": 1},
             "attempt_number": 1, "revision": 1, "generation": 0,
             "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
             "authority_digest": provenant_core::Digest::from_bytes([5; 32]),

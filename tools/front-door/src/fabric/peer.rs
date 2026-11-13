@@ -1063,11 +1063,12 @@ pub(super) fn peer_graph_receipt(
                     | provenant_run::OperationState::Blocked
             )
         {
-            let run = session
+            let admitted = session
                 .store
-                .run(operation.run_id, &call)
+                .operation_attempt(&operation.operation_id, &call)
+                .and_then(|admitted| session.store.record(admitted, &call))
                 .map_err(run_error)?;
-            owner.receipt(&session, launch_operation, &run, &[], &call)?;
+            owner.receipt(&session, launch_operation, &admitted, &[], &call)?;
         }
     }
     let reference = root

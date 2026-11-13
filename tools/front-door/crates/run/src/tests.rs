@@ -2961,7 +2961,7 @@ fn a_terminal_commit_owes_one_frozen_reaction_in_the_same_transaction() -> TestR
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
     let id = input.attempt_id;
-    assert_eq!(store.pending_reactions(input.attempt_id, &call)?, [id]);
+    assert!(store.reaction_pending(input.attempt_id, &call)?);
     let owed = store.reaction(id, &call)?.ok_or("row")?;
     assert!(
         owed.notice
@@ -2987,10 +2987,7 @@ fn recovery_drains_what_a_crashed_guardian_left_and_a_failed_step_retries() -> T
     // The guardian dies after the commit, before any reaction.
     drop(store);
     let recovery = RunStore::open(&context, &call)?;
-    assert_eq!(
-        recovery.pending_reactions(input.attempt_id, &call)?.len(),
-        1
-    );
+    assert!(recovery.reaction_pending(input.attempt_id, &call)?);
     let calls = std::cell::RefCell::new((0, 0));
     let mut step = |reaction: &mut Reaction,
                     _save: &mut crate::reactions::Saver<'_>|
@@ -3015,15 +3012,10 @@ fn recovery_drains_what_a_crashed_guardian_left_and_a_failed_step_retries() -> T
     let failed = recovery.drain_reactions(input.attempt_id, &clock, &cancel, &mut step);
     assert_eq!(failed.unwrap_err().to_string(), "inbox busy");
     // Progress is kept and the row is still owed.
-    assert_eq!(
-        recovery.pending_reactions(input.attempt_id, &call)?.len(),
-        1
-    );
+    assert!(recovery.reaction_pending(input.attempt_id, &call)?);
     recovery.drain_reactions(input.attempt_id, &clock, &cancel, &mut step)?;
     assert!(
-        recovery
-            .pending_reactions(input.attempt_id, &call)?
-            .is_empty()
+        !recovery.reaction_pending(input.attempt_id, &call)?
     );
     recovery.drain_reactions(input.attempt_id, &clock, &cancel, &mut step)?;
     // The graph ran once, the failed notice ran twice, and nothing ran after.
@@ -3058,7 +3050,7 @@ fn two_concurrent_drains_react_once() -> TestResult {
     other.drain_reactions(input.attempt_id, &clock, &cancel, &mut finish)?;
     store.drain_reactions(input.attempt_id, &clock, &cancel, &mut finish)?;
     assert_eq!(runs.get(), 1);
-    assert!(store.pending_reactions(input.attempt_id, &call)?.is_empty());
+    assert!(!store.reaction_pending(input.attempt_id, &call)?);
     Ok(())
 }
 
@@ -3130,7 +3122,7 @@ fn progress_saves_with_a_fresh_budget_after_a_long_step() -> TestResult {
         reaction.ledger_done = true;
         Ok(())
     })?;
-    assert!(store.pending_reactions(input.attempt_id, &call)?.is_empty());
+    assert!(!store.reaction_pending(input.attempt_id, &call)?);
     assert!(store.reaction(id, &call)?.ok_or("row")?.graph_done);
     Ok(())
 }

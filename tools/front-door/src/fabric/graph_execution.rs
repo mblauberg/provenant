@@ -1216,18 +1216,14 @@ impl Factory {
                 let store = owner.store(cancel)?;
                 let call = owner.call(cancel);
                 // An operation this actor never accepted launched nothing to stop.
-                match store.operation(&accepted, &call).map_err(run_error)? {
-                    Some(record) => store
-                        .pending_attempts(record.run_id, &call)
-                        .map_err(run_error)?
-                        .into_iter()
-                        .map(|record| AttemptTarget {
-                            extra: Default::default(),
-                            host: Some(self.context.identity.host),
-                            attempt: record.attempt_id,
-                        })
-                        .collect(),
-                    None => vec![],
+                match store.operation_attempt(&accepted, &call) {
+                    Ok(admitted) => vec![AttemptTarget {
+                        extra: Default::default(),
+                        host: Some(self.context.identity.host),
+                        attempt: admitted,
+                    }],
+                    Err(provenant_run::RunError::NotFound) => vec![],
+                    Err(error) => return Err(run_error(error)),
                 }
             }
         };

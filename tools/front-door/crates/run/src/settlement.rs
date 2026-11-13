@@ -970,7 +970,7 @@ mod tests {
         )?;
         store.commit_lost(crate::RunStore::scope(&record), "fixture", &call)?;
         store.set_temporary_retained(id, false, &call)?;
-        assert_eq!(store.pending_reactions(run.attempt_id, &call)?, [id]);
+        assert!(store.reaction_pending(run.attempt_id, &call)?);
         assert!(store.writer_fences()?.is_empty());
         let mut spawned = false;
         let found = store.queue_reconcile_mode(
@@ -1110,7 +1110,7 @@ mod tests {
             reaction.ledger_done = true;
             Ok(())
         })?;
-        assert!(store.pending_reactions(run.attempt_id, &call)?.is_empty());
+        assert!(!store.reaction_pending(run.attempt_id, &call)?);
         let slot = context
             .state_root
             .as_path()
@@ -1196,7 +1196,7 @@ mod tests {
         })?;
         store.set_temporary_retained(id, true, &call)?;
         assert!(run.request.task.writer.is_none());
-        assert!(store.pending_reactions(run.attempt_id, &call)?.is_empty());
+        assert!(!store.reaction_pending(run.attempt_id, &call)?);
         assert!(store.writer_fences()?.is_empty());
         let mut spawned = false;
         store.queue_reconcile_mode(
@@ -1244,7 +1244,7 @@ mod tests {
             let scope = crate::RunStore::scope(&record);
             store.commit_lost(scope, "fixture", &call)?;
             store.set_temporary_retained(id, retained, &call)?;
-            assert_eq!(store.pending_reactions(run.attempt_id, &call)?, [id]);
+            assert!(store.reaction_pending(run.attempt_id, &call)?);
             let attempt = store.attempt_dir(id, false)?;
             let mut spawned = false;
             store.queue_reconcile_mode(
@@ -2333,11 +2333,9 @@ impl crate::RunStore {
         // Reactions need the same retry gates, but are internal work rather
         // than custody recovery rows. Report them only if recovery is uncertain.
         let mut reaction_only = Vec::new();
-        for id in self.pending_reactions(run, call)? {
-            if !ids.contains(&id) {
-                ids.push(id);
-                reaction_only.push(id);
-            }
+        if self.reaction_pending(run, call)? && !ids.contains(&run) {
+            ids.push(run);
+            reaction_only.push(run);
         }
         if ids.is_empty()
             && let Some(error) = listing_error
