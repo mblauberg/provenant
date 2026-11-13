@@ -1452,13 +1452,12 @@ fn sandbox_floors_children(sandbox: Option<&serde_json::Value>) -> bool {
     };
     match sandbox
         .get("effective")
-        .or_else(|| sandbox.get("sandboxed"))
         .and_then(serde_json::Value::as_bool)
     {
         Some(false) => false,
         Some(true) => !matches!(
             sandbox.get("source").and_then(serde_json::Value::as_str),
-            Some("read_only" | "network" | "default")
+            Some("network" | "default")
         ),
         None => true,
     }
@@ -1596,21 +1595,28 @@ mod tests {
         let floors = |value: serde_json::Value| sandbox_floors_children(Some(&value));
         for source in ["route", "parent", "knob", "platform", "unknown"] {
             assert!(
-                floors(serde_json::json!({"sandboxed":true,"source":source})),
+                floors(serde_json::json!({"effective":true,"source":source})),
                 "{source}"
             );
         }
-        for source in ["read_only", "network"] {
+        for source in ["network", "default"] {
             assert!(
-                !floors(serde_json::json!({"sandboxed":true,"source":source})),
+                !floors(serde_json::json!({"effective":true,"source":source})),
                 "{source}"
             );
         }
         assert!(!floors(
-            serde_json::json!({"sandboxed":false,"source":"default"})
+            serde_json::json!({"effective":false,"source":"default"})
         ));
-        assert!(floors(serde_json::json!({"sandboxed":true})));
+        assert!(floors(serde_json::json!({"effective":true})));
         assert!(floors(serde_json::json!({})));
+        // Older shapes are not interpreted as format-2 authority.
+        assert!(floors(
+            serde_json::json!({"sandboxed":false,"source":"read_only"})
+        ));
+        assert!(floors(
+            serde_json::json!({"effective":true,"source":"read_only"})
+        ));
         assert!(sandbox_floors_children(None));
     }
 

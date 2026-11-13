@@ -1129,8 +1129,10 @@ mod answer_delivery_tests {
     #[test]
     fn hook_config_read_is_quiet_and_keeps_errors() -> Result<(), Error> {
         let temp = tempfile::tempdir()?;
-        let state = temp.path().join("state");
-        std::fs::create_dir(&state)?;
+        // Product discovery may protect the workspace as its asset root.
+        // State must have its own root, independent of that fallback.
+        let state_root = tempfile::tempdir()?;
+        let state = state_root.path().to_path_buf();
         std::fs::write(
             state.join("config.toml"),
             "schema_version=1\n[domains.routing]\npacing_overrides=[{provider='codex',policy='pace',expires_unix_seconds=9}]\n",

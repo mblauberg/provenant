@@ -3493,21 +3493,16 @@ fn reset_receipt_read_error_refuses_without_deletion() -> Result {
 }
 
 #[test]
-fn reset_lock_named_symlink_refuses_before_any_store_is_removed() -> Result {
+fn reset_unlinks_lock_named_symlinks_without_touching_their_targets() -> Result {
     let (rig, stage) = reset_fixture()?;
     let outside = rig.root.join("outside-lock-target");
     fs::write(&outside, "keep target")?;
     std::os::unix::fs::symlink(&outside, rig.state.join("run.sqlite3.lock"))?;
-    let before = snapshot(&rig.state)?;
-    let refused = reset_install(&rig, &stage, &["--reset-state"])?;
-    assert_ne!(code(&refused), 0);
-    assert_eq!(snapshot(&rig.state)?, before);
+    let installed = reset_install(&rig, &stage, &["--reset-state"])?;
+    assert_eq!(code(&installed), 0, "{installed:?}");
+    assert!(!rig.state.join("run.sqlite3").exists());
+    assert!(fs::symlink_metadata(rig.state.join("run.sqlite3.lock")).is_err());
     assert_eq!(fs::read_to_string(outside)?, "keep target");
-    assert!(
-        fs::symlink_metadata(rig.state.join("run.sqlite3.lock"))?
-            .file_type()
-            .is_symlink()
-    );
     Ok(())
 }
 

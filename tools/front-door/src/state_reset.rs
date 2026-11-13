@@ -270,6 +270,7 @@ fn check_removal(parent: &Directory, name: &OsStr) -> io::Result<()> {
         return Ok(());
     };
     if provenant_os::fs::is_reserved_lock_name(name)
+        && value.kind != FileKind::Symlink
         && (value.kind != FileKind::Regular || !name.as_encoded_bytes().ends_with(b".lock"))
     {
         return Err(io::Error::other(format!(
@@ -315,6 +316,8 @@ fn remove_entry(parent: &Directory, name: &OsStr) -> io::Result<()> {
         if recheck(parent, name, before)? {
             fs(parent.rmdir(name))?;
         }
+    } else if before.kind == FileKind::Symlink {
+        fs(parent.unlink_symlink(name, &before))?;
     } else if recheck(parent, name, before)? {
         if provenant_os::fs::is_reserved_lock_name(name) {
             let guard = fs(parent.try_lock_existing(name, LockMode::Exclusive))?;

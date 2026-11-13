@@ -265,6 +265,28 @@ const fn flag(
 /// `graph:`, `operation:` and `land:` prefixes) are refused by the target
 /// parser instead.
 pub const REMOVED: &[Removed] = &[
+    flag(
+        &["dispatch"],
+        "prompt-file",
+        "provenant run TEMPLATE --brief-file PATH",
+    ),
+    flag(
+        &["dispatch"],
+        "prompt-stdin",
+        "provenant run TEMPLATE --brief-file -",
+    ),
+    flag(&["resume"], "no-fallback", "provenant retry NAME/NODE#N"),
+    flag(
+        &["run"],
+        "prompt-file",
+        "provenant run TEMPLATE --brief-file PATH",
+    ),
+    flag(
+        &["run"],
+        "prompt-stdin",
+        "provenant run TEMPLATE --brief-file -",
+    ),
+    flag(&["retry"], "no-fallback", "provenant retry NAME/NODE#N"),
     verb(&["dispatch"], "provenant run TEMPLATE BRIEF"),
     verb(&["lanes"], "provenant status"),
     verb(&["resume"], "provenant retry NAME/NODE"),

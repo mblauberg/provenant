@@ -1271,6 +1271,100 @@ fn context<'a>(clock: &'a SystemClock, cancel: &'a CancelToken) -> InstallContex
     }
 }
 #[test]
+fn receipt_callback_runs_only_after_writes_and_can_require_an_unchanged_receipt() {
+    struct Boundary<'a> {
+        fixture: &'a Fixture,
+        previous: Option<Vec<u8>>,
+        marker: PathBuf,
+        refuse: bool,
+        called: bool,
+    }
+    impl InstallReporter for Boundary<'_> {
+        fn preview(&mut self, _: &[Action]) -> io::Result<()> {
+            Ok(())
+        }
+        fn receipt_required(&self) -> bool {
+            true
+        }
+        fn before_receipt(&mut self) -> io::Result<()> {
+            assert!(self.fixture.targets.bin_dir.join("provenant").exists());
+            assert!(self.fixture.link().exists());
+            assert_eq!(fs::read(self.fixture.receipt()).ok(), self.previous);
+            self.called = true;
+            if self.refuse {
+                return Err(io::Error::other("reset refused"));
+            }
+            fs::remove_file(&self.marker)
+        }
+    }
+    let f = Fixture::new();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let marker = f.base.join("dropped-store");
+    fs::write(&marker, "old state").unwrap();
+    let mut reporter = Boundary {
+        fixture: &f,
+        previous: None,
+        marker: marker.clone(),
+        refuse: true,
+        called: false,
+    };
+    let plan = f.plan();
+    install(
+        &plan,
+        &context(&clock, &cancel),
+        &mut reporter,
+        &Smoke,
+        true,
+    )
+    .unwrap();
+    assert!(!reporter.called);
+    assert!(marker.exists());
+    let error = install(
+        &plan,
+        &context(&clock, &cancel),
+        &mut reporter,
+        &Smoke,
+        false,
+    )
+    .unwrap_err();
+    assert!(reporter.called);
+    assert!(
+        matches!(error, InstallError::Partial { remaining, .. } if remaining.iter().all(|a| a.selector == "receipt"))
+    );
+    assert!(!f.receipt().exists());
+    assert!(marker.exists());
+    reporter.refuse = false;
+    reporter.called = false;
+    install(
+        &f.plan(),
+        &context(&clock, &cancel),
+        &mut reporter,
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    assert!(reporter.called);
+    assert!(!marker.exists());
+    let previous = fs::read(f.receipt()).unwrap();
+    assert!(f.plan().actions().is_empty());
+    fs::write(&marker, "recreated old state").unwrap();
+    reporter.previous = Some(previous.clone());
+    reporter.called = false;
+    install(
+        &f.plan(),
+        &context(&clock, &cancel),
+        &mut reporter,
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    assert!(reporter.called);
+    assert!(!marker.exists());
+    assert_eq!(fs::read(f.receipt()).unwrap(), previous);
+}
+
+#[test]
 fn dry_run_and_broken_preview_create_nothing() {
     let f = Fixture::new();
     let plan = f.plan();

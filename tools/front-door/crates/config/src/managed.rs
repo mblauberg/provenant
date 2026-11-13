@@ -456,6 +456,16 @@ pub struct ManualInclude {
 
 /// Preview must succeed before any root, lock, staging file or receipt is made.
 pub trait InstallReporter {
+    /// Request a receipt publication even when its bytes are unchanged, so an
+    /// external state transition still has a final commit boundary.
+    fn receipt_required(&self) -> bool {
+        false
+    }
+    /// Called under the install lock after every non-receipt write succeeds,
+    /// immediately before publishing the receipt. Never called for dry runs.
+    fn before_receipt(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
     /// Called under the install lock after rechecking an exact match or absence,
     /// before unlinking or forgetting an already missing managed agent.
     fn before_remove(&mut self, _action: &Action) -> std::io::Result<()> {
@@ -1180,25 +1190,7 @@ pub fn plan_install(
                 mode: 0o600,
             })
     }) {
-        actions.push(Action {
-            path: AbsolutePath::new(&receipt_path)?,
-            disposition: if current.is_some() {
-                Disposition::Replace
-            } else {
-                Disposition::Create
-            },
-            selector: "receipt".into(),
-            before: current
-                .as_ref()
-                .and_then(|snapshot| owned(&snapshot.value).ok()),
-            after: Some(OwnedValue::File {
-                extra: Default::default(),
-                digest: CanonicalV1::file_digest(&bytes),
-                mode: 0o600,
-            }),
-            identity: identity(current),
-            edits: Vec::new(),
-        });
+        actions.push(receipt_action(&receipt_path, current, &bytes)?);
     }
 
     // Publish release contents first, then release.json as its completion
@@ -1230,6 +1222,32 @@ pub fn plan_install(
     })
 }
 
+fn receipt_action(
+    path: &Path,
+    current: &Option<Snapshot>,
+    bytes: &[u8],
+) -> Result<Action, InstallError> {
+    Ok(Action {
+        path: AbsolutePath::new(path)?,
+        disposition: if current.is_some() {
+            Disposition::Replace
+        } else {
+            Disposition::Create
+        },
+        selector: "receipt".into(),
+        before: current
+            .as_ref()
+            .and_then(|snapshot| owned(&snapshot.value).ok()),
+        after: Some(OwnedValue::File {
+            extra: Default::default(),
+            digest: CanonicalV1::file_digest(bytes),
+            mode: 0o600,
+        }),
+        identity: identity(current),
+        edits: Vec::new(),
+    })
+}
+
 pub struct InstallContext<'a> {
     pub clock: &'a dyn Clock,
     pub budget: WaitBudget,
@@ -1242,9 +1260,26 @@ pub fn install(
     smoke: &dyn ReleaseSmoke,
     dry_run: bool,
 ) -> Result<InstallOutcome, InstallError> {
-    reporter
-        .preview(&plan.actions)
-        .map_err(InstallError::Preview)?;
+    let mut actions = plan.actions.clone();
+    if reporter.receipt_required() && !actions.iter().any(|a| a.selector == "receipt") {
+        let path = plan
+            .targets
+            .roots
+            .state
+            .as_path()
+            .join("install/receipt.json");
+        let current = plan
+            .before
+            .entries
+            .get(&path)
+            .ok_or_else(|| InstallError::Drift(path.clone()))?;
+        actions.push(receipt_action(
+            &path,
+            current,
+            &provenant_records::encode(&plan.receipt)?,
+        )?);
+    }
+    reporter.preview(&actions).map_err(InstallError::Preview)?;
     reporter
         .manual_includes(&plan.manual_includes)
         .map_err(InstallError::Preview)?;
@@ -1254,7 +1289,7 @@ pub fn install(
     if dry_run {
         return Ok(InstallOutcome {
             findings: plan.findings().to_vec(),
-            actions: plan.actions.clone(),
+            actions: actions.clone(),
             manual_includes: plan.manual_includes.clone(),
             dry_run: true,
         });
@@ -1290,7 +1325,7 @@ pub fn install(
     // preview ignores those names so it cannot interrupt a live publication.
     validate_release_inventory(&plan.release, &release_root, state_root, unfinished)?;
     let mut completed = Vec::new();
-    for (index, action) in plan.actions.iter().enumerate() {
+    for (index, action) in actions.iter().enumerate() {
         let result = (|| {
             let path = action.path.to_path_buf()?;
             if context.cancel.is_cancelled() {
@@ -1325,13 +1360,17 @@ pub fn install(
                         .value
                         .clone()
                 };
+                if action.selector == "receipt" {
+                    reporter.before_receipt().map_err(InstallError::Preview)?;
+                    recheck(&path, before, state_root)?;
+                }
                 publish(&path, &value, before.is_some(), state_root)
             }
         })();
         if let Err(source) = result {
             return Err(InstallError::Partial {
                 completed,
-                remaining: plan.actions.iter().skip(index).cloned().collect(),
+                remaining: actions.iter().skip(index).cloned().collect(),
                 source: Box::new(source),
             });
         }

@@ -263,6 +263,8 @@ fn receipt_targets(
 #[derive(Default)]
 struct PreviewReporter {
     home: Option<PathBuf>,
+    reset: Option<crate::state_reset::Plan>,
+    reset_state: Option<PathBuf>,
 }
 impl PreviewReporter {
     fn before_remove_with(
@@ -296,6 +298,41 @@ impl PreviewReporter {
     }
 }
 impl InstallReporter for PreviewReporter {
+    fn receipt_required(&self) -> bool {
+        self.reset.is_some()
+    }
+    fn before_receipt(&mut self) -> io::Result<()> {
+        let Some(plan) = self.reset.as_ref() else {
+            return Ok(());
+        };
+        let state = self
+            .reset_state
+            .as_deref()
+            .ok_or_else(|| io::Error::other("missing reset state"))?;
+        let home = self
+            .home
+            .as_deref()
+            .ok_or_else(|| io::Error::other("missing agent home"))?;
+        // On failure leave services stopped; install is rerunnable.
+        crate::state_reset::remove(plan, || {
+            if provenant_fabric_runtime::peer_agent::eligible(state, home) {
+                provenant_fabric_runtime::peer_agent::stop(home).map_err(io::Error::other)?;
+                retire_disk_guard(home).map_err(io::Error::other)?;
+                super::tick_agent::retire_gc(home).map_err(io::Error::other)?;
+            }
+            if super::tick_agent::eligible(state, home) {
+                super::tick_agent::stop(home).map_err(io::Error::other)?;
+            }
+            Ok(())
+        })
+        .map_err(|error| {
+            io::Error::other(format!(
+                "STATE_RESET_FAILED: {error}; agents remain stopped; rerun install --reset-state"
+            ))
+        })?;
+        self.reset = None;
+        Ok(())
+    }
     fn before_remove(&mut self, action: &Action) -> io::Result<()> {
         self.before_remove_with(action, |home| match action.selector.as_str() {
             "tick-agent" | "tick-service" => {
@@ -987,6 +1024,7 @@ fn apply_install(
     let tick_enabled = targets.tick_agent.is_some();
     let mut reporter = PreviewReporter {
         home: Some(home.clone()),
+        ..Default::default()
     };
     let result = (|| {
         let mut combined = InstallOutcome {
@@ -1048,25 +1086,12 @@ fn apply_install(
                 "binary identity differs from release manifest",
             ));
         }
-        if !args.dry_run {
-            let plan = reset_gate(globals, args.reset_state)
-                .map_err(|error| InstallError::AgentRetirement(error.message()))?;
-            if let Some(plan) = plan {
-                // On failure leave services stopped; the install is rerunnable.
-                crate::state_reset::remove(&plan, || {
-                    if provenant_fabric_runtime::peer_agent::eligible(&state, &home) {
-                        provenant_fabric_runtime::peer_agent::stop(&home).map_err(io::Error::other)?;
-                        retire_disk_guard(&home).map_err(io::Error::other)?;
-                        super::tick_agent::retire_gc(&home).map_err(io::Error::other)?;
-                    }
-                    if super::tick_agent::eligible(&state, &home) {
-                        super::tick_agent::stop(&home).map_err(io::Error::other)?;
-                    }
-                    Ok(())
-                }).map_err(|error| InstallError::AgentRetirement(format!(
-                    "STATE_RESET_FAILED: {error}; agents remain stopped; rerun install --reset-state")))?;
-            }
-        }
+        let mut reset = if args.dry_run {
+            None
+        } else {
+            reset_gate(globals, args.reset_state)
+                .map_err(|error| InstallError::AgentRetirement(error.message()))?
+        };
         if agents && !args.dry_run && provenant_fabric_runtime::peer_agent::eligible(&state, &home)
         {
             retire_disk_guard(&home)
@@ -1074,7 +1099,14 @@ fn apply_install(
             super::tick_agent::retire_gc(&home)
                 .map_err(|error| InstallError::AgentRetirement(error.to_string()))?;
         }
-        for batch in batches {
+        let batch_count = batches.len();
+        for (index, batch) in batches.into_iter().enumerate() {
+            // Only the final batch may reset state: every real batch write
+            // must have succeeded before deletion and its final receipt.
+            if index + 1 == batch_count {
+                reporter.reset = reset.take();
+                reporter.reset_state = Some(state.clone());
+            }
             // Publish one receipt target at a time, using config's existing lock and ownership rules.
             let settings = batch_args(&batch, args.dry_run);
             let outcome = cli::install::execute_install(
@@ -1439,6 +1471,7 @@ fn prune_orphans(globals: &cli::Globals) -> Result<Vec<String>, String> {
             .map_err(|e| e.to_string())?;
         let mut reporter = PreviewReporter {
             home: Some(targets.home.clone()),
+            ..Default::default()
         };
         let outcome = cli::install::execute_uninstall(
             &cli::Uninstall {
@@ -1975,6 +2008,7 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
     };
     let mut reporter = PreviewReporter {
         home: Some(targets.home.clone()),
+        ..Default::default()
     };
     if provenant_fabric_runtime::peer_agent::eligible(targets.roots.state.as_path(), &targets.home)
         && let Err(error) = retire_disk_guard(&targets.home)
@@ -2097,7 +2131,10 @@ mod tests {
         std::fs::create_dir(&home)?;
         let alias = tmp.path().join("home-alias");
         std::os::unix::fs::symlink(&home, &alias)?;
-        let reporter = PreviewReporter { home: Some(alias) };
+        let reporter = PreviewReporter {
+            home: Some(alias),
+            ..Default::default()
+        };
         let mut action = Action {
             path: AbsolutePath::new(&provenant_fabric_runtime::peer_agent::plist(&home))?,
             disposition: Disposition::Remove,

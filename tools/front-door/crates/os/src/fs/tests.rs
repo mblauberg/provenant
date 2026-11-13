@@ -1,6 +1,35 @@
 use super::*;
 
 #[test]
+fn symlink_unlink_checks_identity_and_preserves_targets_even_for_lock_names() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    std::fs::write(temp.path().join("target"), b"keep").unwrap();
+    for leaf in ["link", "owner.lock", "Cargo.lock"] {
+        let name = OsStr::new(leaf);
+        // Use the OS fixture to create reserved names that ordinary mutations refuse.
+        std::os::unix::fs::symlink("target", temp.path().join(leaf)).unwrap();
+        let before = dir.metadata_at(name, false).unwrap();
+        std::fs::rename(temp.path().join(leaf), temp.path().join("held-link")).unwrap();
+        std::os::unix::fs::symlink("target", temp.path().join(leaf)).unwrap();
+        assert!(matches!(
+            dir.unlink_symlink(name, &before),
+            Err(FsError::RaceRefused { .. })
+        ));
+        assert_eq!(
+            std::fs::read_link(temp.path().join(leaf)).unwrap(),
+            Path::new("target")
+        );
+        std::fs::remove_file(temp.path().join(leaf)).unwrap();
+        std::fs::rename(temp.path().join("held-link"), temp.path().join(leaf)).unwrap();
+        let observed = dir.metadata_at(name, false).unwrap();
+        dir.unlink_symlink(name, &observed).unwrap();
+        assert!(std::fs::symlink_metadata(temp.path().join(leaf)).is_err());
+        assert_eq!(std::fs::read(temp.path().join("target")).unwrap(), b"keep");
+    }
+}
+
+#[test]
 fn retired_owner_lock_refuses_stale_and_shared_guards() {
     let temp = tempfile::tempdir().unwrap();
     let directory = Directory::open_anchor(temp.path()).unwrap();

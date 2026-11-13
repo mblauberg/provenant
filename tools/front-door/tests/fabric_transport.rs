@@ -3272,8 +3272,10 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
     )?;
     assert_eq!(code(&peer_identity), 0);
     let peer_identity: Value = serde_json::from_slice(&peer_identity.stdout.bytes)?;
+    // A receiver owns its own graph; its WorkKey is not the origin's key.
+    let receiver_graph = "peer-cancel-fixture";
     let context =
-        serde_json::from_value(json!({"graph_id":"remote-graph","node_id":"one","attempt":1}))?;
+        serde_json::from_value(json!({"graph_id":receiver_graph,"node_id":"one","attempt":1}))?;
     let (attempt, _) = seed_attempt_in_state(
         &rig,
         &peer_identity,
@@ -3321,6 +3323,72 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
             )
         }
     }
+    // Protocol 13 binds the receiver graph to the origin WorkKey. Seed that
+    // relationship through the graph journal, not just an accepted attempt ID.
+    let origin_key = provenant_records::WorkKey::new(project, "remote-graph", "one", 1)?;
+    let peer_project = ProjectId::parse(
+        peer_identity["data"]["project"]
+            .as_str()
+            .ok_or("peer project")?,
+    )?;
+    let peer_actor = peer_identity["data"]["inbox"]["actor"]
+        .as_str()
+        .ok_or("peer actor")?;
+    let mut peer_roots = RootInputs::new(rig.home.clone(), rig.project.clone());
+    peer_roots.state_dir = Some(peer_state.clone());
+    let receiver_state = peer_roots
+        .resolve(&provenant_os::fs::SystemPathResolver)?
+        .state;
+    let receiver_document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":receiver_graph,
+        "peer_origin_work_key":origin_key,
+        "nodes":[{"id":"one","access":"read_only","prompt":"fixture","route":{"alias":"senior"}}]
+    }))?;
+    let mut receiver = FileJournal::open(
+        &receiver_state,
+        peer_project,
+        receiver_graph,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    receiver.bind(GraphExecution {
+        extra: [(
+            "peer_origin_context".into(),
+            json!({"graph_id":"remote-graph","node_id":"one"}),
+        )]
+        .into(),
+        integration_base: None,
+        review_base: None,
+        directory: rig.project.clone(),
+        document: receiver_document.clone(),
+    })?;
+    let receiver_seeded = provenant_fabric_runtime::graph::advance_with_budget(
+        &receiver_document,
+        &mut AcceptedPeer {
+            actor: peer_actor.into(),
+            reference: format!("{peer}/{attempt}"),
+        },
+        &mut receiver,
+        &Default::default(),
+        &Default::default(),
+    )?;
+    assert_eq!(
+        receiver_seeded.checkpoint.nodes[0].state,
+        provenant_fabric_runtime::graph::NodeState::Running
+    );
+    drop(receiver);
+    let execution = FileJournal::execution(&receiver_state, peer_project, receiver_graph)?
+        .ok_or("receiver execution")?;
+    assert_eq!(
+        execution.document.extra["peer_origin_work_key"],
+        json!(origin_key)
+    );
+    assert_eq!(
+        execution.extra["peer_origin_context"],
+        json!({"graph_id":"remote-graph","node_id":"one"})
+    );
+    assert_ne!(execution.document.graph_id, document.graph_id);
     let mut journal = FileJournal::open(&state, project, "remote-graph", budget, &cancel, &clock)?;
     journal.bind(GraphExecution {
         extra: Default::default(),
@@ -3352,6 +3420,34 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
     let stopped =
         FileJournal::read_checkpoint(&state, project, "remote-graph")?.ok_or("checkpoint")?;
     assert_eq!(stopped.cancel_reason.as_deref(), Some("peer test"));
+    let receiver_stopped =
+        FileJournal::read_checkpoint(&receiver_state, peer_project, receiver_graph)?
+            .ok_or("receiver checkpoint")?;
+    assert!(
+        receiver_stopped.nodes.iter().all(|node| !matches!(
+            node.state,
+            provenant_fabric_runtime::graph::NodeState::Pending
+                | provenant_fabric_runtime::graph::NodeState::Running
+        )),
+        "origin cancellation must settle the receiver subtree"
+    );
+    let receiver_attempt = receiver_stopped
+        .nodes
+        .iter()
+        .find(|node| node.id == "one")
+        .ok_or("receiver node")?
+        .attempts
+        .last()
+        .ok_or("receiver attempt")?;
+    assert_eq!(
+        receiver_attempt.state,
+        provenant_fabric_runtime::graph::AttemptState::Terminal
+    );
+    assert_eq!(
+        receiver_attempt.attempt_ref.as_deref(),
+        Some(format!("{peer}/{attempt}").as_str())
+    );
+
     rig.assert_legacy_unchanged()?;
     cleanup.disarm();
     Ok(())

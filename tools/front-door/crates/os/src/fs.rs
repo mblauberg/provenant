@@ -1033,6 +1033,18 @@ impl Directory {
     pub fn unlink(&self, name: &OsStr) -> Result<()> {
         self.remove(name, false)
     }
+    /// Unlink only the symlink observed by the caller, including lock-named
+    /// links. Never opens the link or its target, and refuses a replaced entry.
+    pub fn unlink_symlink(&self, name: &OsStr, expected: &Metadata) -> Result<()> {
+        let name = component(name)?;
+        let current = self.metadata_at(name, false)?;
+        if expected.kind != FileKind::Symlink || !expected.unchanged(&current) {
+            return Err(FsError::RaceRefused { name: name.into() });
+        }
+        os::unlink(&self.file, name, false)
+            .map_err(error("unlinkat symlink", &self.path.join(name)))?;
+        self.sync()
+    }
     pub fn rmdir(&self, name: &OsStr) -> Result<()> {
         self.remove(name, true)
     }
