@@ -159,8 +159,10 @@ fn settled_cost_for_a_past_window_equals_the_telemetry_report() -> Result {
     let rows = facts
         .iter()
         .enumerate()
-        .map(|(index, fact)| row(fact, &key(index as u64 + 1)?, Some(&prices)))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+        .map(|(index, fact)| -> Result<_> {
+            Ok(row(fact, &key(index as u64 + 1)?, Some(&prices))?)
+        })
+        .collect::<Result<Vec<_>>>()?;
     let first = append(&state, &rows, &SystemClock::new(), &CancelToken::new())?;
     assert_eq!(first.added, 42);
     let second = append(&state, &rows, &SystemClock::new(), &CancelToken::new())?;

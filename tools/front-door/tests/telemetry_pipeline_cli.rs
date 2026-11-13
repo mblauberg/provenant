@@ -114,12 +114,15 @@ fn unreadable_graph_checkpoint_does_not_abort_pipeline() -> Result {
 }
 
 #[test]
-fn repeated_node_labels_without_a_graph_preserve_each_unattributed_row() -> Result {
+fn repeated_node_labels_in_distinct_graphs_preserve_each_unattributed_row() -> Result {
     let rig = rig()?;
     terminal_run::seed(
         &rig,
         "unattributed-fixture",
-        &[json!({"node_id":"review"}), json!({"node_id":"review"})],
+        &[
+            json!({"graph_id":"graph-one","node_id":"review"}),
+            json!({"graph_id":"graph-two","node_id":"review"}),
+        ],
     )?;
     let output = rig.command(&[
         "telemetry",
@@ -131,8 +134,20 @@ fn repeated_node_labels_without_a_graph_preserve_each_unattributed_row() -> Resu
     ])?;
     assert_eq!(code(&output), 0, "{output:?}");
     let report: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let rows = report["data"]["pipeline"]["outcomes"]["rows"]
+        .as_array()
+        .ok_or("missing outcome rows")?;
+    let graphs = rows
+        .iter()
+        .map(|row| row["evidence"]["graph"].as_str().ok_or("missing graph"))
+        .collect::<std::result::Result<std::collections::BTreeSet<_>, _>>()?;
     assert_eq!(
-        report["data"]["pipeline"]["outcomes"]["unattributed_rows"], 2,
+        graphs,
+        std::collections::BTreeSet::from(["graph-one", "graph-two"])
+    );
+    assert_eq!(
+        report["data"]["pipeline"]["outcomes"]["unattributed_rows"],
+        rows.len(),
         "{report}"
     );
     Ok(())
