@@ -1739,8 +1739,14 @@ fn settled_task_graph(rig: &GraphProject) -> Result<String> {
     Ok(id.to_owned())
 }
 
-#[test]
-fn retry_prompt_sources_follow_the_same_target_rules() -> Result {
+#[derive(Debug)]
+enum RetryTarget {
+    Graph,
+    Node,
+    Attempt,
+}
+
+fn retry_prompt_sources_follow_target_rules(form: RetryTarget) -> Result {
     use std::io::Write;
     for flag in [
         "--brief",
@@ -1748,68 +1754,83 @@ fn retry_prompt_sources_follow_the_same_target_rules() -> Result {
         "--prompt-stdin",
         "--no-fallback",
     ] {
-        for form in ["graph", "node", "attempt"] {
-            let rig = GraphProject::new()?;
-            let id = settled_task_graph(&rig)?;
-            let (_, status) = rig.run(&["status", &id])?;
-            let attempt = status["data"]["rows"]
-                .as_array()
-                .ok_or("status rows")?
-                .iter()
-                .find(|row| row["kind"] == "attempt")
-                .and_then(|row| row["attempt_id"].as_str())
-                .ok_or("attempt id")?;
-            let target = match form {
-                "node" => format!("{id}/task"),
-                "attempt" => attempt.to_owned(),
-                _ => id.clone(),
-            };
-            let brief = "line one\nline two: corrected scope\n";
-            let path = rig.temp.path().join("brief");
-            std::fs::write(&path, brief)?;
-            let mut command = rig.command();
-            command.args(["retry", &target, flag]);
-            match flag {
-                "--brief" => {
-                    command.arg(brief);
-                }
-                "--prompt-file" => {
-                    command.arg(&path);
-                }
-                "--prompt-stdin" => {
-                    command.stdin(std::process::Stdio::piped());
-                }
-                _ => {}
+        let rig = GraphProject::new()?;
+        let id = settled_task_graph(&rig)?;
+        let (_, status) = rig.run(&["status", &id])?;
+        let attempt = status["data"]["rows"]
+            .as_array()
+            .ok_or("status rows")?
+            .iter()
+            .find(|row| row["kind"] == "attempt")
+            .and_then(|row| row["attempt_id"].as_str())
+            .ok_or("attempt id")?;
+        let target = match form {
+            RetryTarget::Graph => id.clone(),
+            RetryTarget::Node => format!("{id}/task"),
+            RetryTarget::Attempt => attempt.to_owned(),
+        };
+        let brief = "line one\nline two: corrected scope\n";
+        let path = rig.temp.path().join("brief");
+        std::fs::write(&path, brief)?;
+        let mut command = rig.command();
+        command.args(["retry", &target, flag]);
+        match flag {
+            "--brief" => {
+                command.arg(brief);
             }
-            command.stdout(std::process::Stdio::piped());
-            let mut child = command.spawn()?;
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(brief.as_bytes())?;
+            "--prompt-file" => {
+                command.arg(&path);
             }
-            let output = child.wait_with_output()?;
-            let value: Value = serde_json::from_slice(&output.stdout)?;
-            if flag == "--no-fallback" {
-                assert!(!output.status.success(), "{form}: {value}");
-                let message = value["error"]["message"].as_str().ok_or("message")?;
-                assert!(
-                    message.contains(flag) && message.contains("provider"),
-                    "{value}"
-                );
-                assert!(
-                    value["error"]["detail"]
-                        .as_str()
-                        .is_some_and(|detail| detail.contains(flag)),
-                    "{value}"
-                );
-            } else {
-                assert!(output.status.success(), "{flag} {form}: {value}");
-                let (prompt, previous) = stored_prompt(&rig, &id, "task")?;
-                assert_eq!(prompt, brief, "{flag} {form}");
-                assert!(previous > 0);
+            "--prompt-stdin" => {
+                command.stdin(std::process::Stdio::piped());
             }
+            _ => {}
+        }
+        command.stdout(std::process::Stdio::piped());
+        let mut child = command.spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(brief.as_bytes())?;
+        }
+        let output = child.wait_with_output()?;
+        let value: Value = serde_json::from_slice(&output.stdout)?;
+        if flag == "--no-fallback" {
+            assert!(!output.status.success(), "{form:?}: {value}");
+            let message = value["error"]["message"].as_str().ok_or("message")?;
+            assert!(
+                message.contains(flag) && message.contains("provider"),
+                "{value}"
+            );
+            assert!(
+                value["error"]["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains(flag)),
+                "{value}"
+            );
+        } else {
+            assert!(output.status.success(), "{flag} {form:?}: {value}");
+            let (prompt, previous) = stored_prompt(&rig, &id, "task")?;
+            assert_eq!(prompt, brief, "{flag} {form:?}");
+            assert!(previous > 0);
         }
     }
     Ok(())
+}
+
+macro_rules! retry_prompt_target_tests {
+    ($($name:ident => $form:ident),+ $(,)?) => {
+        $(
+            #[test]
+            fn $name() -> Result {
+                retry_prompt_sources_follow_target_rules(RetryTarget::$form)
+            }
+        )+
+    };
+}
+
+retry_prompt_target_tests! {
+    retry_prompt_sources_for_graph_target => Graph,
+    retry_prompt_sources_for_node_target => Node,
+    retry_prompt_sources_for_attempt_target => Attempt,
 }
 
 #[test]
