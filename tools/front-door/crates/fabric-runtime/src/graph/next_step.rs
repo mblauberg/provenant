@@ -44,23 +44,24 @@ pub(super) fn stop_cause(
     if attempt.state != AttemptState::Terminal || !attempt.launched {
         return None;
     }
+    if let Some(cause) = attempt.stop {
+        return Some(cause);
+    }
     if declared(progress) {
         return Some(if progress.blocked {
             StopCause::Blocked
-        } else if attempt.stop == Some(StopCause::ContextHandoff) {
-            StopCause::ContextHandoff
         } else {
             StopCause::StoppedEarly
         });
     }
-    attempt.stop.or(match attempt.outcome? {
+    match attempt.outcome? {
         AttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
         AttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
         AttemptOutcome::AdapterUnavailable => Some(StopCause::AdapterUnavailable),
         AttemptOutcome::PreparationRefused(cause) => Some(cause.into()),
         AttemptOutcome::DeadlineExceeded => Some(StopCause::Deadline),
         _ => None,
-    })
+    }
 }
 
 /// Facts the decision needs beyond the cause: same-route retries this node

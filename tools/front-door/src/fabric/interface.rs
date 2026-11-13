@@ -1632,8 +1632,12 @@ impl Factory {
             }
             result => result?,
         };
+        let replayed = result["replayed"].as_bool().unwrap_or(false);
+        if let Some(object) = result.as_object_mut() {
+            object.remove("replayed");
+        }
         result["named"] = json!({
-            "requested": requested, "graph": id, "replayed": false, "taken": taken,
+            "requested": requested, "graph": id, "replayed": replayed, "taken": taken,
         });
         Ok(result)
     }
@@ -1659,7 +1663,8 @@ impl Factory {
             .map_err(scratch_prepare_error)?;
         let path = publish_graph_document(&scratch, &encode(&document)?)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-        let run = self.graph_with_scratch(
+        let mut replayed = false;
+        let run = self.graph_launch_result(
             GraphInput::Run {
                 extra: Default::default(),
                 document: path.clone(),
@@ -1672,8 +1677,13 @@ impl Factory {
                 .and_then(Value::as_u64)
                 .map(|_| budget),
             announce,
+            Some(&mut replayed),
         )?;
-        let run = self.wait_document(run, input, budget, cancel, &path, &scratch)?;
+        let run = if replayed {
+            run
+        } else {
+            self.wait_document(run, input, budget, cancel, &path, &scratch)?
+        };
         let timed_out = input.get("wait_seconds").and_then(Value::as_u64).is_some()
             && run.status == GraphStatus::Pending
             && !cancel.is_cancelled();
@@ -1707,6 +1717,7 @@ impl Factory {
             )?;
         }
         let mut result = encode(run)?;
+        result["replayed"] = json!(replayed);
         report_launch_refusals(&mut result, &rows);
         result["timed_out"] = json!(timed_out);
         Ok(result)
@@ -3059,16 +3070,8 @@ mod tests {
                 _: Option<&str>,
                 _: graph::Replay<'_>,
             ) -> std::result::Result<graph::AttemptObservation, Self::Error> {
-                Ok(graph::AttemptObservation::Terminal {
+                Ok(graph::AttemptObservation::Pending {
                     attempt_ref: Some("fixture/first".into()),
-                    outcome: graph::AttemptOutcome::Succeeded,
-                    launched: true,
-                    result: None,
-                    result_warning: None,
-                    result_path: None,
-                    branch: None,
-                    commit: None,
-                    stop: None,
                 })
             }
         }
@@ -3104,14 +3107,32 @@ mod tests {
             &factory.context.config.graph.limits,
             &factory.context.config.graph.budget,
         )?;
-        assert_eq!(first.status, GraphStatus::Complete);
+        assert_eq!(first.status, GraphStatus::Pending);
         drop(journal);
+        // Both requests already chose Create before the creator bound. Race
+        // those stale choices at the launch boundary: neither may observe or
+        // advance the pending attempt after acquiring the journal lock.
+        let barrier = std::sync::Barrier::new(2);
+        let launch = || {
+            barrier.wait();
+            factory.launch_submission(document.clone(), &json!({}), budget, &cancel, None)
+        };
+        std::thread::scope(|scope| -> std::result::Result<(), FacadeError> {
+            let left = scope.spawn(&launch);
+            let right = scope.spawn(&launch);
+            for result in [left.join().unwrap()?, right.join().unwrap()?] {
+                assert_eq!(result["replayed"], true);
+                assert_eq!(result["status"], "pending");
+                assert_eq!(result["checkpoint"], encode(&first.checkpoint)?);
+            }
+            Ok(())
+        })?;
         assert_eq!(id, "recover-run");
         input["explain"] = json!(false);
         let replay = factory.graph_document(input, budget, &cancel)?;
         assert_eq!(replay["named"]["replayed"], true);
         assert_eq!(replay["checkpoint"]["graph_id"], id);
-        assert_eq!(replay["status"], "complete");
+        assert_eq!(replay["status"], "pending");
         let saved = FileJournal::read_checkpoint(
             &factory.context.roots.state,
             factory.context.identity.project,

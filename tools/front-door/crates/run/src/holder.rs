@@ -2566,8 +2566,15 @@ impl RunStore {
             decoded.terminal_cause = None;
         }
         let decoded_reason = decoded.reason.take().map(bounded_reason);
-        let stop = provenant_records::Stop::sealed(decoded.terminal_cause, handoff.clone())
-            .map_err(|_| RunError::Validation("stop could not be sealed"))?;
+        let cause = decoded
+            .terminal_cause
+            .map(Into::into)
+            .or_else(|| provenant_records::StopCause::of_outcome(decoded.outcome));
+        let stop = match cause {
+            Some(cause) => provenant_records::Stop::new(cause, handoff.clone()).map(Some),
+            None => provenant_records::Stop::sealed(None, handoff.clone()),
+        }
+        .map_err(|_| RunError::Validation("stop could not be sealed"))?;
         let publication = TerminalPublication {
             stop,
             terminal_cause: decoded.terminal_cause,
@@ -4199,114 +4206,131 @@ mod writer_recovery_tests {
     #[test]
     fn writer_that_lost_its_lane_token_settles_on_its_handoff()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
-        let fixture = PrepareFixture::new()?;
-        let execution = registered_landed_writer_fixture(&fixture)?;
-        let (clock, cancel) = (clock(), CancelToken::new());
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&execution, &call)?;
-        let mut run = input();
-        run.request.task.writer = Some(fixture.writer.clone());
-        store.create(&run, &call)?;
-        let id = run.attempt_id;
-        store.mark_starting(
-            &store.record(id, &call)?,
-            &route(),
-            &[],
-            &Default::default(),
-            None,
-            &call,
-        )?;
-        let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-        let scope = RunStore::scope(&record);
-        let attempt = store.attempt_dir(id, false)?;
-        let mut launch = crate::prepare_writer(
-            &fixture.writer,
-            execution.state_root.as_path(),
-            execution.project_id,
-        )?;
-        launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
-        let candidate = store.temporary_path(id, &call)?.join("candidate-0");
-        std::fs::create_dir_all(&candidate)?;
-        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-        crate::objects::prepare_bound(
-            &git,
-            launch.worktree.repo(),
-            &attempt,
-            &candidate,
-            launch.branch.as_str(),
-            launch.base,
-        )?;
-        let pin = format!("refs/provenant/import/{}", launch.base);
-        fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
-        let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
-        let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
-            directory.try_clone()?,
-            scope,
-            binding,
-            call.lock_budget(),
-            &cancel,
-            &clock,
-        )?;
-        drop(provenant_supervisor::fixture::bind_writer_attempt(
-            lease, &attempt,
-        )?);
-        std::fs::write(
-            launch.worktree.repo().root_path().join("token-work.txt"),
-            "uncommitted work before the token was lost\n",
-        )?;
-        let progress = serde_json::json!({
-            "schema_version": 2,
-            "status": "stopped_early",
-            "note": "Parser done; renderer next",
-            "remaining": ["Finish renderer"],
-            "decisions": [],
-            "verify": [],
-        });
-        crate::artifacts::seal(
-            &attempt,
-            provenant_records::AttemptFile::Handoff.name(),
-            &serde_json::to_vec(&progress)?,
-            provenant_records::handoff::HANDOFF_BYTES as u64,
-        )?;
-        let mut observed = crate::tests::exit();
-        observed.scope = scope;
-        crate::dispatch_tests::seal_exit(&store, &observed)?;
-        crate::artifacts::seal(
-            &attempt,
-            "launch.json",
-            &crate::db::bytes(
-                &serde_json::json!({"schema_version":1,"scope":scope,"requester":execution.actor_id}),
-            )?,
-            RECORD_LIMIT,
-        )?;
-        let mut fake =
-            crate::dispatch_tests::Fake::with_observed(Some(route()), Some(Outcome::AuthRequired));
-        fake.terminal_cause = Some(TerminalCause::LaneTokenLost);
-        let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
-        let AttemptState::Terminal {
-            extra,
-            outcome,
-            reason,
-            ..
-        } = &finished.state
-        else {
-            panic!("attempt must be terminal");
-        };
-        assert_eq!(*outcome, Outcome::ReviewRequired, "reason: {reason:?}");
-        assert_eq!(
-            extra.get("terminal_cause"),
-            Some(&serde_json::json!(TerminalCause::LaneTokenLost))
-        );
-        let result =
-            String::from_utf8(read_sealed(&attempt, "result.md", RESULT_LIMIT)?.ok_or("result")?)?;
-        let handoff =
-            provenant_records::handoff::Handoff::from_result(&result)?.ok_or("result handoff")?;
-        assert_eq!(handoff.note, "Parser done; renderer next");
-        assert_eq!(
-            std::fs::read_to_string(fixture.writer.worktree.join("token-work.txt"))?,
-            "uncommitted work before the token was lost\n"
-        );
+        for host_outcome in [Outcome::AuthRequired, Outcome::Lost, Outcome::Unsettled] {
+            use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+            let fixture = PrepareFixture::new()?;
+            let execution = registered_landed_writer_fixture(&fixture)?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            let store = RunStore::open(&execution, &call)?;
+            let mut run = input();
+            run.request.task.writer = Some(fixture.writer.clone());
+            store.create(&run, &call)?;
+            let id = run.attempt_id;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+            let scope = RunStore::scope(&record);
+            let attempt = store.attempt_dir(id, false)?;
+            let mut launch = crate::prepare_writer(
+                &fixture.writer,
+                execution.state_root.as_path(),
+                execution.project_id,
+            )?;
+            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            let candidate = store.temporary_path(id, &call)?.join("candidate-0");
+            std::fs::create_dir_all(&candidate)?;
+            let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+            crate::objects::prepare_bound(
+                &git,
+                launch.worktree.repo(),
+                &attempt,
+                &candidate,
+                launch.branch.as_str(),
+                launch.base,
+            )?;
+            let pin = format!("refs/provenant/import/{}", launch.base);
+            fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
+            let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+            let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+                directory.try_clone()?,
+                scope,
+                binding,
+                call.lock_budget(),
+                &cancel,
+                &clock,
+            )?;
+            drop(provenant_supervisor::fixture::bind_writer_attempt(
+                lease, &attempt,
+            )?);
+            std::fs::write(
+                launch.worktree.repo().root_path().join("token-work.txt"),
+                "uncommitted work before the token was lost\n",
+            )?;
+            let progress = serde_json::json!({
+                "schema_version": 2,
+                "status": "stopped_early",
+                "note": "Parser done; renderer next",
+                "remaining": ["Finish renderer"],
+                "decisions": [],
+                "verify": [],
+            });
+            crate::artifacts::seal(
+                &attempt,
+                provenant_records::AttemptFile::Handoff.name(),
+                &serde_json::to_vec(&progress)?,
+                provenant_records::handoff::HANDOFF_BYTES as u64,
+            )?;
+            let mut observed = crate::tests::exit();
+            observed.scope = scope;
+            crate::dispatch_tests::seal_exit(&store, &observed)?;
+            crate::artifacts::seal(
+                &attempt,
+                "launch.json",
+                &crate::db::bytes(
+                    &serde_json::json!({"schema_version":1,"scope":scope,"requester":execution.actor_id}),
+                )?,
+                RECORD_LIMIT,
+            )?;
+            let mut fake =
+                crate::dispatch_tests::Fake::with_observed(Some(route()), Some(host_outcome));
+            fake.terminal_cause = Some(TerminalCause::LaneTokenLost);
+            let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
+            let AttemptState::Terminal {
+                extra,
+                outcome,
+                reason,
+                ..
+            } = &finished.state
+            else {
+                panic!("attempt must be terminal");
+            };
+            let expected_outcome = if host_outcome == Outcome::AuthRequired {
+                Outcome::ReviewRequired
+            } else {
+                host_outcome
+            };
+            assert_eq!(*outcome, expected_outcome, "reason: {reason:?}");
+            if host_outcome == Outcome::AuthRequired {
+                assert_eq!(
+                    extra.get("terminal_cause"),
+                    Some(&serde_json::json!(TerminalCause::LaneTokenLost))
+                );
+            }
+            let stop: provenant_records::Stop = serde_json::from_value(extra["stop"].clone())?;
+            let expected_stop = match host_outcome {
+                Outcome::Lost => provenant_records::StopCause::Lost,
+                Outcome::Unsettled => provenant_records::StopCause::Unsettled,
+                _ => provenant_records::StopCause::LaneTokenLost,
+            };
+            assert_eq!(stop.cause(), expected_stop);
+            let result = String::from_utf8(
+                read_sealed(&attempt, "result.md", RESULT_LIMIT)?.ok_or("result")?,
+            )?;
+            let handoff = provenant_records::handoff::Handoff::from_result(&result)?
+                .ok_or("result handoff")?;
+            assert_eq!(handoff.note, "Parser done; renderer next");
+            assert_eq!(
+                std::fs::read_to_string(fixture.writer.worktree.join("token-work.txt"))?,
+                "uncommitted work before the token was lost\n"
+            );
+        }
         Ok(())
     }
 

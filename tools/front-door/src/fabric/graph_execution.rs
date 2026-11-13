@@ -417,6 +417,31 @@ impl Factory {
         admission_timeout: Option<WaitBudget>,
         announce: Option<Announce<'_>>,
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
+        self.graph_launch_result(
+            input,
+            budget,
+            cancel,
+            prepared_scratch,
+            admission_timeout,
+            announce,
+            None,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "submission replay disposition is separate from graph advancement"
+    )]
+    pub(crate) fn graph_launch_result(
+        &self,
+        input: GraphInput,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        prepared_scratch: Option<&Path>,
+        admission_timeout: Option<WaitBudget>,
+        announce: Option<Announce<'_>>,
+        replayed: Option<&mut bool>,
+    ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
         let facts = provenant_confinement::worktrees::RepoFacts::default();
         use provenant_fabric_runtime::coordination::input::ValidateInput;
         use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
@@ -784,7 +809,8 @@ impl Factory {
             if let Some((directory, name, bytes)) = &scratch_source {
                 restore_scratch_source(directory, name, bytes)?;
             }
-            let existing = journal.load(id).map_err(graph_journal_error)?.is_some();
+            let checkpoint = journal.load(id).map_err(graph_journal_error)?;
+            let existing = checkpoint.is_some();
             let bound_execution = if existing {
                 Some(
                     FileJournal::execution(
@@ -801,10 +827,25 @@ impl Factory {
             // A graph name holds one launch input. A new launch that finds the
             // name bound to another digest lost a race for it; never resume or
             // patch the other launch's graph.
-            if let (Some(bound), Some(digest)) = (&bound_execution, document.replay_digest())
-                && bound.document.replay_digest() != Some(digest)
-            {
-                return Err(FacadeError::Conflict);
+            if let (Some(bound), Some(digest)) = (&bound_execution, document.replay_digest()) {
+                if bound.document.replay_digest() != Some(digest) {
+                    return Err(FacadeError::Conflict);
+                }
+                if let Some(replayed) = replayed {
+                    // The journal lock, not the optimistic name lookup, decides
+                    // who created this submission. A matching waiter only reads.
+                    *replayed = true;
+                    let mut run = graph_snapshot(checkpoint.ok_or(FacadeError::StateCorrupt)?);
+                    redact_checkout_paths(&mut run.checkpoint);
+                    run.advance_error = FileJournal::read_advance_error(
+                        &self.context.roots.state,
+                        self.context.identity.project,
+                        id,
+                    )
+                    .map_err(graph_journal_error)?
+                    .or(run.advance_error);
+                    return Ok(run);
+                }
             }
             let mut ledger_warning = None;
             let integration_base = if existing {

@@ -11,6 +11,9 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Re
     let mut out = reply(
         "output",
         read.and_then(|(mut data, mut text)| {
+            // The graph resolver owns placement; this public handle reaches the
+            // same host again without exposing its internal attempt ID.
+            data["target"] = json!(command.target.to_string());
             if let Some(lines) = receipt_tail {
                 text =
                     text[tail_start(text.as_bytes(), lines.min(limits::TAIL_LINES))..].to_owned();
@@ -157,11 +160,7 @@ pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::S
         let body = crate::head_and_tail(text, limits::OUTPUT_BYTES);
         lines.extend(body.lines().map(str::to_owned));
     }
-    let target = data["attempt_id"].as_str().map(|id| {
-        data["host"]
-            .as_str()
-            .map_or_else(|| id.to_owned(), |host| format!("{host}/{id}"))
-    });
+    let target = data["target"].as_str();
     let state = data["state"].as_str().unwrap_or_default();
     let next = target.and_then(|target| {
         if data["eof"] == json!(false) {
@@ -968,6 +967,41 @@ mod tests {
         provider_error_from_result, provider_error_from_stderr,
     };
     use serde_json::json;
+
+    #[test]
+    fn output_followups_use_the_public_handle_for_local_and_peer_placements() {
+        for host in [
+            serde_json::Value::Null,
+            json!("11111111111111111111111111111111"),
+        ] {
+            let mut data = json!({
+                "attempt_id":"22222222222222222222222222222222", "host":host,
+                "state":"running", "eof":false,
+                "part":"result", "next_offset":42
+            });
+            let command = crate::Output {
+                target: "repair/writer#2".parse().unwrap(),
+                part: crate::Part::Result,
+                to: None,
+                path: false,
+                offset: 0,
+                tail: None,
+                max_bytes: 65536,
+            };
+            let rendered = super::render_output(command.clone(), Ok((data.clone(), String::new())));
+            let next = rendered.summary.unwrap().next.unwrap();
+            assert_eq!(
+                next,
+                "provenant output repair/writer#2 --part result --offset 42"
+            );
+            data["eof"] = json!(true);
+            let rendered = super::render_output(command, Ok((data, String::new())));
+            assert_eq!(
+                rendered.summary.unwrap().next.as_deref(),
+                Some("provenant wait repair/writer#2")
+            );
+        }
+    }
 
     #[test]
     fn output_summary_names_planner_fallback_and_reason() {

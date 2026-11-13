@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-pub const PROTOCOL: u64 = 6;
+pub const PROTOCOL: u64 = 13;
 pub const CONSOLE_PROTOCOL: u64 = 7;
 pub const INBOX_PROTOCOL: u64 = 8;
 pub const DOCTOR_PROTOCOL: u64 = 12;
@@ -24,9 +24,9 @@ pub const MAX_FRAME: usize = 1_048_576;
 
 /// The newest feature protocol level this release speaks. `PROTOCOL` is the
 /// base wire fence shared with every peer release; feature actions negotiate
-/// their own level per call, up to this ceiling. A release that adds a newer
-/// action family includes it here, and the local `hosts` row reports the
-/// ceiling beside the base fence so that the base level cannot read as stale.
+/// their independently versioned level per call, up to this ceiling. The local
+/// `hosts` row reports both; a base payload change can raise the base above the
+/// feature ceiling without changing the feature payloads.
 pub fn newest_feature_protocol() -> u64 {
     CONSOLE_PROTOCOL
         .max(INBOX_PROTOCOL)
@@ -1222,13 +1222,21 @@ mod tests {
 
     #[test]
     fn hosts_report_a_feature_ceiling_beside_the_base_fence() {
+        for fence in [
+            CONSOLE_PROTOCOL,
+            INBOX_PROTOCOL,
+            DOCTOR_PROTOCOL,
+            CONSOLE_DETAIL_PROTOCOL,
+            CONSOLE_INBOX_PROTOCOL,
+        ] {
+            assert!(newest_feature_protocol() >= fence);
+        }
         assert_eq!(newest_feature_protocol(), DOCTOR_PROTOCOL);
-        assert!(newest_feature_protocol() >= PROTOCOL);
     }
 
     #[test]
     fn protocol_fence_precedes_action_decoding() {
-        let request = PeerRequest {
+        let mut request = PeerRequest {
             extra: Default::default(),
             version: 1,
             protocol: PROTOCOL - 1,
@@ -1243,20 +1251,29 @@ mod tests {
             action: serde_json::json!({"action": "future_action", "build_heavy": true}),
             trace: Trace::default(),
         };
-        let bytes = serde_json::to_vec(&request).unwrap();
-        assert!(decode_request(&bytes).is_err());
-        let response = protocol_refusal(&bytes).unwrap().unwrap();
-        assert_eq!(response.protocol, PROTOCOL);
-        assert!(matches!(
-            response.result,
-            PeerResult::Error {
-                data: crate::hosts::PeerResultError {
-                    error: facade::FacadeError::PeerVersion,
-                    ..
-                },
-                ..
+        for protocol in [6, PROTOCOL - 1] {
+            for action in [
+                serde_json::json!({"action":"future_action"}),
+                serde_json::json!({"action":"submit", "input":{"op":"submit", "task":"invalid shape", "origin_work_key":"new payload"}}),
+            ] {
+                request.protocol = protocol;
+                request.action = action;
+                let bytes = serde_json::to_vec(&request).unwrap();
+                assert!(decode_request(&bytes).is_err());
+                let response = protocol_refusal(&bytes).unwrap().unwrap();
+                assert_eq!(response.protocol, PROTOCOL);
+                assert!(matches!(
+                    response.result,
+                    PeerResult::Error {
+                        data: crate::hosts::PeerResultError {
+                            error: facade::FacadeError::PeerVersion,
+                            ..
+                        },
+                        ..
+                    }
+                ));
             }
-        ));
+        }
     }
 
     #[test]
@@ -1525,6 +1542,7 @@ mod tests {
             extra: Default::default(),
             input: Box::new(facade::SubmitInput::Submit {
                 extra: Default::default(),
+                origin_work_key: None,
                 operation_id: operation.clone(),
                 task,
                 knobs: Vec::new(),

@@ -817,7 +817,66 @@ impl FileJournal {
         format!("graph-{}.json", self.graph_id).into()
     }
 
+    /// The immutable origin binding retained with the graph's name after
+    /// collection removes its checkpoint. It is copied from document metadata
+    /// under the same journal lock before the first attempt can launch.
+    pub fn peer_origin(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+    ) -> Result<Option<provenant_records::WorkKey>, JournalError> {
+        if !valid_identifier(graph_id) {
+            return Err(JournalError::InvalidGraphId);
+        }
+        let directory = match graph_directory(root, project) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let bytes = match directory
+            .read_stable(OsStr::new(&format!("peer-origin-{graph_id}.json")), 4096)
+        {
+            Ok(bytes) => bytes,
+            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|_| JournalError::BadEnvelope)
+    }
+
     fn reserve_name(&self) -> Result<(), JournalError> {
+        if let Some(origin) = self
+            .execution
+            .as_ref()
+            .and_then(|execution| execution.document.extra.get("peer_origin_work_key"))
+        {
+            let origin: provenant_records::WorkKey =
+                serde_json::from_value(origin.clone()).map_err(|_| JournalError::BadEnvelope)?;
+            let name = format!("peer-origin-{}.json", self.graph_id);
+            match self.directory.read_stable(OsStr::new(&name), 4096) {
+                Ok(bytes) => {
+                    let retained: provenant_records::WorkKey =
+                        serde_json::from_slice(&bytes).map_err(|_| JournalError::BadEnvelope)?;
+                    if retained != origin {
+                        return Err(JournalError::GraphMismatch);
+                    }
+                }
+                Err(error) if error.is_not_found() => {
+                    let bytes = CanonicalV1::bytes(&origin)?;
+                    self.directory
+                        .atomic_write(
+                            OsStr::new(&name),
+                            ".peer-origin.",
+                            bytes.as_bytes(),
+                            PublishMode::NoReplace,
+                        )?
+                        .require_durable()
+                        .map_err(JournalError::DurabilityUnconfirmed)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
         let name: OsString = format!("graph-{}.reserved", self.graph_id).into();
         self.directory
             .atomic_write(&name, ".graph-name.", b"reserved\n", PublishMode::Replace)?

@@ -238,9 +238,15 @@ Each host owns its records and liveness, so an unreachable peer is `Unknown`,
 never dead. Peers use system SSH and the fixed `provenant fabric peer` command,
 which refuses another protocol before decoding. An uncertain remote mutation is
 resolved only by the home host's receipt, never resent, and code crosses hosts
-only as committed objects Git verifies. Remote placements and fetched artifacts
-carry the project, graph, node and attempt `WorkKey`; the peer uses its
-`AttemptId` internally to resolve active work. Credentials, keys and keychains never cross hosts (no test:
+only as committed objects Git verifies. Submit carries the origin's full
+project, graph, node and attempt `WorkKey`. The receiver executes in its own
+`peer-<digest>` graph with receiver-local WorkKeys and internal AttemptIds.
+Its immutable graph document records the origin WorkKey, retained beside the
+name reservation after checkpoint collection, and authenticated
+status and artifact reads carry that binding back. The origin checks the full
+binding before trusting a remote attempt. The changed Submit payload raises
+the base protocol fence; mixed versions refuse before payload decoding.
+Credentials, keys and keychains never cross hosts (no test:
 peer request types carry no credential fields), and peer changes need a
 chair-run smoke between two real hosts (review gate).
 - Why: remote guesses or a resent mutation could free a live lane or apply twice.

@@ -3129,6 +3129,10 @@ impl BoundGraphOwner<'_> {
             });
             let input = SubmitInput::Submit {
                 extra: Default::default(),
+                origin_work_key: Some(
+                    key.work_key(self.factory.context.identity.project)
+                        .map_err(|_| FacadeError::StateCorrupt)?,
+                ),
                 operation_id,
                 task: SubmittedTask {
                     require_skill_location: accepted_skill_location
@@ -3532,13 +3536,16 @@ impl BoundGraphOwner<'_> {
         };
         let attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
         // A local attempt carries this node's exact work key. A remote attempt
-        // lives in the receiver's own graph (`peer_graph_name`), which keeps the
-        // origin node id under the receiver's own graph and attempt numbering.
+        // lives in the receiver's own graph and carries its immutable origin.
         let remote_target = target
             .host
             .is_some_and(|host| host != self.factory.context.identity.host);
         let identity_matches = if remote_target {
+            let expected = key
+                .work_key(self.factory.context.identity.project)
+                .map_err(|_| FacadeError::StateCorrupt)?;
             attempt.key.node() == key.node_id
+                && super::peer::peer_origin_matches(&attempt.extra, &expected)
         } else {
             key.work_key(attempt.key.project()).ok().as_ref() == Some(&attempt.key)
         };

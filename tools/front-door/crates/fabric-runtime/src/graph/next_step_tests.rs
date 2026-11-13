@@ -208,7 +208,7 @@ fn a_depleted_writer_moves_to_a_new_route_at_once_in_its_worktree() {
         let document = document("worktree_write", serde_json::Value::Null);
         let mut owner = Owner {
             observations: [
-                terminal("a/1", AttemptOutcome::OtherFailure, Some(cause), None),
+                terminal("a/1", AttemptOutcome::OtherFailure, Some(cause), Some("```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"Work remains\",\"remaining\":[\"Finish work\"],\"decisions\":[],\"verify\":[]}\n```")),
                 done("b/1"),
             ]
             .into(),

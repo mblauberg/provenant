@@ -6,6 +6,16 @@ use serde_json::json;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+fn origin_key() -> provenant_records::WorkKey {
+    provenant_records::WorkKey::new(
+        provenant_core::ProjectId::from_bytes([77; 16]),
+        "origin-graph",
+        "parent",
+        1,
+    )
+    .unwrap()
+}
+
 fn receiver() -> TestResult<(crate::worktree_tests::support::TestRig, Factory)> {
     let rig = crate::worktree_tests::repository()?;
     provenant_os::fixture::private_state_dir(&rig.state)?;
@@ -33,6 +43,7 @@ fn submit_parent(
 ) -> TestResult<SubmissionReceipt> {
     let input = serde_json::from_value(json!({
         "op":"submit", "operation_id":operation,
+        "origin_work_key":origin_key(),
         "task":{"prompt":"Launch a child and collect its answer", "access":"read_only",
             "route":{"kind":"model","provider":"fixture","model":"fixture/model"},
             "timeout_seconds":30,
@@ -75,7 +86,9 @@ fn advance_receiver(
         cancel,
         &factory.clock,
     )?;
-    let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None,
+    let mut owner = BoundGraphOwner {
+        writer_launch_budget: None,
+        admission_timeout: None,
         repo_facts: Default::default(),
         launch_warnings: Vec::new(),
         factory,
@@ -138,6 +151,7 @@ fn peer_hosted_lane_launches_a_local_child_and_collects_its_result() -> TestResu
     assert_eq!(replay.extra["peer_graph"], receipt.extra["peer_graph"]);
     let changed: SubmitInput = serde_json::from_value(json!({
         "op":"submit", "operation_id":"peer-parent-result",
+        "origin_work_key":origin_key(),
         "task":{"prompt":"A changed brief must not reuse the accepted operation", "access":"read_only",
             "route":{"kind":"model","provider":"fixture","model":"fixture/model"},
             "timeout_seconds":30,
@@ -176,10 +190,8 @@ fn peer_hosted_lane_launches_a_local_child_and_collects_its_result() -> TestResu
     )?;
     let request = parent_store.request(parent_record.attempt_id, &parent_call)?;
     assert_eq!(request.task.provider_timeout_seconds, 17);
-    let directory = provenant_os::fs::Directory::open_anchor(
-        &rig.state
-            .join(format!("attempts/{parent}")),
-    )?;
+    let directory =
+        provenant_os::fs::Directory::open_anchor(&rig.state.join(format!("attempts/{parent}")))?;
     parent_store.admit(
         parent,
         &directory,
@@ -263,6 +275,33 @@ fn peer_hosted_lane_launches_a_local_child_and_collects_its_result() -> TestResu
     let pointer = super::super::peer::peer_graph_fields(&factory, parent)?;
     assert_eq!(pointer["peer_graph"]["graph_id"], graph);
     assert_eq!(pointer["peer_origin_context"]["graph_id"], "origin-graph");
+    assert!(super::super::peer::peer_origin_matches(
+        &pointer,
+        &origin_key()
+    ));
+    let execution = FileJournal::execution(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        graph,
+    )?
+    .ok_or("receiver graph document")?;
+    assert_eq!(
+        execution.document.extra["peer_origin_work_key"],
+        json!(origin_key())
+    );
+    for wrong in [
+        provenant_records::WorkKey::new(
+            factory.context.identity.project,
+            "origin-graph",
+            "parent",
+            1,
+        )?,
+        provenant_records::WorkKey::new(origin_key().project(), "other-graph", "parent", 1)?,
+        provenant_records::WorkKey::new(origin_key().project(), "origin-graph", "other-node", 1)?,
+        origin_key().next_attempt().ok_or("next origin attempt")?,
+    ] {
+        assert!(!super::super::peer::peer_origin_matches(&pointer, &wrong));
+    }
     let page = super::super::peer::peer_graph_fields_page(&factory, parent, 1)?;
     assert_eq!(
         page["peer_subtree"]["checkpoint"]["nodes"]
@@ -621,6 +660,10 @@ fn peer_hosted_lane_collection_preserves_origin_status() -> TestResult {
     );
     let fields = super::super::peer::peer_graph_fields(&factory, parent)?;
     assert_eq!(fields["peer_graph_collected"], true);
+    assert!(super::super::peer::peer_origin_matches(
+        &fields,
+        &origin_key()
+    ));
     assert_eq!(fields["peer_graph"], receipt.extra["peer_graph"]);
     let mut record = store.record(parent, &call)?;
     record.extra.extend(fields);
@@ -678,7 +721,10 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
                 detail: "PRIVATE_PACING_SENTINEL".into(),
             };
             route.set_guard_facts(None, Some(self.0)).unwrap();
-            let mut refusal = provenant_run::PrepareRefusal::new(provenant_records::run::TerminalCause::RouteResolutionRefused, "PRIVATE_PACING_SENTINEL");
+            let mut refusal = provenant_run::PrepareRefusal::new(
+                provenant_records::run::TerminalCause::RouteResolutionRefused,
+                "PRIVATE_PACING_SENTINEL",
+            );
             refusal.skipped_routes.push(route);
             Err(refusal)
         }
@@ -730,10 +776,12 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
         setting: PacingReserveSetting::AdapterFiveHour,
         origin: PacingSettingSource::Configuration,
     };
-    let started =
-        session
-            .store
-            .start(record.attempt_id, &Pacing(fact), &|_, _| Ok(Vec::new()), &call)?;
+    let started = session.store.start(
+        record.attempt_id,
+        &Pacing(fact),
+        &|_, _| Ok(Vec::new()),
+        &call,
+    )?;
     let first = owner
         .receipt(&session, operation.clone(), &record, &started, &call)
         .unwrap_err();
@@ -809,13 +857,15 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
                 provenant_records::run::TerminalCause::RouteResolutionRefused,
                 "allowance spent",
             );
-            refusal.skipped_routes.push(provenant_records::run::SkippedRoute {
-                extra: Default::default(),
-                route: "codex/gpt".into(),
-                kind: provenant_records::run::SkipKind::Unavailable,
-                cause: None,
-                detail: "allowance spent".into(),
-            });
+            refusal
+                .skipped_routes
+                .push(provenant_records::run::SkippedRoute {
+                    extra: Default::default(),
+                    route: "codex/gpt".into(),
+                    kind: provenant_records::run::SkipKind::Unavailable,
+                    cause: None,
+                    detail: "allowance spent".into(),
+                });
             Err(refusal)
         }
         fn decode(

@@ -221,8 +221,10 @@ returns when every target has. `--pr NUMBER` is satisfied when the pull
 request's required checks on its current head reach a verdict, or when it is
 merged or closed. `--timeout` takes a span, defaults to
 `domains.wait.timeout_seconds` and is at most four hours. `--follow` prints
-one line per transition before the result. A failed read is retried until the
-deadline rather than ending the wait. Neither expiry nor cancelling a wait
+one line per transition before the result. Bare wait includes unreadable graphs
+as unsuccessful targets. Other failed reads are retried until the shared
+deadline, which also bounds target validation, graph reads and peer enrichment.
+Neither expiry nor cancelling a wait
 stops the work.
 
 | Exit | Meaning |
@@ -230,7 +232,7 @@ stops the work.
 | 0 | Every target settled successfully; under `--any`, the first one did. A merged pull request, or one whose checks passed, counts as success. |
 | 1 | A target settled without success: failed, stopped or lost, or a pull request whose checks failed or that closed unmerged. The result names it. |
 | 2 | Invalid input, including a target that is not found or is ambiguous. `wait` resolves every target before it starts. |
-| 5 | A target needs input: an open owner ask, or a lane waiting to be steered. |
+| 5 | A graph target is paused for owner input. Node and attempt targets settle by their own state; an open lane ask or steering wait alone does not satisfy them. |
 | 124 | The budget expired with targets unsettled; the result names them. |
 | 130 | The wait was cancelled. |
 
@@ -556,8 +558,10 @@ and its fallback receipt; account and quota guards still apply.
 
 ### Waits are readers
 
-Every wait has an explicit budget, and a timeout exits 124. A target needing
-input satisfies a wait (exit 5). Neither expiry nor cancelling a wait stops the
+Every wait has an explicit budget, and a timeout exits 124. A paused graph
+target satisfies a wait (exit 5). Node and attempt targets use their own state;
+an open lane ask or steering wait alone does not satisfy them.
+Neither expiry nor cancelling a wait stops the
 work: `wait` only reads checkpoints and pull request state. `--any` returns at
 the first target to settle; otherwise the wait returns when every target has.
 `provenant help --all` and the MCP `tools/list` response own the accepted
