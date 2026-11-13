@@ -36,7 +36,7 @@ reconstructs them from run history.
   `::a_kept_1x_ledger_row_decodes_old_ids_as_opaque_labels`;
   `::an_unrecognised_line_is_reported_by_segment_and_line`;
   `src/settlement.rs::tests::settlement_writes_one_priced_ledger_row_and_a_failed_append_stays_pending`;
-  `::settled_cost_for_a_past_window_equals_the_telemetry_report`;
+  `crates/telemetry/src/ledger/tests.rs::settled_cost_for_a_past_window_equals_the_telemetry_report`;
   `tests/telemetry_value_cost.rs::cost_reports_unpriced_and_unattributed_attempts_without_zero_filling`
 - Owner: `crates/telemetry/src/ledger.rs`, `src/settlement.rs`
 

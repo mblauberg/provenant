@@ -351,7 +351,7 @@ payloads, logs, events and worktrees; it never removes run/attempt metadata.
 Whole-run collection must delete its association in the same host-owned removal
 workflow. Lane-writable missing child records alone cannot authorise deletion.
 
-- Test: `crates/fabric-runtime/src/chairs.rs::nested_chair_binding`;
+- Test: `crates/fabric-runtime/src/chairs.rs::tests::associations_are_keyed_by_project_and_graph_and_inherit_by_name`;
   `crates/run/src/service_tests.rs::chair_binding_replays_the_original_submission`;
   `crates/cli/src/run/tests.rs::operation_replays_after_its_context_ref_moves_or_is_deleted`;
   `crates/run/src/dispatch_lifecycle_tests.rs::nested_continuation_uses_host_derived_ids`;
