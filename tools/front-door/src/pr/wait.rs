@@ -78,7 +78,6 @@ fn observe(
         other => other,
     }
 }
-#[cfg(test)]
 #[allow(dead_code, reason = "helper used by the wait unit tests")]
 fn state(checks: &[Check], required: &[Required], now: jiff::Timestamp) -> State {
     let head = checks.first().map_or("", |check| check.head.as_str());
