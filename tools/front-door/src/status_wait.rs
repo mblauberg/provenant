@@ -329,9 +329,9 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         match provenant_sqlite::with_busy_timeout(Duration::ZERO, || {
             crate::fabric::unsettled_graphs(&edge, deadline, &stop.cancel)
         }) {
-            Ok(graphs) => sources.extend(graphs.into_iter().map(|(target, error)| match error {
-                Some(error) => Source::UnreadableGraph(target, error),
-                None => Source::Graph(target),
+            Ok(graphs) => sources.extend(graphs.into_iter().map(|graph| match graph.error {
+                Some(error) => Source::UnreadableGraph(graph.target, error),
+                None => Source::Graph(graph.target),
             })),
             Err(error) => return preflight_error(error.as_ref(), deadline, &stop.cancel, globals),
         }
@@ -500,12 +500,12 @@ mod tests {
         };
         let deadline = Instant::now() + Duration::from_secs(30);
         let discovered = crate::fabric::unsettled_graphs(&edge, deadline, &cancel)?;
-        let (target, error) = discovered
+        let graph = discovered
             .into_iter()
-            .find(|(target, _)| target.name == "broken")
+            .find(|graph| graph.target.name == "broken")
             .ok_or("broken graph was hidden")?;
         let reading = read(
-            &Source::UnreadableGraph(target, error.ok_or("decode failure")?),
+            &Source::UnreadableGraph(graph.target, graph.error.ok_or("decode failure")?),
             &edge,
             deadline,
             Duration::from_secs(1),

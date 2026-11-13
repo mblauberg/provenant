@@ -436,18 +436,8 @@ fn mark_unreadable_attempt(row: &mut Value, attempt: &str, error: &provenant_rec
     ));
 }
 
-/// Enrich graph attempt rows from identity-checked host records. Checkpoint
-/// rows describe graph progress; the run owner retains typed terminal causes.
-pub(crate) fn enrich_status_rows(
-    rows: &mut [Value],
-    context: &Context,
-    clock: &SystemClock,
-    cancel: &CancelToken,
-) -> Result<(), FacadeError> {
-    let budget = WaitBudget::cli(clock.mono_now(), 30).map_err(|_| FacadeError::Timeout)?;
-    enrich_status_rows_within(rows, context, clock, cancel, budget)
-}
-
+/// Enrich graph attempt rows from identity-checked host records within the
+/// caller's budget. The run owner retains typed terminal causes.
 pub(crate) fn enrich_status_rows_within(
     rows: &mut [Value],
     context: &Context,
@@ -1633,18 +1623,36 @@ fn graph_attempt_output(
             &owner.call(cancel),
         ));
     }
+    let origin = provenant_records::WorkKey::new(
+        factory.context.identity.project,
+        command.target.name.clone(),
+        command
+            .target
+            .node
+            .clone()
+            .ok_or(FacadeError::StateCorrupt)?,
+        command
+            .target
+            .attempt
+            .ok_or(FacadeError::StateCorrupt)?
+            .get(),
+    )
+    .map_err(|_| FacadeError::StateCorrupt)?;
     Ok(provenant_cli::run::output_from_host(
         command,
         host,
         attempt,
         |input| {
-            owner.output(input, budget, cancel).map_err(|error| {
-                provenant_cli::run::Fail::new(
-                    provenant_records::Outcome::Error,
-                    provenant_run::ErrorKind::Fabric,
-                    error.to_string(),
-                )
-            })
+            owner
+                .output(input, budget, cancel)
+                .and_then(|output| super::peer::checked_output_origin(output, &origin))
+                .map_err(|error| {
+                    provenant_cli::run::Fail::new(
+                        provenant_records::Outcome::Error,
+                        provenant_run::ErrorKind::Fabric,
+                        error.to_string(),
+                    )
+                })
         },
     ))
 }
@@ -1822,13 +1830,19 @@ pub(crate) fn check_targets(
     Ok(())
 }
 
+#[derive(Debug)]
+pub(crate) struct WaitGraph {
+    pub target: provenant_cli::Target,
+    pub error: Option<String>,
+}
+
 /// The project's running graphs: what a wait with no target waits for. A
 /// paused graph waits on its owner, so it is left out.
 pub(crate) fn unsettled_graphs(
     edge: &provenant_cli::run::Edge<'_>,
     deadline: std::time::Instant,
     cancel: &CancelToken,
-) -> Result<Vec<(provenant_cli::Target, Option<String>)>, Box<dyn std::error::Error>> {
+) -> Result<Vec<WaitGraph>, Box<dyn std::error::Error>> {
     wait_remaining(deadline, cancel)?;
     let Some(context) = read_context(edge)? else {
         return Ok(Vec::new());
@@ -1850,14 +1864,14 @@ pub(crate) fn unsettled_graphs(
             Ok(_) => continue,
             Err(error) => Some(error.to_string()),
         };
-        graphs.push((
-            provenant_cli::Target {
+        graphs.push(WaitGraph {
+            target: provenant_cli::Target {
                 name,
                 node: None,
                 attempt: None,
             },
             error,
-        ));
+        });
     }
     wait_remaining(deadline, cancel)?;
     Ok(graphs)

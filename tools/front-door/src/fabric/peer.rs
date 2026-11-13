@@ -1156,13 +1156,7 @@ pub(crate) fn peer_graph_fields_page(
     else {
         return Ok(Default::default());
     };
-    let Some(checkpoint) = FileJournal::read_checkpoint(
-        &factory.context.roots.state,
-        factory.context.identity.project,
-        graph,
-    )
-    .map_err(graph_journal_error)?
-    else {
+    let collected = || -> Result<provenant_records::ExtraFields, FacadeError> {
         // Terminal checkpoints can be collected before their RunStore attempts.
         // Retain an explicit pointer so the origin can keep its own durable row.
         if !matches!(
@@ -1171,7 +1165,7 @@ pub(crate) fn peer_graph_fields_page(
         ) {
             return Err(FacadeError::StateCorrupt);
         }
-        return Ok([
+        Ok([
             (
                 "peer_graph".into(),
                 serde_json::json!({"host":factory.context.identity.host,"graph_id":graph}),
@@ -1190,7 +1184,16 @@ pub(crate) fn peer_graph_fields_page(
                 ),
             ),
         ]
-        .into());
+        .into())
+    };
+    let Some(checkpoint) = FileJournal::read_checkpoint(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        graph,
+    )
+    .map_err(graph_journal_error)?
+    else {
+        return collected();
     };
     let reference = format!("{}/{}", factory.context.identity.host, attempt);
     if relay::historical_parent_of_attempt(&checkpoint, &reference).is_none() {
@@ -1203,7 +1206,7 @@ pub(crate) fn peer_graph_fields_page(
     )
     .map_err(graph_journal_error)?
     else {
-        return Ok(Default::default());
+        return collected();
     };
     let Some(origin) = execution.extra.get("peer_origin_context") else {
         return Ok(Default::default());
@@ -1278,6 +1281,17 @@ pub(super) fn peer_origin_matches(
         .and_then(|value| serde_json::from_value::<provenant_records::WorkKey>(value.clone()).ok())
         .as_ref()
         == Some(expected)
+}
+
+pub(super) fn checked_output_origin(
+    output: OutputResult,
+    expected: &provenant_records::WorkKey,
+) -> Result<OutputResult, FacadeError> {
+    let (OutputResult::Chunk { extra, .. } | OutputResult::Artifact { extra, .. }) = &output;
+    if !peer_origin_matches(extra, expected) {
+        return Err(FacadeError::StateCorrupt);
+    }
+    Ok(output)
 }
 
 pub(crate) fn peer_cancel_operation(

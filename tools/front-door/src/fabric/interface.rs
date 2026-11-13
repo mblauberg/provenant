@@ -3118,8 +3118,8 @@ mod tests {
             factory.launch_submission(document.clone(), &json!({}), budget, &cancel, None)
         };
         std::thread::scope(|scope| -> std::result::Result<(), FacadeError> {
-            let left = scope.spawn(&launch);
-            let right = scope.spawn(&launch);
+            let left = scope.spawn(launch);
+            let right = scope.spawn(launch);
             for result in [left.join().unwrap()?, right.join().unwrap()?] {
                 assert_eq!(result["replayed"], true);
                 assert_eq!(result["status"], "pending");

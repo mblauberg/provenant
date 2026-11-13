@@ -558,10 +558,8 @@ and its fallback receipt; account and quota guards still apply.
 
 ### Waits are readers
 
-Every wait has an explicit budget, and a timeout exits 124. A paused graph
-target satisfies a wait (exit 5). Node and attempt targets use their own state;
-an open lane ask or steering wait alone does not satisfy them.
-Neither expiry nor cancelling a wait stops the
+Every wait has an explicit budget, and a timeout exits 124. A target needing
+input satisfies a wait (exit 5). Neither expiry nor cancelling a wait stops the
 work: `wait` only reads checkpoints and pull request state. `--any` returns at
 the first target to settle; otherwise the wait returns when every target has.
 `provenant help --all` and the MCP `tools/list` response own the accepted

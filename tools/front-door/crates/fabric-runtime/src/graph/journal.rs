@@ -19,6 +19,7 @@ pub fn take_checkpoint_read_ids() -> Vec<String> {
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum CrashPoint {
+    PeerOrigin,
     PendingMarker,
     TerminalCheckpoint,
     SentinelBefore,
@@ -846,6 +847,13 @@ impl FileJournal {
     }
 
     fn reserve_name(&self) -> Result<(), JournalError> {
+        // Reserve first: a crash while publishing retained metadata must not
+        // make a partially admitted launch available to different input.
+        let name: OsString = format!("graph-{}.reserved", self.graph_id).into();
+        self.directory
+            .atomic_write(&name, ".graph-name.", b"reserved\n", PublishMode::Replace)?
+            .require_durable()
+            .map_err(JournalError::DurabilityUnconfirmed)?;
         if let Some(origin) = self
             .execution
             .as_ref()
@@ -876,17 +884,16 @@ impl FileJournal {
                 }
                 Err(error) => return Err(error.into()),
             }
+            #[cfg(test)]
+            inject_crash(CrashPoint::PeerOrigin);
         }
-        let name: OsString = format!("graph-{}.reserved", self.graph_id).into();
-        self.directory
-            .atomic_write(&name, ".graph-name.", b"reserved\n", PublishMode::Replace)?
-            .require_durable()
-            .map_err(JournalError::DurabilityUnconfirmed)
+        Ok(())
     }
 
     fn has_retained_identity(&self) -> Result<bool, JournalError> {
         for name in [
             OsString::from(format!("graph-{}.reserved", self.graph_id)),
+            OsString::from(format!("peer-origin-{}.json", self.graph_id)),
             OsString::from(format!("{}.events.jsonl", self.graph_id)),
         ] {
             match self.directory.open_read(&name) {

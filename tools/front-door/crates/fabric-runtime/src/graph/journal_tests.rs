@@ -5,6 +5,51 @@ use std::{convert::Infallible, os::unix::fs::PermissionsExt};
 struct Owner;
 
 #[test]
+fn interrupted_peer_origin_publication_never_reuses_the_launch_name() {
+    use super::journal::{CRASH_POINT, CrashPoint};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let origin = provenant_records::WorkKey::new(project, "origin", "writer", 1).unwrap();
+    let mut fixture: StoredCheckpoint =
+        serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
+    fixture
+        .execution
+        .document
+        .extra
+        .insert("peer_origin_work_key".into(), serde_json::json!(origin));
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    journal.bind(fixture.execution.clone()).unwrap();
+    CRASH_POINT.with(|point| point.set(Some(CrashPoint::PeerOrigin)));
+    assert!(catch_unwind(AssertUnwindSafe(|| journal.save(&fixture.checkpoint))).is_err());
+    drop(journal);
+    assert_eq!(
+        FileJournal::peer_origin(&root, project, "g-test").unwrap(),
+        Some(origin)
+    );
+    assert!(
+        FileJournal::reserved_graph_ids(&root, project)
+            .unwrap()
+            .iter()
+            .any(|id| id == "g-test")
+    );
+    fixture.execution.document.nodes[0].prompt = "changed input".into();
+    let mut retry = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    assert!(matches!(
+        retry.bind(fixture.execution),
+        Err(JournalError::NameReserved)
+    ));
+}
+
+#[test]
 fn terminal_legacy_checkpoint_is_decoded_or_retired() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();

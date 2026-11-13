@@ -3540,12 +3540,12 @@ impl BoundGraphOwner<'_> {
         let remote_target = target
             .host
             .is_some_and(|host| host != self.factory.context.identity.host);
+        let expected_origin = key
+            .work_key(self.factory.context.identity.project)
+            .map_err(|_| FacadeError::StateCorrupt)?;
         let identity_matches = if remote_target {
-            let expected = key
-                .work_key(self.factory.context.identity.project)
-                .map_err(|_| FacadeError::StateCorrupt)?;
             attempt.key.node() == key.node_id
-                && super::peer::peer_origin_matches(&attempt.extra, &expected)
+                && super::peer::peer_origin_matches(&attempt.extra, &expected_origin)
         } else {
             key.work_key(attempt.key.project()).ok().as_ref() == Some(&attempt.key)
         };
@@ -3649,6 +3649,7 @@ impl BoundGraphOwner<'_> {
                         remote_graph_result(
                             &mut owner,
                             &target,
+                            &expected_origin,
                             node.required_verdict,
                             self.budget,
                             self.cancel,
@@ -4636,11 +4637,12 @@ fn peer_handoff(
 fn remote_graph_result(
     owner: &mut BinaryRunOwner<'_>,
     target: &AttemptTarget,
+    origin: &provenant_records::WorkKey,
     required: Option<&str>,
     budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<provenant_records::result_capture::CapturedResult, FacadeError> {
-    capture_graph_output(target, required, |offset| {
+    capture_graph_output(target, origin, required, |offset| {
         owner.output(
             OutputInput::Read {
                 extra: Default::default(),
@@ -4657,6 +4659,7 @@ fn remote_graph_result(
 
 fn capture_graph_output(
     target: &AttemptTarget,
+    origin: &provenant_records::WorkKey,
     required: Option<&str>,
     mut read: impl FnMut(u64) -> Result<OutputResult, FacadeError>,
 ) -> Result<provenant_records::result_capture::CapturedResult, FacadeError> {
@@ -4664,7 +4667,7 @@ fn capture_graph_output(
     let mut offset = 0;
     let mut expected_digest = None;
     loop {
-        let response = read(offset)?;
+        let response = super::peer::checked_output_origin(read(offset)?, origin)?;
         let OutputResult::Chunk {
             target: observed,
             part: OutputPart::Result,
@@ -4756,13 +4759,19 @@ mod peer_capture_tests {
             attempt: provenant_core::AttemptId::from_bytes([2; 16]),
         };
         let text = "x".repeat(130_000) + "\nVERDICT: PASS\n";
+        let origin = provenant_records::WorkKey::new(
+            provenant_core::ProjectId::from_bytes([7; 16]),
+            "origin",
+            "review",
+            1,
+        )?;
         let digest = provenant_core::Digest::from_bytes(
             *provenant_records::CanonicalV1::file_digest(text.as_bytes()).bytes(),
         );
         let chunk = |offset: u64| {
             let end = (offset + provenant_records::run::OUTPUT_LIMIT).min(text.len() as u64);
             OutputResult::Chunk {
-                extra: Default::default(),
+                extra: [("peer_origin_work_key".into(), serde_json::json!(origin))].into(),
                 target: target.clone(),
                 part: OutputPart::Result,
                 state: "succeeded".into(),
@@ -4775,7 +4784,7 @@ mod peer_capture_tests {
             }
         };
         let mut pages = 0;
-        let result = capture_graph_output(&target, Some("VERDICT: PASS"), |offset| {
+        let result = capture_graph_output(&target, &origin, Some("VERDICT: PASS"), |offset| {
             pages += 1;
             Ok(chunk(offset))
         })?;
@@ -4783,15 +4792,16 @@ mod peer_capture_tests {
         assert!(result.matched_required);
         assert_eq!(result.verdict.as_deref(), Some("VERDICT: PASS"));
         assert_eq!(result.digest, digest.to_string());
-        for malformed in [0, 1, 2, 3] {
+        for malformed in [0, 1, 2, 3, 4, 5] {
             assert!(matches!(
-                capture_graph_output(&target, None, |offset| {
+                capture_graph_output(&target, &origin, None, |offset| {
                     let mut response = chunk(offset);
                     if let OutputResult::Chunk {
                         target,
                         offset: start,
                         next_offset,
                         digest,
+                        extra,
                         ..
                     } = &mut response
                     {
@@ -4799,7 +4809,16 @@ mod peer_capture_tests {
                             0 => target.attempt = provenant_core::AttemptId::from_bytes([9; 16]),
                             1 => *start += 1,
                             2 => *next_offset = offset,
-                            _ => *digest = provenant_core::Digest::from_bytes([9; 32]),
+                            3 => *digest = provenant_core::Digest::from_bytes([9; 32]),
+                            4 => {
+                                extra.insert(
+                                    "peer_origin_work_key".into(),
+                                    serde_json::json!(origin.next_attempt().unwrap()),
+                                );
+                            }
+                            _ => {
+                                extra.remove("peer_origin_work_key");
+                            }
                         }
                     }
                     Ok(response)
