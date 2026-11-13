@@ -335,3 +335,21 @@ fn each_record_round_trips_and_keeps_an_unknown_field() {
         true,
     );
 }
+
+#[test]
+fn budget_policy_is_canonical_while_configuration_accepts_fractions() {
+    let grace: crate::BudgetGrace = serde_json::from_value(json!(0.1)).unwrap();
+    let policy = crate::BudgetPolicy {
+        grace,
+        ..Default::default()
+    };
+    let bytes = CanonicalV1::bytes(&policy).unwrap();
+    let value: Value = serde_json::from_slice(bytes.as_bytes()).unwrap();
+    assert_eq!(value["grace_millionths"], grace.millionths());
+    assert!(value.get("grace").is_none());
+    assert_eq!(
+        serde_json::from_value::<crate::BudgetPolicy>(value).unwrap(),
+        policy
+    );
+    assert_eq!(serde_json::to_value(grace).unwrap(), json!(0.1));
+}

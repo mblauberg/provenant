@@ -1051,6 +1051,7 @@ pub(super) fn safe_input_field(field: &str) -> Option<String> {
         "paths",
         "path",
         "key",
+        "task",
         "tasks",
         "context",
         "title",

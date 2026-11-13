@@ -153,8 +153,29 @@ impl<'de> Deserialize<'de> for BudgetGrace {
 pub struct BudgetPolicy {
     pub action: BudgetAction,
     pub action_source: LimitSource,
+    #[serde(rename = "grace_millionths", with = "budget_grace_millionths")]
     pub grace: BudgetGrace,
     pub grace_source: LimitSource,
+}
+
+// Configuration uses fractions, while sealed policy records must be canonical
+// (integer-only). Keep the conversion at the durable policy boundary.
+mod budget_grace_millionths {
+    use super::BudgetGrace;
+    use serde::Deserialize;
+
+    pub fn serialize<S: serde::Serializer>(
+        value: &BudgetGrace,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(value.millionths())
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BudgetGrace, D::Error> {
+        u64::deserialize(deserializer).map(BudgetGrace)
+    }
 }
 
 impl Default for BudgetPolicy {

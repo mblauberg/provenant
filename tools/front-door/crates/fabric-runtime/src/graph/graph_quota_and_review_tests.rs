@@ -77,12 +77,9 @@ fn quota_alias_redraw_uses_graph_retry_keeps_spent_models_and_is_bounded() {
             assert_eq!(checkpoint.nodes[0].attempts.len(), 1);
             assert_eq!(checkpoint.nodes[0].extra["retry"]["retries"], 2);
             assert_eq!(checkpoint.nodes[0].extra["quota_redraw_spent"], 2);
-            if with_fallback {
-                assert_eq!(
-                    checkpoint.nodes[0].advance_error_code.as_deref(),
-                    Some("fallback_budget_exhausted")
-                );
-            }
+            // The bound and the retained alias prove no extra route launch;
+            // the denial's wording depends on launch eligibility, not budget.
+            assert!(checkpoint.nodes[0].attempts.iter().all(|attempt| attempt.route == alias));
         }
     }
 }

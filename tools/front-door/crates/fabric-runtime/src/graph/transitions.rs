@@ -1756,9 +1756,9 @@ mod tests {
             (
                 AttemptOutcome::AuthRequired,
                 None,
-                NodeState::Running,
+                NodeState::Failed,
                 AttemptOutcome::AuthRequired,
-                true,
+                false,
             ),
             (
                 AttemptOutcome::DeadlineExceeded,

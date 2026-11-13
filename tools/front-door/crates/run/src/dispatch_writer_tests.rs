@@ -699,7 +699,7 @@ fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResul
         assert_eq!(cwd, std::env::current_dir().unwrap());
         let request: serde_json::Value = serde_json::from_str(argv[3].to_str().unwrap()).unwrap();
         assert_eq!(
-            request["run"],
+            request["attempt"],
             serde_json::to_value(run.attempt_id).unwrap()
         );
         launched = true;
@@ -725,10 +725,10 @@ fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResul
     assert!(requeued, "expiry permits a fresh worker at the boundary");
     // Invalid or obsolete markers must fail visibly instead of permitting a spawn.
     for marker in [
-        serde_json::json!({"schema_version":1,"run":run.attempt_id,"expires_ms":0}),
-        serde_json::json!({"schema_version":3,"run":run.attempt_id,"expires":"1970-01-01T00:00:00.000000Z"}),
-        serde_json::json!({"schema_version":2,"run":AttemptId::from_bytes([99;16]),"expires":"1970-01-01T00:00:00.000000Z"}),
-        serde_json::json!({"schema_version":2,"run":run.attempt_id,"expires":"broken"}),
+        serde_json::json!({"schema_version":1,"attempt":run.attempt_id,"expires_ms":0}),
+        serde_json::json!({"schema_version":3,"attempt":run.attempt_id,"expires":"1970-01-01T00:00:00.000000Z"}),
+        serde_json::json!({"schema_version":2,"attempt":AttemptId::from_bytes([99;16]),"expires":"1970-01-01T00:00:00.000000Z"}),
+        serde_json::json!({"schema_version":2,"attempt":run.attempt_id,"expires":"broken"}),
     ] {
         run_directory
             .atomic_write(

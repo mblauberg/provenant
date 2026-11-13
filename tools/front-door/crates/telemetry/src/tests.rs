@@ -396,7 +396,9 @@ fn selection_uses_finished_time_half_open_bounds_and_project() {
     backwards.finished_at = WallTime::from_micros(-1).unwrap();
     let invalid = TelemetryError::InvalidFact("time order or zero attempt number");
     assert_eq!(reduce([backwards], None).unwrap_err(), invalid);
-    assert_eq!(reduce([fact(0, None)], None).unwrap_err(), invalid);
+    let mut zero_number = fact(1, None);
+    zero_number.attempt_number = 0;
+    assert_eq!(reduce([zero_number], None).unwrap_err(), invalid);
 }
 
 #[test]

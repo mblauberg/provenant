@@ -633,9 +633,11 @@ fn entry(extra: &str) -> String {
 /// `lens-c` is unavailable. `verify` reads the lens group.
 fn partial_review(minimum: usize) -> (GraphDocument, FakeOwner) {
     let ok = "LENS-A-OK\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"low\",\"file\":\"a.rs\",\"line\":1,\"summary\":\"note\",\"status\":\"open\"}]}\n```";
+    // A fixed route makes unavailable members final; an alias authorises
+    // stop-policy redraw and would consume a consumer's fixture observation.
     let lens = |id: &str| {
         serde_json::json!({"id":id,"access":"read_only","prompt":id,
-            "require_findings":true,"route":{"alias":"fixture"}})
+            "require_findings":true,"route":{"adapter":"fixture","model":"fixture/lens"}})
     };
     let exports: Vec<_> = ["lens-a", "lens-b", "lens-c"]
         .map(|id| serde_json::json!({"node":id,"outputs":["result","findings"]}))
@@ -825,11 +827,10 @@ fn check_fallback(
     };
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
-    // A launched writer that met a depleted route is restarted on the next
-    // route by the stop decision; a reader's route fallback already decided.
+    // A launched node changes route through a graph stop-policy restart,
+    // keeping the settled attempt in history rather than inline fallback.
     let restarted = !expected
         && launched
-        && access == AccessMode::WorktreeWrite
         && matches!(
             outcome,
             AttemptOutcome::AuthRequired

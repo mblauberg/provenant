@@ -65,9 +65,11 @@ fn cumulative_allowance_counts_graph_attempts_and_survives_observation_replay() 
         .push_back(terminal(AttemptOutcome::UsageLimited));
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
-    assert_eq!(run.checkpoint.nodes[0].attempts.len(), 2);
+    assert_eq!(run.checkpoint.nodes[0].recorded_attempts().count(), 2);
+    assert_eq!(run.checkpoint.nodes[0].attempts.len(), 1);
+    assert_eq!(run.checkpoint.nodes[0].previous_attempts.len(), 1);
     assert_eq!(run.checkpoint.nodes[0].extra["retry"]["retries"], 1);
-    assert_eq!(owner.calls.len(), 3); // One observation replay and one allowed route switch.
+    assert_eq!(owner.calls.len(), 3); // One observation replay and one stop-policy restart.
     assert_eq!(owner.retry_budgets, vec![Some(1), Some(1), Some(0)]);
     assert_eq!(owner.calls[0].0, owner.calls[1].0);
     advance(&document, &mut owner, &mut journal).unwrap();

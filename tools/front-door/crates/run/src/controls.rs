@@ -1075,6 +1075,7 @@ mod lineage_tests {
             original.request.task.context = Some(provenant_records::run::WorkContext {
                 graph_id: Some("graph-writer-lineage".into()),
                 node_id: Some(format!("writer-{index}")),
+                attempt: Some(1),
                 ..Default::default()
             });
             store.create(&original, &call)?;
@@ -1175,6 +1176,16 @@ mod lineage_tests {
                 clock.wall_now()?,
                 &call,
             )?;
+            let next = Resume {
+                extend: Vec::new(),
+                prior,
+                expected_generation: 0,
+                operation_id: format!("explicit-resume-{index}").parse()?,
+                attempt_id: AttemptId::from_bytes([90 + index as u8; 16]),
+                prompt: "Continue".into(),
+                created_at: clock.wall_now()?,
+            };
+            let resumed = store.resume_fresh(&next, "no provider session", &call)?;
             // A graph retry has a fresh run and no run-policy retry_of. Its
             // sealed predecessor still protects it against ownership changes
             // between admission and the launch-custody check below.
@@ -1183,8 +1194,8 @@ mod lineage_tests {
             graph.operation_id = format!("graph-retry-{index}").parse()?;
             graph.attempt_id = AttemptId::from_bytes([190 + index as u8; 16]);
             graph.request.task = original.request.task.clone();
-            crate::tests::rekey(&mut graph);
             let graph_task = &mut graph.request.task;
+            graph_task.context.as_mut().ok_or("graph context")?.attempt = Some(3);
             graph_task.source_head = graph_task.head.clone();
             graph_task
                 .context
@@ -1238,16 +1249,6 @@ mod lineage_tests {
                     "graph predecessor accepted mismatched {field}"
                 );
             }
-            let next = Resume {
-                extend: Vec::new(),
-                prior,
-                expected_generation: 0,
-                operation_id: format!("explicit-resume-{index}").parse()?,
-                attempt_id: AttemptId::from_bytes([90 + index as u8; 16]),
-                prompt: "Continue".into(),
-                created_at: clock.wall_now()?,
-            };
-            let resumed = store.resume_fresh(&next, "no provider session", &call)?;
             assert_eq!(
                 store
                     .request(resumed.attempt_id, &call)?
@@ -3750,7 +3751,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_reports_an_orphan_fence_without_losing_known_attempts()
+    fn reconcile_keeps_unrelated_orphan_fences_outside_its_attempt_scope()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let clock = crate::tests::clock();
@@ -3790,71 +3791,21 @@ mod tests {
             &call,
             &SystemProcessObserver,
         )?;
-        assert_eq!(found.len(), 2);
-        assert_eq!(found[0], (run.attempt_id, Reconciled::Queued));
-        assert!(matches!(&found[1], (id, Reconciled::Uncertain { reason })
-            if *id == orphan && reason.to_string().contains(&RunError::NotFound.to_string())));
+        assert_eq!(found, vec![(run.attempt_id, Reconciled::Queued)]);
         let queued = store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
             panic!("queued work and an orphan fence need no recovery worker")
         })?;
-        assert_eq!(queued[0], (run.attempt_id, Reconciled::Queued));
-        assert!(matches!(&queued[1], (id, Reconciled::Uncertain { .. }) if *id == orphan));
-        Ok(())
-    }
-
-    #[test]
-    fn reconcile_carries_slot_root_fence_before_discovering_its_attempt()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let clock = crate::tests::clock();
-        let cancel = provenant_core::CancelToken::new();
-        let call = crate::tests::call(&clock, &cancel);
-        let context = crate::tests::context(temp.path())?;
-        let store = RunStore::open(&context, &call)?;
-        let run = crate::tests::input();
-        store.create(&run, &call)?;
-        let orphan = AttemptId::from_bytes([7; 16]);
-        let slot = context
-            .state_root
-            .as_path()
-            .join("worktrees")
-            .join(context.project_id.to_string())
-            .join("orphan");
-        std::fs::create_dir_all(&slot)?;
-        let directory = provenant_os::fs::Directory::open_anchor(&slot)?;
-        drop(custody::acquire_reader(
-            directory.try_clone()?,
-            Scope {
-                attempt: orphan,
-                generation: 1,
-            },
-            call.lock_budget(),
-            &cancel,
-            &clock,
-        )?);
-        let child = slot.join(orphan.to_string()).join("reservation.json");
-        let mut legacy: serde_json::Value = serde_json::from_slice(&std::fs::read(&child)?)?;
-        let metadata = directory.metadata()?;
-        legacy["reservation_device"] = metadata.device.into();
-        legacy["reservation_inode"] = metadata.inode.into();
-        std::fs::write(slot.join("reservation.json"), serde_json::to_vec(&legacy)?)?;
-        std::fs::remove_file(&child)?;
-        store.attempt_dir(orphan, true)?;
-        assert!(store.writer_fence_listing()?.reservations.is_empty());
-        let found = store.reconcile_with_observer(
-            run.attempt_id,
+        assert_eq!(queued, vec![(run.attempt_id, Reconciled::Queued)]);
+        assert_eq!(store.writer_fences()?[0].scope.attempt, orphan);
+        let orphan_result = store.reconcile_with_observer(
+            orphan,
             &crate::dispatch_tests::Fake::default(),
             &call,
             &SystemProcessObserver,
         )?;
         assert!(
-            found
-                .iter()
-                .any(|(id, state)| *id == orphan && matches!(state, Reconciled::Uncertain { .. }))
+            matches!(orphan_result.as_slice(), [(id, Reconciled::Uncertain { .. })] if *id == orphan)
         );
-        assert!(!slot.join("reservation.json").exists());
-        assert!(child.exists());
-        assert_eq!(store.writer_fences()?[0].scope.attempt, orphan);
         Ok(())
     }
 

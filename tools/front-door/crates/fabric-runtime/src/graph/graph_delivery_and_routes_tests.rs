@@ -579,6 +579,7 @@ fn usage_limit_failure_reports_cause_instead_of_missing_findings() {
     pool.alias = Some("senior".into());
     let document = graph(vec![node("task", pool)]);
     let mut owner = FakeOwner {
+        retry_limit: Some(0),
         observations: VecDeque::from([terminal_with_result(AttemptOutcome::UsageLimited, "")]),
         ..FakeOwner::default()
     };
@@ -668,14 +669,14 @@ fn fallback_outcomes_are_named_by_access_and_launch_state() {
             AccessMode::ReadOnly,
             true,
             AttemptOutcome::UsageLimited,
-            true,
+            false,
         ),
         (
             "reader auth refusal after launch",
             AccessMode::ReadOnly,
             true,
             AttemptOutcome::AuthRequired,
-            true,
+            false,
         ),
         (
             "reader unavailable adapter after launch",
@@ -739,37 +740,6 @@ fn fallback_outcomes_are_named_by_access_and_launch_state() {
 }
 
 #[test]
-fn launched_reader_fallback_respects_retry_budget() {
-    let mut task = node("node", route("first"));
-    task.access = AccessMode::ReadOnly;
-    task.route = None;
-    task.routes = Some(vec![route("first"), route("second")]);
-    let document = graph(vec![task]);
-    let mut owner = FakeOwner {
-        retry_limit: Some(0),
-        observations: VecDeque::from([AttemptObservation::Terminal {
-            attempt_ref: Some("host/attempt".into()),
-            outcome: AttemptOutcome::UsageLimited,
-            launched: true,
-            result: None,
-            result_warning: None,
-            result_path: None,
-            branch: None,
-            commit: None,
-            stop: None,
-        }]),
-        ..FakeOwner::default()
-    };
-    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(owner.calls.len(), 1);
-    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
-    assert_eq!(
-        run.checkpoint.nodes[0].advance_error_code.as_deref(),
-        Some("fallback_budget_exhausted")
-    );
-}
-
-#[test]
 fn launched_reader_reports_pinned_route() {
     let task = node("node", route("first"));
     let mut owner = FakeOwner {
@@ -800,7 +770,7 @@ fn launched_reader_reports_pinned_route() {
 }
 
 #[test]
-fn launched_reader_fallback_keeps_account_pin() {
+fn reader_auth_restart_uses_the_declared_successor_account() {
     let mut task = node("node", route("first"));
     let mut first = route("first");
     first.account = Some("account-one".into());
@@ -819,7 +789,7 @@ fn launched_reader_fallback_keeps_account_pin() {
             branch: None,
             commit: None,
             stop: None,
-        }]),
+        }, terminal(AttemptOutcome::Succeeded)]),
         ..FakeOwner::default()
     };
     let run = advance(
@@ -828,11 +798,12 @@ fn launched_reader_fallback_keeps_account_pin() {
         &mut MemoryJournal::default(),
     )
     .unwrap();
-    assert_eq!(owner.calls.len(), 1);
-    assert_eq!(
-        run.checkpoint.nodes[0].advance_error_code.as_deref(),
-        Some("fallback_account_pinned")
-    );
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(owner.calls[0].1.account.as_deref(), Some("account-one"));
+    assert_eq!(owner.calls[1].1.account.as_deref(), Some("account-two"));
+    assert_ne!(owner.attempt_numbers[0], owner.attempt_numbers[1]);
+    assert_eq!(run.checkpoint.nodes[0].recorded_attempts().count(), 2);
 }
 
 #[test]

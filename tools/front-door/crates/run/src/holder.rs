@@ -1709,6 +1709,12 @@ impl RunStore {
             {
                 decoded.result = handoff.fenced();
             }
+            if decoded.result.trim().is_empty() {
+                decoded.result = "Token target reached at a clean pushed point; inspect the retained work before accepting completion.".into();
+            }
+            // The host has sealed a complete review report even when the
+            // interrupted provider did not finish its own report.
+            decoded.complete = true;
             decoded.reason = Some("token target reached at a clean pushed point; retained the lane's handoff without a budget snapshot".into());
         }
         // Valid natural completion wins over a late stop request.
@@ -1795,7 +1801,22 @@ impl RunStore {
             && soft_budget_wrap_up(&record, &decoded.usage)
         {
             decoded.outcome = Outcome::ReviewRequired;
-            decoded.reason = Some("token budget crossed; continuing this provider session once to commit, push and report within the remaining grace".into());
+            let stopped = stopped_handoff(
+                handoff.take(),
+                "Token target crossed; a same-session budget wrap-up is pending.",
+            );
+            let blocked = stopped.status == provenant_records::handoff::HandoffStatus::Blocked;
+            if blocked {
+                decoded.terminal_cause = Some(TerminalCause::Blocked);
+            }
+            decoded.result = stopped.fenced();
+            decoded.complete = true;
+            handoff = Some(stopped);
+            decoded.reason = Some(if blocked {
+                "token budget crossed; the blocked handoff requires an owner decision before continuing".into()
+            } else {
+                "token budget crossed; continuing this provider session once to commit, push and report within the remaining grace".into()
+            });
         }
         if let Some(bytes) = read_sealed(
             attempt,
@@ -2441,7 +2462,8 @@ impl RunStore {
         // A blocked writer settles with its own cause and its note. A failure
         // or another cause already recorded keeps its place.
         if task.writer.is_some()
-            && decoded.terminal_cause.is_none()
+            && (decoded.terminal_cause.is_none()
+                || decoded.terminal_cause == Some(TerminalCause::Blocked))
             && matches!(
                 decoded.outcome,
                 Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
@@ -4311,6 +4333,7 @@ mod writer_recovery_tests {
         budget_stop_case(BudgetStopCase::Natural)?;
         budget_stop_case(BudgetStopCase::Clean)?;
         budget_stop_case(BudgetStopCase::WrapUpRefused)?;
+        budget_stop_case(BudgetStopCase::WrapUpBlocked)?;
         budget_stop_case(BudgetStopCase::NativeStaged)
     }
 
@@ -4321,6 +4344,7 @@ mod writer_recovery_tests {
         Commit,
         WrapUp,
         WrapUpRefused,
+        WrapUpBlocked,
         NativeStaged,
         Natural,
         Clean,
@@ -4350,6 +4374,7 @@ mod writer_recovery_tests {
             case,
             BudgetStopCase::WrapUp
                 | BudgetStopCase::WrapUpRefused
+                | BudgetStopCase::WrapUpBlocked
                 | BudgetStopCase::Natural
                 | BudgetStopCase::Clean
         ) {
@@ -4365,9 +4390,13 @@ mod writer_recovery_tests {
         } else {
             Default::default()
         };
+        let mut applied_route = route();
+        if limits.budget_policy.is_some() {
+            applied_route.provider = Some("codex".into());
+        }
         store.mark_starting_with_priority(
             &store.record(id, &call)?,
-            &route(),
+            &applied_route,
             &[],
             &Default::default(),
             None,
@@ -4388,7 +4417,12 @@ mod writer_recovery_tests {
         std::fs::create_dir_all(&candidate)?;
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
         if matches!(case, BudgetStopCase::NativeStaged) {
-            fixture.lane_git(&["push", "--set-upstream", "origin", launch.branch.as_str()])?;
+            let branch = launch
+                .branch
+                .as_str()
+                .strip_prefix("refs/heads/")
+                .ok_or("local branch")?;
+            fixture.lane_git(&["push", "--set-upstream", "origin", branch])?;
         }
         crate::objects::prepare_bound(
             &git,
@@ -4430,12 +4464,26 @@ mod writer_recovery_tests {
                     "+refs/heads/*:refs/remotes/origin/*".to_owned(),
                 ),
                 (
-                    format!("branch.{}.remote", launch.branch.as_str()),
+                    format!(
+                        "branch.{}.remote",
+                        launch
+                            .branch
+                            .as_str()
+                            .strip_prefix("refs/heads/")
+                            .ok_or("local branch")?
+                    ),
                     "origin".to_owned(),
                 ),
                 (
-                    format!("branch.{}.merge", launch.branch.as_str()),
-                    format!("refs/heads/{}", launch.branch.as_str()),
+                    format!(
+                        "branch.{}.merge",
+                        launch
+                            .branch
+                            .as_str()
+                            .strip_prefix("refs/heads/")
+                            .ok_or("local branch")?
+                    ),
+                    launch.branch.as_str().to_owned(),
                 ),
             ] {
                 crate::objects::command(
@@ -4446,16 +4494,31 @@ mod writer_recovery_tests {
                     None,
                 )?;
             }
-            crate::objects::command(
+            let objects = source.objects.current_path()?;
+            let alternate = launch.worktree.repo().common_git_dir().join("objects");
+            crate::objects::execute_bounded(
                 &git,
                 &refs,
                 launch.worktree.repo().root_path(),
                 &[
                     "update-ref".into(),
-                    format!("refs/remotes/origin/{}", launch.branch.as_str()).into(),
+                    format!(
+                        "refs/remotes/origin/{}",
+                        launch
+                            .branch
+                            .as_str()
+                            .strip_prefix("refs/heads/")
+                            .ok_or("local branch")?
+                    )
+                    .into(),
                     launch.base.to_string().into(),
                 ],
                 None,
+                crate::objects::Execution {
+                    object_directory: Some(&objects),
+                    alternate_directory: Some(&alternate),
+                    ..Default::default()
+                },
             )?;
             fixture.lane_git(&["add", "budget-work.txt"])?;
             std::fs::remove_file(fixture.writer.worktree.join("budget-work.txt"))?;
@@ -4478,7 +4541,12 @@ mod writer_recovery_tests {
             if !dirty {
                 // The clean-point contract uses locally recorded push evidence.
                 // A real local bare remote exercises native Git's tracking ref.
-                fixture.lane_git(&["push", "--set-upstream", "origin", launch.branch.as_str()])?;
+                let branch = launch
+                    .branch
+                    .as_str()
+                    .strip_prefix("refs/heads/")
+                    .ok_or("local branch")?;
+                fixture.lane_git(&["push", "--set-upstream", "origin", branch])?;
             }
             if dirty {
                 std::fs::write(
@@ -4680,21 +4748,31 @@ mod writer_recovery_tests {
             RECORD_LIMIT,
         )?;
         let mut fake = crate::dispatch_tests::Fake::with_observed(
-            Some(route()),
+            Some(applied_route.clone()),
             Some(if matches!(case, BudgetStopCase::Natural) {
                 Outcome::Succeeded
             } else {
                 Outcome::TimedOut
             }),
         );
+        if matches!(case, BudgetStopCase::WrapUpBlocked) {
+            let mut blocked = stopped_handoff(None, "Owner decision required before continuing.");
+            blocked.status = provenant_records::handoff::HandoffStatus::Blocked;
+            fake.answer = Some(blocked.fenced());
+        }
+        if matches!(case, BudgetStopCase::Natural) {
+            fake.answer = Some("Completed the accepted work and pushed its branch.".into());
+        }
         if matches!(
             case,
             BudgetStopCase::WrapUp
                 | BudgetStopCase::WrapUpRefused
+                | BudgetStopCase::WrapUpBlocked
                 | BudgetStopCase::Natural
                 | BudgetStopCase::Clean
         ) {
             fake.codex_usage = Some(UsageRecord {
+                extra: [("per_attempt".into(), true.into())].into(),
                 uncached_input: Some(1_000_001),
                 ..Default::default()
             });
@@ -4707,6 +4785,7 @@ mod writer_recovery_tests {
             case,
             BudgetStopCase::WrapUp
                 | BudgetStopCase::WrapUpRefused
+                | BudgetStopCase::WrapUpBlocked
                 | BudgetStopCase::Natural
                 | BudgetStopCase::Clean
         ) {
@@ -4724,6 +4803,25 @@ mod writer_recovery_tests {
                     }
                 ));
                 assert!(store.prepare_budget_wrap_up(id, &call)?.is_none());
+            } else if matches!(case, BudgetStopCase::WrapUpBlocked) {
+                assert!(store.prepare_budget_wrap_up(id, &call)?.is_none());
+                assert!(finished.superseded_by.is_none());
+                let AttemptState::Terminal { extra, .. } = &finished.state else {
+                    panic!("not terminal")
+                };
+                let stop: provenant_records::Stop =
+                    serde_json::from_value(extra.get("stop").cloned().ok_or("stop")?)?;
+                assert_eq!(stop.cause(), provenant_records::StopCause::Blocked);
+                assert_eq!(
+                    extra
+                        .get("terminal_note")
+                        .and_then(serde_json::Value::as_str),
+                    Some("Owner decision required before continuing.")
+                );
+                assert_eq!(
+                    stop.handoff().ok_or("blocked handoff")?.status,
+                    provenant_records::handoff::HandoffStatus::Blocked
+                );
             } else if matches!(case, BudgetStopCase::WrapUpRefused) {
                 assert!(store.prepare_budget_wrap_up(id, &call)?.is_none());
                 assert!(

@@ -1380,7 +1380,7 @@ fn tampered_request_names_the_request_digest_that_failed() -> TestResult {
 }
 
 #[test]
-fn older_request_bytes_are_verified_before_decoding() -> TestResult {
+fn sealed_request_bytes_are_verified_before_normalising_defaults() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -1391,16 +1391,13 @@ fn older_request_bytes_are_verified_before_decoding() -> TestResult {
     store.create(&input, &call)?;
 
     let mut value = serde_json::to_value(&input.request)?;
-    let task = value["tasks"][0].as_object_mut().unwrap();
+    let task = value["task"].as_object_mut().ok_or("task")?;
     task.insert(
         "profile".into(),
         serde_json::to_value(&input.request.task.profile)?,
     );
-    // The historic request always wrote fallback, including an empty list.
-    // Construct those persisted bytes explicitly: current tasks no longer
-    // execute policy successors, but their old fields must remain readable.
-    task.insert("fallback".into(), serde_json::json!([]));
-    assert_eq!(task.len(), 9);
+    // Explicit default fields are valid current-format input. Verify the
+    // sealed bytes before decoding can omit those defaults on reserialization.
     let mut raw = crate::db::bytes(&value)?;
     let digest = CanonicalV1::record_digest("run-request", 1, &value)?;
     let path = context
@@ -1418,10 +1415,6 @@ fn older_request_bytes_are_verified_before_decoding() -> TestResult {
     )?;
     let decoded = store.request(input.attempt_id, &call)?;
     assert_eq!(decoded.task.profile, input.request.task.profile);
-    assert_eq!(
-        decoded.task.extra.get("fallback"),
-        Some(&serde_json::json!([]))
-    );
     assert_ne!(decoded.digest()?, digest);
 
     raw[0] ^= 1;
@@ -1547,14 +1540,15 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     let work = provenant_records::run::WorkContext {
         work_item: Some("issue-42".into()),
         role: Some("reviewer".into()),
-        ..Default::default()
+        ..input.request.task.context.clone().ok_or("work key")?
     };
     input.request.task.context = Some(work.clone());
-    // A schema-v1 request without a profile must keep its sealed digest.
+    // Omitting a default profile must keep the current request's sealed digest.
     let mut unstamped = serde_json::to_value(&input.request)?;
-    for task in unstamped["tasks"].as_array_mut().ok_or("tasks")? {
-        task.as_object_mut().ok_or("task")?.remove("profile");
-    }
+    unstamped["task"]
+        .as_object_mut()
+        .ok_or("task")?
+        .remove("profile");
     let decoded: CanonicalRequest = serde_json::from_value(unstamped.clone())?;
     assert_eq!(
         decoded.digest()?,
@@ -1936,26 +1930,16 @@ fn oversized_prompt_retains_code_and_projects_field_limit() -> TestResult {
     let Err(error) = store.create(&request, &call) else {
         return Err("oversized prompt accepted".into());
     };
-    assert_eq!(
-        error.to_string(),
-        format!("read or record exceeds byte limit {RECORD_LIMIT}")
-    );
+    assert!(matches!(error, RunError::PromptTooLarge { limit } if limit == RECORD_LIMIT));
     let projection = error.diagnostic(provenant_records::diagnostic::Destination::Local);
     assert_eq!(projection.code, "INVALID");
-    assert!(
-        projection
-            .detail
-            .as_deref()
-            .unwrap()
-            .contains("tasks[0].prompt")
+    assert_eq!(
+        projection.fact,
+        Some(provenant_records::diagnostic::DiagnosticFact::PromptLimit {
+            limit: RECORD_LIMIT
+        })
     );
-    assert!(
-        projection
-            .detail
-            .as_deref()
-            .unwrap()
-            .contains(&RECORD_LIMIT.to_string())
-    );
+    assert!(projection.next.is_some());
     assert!(!serde_json::to_string(&projection)?.contains("TOKEN_SENTINEL"));
     assert!(
         RunError::TooLarge {
@@ -2914,20 +2898,26 @@ fn work_context_bounds_are_enforced() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     for value in ["x".repeat(257), "  ".into(), "bad\nvalue".into()] {
         let mut request = input();
-        request.request.task.context = Some(provenant_records::run::WorkContext {
-            work_item: Some(value),
-            ..Default::default()
-        });
+        request
+            .request
+            .task
+            .context
+            .as_mut()
+            .ok_or("work key")?
+            .work_item = Some(value);
         assert!(matches!(
             store.create(&request, &call),
             Err(RunError::Validation("work context"))
         ));
     }
     let mut request = input();
-    request.request.task.context = Some(provenant_records::run::WorkContext {
-        work_item: Some("x".repeat(256)),
-        ..Default::default()
-    });
+    request
+        .request
+        .task
+        .context
+        .as_mut()
+        .ok_or("work key")?
+        .work_item = Some("x".repeat(256));
     store.create(&request, &call)?;
     Ok(())
 }
@@ -3492,12 +3482,9 @@ fn concurrent_creates_of_one_work_key_admit_one_attempt() -> TestResult {
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
-    assert!(
-        results
-            .iter()
-            .any(|r| matches!(r, Err(RunError::OperationConflict)))
-    );
+    let attempts = results.into_iter().collect::<Result<Vec<_>>>()?;
+    assert_eq!(attempts[0].attempt_id, attempts[1].attempt_id);
+    assert_eq!(attempts[0].key, attempts[1].key);
     let rows: i64 = run_database(&context)?.query_row(
         "SELECT COUNT(*) FROM attempts WHERE graph='graph-race' AND node='build' AND attempt=1",
         [],

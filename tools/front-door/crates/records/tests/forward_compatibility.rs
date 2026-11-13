@@ -273,7 +273,6 @@ cases! {
     skipped_route_preserves_digest: run::SkippedRoute => skipped_route();
     artifact_record_preserves_digest: run::ArtifactRecord => artifact();
     write_grant_record_preserves_digest: run::WriteGrantRecord => write_grant();
-    attempt_record_preserves_digest: run::AttemptRecord => attempt();
     lane_wait_preserves_digest: run::LaneWait => json!({"attempt_id":ID,"lane_class":"writer","waiting_for":"capacity"});
     admission_ticket_preserves_digest: run::AdmissionTicket => json!({"schema_version":1,"operation_id":"operation","attempt_id":ID,"project_id":ID,"sequence":1,"generation":1,"active":true,"memory_floor_basis_points":1000,"disk_floor_bytes":1,"startup_spacing_ms":1,"run_concurrency":1,"admission_deadline":NOW});
     run_event_preserves_digest: run::RunEvent => json!({"schema_version":1,"sequence":1,"project_id":ID,"attempt_id":ID,"revision":1,"change":terminal_state(),"trace":{}});
@@ -334,6 +333,17 @@ cases! {
 }
 
 #[test]
+fn attempt_record_preserves_digest() -> TestResult {
+    let mut value = normalise::<run::AttemptRecord>(attempt())?;
+    // WorkKey has exactly four identity fields; unlike record payloads, it
+    // deliberately discards unknown fields (covered by format2_tests).
+    let key = value["key"].clone();
+    add_future_fields(&mut value);
+    value["key"] = key;
+    assert_preserved::<run::AttemptRecord>("run-attempt", value)
+}
+
+#[test]
 fn request_digest_matches_the_newer_writers_canonical_record() -> TestResult {
     let mut value = normalise::<run::CanonicalRequest>(request())?;
     add_future_fields(&mut value);
@@ -358,7 +368,7 @@ fn unknown_profile_and_access_fields_survive_parent_skip_rules() -> TestResult {
     task["access"] = empty_access;
     assert_preserved::<run::TaskRequest>("run-task-with-future-policy", task.clone())?;
     let mut request = normalise::<run::CanonicalRequest>(request())?;
-    request["tasks"][0] = task;
+    request["task"] = task;
     assert_preserved::<run::CanonicalRequest>("run-request", request)?;
     let mut attempt = normalise::<run::AttemptRecord>(attempt())?;
     assert!(attempt.get("profile").is_none());

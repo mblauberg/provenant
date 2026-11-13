@@ -101,6 +101,9 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
                         }]), "VERDICT: PASS")));
                     }
                     let mut owner = FakeOwner {
+                        // These members have exhausted their restart allowance;
+                        // this test judges final panel coverage, not alias redraw.
+                        retry_limit: Some(0),
                         observations,
                         ..Default::default()
                     };
@@ -190,6 +193,9 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
                         &answer(json!([]), "VERDICT: PASS"),
                     ));
                     let mut owner = FakeOwner {
+                        // These members have exhausted their restart allowance;
+                        // this test judges final panel coverage, not alias redraw.
+                        retry_limit: Some(0),
                         observations,
                         ..Default::default()
                     };
