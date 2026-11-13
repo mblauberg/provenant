@@ -109,13 +109,16 @@ fn codex_rollout_is_found_in_the_launched_candidate() -> Result<(), Box<dyn std:
         std::fs::create_dir_all(&candidate)?;
         std::fs::create_dir_all(&day)?;
         if native {
-            std::fs::write(
-                base.join("codex-observation-candidate-1.json"),
-                serde_json::to_vec(&serde_json::json!({
-                    "schema_version": 1,
-                    "home": provenant_records::StructuredPathWire::from_path(&home)?,
-                }))?,
-            )?;
+            let selector = base.join("codex-observation-candidate-1.json");
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "home": provenant_records::StructuredPathWire::from_path(&home)?,
+            }))?;
+            // Host metadata uses its own explicit root, independently of
+            // adapter setup's scratch-only file authority. Replay is idempotent.
+            for _ in 0..2 {
+                write_setup_file(&[&base], &selector, &bytes, false)?;
+            }
         }
         // Candidate-local bytes cannot redirect host observation.
         std::fs::write(
