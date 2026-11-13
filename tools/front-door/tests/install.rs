@@ -3412,7 +3412,7 @@ fn bootstrap_prompts_only_for_the_format_acknowledgement_status() -> Result {
         &installer,
         r#"#!/bin/sh
 case "$*" in
-  *--upgrade-preflight*) case "$*" in *--reset-state*) exit 0 ;; esac; exit "$PREFLIGHT_STATUS" ;;
+  *--upgrade-preflight*) case "$*" in *--reset-state*) exit "${ACKNOWLEDGED_STATUS:-0}" ;; esac; exit "$PREFLIGHT_STATUS" ;;
 esac
 printf installed > "$HOME/installed"
 "#,
@@ -3461,6 +3461,11 @@ cp '{}' "$2/bin/provenant"
     assert_eq!(code(&accepted), 0, "{accepted:?}");
     assert!(rig.home.join("installed").exists());
     fs::remove_file(rig.home.join("installed"))?;
+    rig.env.push(("ACKNOWLEDGED_STATUS".into(), "2".into()));
+    let failed_validation = rig.execute_os(Path::new("/bin/sh"), &args, Some(b"reset\n"))?;
+    assert_eq!(code(&failed_validation), 2);
+    assert!(!rig.home.join("installed").exists());
+    rig.env.retain(|(key, _)| key != "ACKNOWLEDGED_STATUS");
     args.push("--non-interactive".into());
     let captured = rig.execute_os(Path::new("/bin/sh"), &args, Some(b"reset\n"))?;
     assert_eq!(code(&captured), 6);

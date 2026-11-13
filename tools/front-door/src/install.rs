@@ -1840,7 +1840,8 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                 output,
             },
         };
-        let mut commands = vec![("local".to_owned(), local, Vec::new())];
+        let mut commands: Vec<(String, Vec<std::ffi::OsString>, &[u8])> =
+            vec![("local".to_owned(), local, &[])];
         // Construct the entire fleet before running either phase.
         for (name, peer) in fabric.peers {
             let (command, input) = if let Some(archive) = &source_archive {
@@ -1854,7 +1855,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                             ""
                         }
                     ),
-                    archive.clone(),
+                    archive.as_slice(),
                 )
             } else {
                 let command = format!(
@@ -1868,7 +1869,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                         .collect::<Vec<_>>()
                         .join(" ")
                 );
-                (command, Vec::new())
+                (command, &[][..])
             };
             let argv = vec![
                 ssh.as_ref()
@@ -1897,7 +1898,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
             }
             let host = report(
                 name.clone(),
-                runner.execute(&preflight, Some(input), 1_048_576, 3600),
+                runner.execute(&preflight, Some(*input), 1_048_576, 3600),
             );
             if !host.success {
                 results.push(host);
@@ -1907,7 +1908,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         for (name, argv, input) in commands {
             results.push(report(
                 name,
-                runner.execute(&argv, Some(&input), 1_048_576, 3600),
+                runner.execute(&argv, Some(input), 1_048_576, 3600),
             ));
             if !results.last().is_some_and(|host| host.success) {
                 break;

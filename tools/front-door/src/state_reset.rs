@@ -390,11 +390,11 @@ pub(crate) fn remove(plan: &Plan, quiesce: impl FnOnce() -> io::Result<()>) -> i
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
     #[test]
-    fn refused_agent_quiescence_leaves_stores_intact() -> Result {
+    fn refused_agent_quiescence_leaves_stores_intact()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use super::*;
         let temp = tempfile::tempdir()?;
         std::fs::create_dir(temp.path().join("install"))?;
         std::fs::write(temp.path().join("run.sqlite3"), "old store")?;
@@ -408,7 +408,9 @@ mod tests {
     }
 
     #[test]
-    fn partial_removal_and_disappearing_companions_are_rerunnable() -> Result {
+    fn partial_removal_and_disappearing_companions_are_rerunnable()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use super::*;
         let temp = tempfile::tempdir()?;
         std::fs::create_dir(temp.path().join("install"))?;
         for name in ["run.sqlite3", "run.sqlite3-wal", "admission.sqlite3"] {
@@ -424,7 +426,9 @@ mod tests {
     }
 
     #[test]
-    fn stores_recreated_while_stopping_agents_are_included() -> Result {
+    fn stores_recreated_while_stopping_agents_are_included()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use super::*;
         let temp = tempfile::tempdir()?;
         std::fs::create_dir(temp.path().join("install"))?;
         std::fs::write(temp.path().join("run.sqlite3"), "old store")?;
@@ -436,7 +440,9 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn temporary_alias_cleanup_never_follows_or_removes_foreign_targets() -> Result {
+    fn temporary_alias_cleanup_never_follows_or_removes_foreign_targets()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use super::*;
         let temp = tempfile::tempdir()?;
         let state = temp.path().join("state");
         let attempt = state.join("attempts/a1");
