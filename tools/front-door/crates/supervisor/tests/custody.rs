@@ -2757,14 +2757,13 @@ fn retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive(root: &Path) -
         admit(WaitBudget::nonblocking(provenant_core::Clock::mono_now(
             &clock
         ))),
-        Err(CustodyError::Busy)
+        Err(CustodyError::Fenced)
     ));
     assert!(!root.join("inherited-attempt/process-exit.json").exists());
     drop(descendant_gate);
     wait_for_identity_absence(&descendant)?;
-    // Darwin can report the process absent just before the last inherited flock
-    // descriptor closes. Wait on the lock itself before reacquiring custody.
-    admit(budget(&clock)?)?.withdraw_unlaunched()?;
+    // Descriptor closure cannot clear an unresolved durable reservation.
+    assert!(matches!(admit(budget(&clock)?), Err(CustodyError::Fenced)));
     assert!(
         writer_path
             .join(scope().attempt.to_string())
@@ -2788,7 +2787,7 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
     byte(&mut held, b'R')?;
     drop(writer);
     let clock = SystemClock::new();
-    // The live provider retains the inherited lease after guardian loss.
+    // Guardian loss frees the kernel lease, but never clears the durable fence.
     let writer_path = root.join("crash-writer");
     let provider = process_identity(read_pid_line(&mut held)?)?;
     let locked = acquire_recovery(
@@ -2798,12 +2797,12 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
         &CancelToken::new(),
         &clock,
     );
-    assert!(matches!(
-        locked,
-        Err(CustodyError::Filesystem(
-            provenant_os::fs::FsError::LockTimeout { .. }
-        ))
-    ));
+    let locked = locked?;
+    assert_eq!(
+        fixture::recovery_observation(&locked),
+        RecoveryState::Unknown
+    );
+    drop(locked);
     assert!(!root.join("crash-attempt/process-exit.json").exists());
     drop(held);
     wait_for_identity_absence(&provider)?;

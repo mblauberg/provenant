@@ -434,27 +434,14 @@ pub(crate) struct AdoptedDelivery {
     pub(crate) outcome: DeliveryOutcome,
 }
 
-/// The child cannot exec until the observer has captured its native identity.
-/// Command::spawn waits for exec, so a short-lived helper handles the parent end
-/// of the handshake. It is joined on every path before custody is returned.
-fn lease_descriptors<'a>(
-    writer: &'a provenant_os::fs::LockGuard,
-    ports: Option<&'a provenant_os::fs::LockGuard>,
-) -> Vec<std::os::fd::BorrowedFd<'a>> {
-    let mut pass = vec![writer.handoff_file().as_fd()];
-    if let Some(ports) = ports {
-        pass.push(ports.handoff_file().as_fd());
-    }
-    pass
-}
-
 struct SpawnDescriptors<'a> {
-    lease: &'a provenant_os::fs::LockGuard,
     secret: Option<&'a child::SecretPipe>,
-    ports: Option<&'a provenant_os::fs::LockGuard>,
     profile: Option<BorrowedFd<'a>>,
 }
 
+/// The child cannot exec until the observer has captured its native identity.
+/// Command::spawn waits for exec, so a short-lived helper handles the parent end
+/// of the handshake. It is joined on every path before custody is returned.
 fn spawn_identified(
     mut command: Command,
     env: &[(OsString, OsString)],
@@ -462,12 +449,7 @@ fn spawn_identified(
     permit: Permit,
     descriptors: SpawnDescriptors<'_>,
 ) -> io::Result<(Child, ProcessIdentity, Permit)> {
-    let SpawnDescriptors {
-        lease,
-        secret,
-        ports,
-        profile,
-    } = descriptors;
+    let SpawnDescriptors { secret, profile } = descriptors;
     let observer =
         super::census::NativeProcessObserver::for_boot(boot).map_err(io::Error::other)?;
     let (mut parent, channel) = UnixStream::pair()?;
@@ -479,7 +461,10 @@ fn spawn_identified(
     unsafe {
         command.pre_exec(move || identity_gate(channel.as_raw_fd()));
     }
-    let mut pass = lease_descriptors(lease, ports);
+    // Custody belongs to the guardian. The child descriptor sweep keeps all
+    // lane locks CLOEXEC, including writer and port leases. Only inputs needed
+    // by the executable cross this boundary.
+    let mut pass = Vec::new();
     if let Some(profile) = profile {
         pass.push(profile);
     }
@@ -697,7 +682,7 @@ fn priority_with_ops(
 impl ProviderGroup {
     pub(crate) fn spawn(
         spec: provenant_os::sys::raw_exec::SpawnSpec<'_>,
-        lease: &provenant_os::fs::LockGuard,
+        _lease: &provenant_os::fs::LockGuard,
         boot: &str,
         priority: u8,
     ) -> io::Result<Self> {
@@ -758,9 +743,7 @@ impl ProviderGroup {
             boot,
             permit,
             SpawnDescriptors {
-                lease,
                 secret: secret.as_ref(),
-                ports: spec.inherited_ports,
                 profile: profile.as_ref().map(|pipe| pipe.fd()),
             },
         )?;
@@ -1435,43 +1418,29 @@ mod tests {
     }
 
     #[test]
-    fn provider_lease_descriptors_contain_only_writer_and_ports()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn lane_descriptors_are_cloexec() -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
         let directory = provenant_os::fs::Directory::open_anchor(root.path())?;
-        let writer = directory.try_lock(
-            std::ffi::OsStr::new("writer.lock"),
-            provenant_os::fs::LockMode::Exclusive,
-        )?;
-        let ports = directory.try_lock(
-            std::ffi::OsStr::new("ports.lock"),
-            provenant_os::fs::LockMode::Exclusive,
-        )?;
-        let update = provenant_os::provider_fence::acquire(
-            root.path(),
-            "agy",
-            provenant_os::fs::LockMode::Shared,
-        )?;
-        let pass = lease_descriptors(&writer, Some(&ports));
-        assert_eq!(
-            pass.iter().map(AsRawFd::as_raw_fd).collect::<Vec<_>>(),
-            vec![
-                writer.handoff_file().as_raw_fd(),
-                ports.handoff_file().as_raw_fd()
-            ]
-        );
-        assert!(
-            !pass
-                .iter()
-                .any(|fd| fd.as_raw_fd() == update.handoff_file().as_raw_fd())
-        );
+        assert!(provenant_os::sys::fs::is_cloexec(directory.handoff_file()));
+        for name in [
+            "writer.lock",
+            "ports.lock",
+            "custody.lock",
+            "writer-probe.lock",
+        ] {
+            let lease = directory.try_lock(
+                std::ffi::OsStr::new(name),
+                provenant_os::fs::LockMode::Exclusive,
+            )?;
+            assert!(provenant_os::sys::fs::is_cloexec(lease.handoff_file()));
+        }
         Ok(())
     }
 
     #[test]
-    fn provider_descendant_keeps_writer_flock_after_parent_handles_close()
+    fn orphaned_provider_descendant_does_not_retain_writer_flock()
     -> Result<(), Box<dyn std::error::Error>> {
-        use crate::custody::{CustodyError, Scope};
+        use crate::custody::Scope;
         use provenant_core::{AttemptId, CancelToken, Clock, RunId, WaitBudget};
         use provenant_os::{clock::SystemClock, fs::Directory};
 
@@ -1535,9 +1504,9 @@ mod tests {
             return Err(format!("descendant readiness: {read:?}").into());
         }
         assert_eq!(ready, [b'R']);
-        // Close the guardian's copy and kill the provider, leaving only its
-        // exec'd descendant holding the inherited open file description.
-        drop(writer);
+        // Close the guardian's copy and kill the provider. Its orphaned
+        // exec'd descendant remains alive, but must not retain lane custody.
+        writer.withdraw_unlaunched()?;
         let provider = group.child.as_mut().ok_or("missing provider")?;
         provider.kill()?;
         provider.wait()?;
@@ -1548,10 +1517,7 @@ mod tests {
         let admit = |budget| {
             crate::fixture::acquire_writer(directory.try_clone()?, retry, budget, &cancel, &clock)
         };
-        assert!(matches!(
-            admit(WaitBudget::nonblocking(clock.mono_now())),
-            Err(CustodyError::Busy)
-        ));
+        admit(WaitBudget::nonblocking(clock.mono_now()))?.withdraw_unlaunched()?;
         drop(group.stdin.take());
         let mut tail = Vec::new();
         let mut stdout = group.stdout.take().ok_or("missing stdout")?;
