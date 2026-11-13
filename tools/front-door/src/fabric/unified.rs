@@ -1173,19 +1173,23 @@ fn retained_steer_target(
     let records = if host == factory.context.identity.host {
         owner.snapshots_local(&receipt.targets, cancel)?
     } else {
-        match owner.peer(
-            host,
-            PeerAction::RunStatuses {
-                extra: [("graph_launch_actor".into(), json!(actor))].into(),
-                targets: receipt.targets.clone(),
-            },
-            budget,
-            cancel,
-        )? {
-            PeerResult::RunStatuses { data, .. } => data,
-            PeerResult::Error { data, .. } => return Err(data.error),
-            _ => return Err(FacadeError::StateCorrupt),
+        let mut records = Vec::new();
+        for targets in receipt.targets.chunks(100) {
+            match owner.peer(
+                host,
+                PeerAction::RunStatuses {
+                    extra: [("graph_launch_actor".into(), json!(actor))].into(),
+                    targets: targets.to_vec(),
+                },
+                budget,
+                cancel,
+            )? {
+                PeerResult::RunStatuses { data, .. } => records.extend(data),
+                PeerResult::Error { data, .. } => return Err(data.error),
+                _ => return Err(FacadeError::StateCorrupt),
+            }
         }
+        records
     };
     if records.len() != receipt.targets.len() {
         return Err(FacadeError::StateCorrupt);
