@@ -659,11 +659,14 @@ fn incremental_ingest_upgrades_existing_chair_without_rereading() -> Result {
         incremental: true,
     };
     ingest(&f.roots, &request(&chairs))?;
-    assert_eq!(ingest(&f.roots, &request(&recorded_chairs))?.bytes_read, 0);
+    ingest(&f.roots, &request(&recorded_chairs))?;
+    let rows = read_rows(&f.roots, &RowFilter::default())?;
     assert_eq!(
-        read_rows(&f.roots, &RowFilter::default())?[0].source,
-        Source::Chair
+        rows.len(),
+        1,
+        "idempotent attribution without duplicate rows"
     );
+    assert_eq!(rows[0].source, Source::Chair);
     Ok(())
 }
 

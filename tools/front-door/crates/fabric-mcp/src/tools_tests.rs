@@ -661,6 +661,10 @@ fn removed_tools_are_unknown_and_merged_operations_are_typed() {
         json!({"op":"claim_acquire","scope":{"kind":"issue","key":"1571"},"lease_seconds":1});
     let call = ToolCall::parse("fabric_lease", input).unwrap();
     assert_eq!(call.name(), "fabric_lease");
+
+    // Merged from submit_is_removed_and_graph_run_is_the_only_launch_operation:
+    assert!(ToolCall::parse("fabric_run", json!({"op":"submit", "tasks":[]})).is_err());
+    assert!(ToolCall::parse("fabric_run", json!({"op":"run", "brief":"fix X"})).is_ok());
 }
 
 #[test]
@@ -901,12 +905,6 @@ fn mcp_invalid_field_matrix_exposes_only_approved_facts() {
         }
         assert!(wire["next"].is_string());
     }
-}
-
-#[test]
-fn submit_is_removed_and_graph_run_is_the_only_launch_operation() {
-    assert!(ToolCall::parse("fabric_run", json!({"op":"submit", "tasks":[]})).is_err());
-    assert!(ToolCall::parse("fabric_run", json!({"op":"run", "brief":"fix X"})).is_ok());
 }
 
 #[test]

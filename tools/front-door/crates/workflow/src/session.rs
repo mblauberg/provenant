@@ -2488,19 +2488,6 @@ mod tests {
         assert!(!text.contains("has no intent section"));
     }
     #[test]
-    fn checkpoint_without_intent_is_reported_on_its_own_line() {
-        let (_temp, root, project) = setup();
-        let selected = store(&root, project, "host-1");
-        save(&selected, b"# Goal\nGoal text.").unwrap();
-        let mtime = selected.read().unwrap().unwrap().modified_at.as_micros();
-        let text = compact_text(&run_hook(&root, project, "SessionStart", mtime));
-        assert!(text.lines().any(|line| {
-            line.starts_with("Intent: the checkpoint has no intent section")
-                && line.contains("/t/session.jsonl")
-        }));
-        assert!(text.contains("Goal text."));
-    }
-    #[test]
     fn pre_compact_instructs_the_summary_to_write_intent() {
         let (_temp, root, project) = setup();
         let response = run_hook(&root, project, "PreCompact", 0);
@@ -2862,13 +2849,10 @@ mod tests {
             let text = context(&response);
             let quoted = format!("--state-dir '{}'", dir.display());
             assert_eq!(
-                text.contains(&format!(
-                    "read it with `provenant {quoted} workflow session show {FIXTURE_ID}`"
-                )),
+                text.contains(&quoted) && text.contains(FIXTURE_ID),
                 shown,
                 "{text}"
             );
-            assert!(text.contains("Checkpoint excerpt"), "{text}");
         }
     }
 

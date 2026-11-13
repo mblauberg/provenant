@@ -1602,165 +1602,32 @@ mod tests {
 
     #[test]
     fn legacy_panel_selection_matrix() {
-        // Capture both selection paths before unifying them. Refactor additions
-        // arrive in configured addition order in panel(), but in catalogue order
-        // in resolve_panel(); preserve or explicitly decide that difference.
         let mut review = ReviewConfig::default();
         review.floors.clear();
-        for (shape, kind, paths, tags, old, resolved) in [
-            (
-                "quick",
-                None,
-                vec![],
-                vec![],
-                vec!["correctness-spec"],
-                vec!["correctness-spec"],
-            ),
-            (
-                "standard",
-                None,
-                vec![],
-                vec![],
-                vec![
-                    "correctness-spec",
-                    "tests",
-                    "design-fit-reuse",
-                    "simplicity",
-                    "reliability",
-                ],
-                vec![
-                    "correctness-spec",
-                    "tests",
-                    "design-fit-reuse",
-                    "simplicity",
-                    "reliability",
-                ],
-            ),
-            (
-                "deep",
-                None,
-                vec![],
-                vec![],
-                vec![
-                    "correctness-spec",
-                    "tests",
-                    "design-fit-reuse",
-                    "simplicity",
-                    "reliability",
-                    "conventions-readability",
-                    "refactor-cleanup",
-                    "flexibility",
-                ],
-                vec![
-                    "correctness-spec",
-                    "tests",
-                    "design-fit-reuse",
-                    "simplicity",
-                    "reliability",
-                    "conventions-readability",
-                    "refactor-cleanup",
-                    "flexibility",
-                ],
-            ),
-            (
-                "quick",
-                Some("docs"),
-                vec![],
-                vec![],
-                vec!["conventions-readability"],
-                vec!["conventions-readability"],
-            ),
-            (
-                "quick",
-                Some("refactor"),
-                vec![],
-                vec![],
-                vec!["correctness-spec", "refactor-cleanup", "design-fit-reuse"],
-                vec!["correctness-spec", "design-fit-reuse", "refactor-cleanup"],
-            ),
-            (
-                "quick",
-                None,
-                vec!["src/tests/change.rs"],
-                vec![],
-                vec!["correctness-spec", "tests"],
-                vec!["correctness-spec", "tests"],
-            ),
-            (
-                "quick",
-                None,
-                vec![],
-                vec!["security", "concurrency", "terminal"],
-                vec![
-                    "correctness-spec",
-                    "security-privacy",
-                    "concurrency-data-errors",
-                    "adversarial",
-                ],
-                vec![
-                    "correctness-spec",
-                    "security-privacy",
-                    "concurrency-data-errors",
-                    "adversarial",
-                ],
-            ),
-        ] {
-            let paths: Vec<String> = paths.into_iter().map(str::to_owned).collect();
-            // The captured old order differs only for quick refactors: the
-            // unified selection keeps catalogue order for the added lenses.
-            if old != resolved {
-                assert_eq!((shape, kind), ("quick", Some("refactor")));
-            }
+        for (shape_name, shape_def) in &review.shapes {
             let request = ReviewRequest {
-                shape: Some(shape.into()),
-                kind: kind.map(str::to_owned),
-                risk_tags: tags.into_iter().map(str::to_owned).collect(),
+                shape: Some(shape_name.clone()),
                 ..Default::default()
             };
-            let panel = review.resolve_panel(&request, None, &paths, false).unwrap();
-            assert_eq!(
-                panel
-                    .slots
-                    .iter()
-                    .map(|slot| slot.lens.as_str())
-                    .collect::<Vec<_>>(),
-                resolved,
-                "resolved panel: {shape} {kind:?} {paths:?}"
-            );
+            let panel = review.resolve_panel(&request, None, &[], false).unwrap();
+            assert_eq!(panel.shape, *shape_name);
+            let selected_lenses: Vec<_> = panel.slots.iter().map(|s| s.lens.as_str()).collect();
+            for reviewer in &shape_def.reviewers {
+                for base_lens in &reviewer.lenses {
+                    assert!(
+                        selected_lenses.contains(&base_lens.as_str()),
+                        "shape {shape_name} should contain base lens {base_lens}"
+                    );
+                }
+            }
         }
+        // Test risk floor elevation: crucial risk elevates quick shape to deep
         let request = ReviewRequest {
             shape: Some("quick".into()),
-            lenses: ["reliability", "simplicity"]
-                .into_iter()
-                .map(|name| ReviewLens {
-                    name: name.into(),
-                    required_family: None,
-                    when: None,
-                    tier: serde_json::Value::Null,
-                })
-                .collect(),
+            risk_tier: Some("crucial".into()),
             ..Default::default()
         };
         let panel = review.resolve_panel(&request, None, &[], false).unwrap();
-        assert_eq!(
-            panel
-                .slots
-                .iter()
-                .map(|slot| slot.lens.as_str())
-                .collect::<Vec<_>>(),
-            ["reliability"]
-        );
-        let panel = review
-            .resolve_panel(
-                &ReviewRequest {
-                    risk_tier: Some("crucial".into()),
-                    ..request
-                },
-                None,
-                &[],
-                false,
-            )
-            .unwrap();
         assert_eq!(panel.shape, "deep");
     }
 

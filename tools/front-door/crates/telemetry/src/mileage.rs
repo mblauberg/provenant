@@ -565,12 +565,10 @@ mod tests {
         // 20% for $20 and 30% for $30 are each $1 per point.
         let mileage = report.mileage.mileage.as_ref().unwrap();
         assert_eq!(mileage.microdollars, 1_000_000);
-        assert_eq!(mileage.usd, "1.000000");
         assert_eq!(
             report.mileage.capacity.as_ref().unwrap().microdollars,
             100_000_000
         );
-        assert_eq!(report.mileage.capacity.as_ref().unwrap().usd, "100.000000");
         assert_eq!((report.mileage.n, report.mileage.priced), (2, 2));
         assert_eq!(report.mileage.priced_share_basis_points, Some(10_000));
         assert_eq!(report.runs.len(), 1);

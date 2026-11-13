@@ -1,16 +1,49 @@
 use super::*;
 
+fn synthetic_catalogue() -> Result<Catalogue, Box<dyn std::error::Error>> {
+    let mut catalogue = Catalogue::bundled()?;
+    catalogue.models = vec![
+        ModelEntry {
+            model: ModelId::parse("alpha/unique-model")?,
+            free: false,
+            evidence_ref: "evidence".into(),
+            efforts: vec!["medium".into()],
+            family: None,
+            trains_on_prompts: None,
+            monthly_allowance_usd: None,
+            quota_pool: None,
+        },
+        ModelEntry {
+            model: ModelId::parse("alpha/shared-model")?,
+            free: false,
+            evidence_ref: "evidence".into(),
+            efforts: vec!["medium".into()],
+            family: None,
+            trains_on_prompts: None,
+            monthly_allowance_usd: None,
+            quota_pool: None,
+        },
+        ModelEntry {
+            model: ModelId::parse("beta/shared-model")?,
+            free: false,
+            evidence_ref: "evidence".into(),
+            efforts: vec!["medium".into()],
+            family: None,
+            trains_on_prompts: None,
+            monthly_allowance_usd: None,
+            quota_pool: None,
+        },
+    ];
+    Ok(catalogue)
+}
+
 #[test]
 fn bare_name_resolves_to_the_one_provider_that_offers_it() -> Result<(), Box<dyn std::error::Error>>
 {
-    let catalogue = Catalogue::bundled()?;
+    let catalogue = synthetic_catalogue()?;
     assert_eq!(
-        catalogue.resolve_bare_model("claude-sonnet-5-5")?.as_str(),
-        "claude/claude-sonnet-5-5"
-    );
-    assert_eq!(
-        catalogue.resolve_bare_model("gpt-6.1-terra")?.as_str(),
-        "codex/gpt-6.1-terra"
+        catalogue.resolve_bare_model("unique-model")?.as_str(),
+        "alpha/unique-model"
     );
     Ok(())
 }
@@ -18,47 +51,81 @@ fn bare_name_resolves_to_the_one_provider_that_offers_it() -> Result<(), Box<dyn
 #[test]
 fn bare_name_offered_by_several_providers_names_each_candidate()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut catalogue = Catalogue::bundled()?;
-    let mut row = catalogue
-        .models
-        .iter()
-        .find(|row| row.model.as_str() == "codex/gpt-6.1-terra")
-        .cloned()
-        .ok_or("missing codex row")?;
-    row.model = ModelId::parse("cursor/gpt-6.1-terra")?;
-    catalogue.models.push(row);
-    assert_eq!(
-        catalogue.resolve_bare_model("gpt-6.1-terra"),
-        Err(BareModelError::Ambiguous {
-            candidates: vec!["codex/gpt-6.1-terra".into(), "cursor/gpt-6.1-terra".into()],
-        })
-    );
+    let catalogue = synthetic_catalogue()?;
+    let err = catalogue.resolve_bare_model("shared-model").unwrap_err();
+    match err {
+        BareModelError::Ambiguous { mut candidates } => {
+            candidates.sort();
+            assert_eq!(
+                candidates,
+                vec![
+                    "alpha/shared-model".to_string(),
+                    "beta/shared-model".to_string()
+                ]
+            );
+        }
+        other => panic!("expected Ambiguous, got {other:?}"),
+    }
     Ok(())
 }
 
 #[test]
 fn bare_name_no_provider_offers_is_unknown() -> Result<(), Box<dyn std::error::Error>> {
-    let catalogue = Catalogue::bundled()?;
+    let catalogue = synthetic_catalogue()?;
     assert_eq!(
-        catalogue.resolve_bare_model("no-such-model-9"),
+        catalogue.resolve_bare_model("no-such-model"),
         Err(BareModelError::Unknown)
     );
     // A provider-qualified name never resolves as a bare name.
     assert_eq!(
-        catalogue.resolve_bare_model("claude/claude-sonnet-5-5"),
+        catalogue.resolve_bare_model("alpha/unique-model"),
         Err(BareModelError::Unknown)
     );
     Ok(())
 }
 
 #[test]
-fn bundled_pools_exclude_high_terra_but_exact_and_user_pool_allow_it()
+fn pool_excludes_unsupported_effort_but_exact_and_user_pool_allow_it()
 -> Result<(), Box<dyn std::error::Error>> {
-    let catalogue = Catalogue::bundled()?;
+    let mut catalogue = Catalogue::bundled()?;
+    let target = ModelId::parse("alpha/effort-model")?;
+    catalogue.models.push(ModelEntry {
+        model: target.clone(),
+        free: false,
+        evidence_ref: "evidence".into(),
+        efforts: vec!["low".into(), "high".into()],
+        family: None,
+        trains_on_prompts: None,
+        monthly_allowance_usd: None,
+        quota_pool: None,
+    });
+    // Pool allows only "low"
+    catalogue.pools.insert(
+        "test-pool".into(),
+        vec![RoutePoolMember {
+            model: target.clone(),
+            weight: 1,
+            effort: Some("low".into()),
+            efforts: vec!["low".into()],
+            free: false,
+        }],
+    );
     let config = RoutingConfig::default();
-    let available = [availability()];
+    let available = [AvailabilityRecord {
+        schema_version: 1,
+        adapter: "alpha".into(),
+        executable: "/fixture".into(),
+        version: "fixture".into(),
+        fixture_ref: "test".into(),
+        catalogue_revision: catalogue.revision().into(),
+        account_key: None,
+        observed_models: vec!["effort-model".into()],
+        observed_unix_seconds: 0,
+        expires_unix_seconds: 10_000,
+        last_update: None,
+    }];
     let access = [AccessContext {
-        adapter: "codex",
+        adapter: "alpha",
         disclosure_ref: "fixture",
         confinement_ref: "fixture",
     }];
@@ -67,64 +134,49 @@ fn bundled_pools_exclude_high_terra_but_exact_and_user_pool_allow_it()
         access: &access,
         ..context(&catalogue, &config, now()?)
     };
-    let terra = ModelId::parse("codex/gpt-6.1-terra")?;
-    for writes in [false, true] {
-        for pool in catalogue.pools.keys() {
-            for effort in ["high", "xhigh", "max"] {
-                let mut query = request(terra.as_str())?;
-                query.choice = RouteChoice::NamedRoute(RouteName::parse(pool)?);
-                query.intent.writes = writes;
-                query.effort = Some(effort.into());
-                match resolve_with_seed(&query, &ctx, "terra-removal", 0) {
-                    Ok(route) => {
-                        assert_ne!(picked_model(&route)?, terra, "{pool} at {effort}");
-                        let selection = route.pool_selection.ok_or("missing pool receipt")?;
-                        for candidate in selection
-                            .candidates
-                            .iter()
-                            .filter(|c| c.model == terra.as_str())
-                        {
-                            assert_eq!(candidate.exclusion.as_deref(), Some("effort"));
-                        }
-                    }
-                    Err(RoutingError::NoEligiblePoolMember { .. }) => {
-                        assert!(
-                            pool != "senior" || effort != "high",
-                            "senior high must resolve"
-                        );
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            }
-        }
-        let mut exact = request(terra.as_str())?;
-        exact.intent.writes = writes;
-        exact.effort = Some("high".into());
-        let route = resolve(&exact, &ctx)?;
-        assert_eq!(picked_model(&route)?, terra);
-        assert_eq!(route.effort.as_deref(), Some("high"));
-        assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
 
-        let mut custom = RoutingConfig::default();
-        custom.pools.insert(
-            "senior".into(),
-            vec![RoutePoolMember {
-                model: terra.clone(),
-                weight: 1,
-                effort: Some("high".into()),
-                efforts: vec!["high".into()],
-                free: false,
-            }],
-        );
-        exact.choice = RouteChoice::NamedRoute(RouteName::parse("senior")?);
-        let custom_ctx = RoutingContext {
-            config: &custom,
-            ..ctx
-        };
-        let route = resolve(&exact, &custom_ctx)?;
-        assert_eq!(picked_model(&route)?, terra);
-        assert_eq!(route.effort.as_deref(), Some("high"));
-        assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+    // Requesting "high" effort in the pool that only allows "low" excludes the candidate
+    let mut query = request(target.as_str())?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("test-pool")?);
+    query.effort = Some("high".into());
+    match resolve_with_seed(&query, &ctx, "test-seed", 0) {
+        Ok(route) => {
+            assert_ne!(picked_model(&route)?, target);
+        }
+        Err(RoutingError::NoEligiblePoolMember { .. }) => {
+            // Expected when the only member is excluded by effort
+        }
+        Err(err) => return Err(err.into()),
     }
+
+    // Exact request for the model with "high" effort resolves ready
+    let mut exact = request(target.as_str())?;
+    exact.effort = Some("high".into());
+    let route = resolve(&exact, &ctx)?;
+    assert_eq!(picked_model(&route)?, target);
+    assert_eq!(route.effort.as_deref(), Some("high"));
+    assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+
+    // User-configured custom pool allowing "high" effort resolves ready
+    let mut custom = RoutingConfig::default();
+    custom.pools.insert(
+        "custom-pool".into(),
+        vec![RoutePoolMember {
+            model: target.clone(),
+            weight: 1,
+            effort: Some("high".into()),
+            efforts: vec!["high".into()],
+            free: false,
+        }],
+    );
+    exact.choice = RouteChoice::NamedRoute(RouteName::parse("custom-pool")?);
+    let custom_ctx = RoutingContext {
+        config: &custom,
+        ..ctx
+    };
+    let route = resolve(&exact, &custom_ctx)?;
+    assert_eq!(picked_model(&route)?, target);
+    assert_eq!(route.effort.as_deref(), Some("high"));
+    assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
     Ok(())
 }
