@@ -942,7 +942,8 @@ fn resolve_graph_steer_target(
             &factory.context.roots.state,
             factory.context.identity.project,
             &target.graph,
-        )?
+        )
+        .map_err(graph_journal_error)?
         .ok_or(FacadeError::NotFound)?;
         let (node, attempt) = match provenant_cli::inbox::live_steer_attempt(
             &checkpoint,
@@ -1011,7 +1012,8 @@ fn resolve_graph_steer_target(
     let mut matches = Vec::new();
     for graph in graphs {
         let Some(checkpoint) =
-            FileJournal::read_status_checkpoint(&factory.context.roots.state, project, &graph)?
+            FileJournal::read_status_checkpoint(&factory.context.roots.state, project, &graph)
+                .map_err(graph_journal_error)?
         else {
             continue;
         };
@@ -1099,7 +1101,7 @@ fn retained_steer_target(
         .parse()
         .map_err(|_| FacadeError::StateCorrupt)?;
     let host = steer_placement_host(factory, attempt)?;
-    let mut owner = BinaryRunOwner {
+    let owner = BinaryRunOwner {
         factory,
         allow_remote: true,
         actor: Some(actor),
@@ -2489,7 +2491,7 @@ mod tests {
                 "schema_version":1, "graph_id":"g", "plan_digest":"digest",
                 "nodes":[{"id":"task", "state":"running", "worktree":null,
                     "attempts":[{"key":{"graph_id":"g", "node_id":"task", "route_index":0},
-                        "launched":true, "route":{"alias":"senior"}, "state":graph_name,
+                        "launched":true, "route":{"alias":"senior"}, "state":graph_state,
                         "attempt_ref":null,
                         "outcome":if graph_name == "terminal" { Some("task_failed") } else { None::<&str> },
                         "launch_actor":"fixture"}]}]
@@ -2943,7 +2945,7 @@ mod tests {
         }
         assert_eq!(
             FileJournal::read_checkpoint(&roots.state, project, graph)?,
-            Some(checkpoint)
+            Some(checkpoint.clone())
         );
         assert_eq!(
             FileJournal::read_events(&roots.state, project, graph)?,
