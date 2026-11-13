@@ -114,7 +114,8 @@ pub(crate) fn advance_graphs_after_settlement(
             assets: &settled.roots.checkout,
             cwd: &host.cwd,
         };
-        provenant_cli::run::launch_budget_wrap_up(&session, run, &edge, &call, host)?;
+        provenant_cli::run::launch_budget_wrap_up(&session, run, &edge, &call, host)
+            .map_err(|failure| std::io::Error::other(failure.message))?;
     }
     let record = store.record(settled.attempt_id, &call)?;
     if let Some(id) = matching_graph_hint(&roots.state, settled.project_id, &record) {
