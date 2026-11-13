@@ -535,6 +535,7 @@ fn node_bound(
                 extra: Default::default(),
                 graph_id: plan.graph_id.clone(),
                 node_id: node.id.clone(),
+                attempt: u32::MAX,
                 route_index: u16::MAX,
             },
             route: route.clone(),

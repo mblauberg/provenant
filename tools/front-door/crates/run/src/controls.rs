@@ -2638,12 +2638,10 @@ impl RunStore {
     /// this project. Nonterminal work takes priority over temporary cleanup.
     pub fn open_attempts(&self, limit: u64, call: &Request<'_>) -> Result<Vec<AttemptId>> {
         call.check()?;
-        self.cutover_writer_reservations(call)?;
         self.open_attempts_readonly(limit, call)
     }
 
-    /// Inspect pending recovery independently of a failed custody cutover.
-    /// Callers report reservation issues alongside these known attempts.
+    /// Inspect pending recovery without mutating Run state.
     pub fn open_attempts_readonly(&self, limit: u64, call: &Request<'_>) -> Result<Vec<AttemptId>> {
         call.check()?;
         let limit = crate::db::sql_int(limit)?;
@@ -2874,10 +2872,6 @@ impl RunStore {
         observer: &dyn ProcessObserver,
     ) -> Result<Vec<(AttemptId, Reconciled)>> {
         call.check()?;
-        // Judge known attempts even when another slot's cutover failed. The
-        // storage error is returned after those independent decisions are saved.
-        let cutover_error = self.cutover_writer_reservations(call).err();
-        call.check()?;
         let mut ids: Vec<String> = {
             let mut query = self
                 .db
@@ -2934,10 +2928,6 @@ impl RunStore {
             if let Some(state) = state {
                 found.push((id, self.track_reconcile_progress(id, state, call)));
             }
-        }
-        if cutover_error.is_some() {
-            // A cutover timeout may already have been resolved by this pass.
-            retry_reconcile(&self.db, call, || self.cutover_writer_reservations(call))?;
         }
         // A peer may have completed an earlier busy record while this pass
         // judged the remaining records. Report its final state, not that error.

@@ -798,7 +798,7 @@ mod tests {
             let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
                 "schema_version":1,"graph_id":"custody","plan_digest":"fixture",
                 "nodes":[{"id":"parent","state":"succeeded","attempts":[{
-                    "launched":true,"key":{"graph_id":"custody","node_id":"parent","route_index":0},
+                    "launched":true,"key":{"graph_id":"custody","node_id":"parent","route_index":0, "attempt": 1},
                     "route":{"alias":"senior"},"state":"terminal","attempt_ref":reference,
                     "outcome":null,"launch_actor":"fixture"
                 }]}, {"id":"parent--child--grandchild","state":status,"attempts":[]},

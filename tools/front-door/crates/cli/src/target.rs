@@ -298,8 +298,7 @@ pub fn resolve<E>(
         .ok_or_else(|| ResolveError::NotFound(format!("{}/{node}", target.name)))?;
     let numbered: Vec<_> = progress
         .recorded_attempts()
-        .zip(1..)
-        .filter_map(|(attempt, number)| Some((attempt, NonZeroU32::new(number)?)))
+        .filter_map(|attempt| Some((attempt, NonZeroU32::new(attempt.key.attempt)?)))
         .collect();
     let selected = match (target.attempt, want) {
         (Some(number), _) => Some(
@@ -337,6 +336,10 @@ pub fn resolve<E>(
         attempt_ref: selected.and_then(|(attempt, _)| attempt.attempt_ref.clone()),
     })
 }
+
+#[cfg(test)]
+#[path = "target_continuation_invariants.rs"]
+mod continuation_invariants;
 
 #[cfg(test)]
 mod tests {
@@ -494,7 +497,7 @@ mod tests {
                 let attempts: Vec<_> = attempts
                     .iter()
                     .enumerate()
-                    .map(|(index, state)| serde_json::json!({"launched":true,"key":{"graph_id":name,"node_id":id,"route_index":0},"route":{"alias":"senior"},"state":state,"attempt_ref":format!("host/{id}-{}", index + 1),"launch_actor":"actor"}))
+                    .map(|(index, state)| serde_json::json!({"launched":true,"key":{"graph_id":name,"node_id":id,"route_index":0, "attempt": index + 1},"route":{"alias":"senior"},"state":state,"attempt_ref":format!("host/{id}-{}", index + 1),"launch_actor":"actor"}))
                     .collect();
                 serde_json::json!({"id":id,"state":"running","worktree":null,"attempts":attempts})
             })

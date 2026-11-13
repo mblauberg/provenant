@@ -26,6 +26,77 @@ pub(super) fn apply_unknown_observation(
     *state = NodeState::Running;
 }
 
+/// Retain the terminal predecessor and switch only the current route's row to
+/// its admitted continuation. Both remain independently addressable WorkKeys.
+pub(super) fn continue_attempt(
+    checkpoint: &mut GraphCheckpoint,
+    node_index: usize,
+    observation: AttemptObservation,
+    successor: AttemptContinuation,
+    usage: Option<AttemptUsage>,
+) -> Result<(), &'static str> {
+    let AttemptObservation::Terminal {
+        attempt_ref: Some(reference),
+        outcome,
+        launched,
+        stop,
+        ..
+    } = observation
+    else {
+        return Err("a continuation requires its terminal predecessor");
+    };
+    let progress = &mut checkpoint.nodes[node_index];
+    let attempt = progress
+        .attempts
+        .last_mut()
+        .ok_or("continuation has no predecessor")?;
+    if attempt.key.graph_id != successor.key.graph()
+        || attempt.key.node_id != successor.key.node()
+        || attempt.key.attempt.checked_add(1) != Some(successor.key.attempt())
+        || reference == successor.attempt_ref
+        || progress
+            .previous_attempts
+            .iter()
+            .any(|previous| previous.key.attempt == successor.key.attempt())
+    {
+        return Err("continuation must name the next WorkKey of the same node");
+    }
+    attempt.state = AttemptState::Terminal;
+    attempt.attempt_ref = Some(reference.clone());
+    attempt.outcome = Some(outcome);
+    attempt.launched = launched;
+    attempt.stop = stop;
+    attempt.usage = usage;
+    stamp_settlement(checkpoint, node_index);
+    // Record unknown usage while the settled predecessor is the current row.
+    record_usage_events(checkpoint, node_index, None, None);
+    let progress = &mut checkpoint.nodes[node_index];
+    let previous = progress
+        .attempts
+        .pop()
+        .ok_or("continuation has no predecessor")?;
+    let mut current = previous.clone();
+    current.key.attempt = successor.key.attempt();
+    current
+        .key
+        .extra
+        .insert("previous_attempt_ref".into(), reference.into());
+    current.attempt_ref = Some(successor.attempt_ref);
+    current.state = AttemptState::Running;
+    current.outcome = None;
+    current.stop = None;
+    current.usage = None;
+    current.settled = 0;
+    progress.previous_attempts.push(previous);
+    progress.attempts.push(current);
+    progress.state = NodeState::Running;
+    progress.launch_retry = None;
+    progress.advance_owner_code = None;
+    asks::refresh_wake(checkpoint);
+    update_usage_warnings(checkpoint);
+    Ok(())
+}
+
 /// Apply a settled gate using already-observed inputs, before checkpoint save.
 pub(super) fn apply_gate_result(
     progress: &mut NodeProgress,
@@ -1656,6 +1727,13 @@ pub(super) fn attempt_key(
     route_index: usize,
 ) -> Result<AttemptKey, &'static str> {
     let node = &plan.nodes[node_index];
+    if let Some(attempt) = checkpoint.nodes[node_index]
+        .attempts
+        .last()
+        .filter(|attempt| attempt.state != AttemptState::Terminal)
+    {
+        return Ok(attempt.key.clone());
+    }
     let mut attempt_extra = provenant_records::ExtraFields::default();
     if let Some(generation) = checkpoint.nodes[node_index].extra.get("retry_generation") {
         attempt_extra.insert("retry_generation".into(), generation.clone());
@@ -1672,14 +1750,13 @@ pub(super) fn attempt_key(
         extra: attempt_extra,
         graph_id: plan.graph_id.clone(),
         node_id: node.id.clone(),
+        attempt: checkpoint.nodes[node_index]
+            .recorded_attempts()
+            .next_back()
+            .map_or(Some(1), |attempt| attempt.key.attempt.checked_add(1))
+            .ok_or("attempt number exhausted")?,
         route_index: u16::try_from(route_index).map_err(|_| "route count")?,
     };
-    let key = checkpoint.nodes[node_index]
-        .attempts
-        .last()
-        .filter(|attempt| attempt.state != AttemptState::Terminal)
-        .map_or(key, |attempt| attempt.key.clone());
-
     Ok(key)
 }
 

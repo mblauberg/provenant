@@ -1193,6 +1193,7 @@ fn child_key_is_scoped_to_logical_parent_and_replays_a_retried_attempt() {
     let parent = checkpoint.nodes.iter_mut().find(|node| node.id == "a").unwrap();
     parent.previous_attempts.append(&mut parent.attempts);
     let mut next = parent.previous_attempts[0].clone();
+    next.key.attempt = 2;
     next.attempt_ref = Some("attempt-a-retry".into());
     parent.attempts.push(next);
     let checkpoint: GraphCheckpoint = serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();

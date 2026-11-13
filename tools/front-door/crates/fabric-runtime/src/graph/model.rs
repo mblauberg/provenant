@@ -1357,10 +1357,10 @@ pub struct NodeProgress {
     pub last_launch_retry: Option<LaunchRetry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outputs: Option<NodeOutputs>,
-    /// Immutable evidence from earlier node redos, included in budget accounting.
+    /// Immutable evidence from redos and continuations, included in budgets.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub previous_attempts: Vec<GraphAttempt>,
-    /// One durable row per route actually tried, in route order.
+    /// Current attempt on each route actually tried, in route order.
     pub attempts: Vec<GraphAttempt>,
 }
 
@@ -1503,8 +1503,20 @@ pub struct AttemptKey {
     pub extra: provenant_records::ExtraFields,
     pub graph_id: String,
     pub node_id: String,
+    /// One-based WorkKey attempt identity in the journal's project namespace.
+    /// A continuation advances this number without consuming another route.
+    pub attempt: u32,
     /// Zero-based position in that node's ordered route list.
     pub route_index: u16,
+}
+
+impl AttemptKey {
+    pub fn work_key(
+        &self,
+        project: provenant_core::ProjectId,
+    ) -> Result<provenant_records::WorkKey, provenant_records::work_key::WorkKeyError> {
+        provenant_records::WorkKey::new(project, &self.graph_id, &self.node_id, self.attempt)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1644,9 +1656,15 @@ impl GraphCheckpoint {
 }
 
 impl NodeProgress {
-    /// All attempt evidence in launch order, including previous redos.
+    /// All attempt evidence in WorkKey order, including redos and continuations.
     pub fn recorded_attempts(&self) -> impl DoubleEndedIterator<Item = &GraphAttempt> {
-        self.previous_attempts.iter().chain(&self.attempts)
+        let mut attempts: Vec<_> = self
+            .previous_attempts
+            .iter()
+            .chain(&self.attempts)
+            .collect();
+        attempts.sort_by_key(|attempt| attempt.key.attempt);
+        attempts.into_iter()
     }
 
     pub(super) fn truncation(&self) -> Option<(&[usize], usize)> {

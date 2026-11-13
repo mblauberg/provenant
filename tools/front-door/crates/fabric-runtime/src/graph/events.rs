@@ -179,13 +179,14 @@ pub(super) fn append_changes(
                         "started"
                     },
                     &(
-                        attempt.key.route_index,
+                        &attempt.key,
                         &attempt.route,
                         &attempt.attempt_ref,
                         &attempt.outcome,
                     ),
                 )?;
                 observation.details = Some(serde_json::json!({
+                    "attempt": attempt.key.attempt,
                     "route_index": attempt.key.route_index,
                     "state": attempt.state,
                     "outcome": attempt.outcome,
@@ -542,7 +543,7 @@ mod tests {
         let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
             "schema_version":1,"graph_id":"g","plan_digest":"digest",
             "nodes":[{"id":"task","state":"running","worktree":null,"attempts":[{
-                "key":{"graph_id":"g","node_id":"task","route_index":0},
+                "key":{"graph_id":"g","node_id":"task","route_index":0, "attempt": 1},
                 "route":{"alias":"senior"},"state":"starting","launched":false,
                 "attempt_ref":null,"outcome":null,"launch_actor":"actor"
             }]}]
@@ -587,7 +588,7 @@ mod tests {
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
         let mut fixture: StoredCheckpoint =
-            serde_json::from_str(include_str!("../fixtures/legacy-graph-checkpoint.json")).unwrap();
+            serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
         fixture.execution.directory = base;
         let mut journal =
             FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();

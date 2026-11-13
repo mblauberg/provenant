@@ -1305,7 +1305,7 @@ mod tests {
             |n: u8| format!("{host}/{}", provenant_core::AttemptId::from_bytes([n; 16]));
         let attempt = |n: u8, state: &str| {
             serde_json::json!({
-            "key":{"graph_id":"g", "node_id":"task", "route_index":0},
+            "key":{"graph_id":"g", "node_id":"task", "route_index":0, "attempt": 1},
             "launched":true, "route":{"alias":"senior"}, "state":state,
             "attempt_ref":reference(n), "outcome":null, "launch_actor":"fixture"})
         };

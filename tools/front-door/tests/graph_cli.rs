@@ -1549,7 +1549,7 @@ fn steer_graph_and_node_refuse_an_unlaunched_attempt_before_reading_stdin() -> R
         FileJournal::execution(&state, project, "steer-ambiguous")?.ok_or("execution")?;
     let mut checkpoint =
         FileJournal::read_checkpoint(&state, project, "steer-ambiguous")?.ok_or("checkpoint")?;
-    let attempt = json!({"key":{"graph_id":"steer-ambiguous","node_id":"accept","route_index":0},
+    let attempt = json!({"key":{"graph_id":"steer-ambiguous","node_id":"accept","route_index":0, "attempt": 1},
         "launched":false,"route":{"alias":"senior"},"state":"starting","attempt_ref":null,
         "outcome":null,"launch_actor":"fixture"});
     checkpoint.nodes[0].state = NodeState::Running;

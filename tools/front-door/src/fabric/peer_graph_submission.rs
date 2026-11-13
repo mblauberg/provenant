@@ -73,7 +73,7 @@ extend: Vec::new(),
                       require: bool, distinct: &[String]|
      -> Result<(RequestedRoute, Vec<String>), Box<dyn std::error::Error>> {
         let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
-            "graph_id":"sibling-lenses", "node_id":node_id, "route_index":route_index
+            "graph_id":"sibling-lenses", "node_id":node_id, "route_index":route_index, "attempt": route_index + 1
         }))?;
         // The subject is the recorded submission, so the provider launch
         // stays queued after admission.
@@ -550,7 +550,7 @@ fn graph_submission_pins_the_integration_base_across_replay()
     // review base, independently of the integration base.
     use provenant_fabric_runtime::graph::{self, AttemptOwner};
     let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
-        "graph_id":"pinned-base", "node_id":"later-lens", "route_index":0
+        "graph_id":"pinned-base", "node_id":"later-lens", "route_index":0, "attempt": 1
     }))?;
     let route = serde_json::from_value(serde_json::json!({"adapter":"fixture", "model":"fixture/model"}))?;
     let mut bound = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
@@ -579,7 +579,7 @@ fn graph_submission_pins_the_integration_base_across_replay()
         review: Some(base),
     });
     let second: graph::AttemptKey = serde_json::from_value(serde_json::json!({
-        "graph_id":"pinned-base", "node_id":"second-lens", "route_index":0
+        "graph_id":"pinned-base", "node_id":"second-lens", "route_index":0, "attempt": 1
     }))?;
     let actor = bound.actor();
     bound.observe_or_start(&second, graph::NodeInput { review_launch: false,

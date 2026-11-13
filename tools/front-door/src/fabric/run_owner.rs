@@ -1791,7 +1791,7 @@ mod graph_control_tests {
                     "nodes":[
                         {"id":"composite","state":"running","attempts":[]},
                         {"id":"lane","state":"running","attempts":[{
-                            "key":{"graph_id":"g","node_id":"lane","route_index":0},
+                            "key":{"graph_id":"g","node_id":"lane","route_index":0, "attempt": 1},
                             "launched":true,"route":{"alias":"junior"},"state":"running",
                             "attempt_ref":reference,"launch_actor":"fixture"}]},
                     ]

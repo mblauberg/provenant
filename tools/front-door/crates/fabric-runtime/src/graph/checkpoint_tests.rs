@@ -3,7 +3,7 @@ use super::*;
 use serde_json::{Value, json};
 
 fn stored() -> Value {
-    serde_json::from_str(include_str!("../fixtures/legacy-graph-checkpoint.json")).unwrap()
+    serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap()
 }
 
 #[test]

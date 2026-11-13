@@ -429,7 +429,7 @@ fn tick_wakes_graph_without_deadline_but_respects_future_deadline()
         serde_json::from_value(serde_json::json!({
             "schema_version": 1, "graph_id": "waiter", "plan_digest": "plan", "nodes": [
                 {"id":"branch", "worktree":null, "state":"running", "attempts":[{
-                    "key":{"graph_id":"waiter", "node_id":"branch", "route_index":0},
+                    "key":{"graph_id":"waiter", "node_id":"branch", "route_index":0, "attempt": 1},
                     "route":{"adapter":"fixture", "model":"fixture/model"},
                     "state":"running", "launched":true, "launch_actor":"actor"
                 }]}
@@ -467,7 +467,7 @@ pub(crate) mod peer_tests {
         provenant_records::run::WorkContext {
             graph_id: Some(key.graph_id.clone()),
             node_id: Some(key.node_id.clone()),
-            attempt: Some(u32::from(key.route_index) + 1),
+            attempt: Some(key.attempt),
             ..Default::default()
         }
     }

@@ -352,7 +352,7 @@ fn lane_edit_admits_revision_through_host_relay() -> Result {
     let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
         "schema_version":1,"graph_id":graph_id,"plan_digest":"test",
         "nodes":[{"id":"task","worktree":null,"state":"running","attempts":[{
-            "key":{"graph_id":graph_id,"node_id":"task","route_index":0},
+            "key":{"graph_id":graph_id,"node_id":"task","route_index":0, "attempt": 1},
             "launched":true,"route":{"alias":"senior"},"state":"running",
             "attempt_ref":reference,"launch_actor":"actor"
         }]}]

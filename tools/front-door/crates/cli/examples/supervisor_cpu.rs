@@ -135,7 +135,7 @@ fn capture(root: &Path, churn: bool) -> Result {
     })?;
     let checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
         "schema_version":1,"graph_id":"cpu","plan_digest":"fixture","nodes":[{
-            "id":"parent","state":"running","attempts":[{"key":{"graph_id":"cpu","node_id":"parent","route_index":0},"launched":true,"route":{"alias":"junior"},"state":"running","attempt_ref":format!("{}/{}",ctx.identity.host,scope.attempt),"launch_actor":"fixture"}]
+            "id":"parent","state":"running","attempts":[{"key":{"graph_id":"cpu","node_id":"parent","route_index":0, "attempt": 1},"launched":true,"route":{"alias":"junior"},"state":"running","attempt_ref":format!("{}/{}",ctx.identity.host,scope.attempt),"launch_actor":"fixture"}]
         }]
     }))?;
     journal.save(&checkpoint)?;

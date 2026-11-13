@@ -824,7 +824,7 @@ mod tests {
     ) -> serde_json::Value {
         serde_json::json!({
             "launched": launched,
-            "key": {"graph_id": "g", "node_id": "n", "route_index": route_index},
+            "key": {"graph_id": "g", "node_id": "n", "route_index": route_index, "attempt": route_index + 1},
             "route": {"adapter": "a", "model": "a/m"},
             "state": state,
             "attempt_ref": null,

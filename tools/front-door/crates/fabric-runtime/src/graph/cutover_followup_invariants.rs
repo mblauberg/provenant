@@ -250,6 +250,7 @@ fn depletion_keeps_the_pinned_account_and_refuses_a_higher_tier_candidate() {
             graph_id: document.graph_id.clone(),
             node_id: "writer".into(),
             route_index: 0,
+            attempt: 1,
         },
         route: plan.nodes[0].routes[0].clone(),
         state: AttemptState::Terminal,

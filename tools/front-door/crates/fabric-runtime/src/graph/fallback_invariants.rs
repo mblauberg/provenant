@@ -58,7 +58,7 @@ fn settlement_and_selection_share_the_stop_rule_and_custody_guards() {
                     );
                     let progress: NodeProgress = serde_json::from_value(json!({
                         "id":"n", "state":"running", "worktree":null, "attempts":[{
-                            "launched":false, "key":{"graph_id":"g","node_id":"n","route_index":0},
+                            "launched":false, "key":{"graph_id":"g","node_id":"n","route_index":0, "attempt": 1},
                             "route":{"adapter":"a","model":"a/m"}, "state":"terminal",
                             "attempt_ref":"attempt-1", "outcome":outcome, "launch_actor":"chair"
                         }]

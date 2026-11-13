@@ -601,6 +601,7 @@ fn quota_stopped_task_and_composite_member_keep_the_same_lineage() -> Result {
                             "reference":attempt.attempt_ref,
                             "predecessor":attempt.key.extra.get("previous_attempt_ref"),
                             "generation":attempt.key.extra.get("retry_generation"),
+                            "attempt":attempt.key.attempt,
                             "route_index":attempt.key.route_index,
                             "actor":attempt.launch_actor,
                             "outcome":attempt.outcome,
