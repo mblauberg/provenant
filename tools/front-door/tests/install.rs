@@ -3329,6 +3329,8 @@ fn reset_restores_readonly_payload_access_and_unlinks_only_dropped_links() -> Re
 #[test]
 fn reset_partial_archive_failure_is_rerunnable_without_overwriting_history() -> Result {
     let (rig, stage) = reset_fixture()?;
+    // A current receipt can coexist with foreign stores recreated by an old agent.
+    set_receipt_format(&rig, 2)?;
     let source = rig.state.join("attempts/a1/provider-history");
     let archive = rig
         .state
@@ -3348,6 +3350,12 @@ fn reset_partial_archive_failure_is_rerunnable_without_overwriting_history() -> 
         "existing archive"
     );
     assert!(rig.state.join("run.sqlite3").exists());
+    let pending: serde_json::Value =
+        serde_json::from_slice(&fs::read(rig.state.join("install/receipt.json"))?)?;
+    assert_eq!(pending["state_format_version"], 1);
+    // Losing the last foreign header must not hide the unfinished reset.
+    fs::remove_file(rig.state.join("run.sqlite3"))?;
+    assert_eq!(code(&reset_install(&rig, &stage, &[])?), 6);
     // Resolve the collision without deleting its content, then retry.
     fs::rename(&archive, rig.state.join("provider-history/previous"))?;
     let result = reset_install(&rig, &stage, &["--reset-state"])?;

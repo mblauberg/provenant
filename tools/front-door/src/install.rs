@@ -1106,6 +1106,17 @@ fn apply_install(
         // Intermediate receipts must not claim the state transition finished:
         // a later batch can fail while only old artifacts (no DB header) remain.
         reporter.receipt_state_format = reset.as_ref().map(|_| 1);
+        if reset.is_some() {
+            // Finish every payload batch with an ordinary pending receipt,
+            // even for a single target recovering foreign stores under v2.
+            // The extra pass replans the last target and commits v2 only after
+            // reset. Partial removal can lose every old header and still retry.
+            let final_batch = batches
+                .last()
+                .cloned()
+                .ok_or(InstallError::HarnessSelection)?;
+            batches.push(final_batch);
+        }
         let batch_count = batches.len();
         for (index, batch) in batches.into_iter().enumerate() {
             // Only the final batch may reset state: every real batch write
