@@ -38,6 +38,8 @@ const CACHE_LIMIT: u64 = 16 * 1024 * 1024;
 /// One reported check run or the latest state of one status context.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Check {
+    /// Exact commit SHA returned by GitHub for this check.
+    pub head: String,
     pub name: String,
     /// `pass`, `fail`, `cancel`, `pending` or `skipping`.
     pub bucket: String,
@@ -583,6 +585,7 @@ fn parse_bodies<'a>(
             let completed = time(run.get("completed_at"))?;
             let output = run.get("output");
             checks.push(Check {
+                head: commit.into(),
                 name: run.get("name")?.as_str()?.into(),
                 bucket: bucket.into(),
                 app: run["app"]["id"].as_u64(),
@@ -623,6 +626,7 @@ fn parse_bodies<'a>(
             let created = time(status.get("created_at"))?;
             let updated = time(status.get("updated_at"))?;
             checks.push(Check {
+                head: commit.into(),
                 name: name.into(),
                 bucket: bucket.into(),
                 app: None,

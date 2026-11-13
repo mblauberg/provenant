@@ -179,6 +179,69 @@ impl Required {
         self.name == name && self.app.is_none_or(|wanted| Some(wanted) == app)
     }
 }
+
+/// A CI result pinned to the commit that reported it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CiCheck {
+    pub head: String,
+    pub name: String,
+    pub bucket: String,
+    pub app: Option<u64>,
+}
+
+/// Shared interpretation of a head's CI evidence. Callers may keep waiting on
+/// `Pending`; the landing gate still decides whether a completed failure is
+/// acceptable for its own policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CiCompletion {
+    Pending,
+    Green,
+    Failed,
+    Unavailable,
+}
+
+/// Decide whether CI is complete and green for exactly `head`.
+pub(super) fn ci_completion(head: &str, checks: &[CiCheck], required: &[Required]) -> CiCompletion {
+    if checks.iter().any(|check| check.head != head) {
+        return CiCompletion::Unavailable;
+    }
+    let selected: Vec<_> = checks
+        .iter()
+        .filter(|check| {
+            required.is_empty()
+                || required
+                    .iter()
+                    .any(|need| need.matches(&check.name, check.app))
+        })
+        .collect();
+    if selected
+        .iter()
+        .any(|check| matches!(check.bucket.as_str(), "fail" | "cancel"))
+    {
+        return CiCompletion::Failed;
+    }
+    if checks.iter().any(|check| check.bucket == "pending") {
+        return CiCompletion::Pending;
+    }
+    if required.iter().any(|need| {
+        !checks
+            .iter()
+            .any(|check| need.matches(&check.name, check.app))
+    }) || checks.is_empty()
+    {
+        return CiCompletion::Pending;
+    }
+    if selected
+        .iter()
+        .any(|check| !matches!(check.bucket.as_str(), "pass" | "skipping"))
+        || (!required.is_empty() && selected.iter().any(|check| check.bucket == "skipping"))
+        || !selected.iter().any(|check| check.bucket == "pass")
+    {
+        return CiCompletion::Unavailable;
+    }
+    CiCompletion::Green
+}
+
 pub(super) struct Policy {
     pub checks: Vec<Required>,
 }

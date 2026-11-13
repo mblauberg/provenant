@@ -1,5 +1,6 @@
 //! Gate evidence: validation, command execution and pull-request CI waiting.
 use super::{LandingError, model::*, ports::Forge};
+use crate::pr::status::{CiCheck, CiCompletion, Required, ci_completion};
 use provenant_cli::domains::{GateKind, PrCiMode, PrCiSettings};
 use std::time::Duration;
 
@@ -357,6 +358,7 @@ fn ci_outstanding(
     forge: &mut dyn Forge,
     pr: &EligiblePr,
     policy: &PrCiSettings,
+    required_names: &[String],
 ) -> Result<bool, LandingError> {
     let wait = match policy.mode {
         PrCiMode::None => return Ok(false),
@@ -370,13 +372,55 @@ fn ci_outstanding(
         return Ok(false);
     }
     let runs = forge.checks(&pr.head)?;
-    let pending = runs.iter().any(|run| {
-        run.result == GateResult::Pending
-            || run
-                .checks
-                .iter()
-                .any(|check| check.result == GateResult::Pending)
-    });
+    if runs.is_empty() {
+        return Ok(policy.mode == PrCiMode::Always);
+    }
+    if runs.iter().any(|run| run.commit != pr.head) {
+        return Ok(true);
+    }
+    let checks: Vec<_> = runs
+        .iter()
+        .flat_map(|run| {
+            if run.checks.is_empty() {
+                vec![CiCheck {
+                    head: run.commit.clone(),
+                    name: String::new(),
+                    bucket: match &run.result {
+                        GateResult::Passed => "pass",
+                        GateResult::Failed => "fail",
+                        GateResult::Pending | GateResult::Missing => "pending",
+                        GateResult::Skipped | GateResult::Neutral => "skipping",
+                    }
+                    .into(),
+                    app: None,
+                }]
+            } else {
+                run.checks
+                    .iter()
+                    .map(|check| CiCheck {
+                        head: run.commit.clone(),
+                        name: check.name.clone(),
+                        bucket: match &check.result {
+                            GateResult::Passed => "pass",
+                            GateResult::Failed => "fail",
+                            GateResult::Pending | GateResult::Missing => "pending",
+                            GateResult::Skipped | GateResult::Neutral => "skipping",
+                        }
+                        .into(),
+                        app: None,
+                    })
+                    .collect()
+            }
+        })
+        .collect();
+    let required: Vec<_> = required_names
+        .iter()
+        .map(|name| Required {
+            name: name.clone(),
+            app: None,
+        })
+        .collect();
+    let pending = ci_completion(&pr.head, &checks, &required) == CiCompletion::Pending;
     // `always` waits for a run to appear; `affected` waits only for runs that exist.
     Ok(
         pending
@@ -392,23 +436,32 @@ pub fn await_pr_ci(
     forge: &mut dyn Forge,
     prs: &[EligiblePr],
     policy: &PrCiSettings,
+    required_names: &[String],
     poll_seconds: u64,
 ) -> Result<(), LandingError> {
     #[allow(clippy::disallowed_methods, reason = "polling boundary")]
-    await_pr_ci_with(forge, prs, policy, poll_seconds, &std::thread::sleep)
+    await_pr_ci_with(
+        forge,
+        prs,
+        policy,
+        required_names,
+        poll_seconds,
+        &std::thread::sleep,
+    )
 }
 
 fn await_pr_ci_with(
     forge: &mut dyn Forge,
     prs: &[EligiblePr],
     policy: &PrCiSettings,
+    required_names: &[String],
     poll_seconds: u64,
     sleep: &dyn Fn(Duration),
 ) -> Result<(), LandingError> {
     let poll = Duration::from_secs(poll_seconds.max(1));
     for pr in prs {
         let mut waited = Duration::ZERO;
-        while ci_outstanding(forge, pr, policy)? {
+        while ci_outstanding(forge, pr, policy, required_names)? {
             if waited >= PR_CI_WAIT_LIMIT {
                 return Err(failed(format!(
                     "pull request {} CI did not finish in time",
@@ -612,7 +665,7 @@ mod tests {
         };
         let slept = Cell::new(0u32);
         // The run never resolves, so the wait ends only at the limit.
-        let result = await_pr_ci_with(&mut forge, &[pr(1, "h1")], &policy, 3600, &|_| {
+        let result = await_pr_ci_with(&mut forge, &[pr(1, "h1")], &policy, &[], 3600, &|_| {
             slept.set(slept.get() + 1)
         });
         if slept.get() > 0 {
@@ -631,6 +684,33 @@ mod tests {
         assert!(waits(PrCiMode::OptIn, Some("full-ci"), true, true) > 0);
         assert!(waits(PrCiMode::Affected, None, false, true) > 0);
         assert_eq!(waits(PrCiMode::Affected, None, false, false), 0);
+    }
+
+    #[test]
+    fn configured_check_that_has_not_reported_keeps_land_waiting() {
+        let mut forge = FakeForge::default();
+        let mut passing_other_check = evidence(GateResult::Passed, None);
+        passing_other_check.commit = "h1".into();
+        passing_other_check.checks[0].name = "optional".into();
+        forge
+            .check_runs
+            .insert("h1".into(), vec![passing_other_check]);
+        let policy = PrCiSettings {
+            mode: PrCiMode::Always,
+            label: None,
+        };
+        let required = vec!["ci-status".to_owned()];
+        let slept = Cell::new(0_u32);
+        let result = await_pr_ci_with(
+            &mut forge,
+            &[pr(1, "h1")],
+            &policy,
+            &required,
+            3600,
+            &|_| slept.set(slept.get() + 1),
+        );
+        assert!(result.is_err());
+        assert!(slept.get() > 0);
     }
 
     #[test]

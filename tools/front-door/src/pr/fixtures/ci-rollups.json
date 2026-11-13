@@ -1,0 +1,48 @@
+{
+  "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "older_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "queued_required": {
+    "check_runs": [{
+      "name": "build",
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "status": "queued",
+      "conclusion": null,
+      "started_at": null,
+      "completed_at": null,
+      "app": {"id": 15368}
+    }],
+    "total_count": 1,
+    "statuses": []
+  },
+  "stale_pass": {
+    "check_runs": [{
+      "name": "build",
+      "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-01-01T00:00:00Z",
+      "completed_at": "2026-01-01T00:01:00Z",
+      "app": {"id": 15368}
+    }],
+    "total_count": 1,
+    "statuses": []
+  },
+  "no_checks": {
+    "check_runs": [],
+    "total_count": 0,
+    "statuses": []
+  },
+  "all_green": {
+    "check_runs": [{
+      "name": "build",
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-01-01T00:00:00Z",
+      "completed_at": "2026-01-01T00:01:00Z",
+      "app": {"id": 15368}
+    }],
+    "total_count": 1,
+    "statuses": []
+  }
+}
