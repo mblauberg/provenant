@@ -71,7 +71,7 @@ impl SourceViewFixture {
         source: &Path,
         head: &str,
     ) -> Result<PathBuf, super::source_tree::SourceViewError> {
-        use provenant_core::{AttemptId, OperationId, RunId, WallTime};
+        use provenant_core::{AttemptId, OperationId, WallTime};
         use std::os::unix::fs::PermissionsExt;
         let n = self.counter.get() + 1;
         self.counter.set(n);
@@ -93,8 +93,7 @@ impl SourceViewFixture {
         )
         .unwrap()
         .request
-        .tasks
-        .remove(0);
+        .task;
         task.head = Some(head.to_owned());
         task.base = Some(head.to_owned());
         let temporary = self.base.join(format!("tmp-{n}"));
@@ -105,7 +104,6 @@ impl SourceViewFixture {
             operation_id: OperationId::parse("source-view").unwrap(),
             task_index: 0,
             lane_depth: 1,
-            run_id: RunId::from_bytes([53; 16]),
             deadline_unix_ms: u64::MAX,
             scratch: self.base.join("scratch"),
             provider_state: self.base.join("provider-state"),

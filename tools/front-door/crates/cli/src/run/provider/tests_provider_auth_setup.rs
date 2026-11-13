@@ -987,7 +987,6 @@ fn prompt_paths(attempt: &Path) -> Result<run::LaunchPaths, Box<dyn std::error::
         operation_id: provenant_core::OperationId::parse("spill-prompt")?,
         task_index: 0,
         lane_depth: 1,
-        run_id: provenant_core::RunId::from_bytes([2; 16]),
         deadline_unix_ms: u64::MAX,
         scratch: attempt.join("scratch"),
         provider_state: attempt.join("provider-state"),

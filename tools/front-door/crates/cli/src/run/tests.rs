@@ -1,5 +1,6 @@
 use super::*;
 use crate::Mode;
+use provenant_records::CanonicalV1;
 
 pub(super) fn reexec_test_in_lane(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
     if !crate::fabric::in_lane() {
@@ -118,19 +119,23 @@ pub(super) fn trace_run(
     parent_attempt: AttemptId,
     created_at: WallTime,
 ) -> Result<run::PreparedRun, Box<dyn std::error::Error>> {
-    let task_id = TaskId::from_bytes([n; 16]);
+    let attempt_id = AttemptId::from_bytes([n + 2; 16]);
     Ok(run::PreparedRun {
-        run_id: RunId::from_bytes([n + 1; 16]),
+        attempt_id,
         operation_id: OperationId::parse(&format!("trace-{n}"))?,
         created_at,
         request: run::CanonicalRequest {
             extra: Default::default(),
-            child_attempt_id_version: None,
             chair: None,
             fresh_continuation: None,
             schema_version: 1,
-            tasks: vec![run::TaskRequest {
-                context: None,
+            task: run::TaskRequest {
+                context: Some(provenant_records::run::WorkContext {
+                    graph_id: Some(format!("lane-{attempt_id}")),
+                    node_id: Some("node".into()),
+                    attempt: Some(1),
+                    ..Default::default()
+                }),
                 extra: Default::default(),
                 build_heavy: false,
                 title: None,
@@ -138,7 +143,6 @@ pub(super) fn trace_run(
                 head: None,
                 source_head: None,
                 base_ref: None,
-                task_id,
                 prompt_digest: CanonicalV1::file_digest(b"p"),
                 route: run::RequestedRoute::Model {
                     extra: Default::default(),
@@ -154,17 +158,12 @@ pub(super) fn trace_run(
                 delivery_id: None,
                 deliver: None,
                 access: Default::default(),
-            }],
-            concurrency: 1,
+            },
             parent: None,
             lane_depth: Some(1),
             parent_attempt: Some(parent_attempt),
         },
-        attempts: vec![run::NewAttempt {
-            task_id,
-            attempt_id: AttemptId::from_bytes([n + 2; 16]),
-            prompt: "p".into(),
-        }],
+        prompt: "p".into(),
     })
 }
 
@@ -190,7 +189,6 @@ pub(super) fn clean_exit() -> ExitObservation {
     ExitObservation {
         publication: PublicationState::Durable,
         scope: Scope {
-            run: RunId::from_bytes([1; 16]),
             attempt: AttemptId::from_bytes([2; 16]),
             generation: 1,
         },
@@ -257,7 +255,6 @@ fn opencode_decode_holder_context(
         },
         project_id: provenant_core::ProjectId::from_bytes([1; 16]),
         actor_id: ActorId::from_bytes([2; 16]),
-        run_id: RunId::from_bytes([3; 16]),
         attempt_id: AttemptId::from_bytes([4; 16]),
         host_delivery: None,
         launch: None,
@@ -309,7 +306,6 @@ fn invalid_sealed_root_never_writes_to_registry_root() -> Result<(), Box<dyn std
         },
         project_id: provenant_core::ProjectId::from_bytes([1; 16]),
         actor_id: ActorId::from_bytes([2; 16]),
-        run_id: RunId::from_bytes([3; 16]),
         attempt_id: AttemptId::from_bytes([4; 16]),
         host_delivery: None,
         launch: None,
@@ -549,13 +545,17 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
     let submission = |base: &str| Submission {
         chair: chair.clone(),
         operation_id: OperationId::parse("context-ref-replay").unwrap(),
-        tasks: vec![Submitted {
+        task: Submitted {
             attempt: Default::default(),
             require_skill_location: true,
             settlement_retry_limit: None,
-            context: None,
+            context: Some(provenant_records::run::WorkContext {
+                graph_id: Some("context-ref".into()),
+                node_id: Some("node".into()),
+                attempt: Some(1),
+                ..Default::default()
+            }),
             title: None,
-            task_id: TaskId::from_bytes([3; 16]),
             prompt: "review".into(),
             base: Some(base.into()),
             pinned_base: None,
@@ -572,8 +572,7 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
             deliver: None,
             worktree: None,
             access: Default::default(),
-        }],
-        concurrency: Some(1),
+        },
         knobs: vec![],
     };
     // The fake adapter refuses preparation after admission. Keep the durable
@@ -588,11 +587,16 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
         .operation(&OperationId::parse("context-ref-replay")?, &call)?
         .ok_or("refused launch lost its admitted operation")?;
     assert_eq!(operation.state, run::OperationState::Terminal);
-    let first = session.store.run(operation.run_id, &call)?;
-    let graph =
-        launch::graph_for_run(&session, first.run_id, &call).map_err(|failure| failure.message)?;
+    let first = session
+        .store
+        .operation_attempt(&OperationId::parse("context-ref-replay")?, &call)?;
+    let graph = session.store.work_key(first, &call)?.graph().to_owned();
+    assert_eq!(graph, "context-ref");
     assert!(
-        session.store.request(first.run_id, &call)?.tasks[0]
+        session
+            .store
+            .request(first, &call)?
+            .task
             .profile
             .require_skill_location
     );
@@ -605,7 +609,7 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
             binding.request_digest,
             session
                 .store
-                .request(first.run_id, &call)
+                .request(first, &call)
                 .unwrap()
                 .digest()
                 .unwrap()
@@ -617,16 +621,14 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
         roots.state.as_path().join("fabric/host.sqlite3"),
         roots.state.as_path().join("fabric/interrupted.sqlite3"),
     )?;
-    let mut forged = session.store.request(first.run_id, &call)?;
-    forged.concurrency = 2;
+    let mut forged = session.store.request(first, &call)?;
+    forged.lane_depth = Some(2);
     with_chair_index(&roots, &call, |index, c| {
         index.submit(session.context.project_id, &graph, &forged, c)
     })
     .map_err(|f| f.message)?;
     assert_eq!(
-        launch(&session, first.run_id, &edge, &call)
-            .unwrap_err()
-            .status,
+        launch(&session, first, &edge, &call).unwrap_err().status,
         Status::Refused
     );
     std::fs::rename(
@@ -643,7 +645,7 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
         actor: ActorId::from_bytes([7; 16]),
     });
     let (replayed, _) = submit(&session, &edge, replay, &call).map_err(|f| f.message)?;
-    assert_eq!(replayed.run_id, first.run_id);
+    assert_eq!(replayed.attempt_id, first);
     let stopped = CancelToken::new();
     stopped.cancel();
     let cancelled = run::Request {
@@ -671,11 +673,9 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
         }
         let (replayed, _) =
             submit(&session, &edge, submission("context-base"), &call).map_err(|f| f.message)?;
-        assert_eq!(replayed.run_id, first.run_id);
+        assert_eq!(replayed.attempt_id, first);
         assert_eq!(
-            session.store.request(first.run_id, &call)?.tasks[0]
-                .base
-                .as_deref(),
+            session.store.request(first, &call)?.task.base.as_deref(),
             Some(original_base.as_str())
         );
     }
@@ -737,7 +737,6 @@ fn reconcile_reports_orphan_reservation_issues() -> Result<(), Box<dyn std::erro
             std::fs::remove_file(&path)?;
             let directory = provenant_os::fs::Directory::open_anchor(&slot)?;
             let scope = Scope {
-                run: RunId::from_bytes([6; 16]),
                 attempt: AttemptId::from_bytes([7; 16]),
                 generation: 1,
             };
@@ -798,7 +797,7 @@ fn keyed(
     use provenant_fabric_runtime::graph::{
         FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
     };
-    prepared.request.tasks[0].context = Some(provenant_records::run::WorkContext {
+    prepared.request.task.context = Some(provenant_records::run::WorkContext {
         graph_id: Some(graph.into()),
         node_id: Some(node.into()),
         attempt: Some(1),
@@ -807,7 +806,7 @@ fn keyed(
     let reference = format!(
         "{}/{}",
         provenant_core::HostId::from_bytes([1; 16]),
-        prepared.attempts[0].attempt_id
+        prepared.attempt_id
     );
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -872,7 +871,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                 let mut input = trace_run(30, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
                 input.request.parent_attempt = None;
                 input.request.lane_depth = None;
-                input.request.tasks[0].writer = Some(run::WriterRequest {
+                input.request.task.writer = Some(run::WriterRequest {
                     extra: Default::default(),
                     project: fixture.project.clone(),
                     worktree: fixture.tree.clone(),
@@ -884,14 +883,13 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     ("fence", "writer"),
                 )?;
                 session.store.create(&input, &call)?;
-                let id = input.attempts[0].attempt_id;
+                let id = input.attempt_id;
                 let record = session.store.mark_starting_for_fixture(
                     id,
                     &run::RouteRecord::default(),
                     &call,
                 )?;
                 let scope = Scope {
-                    run: input.run_id,
                     attempt: id,
                     generation: record.generation,
                 };
@@ -1031,11 +1029,10 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                         )?
                         .require_durable()?;
                     drop(recovery);
-                    let found = session.store.reconcile_for_fixture(
-                        input.run_id,
-                        &Registry::default(),
-                        &call,
-                    )?;
+                    let found =
+                        session
+                            .store
+                            .reconcile_for_fixture(id, &Registry::default(), &call)?;
                     let record = session.store.record(id, &call)?;
                     // Settlement appends the work-location note to the blocker. This
                     // fixture's private Git holds no refs, so the note says the files
@@ -1122,18 +1119,15 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                         std::fs::read(attempt_path.join("tmp/candidate-0/git-common/evidence"))?,
                         b"private objects"
                     );
-                    session.store.drain_reactions(
-                        input.run_id,
-                        &clock,
-                        &cancel,
-                        &mut |receipt, _| {
+                    session
+                        .store
+                        .drain_reactions(id, &clock, &cancel, &mut |receipt, _| {
                             receipt.graph_done = true;
                             receipt.notice_done = true;
                             receipt.log_done = true;
                             receipt.ledger_done = true;
                             Ok(())
-                        },
-                    )?;
+                        })?;
                     let reported = reconcile(parse(&["reconcile", "fence", "--json"])?, edge);
                     assert_eq!(reported.result.status, Status::Ok, "{}", reported.human);
                     assert!(
@@ -1204,7 +1198,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                 assert!(session.store.writer_fences()?.is_empty());
                 session
                     .store
-                    .reconcile_for_fixture(input.run_id, &Registry::default(), &call)?;
+                    .reconcile_for_fixture(id, &Registry::default(), &call)?;
                 assert_eq!(
                     session
                         .store

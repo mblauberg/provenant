@@ -400,7 +400,6 @@ fn quota_reason_uses_safe_fact_without_provider_message() {
     let exit = ExitObservation {
         publication: PublicationState::Durable,
         scope: Scope {
-            run: RunId::from_bytes([1; 16]),
             attempt: AttemptId::from_bytes([2; 16]),
             generation: 1,
         },
@@ -703,7 +702,6 @@ fn capacity_store_failure_does_not_change_settlement() -> Result<(), Box<dyn std
         },
         project_id: provenant_core::ProjectId::from_bytes([1; 16]),
         actor_id: ActorId::from_bytes([2; 16]),
-        run_id: RunId::from_bytes([3; 16]),
         attempt_id: AttemptId::from_bytes([4; 16]),
         host_delivery: None,
         launch: None,

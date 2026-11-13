@@ -18,7 +18,6 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
             head: None,
             source_head: None,
             base_ref: None,
-            task_id: provenant_core::TaskId::from_bytes([3; 16]),
             profile: Default::default(),
             prompt_digest: provenant_records::CanonicalV1::file_digest(full.as_bytes()),
             route: run::RequestedRoute::Model {
@@ -380,7 +379,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
     adapter_name: &'static str,
     account_key: &'static str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_core::{AttemptId, CancelToken, Digest, OperationId, RunId, TaskId};
+    use provenant_core::{AttemptId, CancelToken, Digest, OperationId};
     use provenant_os::exec::SystemExecutor;
     use provenant_providers::{
         Adapter, Continuation, ExitObservation, LaunchSpec, PrepareInput, ProviderError,
@@ -591,7 +590,6 @@ fn registry_provider_resolves_prepares_and_reports_quota(
     let executable = assets.join(adapter_name);
     std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf x >> \"$HOME/probe-count\"; fi\nprintf 'fixture 1.0\\n'\n")?;
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
-    let run_id = RunId::from_bytes([2; 16]);
     let attempt_id = AttemptId::from_bytes([1; 16]);
     let attempt = state.join(format!("attempts/{attempt_id}"));
     let paths = run::LaunchPaths {
@@ -599,7 +597,6 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         operation_id: OperationId::parse("registry-fixture")?,
         task_index: 0,
         lane_depth: 1,
-        run_id,
         deadline_unix_ms: u64::MAX,
         scratch: attempt.join("scratch"),
         provider_state: attempt.join("provider-state"),
@@ -652,7 +649,6 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         head: None,
         source_head: None,
         base_ref: None,
-        task_id: TaskId::from_bytes([3; 16]),
         profile: Default::default(),
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
         route: run::RequestedRoute::Model {
@@ -714,7 +710,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
 #[test]
 fn opencode_stale_auth_prepares_with_an_unverified_warning()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId, RunId, TaskId};
+    use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId};
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
     use std::{
         os::unix::fs::{DirBuilderExt, PermissionsExt},
@@ -816,7 +812,6 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     let readiness_path = readiness_dir.join("opencode.json");
     std::fs::write(&readiness_path, serde_json::to_vec(&readiness)?)?;
     std::fs::set_permissions(&readiness_path, std::fs::Permissions::from_mode(0o600))?;
-    let run_id = RunId::from_bytes([2; 16]);
     let attempt_id = AttemptId::from_bytes([1; 16]);
     let attempt = state.join(format!("attempts/{attempt_id}"));
     let paths = run::LaunchPaths {
@@ -824,7 +819,6 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
         operation_id: OperationId::parse("opencode-auth-fixture")?,
         task_index: 0,
         lane_depth: 1,
-        run_id,
         deadline_unix_ms: u64::MAX,
         scratch: attempt.join("scratch"),
         provider_state: attempt.join("provider-state"),
@@ -847,7 +841,6 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
         head: None,
         source_head: None,
         base_ref: None,
-        task_id: TaskId::from_bytes([3; 16]),
         profile: Default::default(),
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
         route: run::RequestedRoute::Model {
@@ -956,7 +949,7 @@ fn prepare_over_two_accounts(
     spent: &[&str],
     pin: Option<&str>,
 ) -> Result<Result<run::PreparedLaunch, PrepareError>, Box<dyn std::error::Error>> {
-    use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId, RunId, TaskId};
+    use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId};
     use provenant_os::exec::SystemExecutor;
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     let temp = tempfile::tempdir()?;
@@ -1036,7 +1029,6 @@ fn prepare_over_two_accounts(
     std::fs::create_dir_all(executable.parent().ok_or("provider bin")?)?;
     std::fs::write(&executable, b"#!/bin/sh\nprintf 'opencode 2.2.0\\n'\n")?;
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
-    let run_id = RunId::from_bytes([2; 16]);
     let attempt_id = AttemptId::from_bytes([1; 16]);
     let attempt = state.join(format!("attempts/{attempt_id}"));
     let paths = run::LaunchPaths {
@@ -1044,7 +1036,6 @@ fn prepare_over_two_accounts(
         operation_id: OperationId::parse("exhausted-walk-fixture")?,
         task_index: 0,
         lane_depth: 1,
-        run_id,
         deadline_unix_ms: u64::MAX,
         scratch: attempt.join("scratch"),
         provider_state: attempt.join("provider-state"),
@@ -1067,7 +1058,6 @@ fn prepare_over_two_accounts(
         head: None,
         source_head: None,
         base_ref: None,
-        task_id: TaskId::from_bytes([3; 16]),
         profile: Default::default(),
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
         route: run::RequestedRoute::Model {

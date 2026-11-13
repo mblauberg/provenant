@@ -1,4 +1,5 @@
 use super::*;
+use provenant_records::CanonicalV1;
 
 #[test]
 fn capacity_guardian_context_records_and_reports_config_failure()
@@ -16,7 +17,6 @@ fn capacity_guardian_context_records_and_reports_config_failure()
         },
         project_id: provenant_core::ProjectId::from_bytes([1; 16]),
         actor_id: ActorId::from_bytes([2; 16]),
-        run_id: RunId::from_bytes([3; 16]),
         attempt_id: AttemptId::from_bytes([4; 16]),
         host_delivery: None,
         launch: None,
@@ -284,8 +284,8 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
     let now = WallTime::from_micros(100)?;
     let mut record: run::AttemptRecord = serde_json::from_value(json!({
         "schema_version": 1, "attempt_id": AttemptId::from_bytes([1; 16]),
-        "run_id": RunId::from_bytes([2; 16]), "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
-        "task_id": TaskId::from_bytes([4; 16]), "operation_id": "receipt-test",
+        "key": {"project": provenant_core::ProjectId::from_bytes([3; 16]), "graph": "receipt", "node": "test", "attempt": 1},
+        "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
         "attempt_number": 1, "revision": 1, "generation": 0,
         "requested_route": {"kind":"model","provider":"codex","model":"codex/gpt-6.1-sol"},
         "applied_route": {"provider":"codex","model":"codex/gpt-6.1-sol","effort":"high","account_label":null},
@@ -300,8 +300,8 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
     assert_eq!(
         data["receipt"],
         format!(
-            "Reviewer: codex/gpt-6.1-sol@high (openai; resolved from explicit), run {}/{}/{}",
-            record.run_id, record.task_id, record.attempt_id
+            "Reviewer: codex/gpt-6.1-sol@high (openai; resolved from explicit), attempt {} {}",
+            record.key, record.attempt_id
         )
     );
     assert!(

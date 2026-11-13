@@ -4337,7 +4337,6 @@ fn argv_spill_refusal_preserves_setting_and_source() -> Result<(), Box<dyn std::
         operation_id: provenant_core::OperationId::parse("spill-limit")?,
         task_index: 0,
         lane_depth: 1,
-        run_id: provenant_core::RunId::from_bytes([2; 16]),
         deadline_unix_ms: u64::MAX,
         scratch: root.join("scratch"),
         provider_state: root.join("provider-state"),

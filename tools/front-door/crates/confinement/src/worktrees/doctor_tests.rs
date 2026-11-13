@@ -35,7 +35,6 @@ fn doctor_reports_five_worktree_states_and_one_repair_without_mutation()
                 lease = Some(provenant_supervisor::fixture::acquire_writer(
                     slot,
                     provenant_supervisor::custody::Scope {
-                        run: provenant_core::RunId::from_bytes([41; 16]),
                         attempt: holder,
                         generation: 1,
                     },
@@ -211,7 +210,6 @@ fn doctor_unknown_preserves_census_and_custody_scope_and_evidence() -> Result<()
     // Custody uncertainty takes priority over an incomplete advisory census.
     let slot = writer_directory(context.project_state, &path)?;
     let scope = provenant_supervisor::custody::Scope {
-        run: provenant_core::RunId::from_bytes([51; 16]),
         attempt: AttemptId::from_bytes([52; 16]),
         generation: 1,
     };
@@ -303,7 +301,6 @@ fn a_read_only_probe_cannot_make_concurrent_admission_writer_busy() -> Result<()
         let result = provenant_supervisor::fixture::acquire_writer(
             writer_slot,
             provenant_supervisor::custody::Scope {
-                run: provenant_core::RunId::from_bytes([91; 16]),
                 attempt: AttemptId::from_bytes([92; 16]),
                 generation: 1,
             },
@@ -398,7 +395,6 @@ fn recovery_wait_releases_the_observer_gate_while_a_writer_is_held() -> Result<(
     ])?;
     let slot = writer_directory(context.project_state, &path)?;
     let scope = custody::Scope {
-        run: provenant_core::RunId::from_bytes([101; 16]),
         attempt: AttemptId::from_bytes([102; 16]),
         generation: 1,
     };

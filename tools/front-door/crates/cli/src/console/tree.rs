@@ -232,9 +232,9 @@ pub(super) fn read_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{Digest, OperationId, RootInputs, RunId, TaskId};
+    use provenant_core::{Digest, OperationId, RootInputs};
     use provenant_records::CanonicalV1;
-    use provenant_run::{CanonicalRequest, NewAttempt, PreparedRun};
+    use provenant_run::{CanonicalRequest, PreparedRun};
 
     #[test]
     fn old_child_stores_are_not_read() -> Result<(), Box<dyn std::error::Error>> {
@@ -284,32 +284,33 @@ mod tests {
             read_prompts: false,
         };
         let store = RunStore::open(&context, &call)?;
-        let task = TaskId::from_bytes([3; 16]);
         let mut request: CanonicalRequest = serde_json::from_value(
-            json!({"schema_version":1,"tasks":[{"task_id":task,"prompt_digest":CanonicalV1::file_digest(b"body"),"route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":"high"},"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}],"concurrency":1,"parent":null,"lane_depth":1}),
+            json!({"schema_version":1,"task":{"prompt_digest":CanonicalV1::file_digest(b"body"),"route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":"high"},"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null},"parent":null,"lane_depth":1}),
         )?;
-        let prepared = |run: u8,
-                        attempt: u8,
-                        request: CanonicalRequest|
+        // A launch names its own work key; a continuation takes its parent's.
+        let prepared = |attempt: u8,
+                        mut request: CanonicalRequest|
          -> Result<PreparedRun, Box<dyn std::error::Error>> {
+            request.task.context = Some(provenant_records::run::WorkContext {
+                graph_id: Some(format!("lane-{attempt}")),
+                node_id: Some("node".into()),
+                attempt: Some(1),
+                ..Default::default()
+            });
             Ok(PreparedRun {
-                run_id: RunId::from_bytes([run; 16]),
-                operation_id: OperationId::parse(&format!("tree-{run}-{attempt}"))?,
+                attempt_id: AttemptId::from_bytes([attempt; 16]),
+                operation_id: OperationId::parse(&format!("tree-{attempt}"))?,
                 created_at: clock.wall_now()?,
                 request,
-                attempts: vec![NewAttempt {
-                    task_id: task,
-                    attempt_id: AttemptId::from_bytes([attempt; 16]),
-                    prompt: "body".into(),
-                }],
+                prompt: "body".into(),
             })
         };
-        store.create(&prepared(1, 1, request.clone())?, &call)?;
+        store.create(&prepared(1, request.clone())?, &call)?;
         request.parent_attempt = Some(AttemptId::from_bytes([1; 16]));
-        store.create(&prepared(2, 2, request.clone())?, &call)?;
+        store.create(&prepared(2, request.clone())?, &call)?;
         request.parent = Some(AttemptId::from_bytes([2; 16]));
         request.parent_attempt = Some(AttemptId::from_bytes([9; 16]));
-        store.create(&prepared(3, 3, request.clone())?, &call)?;
+        store.create(&prepared(3, request.clone())?, &call)?;
         let other_project = ProjectId::from_bytes([7; 16]);
         let other_store = RunStore::open(
             &ExecutionContext {
@@ -320,7 +321,7 @@ mod tests {
         )?;
         request.parent = None;
         request.parent_attempt = None;
-        other_store.create(&prepared(4, 4, request)?, &call)?;
+        other_store.create(&prepared(4, request)?, &call)?;
         // Simulate a pre-fix Codex row containing only a running session total.
         let mut legacy = store.record(AttemptId::from_bytes([1; 16]), &call)?;
         legacy.applied_route = Some(provenant_records::run::RouteRecord {

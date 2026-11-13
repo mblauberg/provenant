@@ -64,19 +64,17 @@ fn refused_provider_continuation_keeps_a_durable_attempt() -> Result<(), Box<dyn
     let prior = trace_run(10, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
     store.create(&prior, &call)?;
     store.start(
-        prior.run_id,
+        prior.attempt_id,
         &Refusing { prior: None },
         &|_, _| unreachable!(),
         &call,
     )?;
-    let prior_id = prior.attempts[0].attempt_id;
+    let prior_id = prior.attempt_id;
     let mut resumed = trace_run(20, prior_id, clock.wall_now()?)?;
     resumed.request.parent = Some(prior_id);
-    resumed.request.tasks[0].task_id = prior.attempts[0].task_id;
-    resumed.attempts[0].task_id = prior.attempts[0].task_id;
     store.create(&resumed, &call)?;
     let started = store.start(
-        resumed.run_id,
+        resumed.attempt_id,
         &Refusing {
             prior: Some(prior_id),
         },
@@ -86,13 +84,17 @@ fn refused_provider_continuation_keeps_a_durable_attempt() -> Result<(), Box<dyn
     let [run::Started::Refused { attempt, .. }] = started.as_slice() else {
         return Err("continuation must be refused".into());
     };
-    assert_eq!(*attempt, resumed.attempts[0].attempt_id);
+    assert_eq!(*attempt, resumed.attempt_id);
     // Reopen the store: every ID printed by the refusal must remain
     // addressable after the command exits.
     drop(store);
     let reopened = trace_store(&temp, &call)?;
     let record = run::Service::new(&reopened).status(*attempt, &call)?;
-    assert_eq!(record.run_id, resumed.run_id);
+    // A continuation is the next attempt of its parent's work node.
+    let prior_key = reopened.work_key(prior_id, &call)?;
+    assert_eq!(record.key.graph(), prior_key.graph());
+    assert_eq!(record.key.node(), prior_key.node());
+    assert_eq!(record.key.attempt(), prior_key.attempt() + 1);
     assert!(matches!(
         record.state,
         run::AttemptState::Terminal { outcome: run::Outcome::Rejected, reason: Some(ref reason), .. }

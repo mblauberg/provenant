@@ -2,9 +2,7 @@
 //! cargo run --release -p provenant-cli --example supervisor_cpu -- idle|churn
 #![allow(clippy::disallowed_methods)]
 
-use provenant_core::{
-    ActorId, AttemptId, CancelToken, Clock, Digest, RootInputs, RunId, WaitBudget,
-};
+use provenant_core::{ActorId, AttemptId, CancelToken, Clock, Digest, RootInputs, WaitBudget};
 use provenant_os::{
     clock::SystemClock,
     fs::{Directory, LockMode},
@@ -92,7 +90,6 @@ fn capture(root: &Path, churn: bool) -> Result {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let scope = Scope {
-        run: RunId::from_bytes([1; 16]),
         attempt: AttemptId::from_bytes([2; 16]),
         generation: 1,
     };
@@ -105,7 +102,6 @@ fn capture(root: &Path, churn: bool) -> Result {
         },
         project_id: ctx.identity.project,
         actor_id: ActorId::from_bytes([3; 16]),
-        run_id: scope.run,
         attempt_id: scope.attempt,
         host_delivery: None,
         sealed: None,

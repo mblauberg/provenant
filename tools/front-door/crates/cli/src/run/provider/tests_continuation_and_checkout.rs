@@ -13,7 +13,7 @@ fn writer_continuation_with_unchanged_head_reports_dirty_paths()
 
 fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::{UtilityBudget, UtilityRuntime, worktrees};
-    use provenant_core::{CancelToken, Clock, Digest, TaskId, WaitBudget};
+    use provenant_core::{CancelToken, Clock, Digest, WaitBudget};
     use provenant_os::clock::SystemClock;
     use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
     use std::{
@@ -115,7 +115,6 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         head: Some(predecessor_head.clone()),
         source_head: Some(source_head.clone()),
         base_ref: None,
-        task_id: TaskId::from_bytes([22; 16]),
         profile: Default::default(),
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
         route: run::RequestedRoute::Model {
@@ -432,7 +431,7 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
 #[test]
 fn credential_authority_never_follows_links_below_the_host_root()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_core::{AttemptId, OperationId, RunId};
+    use provenant_core::{AttemptId, OperationId};
 
     let temp = tempfile::tempdir()?;
     let base = temp.path().canonicalize()?;
@@ -448,7 +447,6 @@ fn credential_authority_never_follows_links_below_the_host_root()
         operation_id: OperationId::parse("fixture")?,
         task_index: 0,
         lane_depth: 2,
-        run_id: RunId::from_bytes([2; 16]),
         deadline_unix_ms: u64::MAX,
         scratch: attempt.join("scratch"),
         provider_state: attempt.join("provider-state"),
@@ -489,7 +487,7 @@ fn credential_authority_never_follows_links_below_the_host_root()
 #[test]
 fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result<(), Box<dyn std::error::Error>>
 {
-    use provenant_core::{AttemptId, Digest, RunId, TaskId};
+    use provenant_core::{AttemptId, Digest};
     use provenant_records::{
         FileDigest, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness,
     };
@@ -518,9 +516,10 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
         };
         let mut prior: run::AttemptRecord = serde_json::from_value(serde_json::json!({
             "schema_version": 1,
-            "attempt_id": AttemptId::from_bytes([1; 16]), "run_id": RunId::from_bytes([2; 16]),
-            "project_id": ProjectId::from_bytes([3; 16]), "task_id": TaskId::from_bytes([4; 16]),
-            "operation_id": "fixture", "attempt_number": 1, "revision": 1, "generation": 0,
+            "attempt_id": AttemptId::from_bytes([1; 16]),
+            "key": {"project": ProjectId::from_bytes([3; 16]), "graph": "fixture", "node": "node", "attempt": 1},
+            "project_id": ProjectId::from_bytes([3; 16]),
+            "attempt_number": 1, "revision": 1, "generation": 0,
             "requested_route": {"kind": "model", "provider": adapter, "model": "fixture-model"},
             "applied_route": {"provider": adapter, "model": format!("{adapter}/fixture-model"), "account_key": "local"},
             "authority_digest": Digest::from_bytes([0; 32]), "session": "fixture-session",
@@ -561,19 +560,16 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
             };
             let store = run::RunStore::open(&context, &call)?;
             let request = run::PreparedRun {
-                run_id: prior.run_id,
-                operation_id: prior.operation_id.clone(),
+                attempt_id: prior.attempt_id,
+                operation_id: provenant_core::OperationId::parse("fixture")?,
                 created_at: WallTime::from_micros(100)?,
-                attempts: vec![run::NewAttempt {
-                    attempt_id: prior.attempt_id,
-                    task_id: prior.task_id,
-                    prompt: String::new(),
-                }],
+                prompt: String::new(),
                 request: serde_json::from_value(serde_json::json!({
-                    "schema_version": 1, "concurrency": 1, "parent": null,
-                    "tasks": [{ "task_id": prior.task_id, "prompt_digest": provenant_records::CanonicalV1::file_digest(b""),
+                    "schema_version": 1, "parent": null,
+                    "task": { "context": {"graph_id": prior.key.graph(), "node_id": prior.key.node(), "attempt": prior.key.attempt()},
+                        "prompt_digest": provenant_records::CanonicalV1::file_digest(b""),
                         "route": prior.requested_route, "authority_digest": prior.authority_digest,
-                        "provider_timeout_seconds": 20, "delivery_id": null }]
+                        "provider_timeout_seconds": 20, "delivery_id": null }
                 }))?,
             };
             store.create(&request, &call)?;
