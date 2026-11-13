@@ -946,7 +946,7 @@ mod tests {
         assert_eq!(
             decision,
             SettlementFallback::Fail {
-                code: Some("auth_required".into()),
+                code: Some("auth_required"),
                 message: Some("The lane requires authentication.".into())
             }
         );

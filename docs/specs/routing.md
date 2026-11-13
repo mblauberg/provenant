@@ -134,13 +134,15 @@ roles are `writer`, `review`, `synthesis`, `task` and `plan`; a node takes
 `map[role]` or keeps its template default. An unknown tier or role is a usage
 error that lists the valid values. `run` has no `--tier` (`land --tier` is
 unchanged). Template defaults are data: `implement` runs as junior only for a
-bounded brief, a plan-node output or a `batch` slice, and every other brief
-keeps the template's tier. Tier changes at run time belong to the retry and
+bounded brief, a plan-node output or a `batch` slice. An unplanned
+implementation gets a senior sizing plan before its junior writer; other
+templates keep their tiers. Tier changes at run time belong to the retry and
 depletion rules, not to launch.
 - Why: a caller should choose cost per role without editing a template, and a
   typo must name the valid choices instead of launching on the wrong tier.
 - Test: `src/fabric/interface.rs::a_role_map_sets_each_node_to_its_role_tier_or_keeps_the_default`;
-  `src/fabric/interface.rs::an_unknown_route_role_is_refused_listing_the_valid_roles`
+  `src/fabric/interface.rs::an_unknown_route_role_is_refused_listing_the_valid_roles`;
+  `crates/fabric-runtime/src/graph/implement_invariants.rs::implementation_is_planned_unless_its_brief_is_already_bounded`
 - Owner: `src/fabric/interface.rs`, `crates/fabric-runtime/assets/templates/`
 
 ## Nested lanes
