@@ -853,13 +853,6 @@ mod tests {
         );
     }
 
-    fn write_config(roots: &Roots, text: &str) -> std::path::PathBuf {
-        std::fs::create_dir_all(roots.state.as_path()).unwrap();
-        let path = roots.state.as_path().join("config.toml");
-        std::fs::write(&path, text).unwrap();
-        path
-    }
-
     #[test]
     fn calibration_entry_is_created_by_one_patch() {
         let temp = tempfile::tempdir().unwrap();

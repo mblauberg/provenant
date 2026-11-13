@@ -3028,10 +3028,10 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
     assert_eq!(value["error"]["code"], "STATE_FORMAT_BREAK", "{value}");
     assert!(snapshot(state)? == before);
 
-    // --yes is not an acknowledgement either.
+    // The CLI does not accept the bootstrap script's --yes as an acknowledgement.
     let yes = install(&["--yes"])?;
     let value: serde_json::Value = serde_json::from_slice(&yes.stdout.bytes)?;
-    assert_eq!(value["error"]["code"], "STATE_FORMAT_BREAK", "{value}");
+    assert_eq!(value["error"]["code"], "INVALID", "{value}");
     assert!(snapshot(state)? == before);
 
     // A live lane blocks even an acknowledged reset.
