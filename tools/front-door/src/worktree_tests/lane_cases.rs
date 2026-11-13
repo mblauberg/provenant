@@ -220,13 +220,11 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         if !writer {
             task.writer = None;
         }
-        // Publishing defaults on (`lanes.publish`), so the
-        // publishing rows request it the way dispatch resolves the knob.
-        if publishing {
-            task.profile
-                .knobs
-                .insert("lanes.publish".into(), serde_json::json!(true));
-        }
+        // Select publishing explicitly; missing host configuration does not
+        // disable it because the login may live in a relocated store or keychain.
+        task.profile
+            .knobs
+            .insert("lanes.publish".into(), serde_json::json!(publishing));
         // Catalogue models only: production refuses unverified exact IDs.
         task.route = provenant_run::RequestedRoute::Model {
             extra: Default::default(),
