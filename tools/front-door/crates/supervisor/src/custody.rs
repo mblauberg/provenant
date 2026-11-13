@@ -1,7 +1,7 @@
 //! Guardian channels and persistent writer reservations. A PID is never a handle.
 use crate::census::{ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver};
 use crate::machine::StopReason;
-use provenant_core::{ActorId, AttemptId, CancelToken, Clock, Digest, GitOid, RunId, WaitBudget};
+use provenant_core::{ActorId, AttemptId, CancelToken, Clock, Digest, GitOid, WaitBudget};
 use provenant_os::{
     exec::{CapturedStream, Termination},
     fs::{Directory, FsError, LockGuard, LockMode, Metadata, Publication, PublishMode},
@@ -18,7 +18,6 @@ pub(crate) const RECORD_LIMIT: u64 = 1024 * 1024;
 pub(crate) const EXIT_LIMIT: u64 = 16 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Scope {
-    pub run: RunId,
     pub attempt: AttemptId,
     pub generation: u64,
 }
@@ -30,8 +29,8 @@ pub enum CustodyError {
     ObservationGate(String),
     #[error("writer reservation requires recovery")]
     Fenced,
-    #[error("writer import retained for run {run}, attempt {attempt}")]
-    ImportRetained { run: RunId, attempt: AttemptId },
+    #[error("writer import retained for attempt {attempt}")]
+    ImportRetained { attempt: AttemptId },
     #[error("custody identity is unknown")]
     UnknownIdentity,
     #[error("record is invalid or belongs to another generation")]
@@ -507,15 +506,13 @@ pub(crate) fn acquire_writer_with_observer(
             let settled: SettlementJournal =
                 read_record(&directory, "settlement.json", RECORD_LIMIT)
                     .map_err(|_| CustodyError::Fenced)?;
-            // A settled owner no longer holds this path, so a new run may bind
-            // a worktree recreated there. Only the attempt that settled may be
-            // readmitted, and a run keeps the worktree it held.
+            // A settled owner no longer holds this path, so a new attempt may
+            // bind a worktree recreated there. Only the attempt that settled
+            // may be readmitted, and it keeps the worktree it held.
             let same_custody = previous.binding.same_custody(&binding.0);
             if previous.schema_version != 1
                 || settled.schema_version != 1
-                || (settled.scope.run != previous.scope.run
-                    || settled.scope.generation < previous.scope.generation)
-                || (scope.run == previous.scope.run && !same_custody)
+                || settled.scope.generation < previous.scope.generation
                 || (scope.generation > 1
                     && (scope.attempt != settled.scope.attempt || !same_custody))
             {
@@ -1279,7 +1276,6 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
                 // so a later generation beside it can only be forged.
                 Ok(previous)
                     if !handle.held
-                        && previous.scope.run == request.scope.run
                         && previous.scope.attempt == request.scope.attempt
                         && previous.scope.generation > request.scope.generation =>
                 {
@@ -1880,7 +1876,7 @@ pub fn acquire_recovery(
     validate_anchor(&directory, &reservation)?;
     // Callers may inspect a retained generation before deciding whether to
     // settle it; recovery evidence belongs to this run and attempt.
-    if reservation.scope.run != scope.run || reservation.scope.attempt != scope.attempt {
+    if reservation.scope.attempt != scope.attempt {
         return Err(CustodyError::Fenced);
     }
     Ok(Recovery {

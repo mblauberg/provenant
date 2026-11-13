@@ -1,7 +1,7 @@
 // Integration tests use real time to bound process and filesystem coordination.
 #![allow(clippy::disallowed_methods)]
 
-use provenant_core::{AttemptId, CancelToken, RunId, WaitBudget};
+use provenant_core::{AttemptId, CancelToken, WaitBudget};
 use provenant_os::{
     clock::SystemClock,
     fs::{Directory, FileHandle, LockMode},
@@ -297,7 +297,6 @@ impl ProcessObserver for CensusGateObserver {
 
 fn scope() -> Scope {
     Scope {
-        run: RunId::from_bytes([1; 16]),
         attempt: AttemptId::from_bytes([2; 16]),
         generation: 1,
     }
@@ -363,7 +362,6 @@ fn writer_is_fenced_after_every_descriptor_closes(root: &Path) -> Result<()> {
             .join("ownership.json"),
     )?;
     let next = Scope {
-        run: RunId::from_bytes([3; 16]),
         attempt: AttemptId::from_bytes([4; 16]),
         generation: 1,
     };
@@ -1149,7 +1147,7 @@ fn held_stop_ignores_lane_written_summary_and_cancel_request(root: &Path) -> Res
     let planted = serde_json::json!({
         "schema_version": 1,
         "scope": scope,
-        "request_id": format!("{}.{}.{}.cancel", scope.run, scope.attempt, scope.generation),
+        "request_id": format!("{}.{}.cancel", scope.attempt, scope.generation),
         "requester": provenant_core::ActorId::from_bytes([66; 16]),
         "reason": "explicit_cancellation",
     });
@@ -1176,7 +1174,7 @@ fn cancel_request(scope: Scope, requester: provenant_core::ActorId) -> serde_jso
     serde_json::json!({
         "schema_version": 1,
         "scope": scope,
-        "request_id": format!("{}.{}.{}.cancel", scope.run, scope.attempt, scope.generation),
+        "request_id": format!("{}.{}.cancel", scope.attempt, scope.generation),
         "requester": requester,
         "reason": "explicit_cancellation",
     })

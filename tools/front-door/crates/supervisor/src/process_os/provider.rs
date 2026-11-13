@@ -1537,7 +1537,7 @@ mod tests {
     fn orphaned_provider_descendant_does_not_retain_writer_flock()
     -> Result<(), Box<dyn std::error::Error>> {
         use crate::custody::Scope;
-        use provenant_core::{AttemptId, CancelToken, Clock, RunId, WaitBudget};
+        use provenant_core::{AttemptId, CancelToken, Clock, WaitBudget};
         use provenant_os::{clock::SystemClock, fs::Directory};
 
         let root = tempfile::tempdir()?;
@@ -1545,7 +1545,6 @@ mod tests {
         let clock = SystemClock;
         let cancel = CancelToken::new();
         let scope = Scope {
-            run: RunId::from_bytes([1; 16]),
             attempt: AttemptId::from_bytes([2; 16]),
             generation: 1,
         };

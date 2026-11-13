@@ -1,7 +1,7 @@
 // Integration tests use real time to bound process and filesystem coordination.
 #![allow(clippy::disallowed_methods)]
 
-use provenant_core::{AttemptId, CancelToken, RunId, WaitBudget};
+use provenant_core::{AttemptId, CancelToken, WaitBudget};
 use provenant_os::{clock::SystemClock, fs::Directory};
 use provenant_supervisor::{ExitPublisher, GuardianHooks, custody::*, fixture};
 use std::error::Error;
@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 fn scope() -> Scope {
     Scope {
-        run: RunId::from_bytes([11; 16]),
         attempt: AttemptId::from_bytes([12; 16]),
         generation: 1,
     }

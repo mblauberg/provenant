@@ -53,7 +53,7 @@ impl Driver<'_> {
                     warnings,
                     omitted,
                     &format!(
-                        "cleanup deadline: pid {} command {:?} remains in attempt process custody; resource {} cannot be released; close the service or wait for it to exit, then run `provenant reconcile --id {}`; writer custody remains fenced",
+                        "cleanup deadline: pid {} command {:?} remains in attempt process custody; resource {} cannot be released; close the service or wait for it to exit, then run `provenant reconcile` for attempt {}; writer custody remains fenced",
                         fact.identity.pid,
                         fact.command.as_deref().unwrap_or("unknown"),
                         resource.display(),
@@ -84,7 +84,7 @@ impl Driver<'_> {
                         warnings,
                         omitted,
                         &format!(
-                            "cleanup deadline: pid {} command {:?} has resource {} open; lock ownership is unproven; close the service or wait for it to exit, then run `provenant reconcile --id {}`",
+                            "cleanup deadline: pid {} command {:?} has resource {} open; lock ownership is unproven; close the service or wait for it to exit, then run `provenant reconcile` for attempt {}",
                             fact.identity.pid,
                             fact.command.as_deref().unwrap_or("unknown"),
                             resource.display(),
@@ -99,7 +99,7 @@ impl Driver<'_> {
                 warnings,
                 omitted,
                 &format!(
-                    "cleanup deadline: resource {} or process census remains unresolved; holder pid and command unavailable; inspect open descriptors and run `provenant reconcile --id {}` after the holder exits; writer custody remains fenced",
+                    "cleanup deadline: resource {} or process census remains unresolved; holder pid and command unavailable; inspect open descriptors and run `provenant reconcile` for attempt {} after the holder exits; writer custody remains fenced",
                     resource.display(),
                     self.reservation.scope.attempt,
                 ),

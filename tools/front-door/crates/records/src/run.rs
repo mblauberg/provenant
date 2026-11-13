@@ -1,8 +1,7 @@
 //! Strict run-store records. Facts are constructed only after store validation.
 use crate::{CanonicalError, CanonicalV1, FileDigest, PathWire};
 use provenant_core::{
-    ActorId, AttemptId, DeliveryId, Digest, GitOid, HostId, OperationId, ProjectId, RunId, TaskId,
-    WallTime,
+    ActorId, AttemptId, DeliveryId, Digest, GitOid, HostId, OperationId, ProjectId, WallTime,
 };
 use serde::{Deserialize, Serialize};
 
@@ -51,9 +50,6 @@ pub struct ChairBinding {
 pub struct CanonicalRequest {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
-    /// Host-verifiable child run and attempt IDs. Absent on legacy, unindexed runs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub child_attempt_id_version: Option<u64>,
     /// Submission proposal only. Readers trust the host-owned Fabric index.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chair: Option<ChairBinding>,
@@ -62,8 +58,8 @@ pub struct CanonicalRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fresh_continuation: Option<String>,
     pub schema_version: u64,
-    pub tasks: Vec<TaskRequest>,
-    pub concurrency: u64,
+    /// One launch admits exactly one attempt.
+    pub task: TaskRequest,
     pub parent: Option<AttemptId>,
     /// Depth assigned to this run when it was dispatched from a lane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,43 +73,6 @@ impl CanonicalRequest {
         CanonicalV1::record_digest("run-request", 1, self)
     }
 
-    /// The host-derived run ID for this request under `operation`, or `None`
-    /// for a legacy, unversioned request. Version 1 binds the ID to the whole
-    /// proposal and the host's namespace, so no proposed ID is ever adopted.
-    pub fn child_run_id(
-        &self,
-        project: ProjectId,
-        operation: &OperationId,
-    ) -> Result<Option<RunId>, ChildIdError> {
-        match self.child_attempt_id_version {
-            None => Ok(None),
-            Some(1) => {
-                let parent = self.parent_attempt.ok_or(ChildIdError::MissingParent)?;
-                use sha2::{Digest as _, Sha256};
-                let mut hash = Sha256::new();
-                hash.update(b"provenant-child-run-v1\0");
-                hash.update(project.as_bytes());
-                hash.update(parent.as_bytes());
-                hash.update(CanonicalV1::file_digest(operation.as_str().as_bytes()).bytes());
-                hash.update(self.digest()?.as_bytes());
-                let digest = hash.finalize();
-                let mut id = [0; 16];
-                id.copy_from_slice(&digest[..16]);
-                Ok(Some(RunId::from_bytes(id)))
-            }
-            Some(_) => Err(ChildIdError::UnsupportedVersion),
-        }
-    }
-}
-/// Why a request cannot yield a host-derived child run ID.
-#[derive(Debug, thiserror::Error)]
-pub enum ChildIdError {
-    #[error("unsupported child attempt ID version")]
-    UnsupportedVersion,
-    #[error("derived child IDs require a parent attempt")]
-    MissingParent,
-    #[error(transparent)]
-    Canonical(#[from] CanonicalError),
 }
 /// Effective dispatch policy, sealed with the request and copied to each attempt.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,7 +210,6 @@ pub struct TaskRequest {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "HarnessProfile::is_empty")]
     pub profile: HarnessProfile,
-    pub task_id: TaskId,
     pub prompt_digest: FileDigest,
     /// Chair-verified review head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -675,36 +633,6 @@ impl From<UsageRecord> for crate::Usage {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Closure {
-    Open,
-    Closing,
-    Closed,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RunRecord {
-    #[serde(flatten)]
-    pub extra: crate::ExtraFields,
-    pub schema_version: u64,
-    pub run_id: RunId,
-    pub project_id: ProjectId,
-    pub actor_id: ActorId,
-    pub operation_id: OperationId,
-    pub request_digest: Digest,
-    pub task_ids: Vec<TaskId>,
-    /// Continuation target, independently of nested dispatch metadata.
-    pub parent: Option<AttemptId>,
-    /// Attempt that submitted this nested run; grants no cancellation authority.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_attempt: Option<AttemptId>,
-    pub children: Vec<RunId>,
-    pub revision: u64,
-    pub generation: u64,
-    pub created_at: WallTime,
-    pub closed_at: Option<WallTime>,
-    pub closure: Closure,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum OperationState {
     Prepared,
     Accepted,
@@ -732,7 +660,6 @@ pub struct OperationRecord {
     pub operation_id: OperationId,
     pub kind: OperationKind,
     pub request_digest: Digest,
-    pub run_id: RunId,
     pub state: OperationState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
@@ -1362,10 +1289,8 @@ fn decode_continuation<'de, D: serde::Deserializer<'de>>(
 pub struct AttemptRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<WorkContext>,
-    /// The attempt's work identity. The run store sets it on every attempt it
-    /// admits; records built elsewhere may leave it unset.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key: Option<crate::WorkKey>,
+    /// The attempt's work identity: graph, node and attempt number.
+    pub key: crate::WorkKey,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     /// Human-supplied task title, when provided at submission.
@@ -1385,10 +1310,7 @@ pub struct AttemptRecord {
     pub limits: Option<crate::LaneLimits>,
     pub schema_version: u64,
     pub attempt_id: AttemptId,
-    pub run_id: RunId,
     pub project_id: ProjectId,
-    pub task_id: TaskId,
-    pub operation_id: OperationId,
     pub attempt_number: u64,
     pub revision: u64,
     pub generation: u64,
@@ -1647,8 +1569,6 @@ pub struct AdmissionTicket {
     /// Absent on tickets from before lane classes, which decode as writers.
     #[serde(default)]
     pub lane_class: LaneClass,
-    /// The owning run's batch concurrency, distinct from host admission caps.
-    pub run_concurrency: u64,
     pub quota_permit: Option<String>,
     pub admission_deadline: WallTime,
     /// The provider's wall-clock allowance once it starts, in seconds. Absent
@@ -1663,7 +1583,6 @@ pub struct RunEvent {
     pub schema_version: u64,
     pub sequence: u64,
     pub project_id: ProjectId,
-    pub run_id: RunId,
     pub attempt_id: AttemptId,
     pub revision: u64,
     pub change: AttemptState,
@@ -1770,28 +1689,14 @@ mod tests {
     }
 
     #[test]
-    fn request_without_lane_metadata_retains_its_sealed_digest()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let original = serde_json::json!({
-            "schema_version": 1, "tasks": [], "concurrency": 1, "parent": null
-        });
-        let digest = CanonicalV1::record_digest("run-request", 1, &original)?;
-        let request: CanonicalRequest = serde_json::from_value(original.clone())?;
-        assert_eq!(request.digest()?, digest);
-        assert_eq!(serde_json::to_value(request)?, original);
-        Ok(())
-    }
-
-    #[test]
     fn request_with_a_removed_task_class_retains_its_sealed_digest()
     -> Result<(), Box<dyn std::error::Error>> {
         let request = CanonicalRequest {
             extra: Default::default(),
-            child_attempt_id_version: None,
             chair: None,
             fresh_continuation: None,
             schema_version: 1,
-            tasks: vec![TaskRequest {
+            task: TaskRequest {
                 context: None,
                 extra: Default::default(),
                 build_heavy: false,
@@ -1800,7 +1705,6 @@ mod tests {
                     name: "rigorous".into(),
                     ..HarnessProfile::default()
                 },
-                task_id: TaskId::from_bytes([3; 16]),
                 prompt_digest: CanonicalV1::file_digest(b"prompt"),
                 base: None,
                 head: None,
@@ -1818,20 +1722,19 @@ mod tests {
                 provider_timeout_seconds: 60,
                 delivery_id: None,
                 access: LaneAccess::default(),
-            }],
-            concurrency: 1,
+            },
             parent: None,
             lane_depth: None,
             parent_attempt: None,
         };
         let mut sealed = serde_json::to_value(&request)?;
-        assert!(sealed["tasks"][0].get("title").is_none());
-        assert!(sealed["tasks"][0].get("fallback").is_none());
+        assert!(sealed["task"].get("title").is_none());
+        assert!(sealed["task"].get("fallback").is_none());
         let legacy: CanonicalRequest = serde_json::from_value(sealed.clone())?;
         assert_eq!(serde_json::to_value(&legacy)?, sealed);
         assert_eq!(legacy.digest()?, request.digest()?);
         for task_class in [serde_json::Value::Null, serde_json::json!("mechanical")] {
-            sealed["tasks"][0]["profile"]["task_class"] = task_class;
+            sealed["task"]["profile"]["task_class"] = task_class;
             let digest = CanonicalV1::record_digest("run-request", 1, &sealed)?;
             let parsed: CanonicalRequest = serde_json::from_value(sealed.clone())?;
             assert_eq!(parsed.digest()?, digest);

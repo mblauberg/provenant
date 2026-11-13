@@ -81,13 +81,13 @@ fn writer_delivery_request() -> Value {
     json!({"remote":"origin","branch":"work","open_pr":true})
 }
 fn task() -> Value {
-    json!({"task_id":ID,"prompt_digest":digest(),"route":requested_route(),
+    json!({"prompt_digest":digest(),"route":requested_route(),
         "fallback":[route_record()],"authority_digest":digest(),
         "provider_timeout_seconds":60,"delivery_id":null,
         "writer":{"project":"/repo","worktree":"/repo/work"},"deliver":writer_delivery_request()})
 }
 fn request() -> Value {
-    json!({"schema_version":1,"tasks":[task()],"concurrency":1,"parent":null,
+    json!({"schema_version":1,"task":task(),"parent":null,
         "chair":{"host":ID,"actor":ID}})
 }
 fn readiness() -> Value {
@@ -154,13 +154,13 @@ fn skipped_route() -> Value {
     json!({"route":"codex/other","kind":"unavailable","detail":"unavailable"})
 }
 fn attempt() -> Value {
-    json!({"schema_version":1,"attempt_id":ID,"run_id":ID,"project_id":ID,
-        "task_id":ID,"operation_id":"operation","attempt_number":1,"revision":1,"generation":1,
+    json!({"schema_version":1,"attempt_id":ID,"project_id":ID,
+        "key":{"project":ID,"graph":"g","node":"n","attempt":1},"attempt_number":1,"revision":1,"generation":1,
         "requested_route":requested_route(),"resolved_route":route_record(),
         "applied_route":route_record(),"observed_route":route_record(),"authority_digest":digest(),
         "write_grants":[write_grant()],"protected_paths":[path()],"delivery":writer_delivery_record(),
         "queued_at":NOW,"state":terminal_state(),"usage":{},"prompt":artifact(),"result":artifact(),
-        "exit_evidence":artifact(),"skipped_routes":[skipped_route()],"trace":{"host":ID,"run":ID}})
+        "exit_evidence":artifact(),"skipped_routes":[skipped_route()],"trace":{"host":ID,"attempt":ID}})
 }
 fn evidence() -> Value {
     json!({"path":path(),"digest":digest()})
@@ -191,7 +191,7 @@ fn receipt() -> Value {
         "review_attempts":[],"decision":accepted_decision(),"created_at":10,"updated_at":10})
 }
 fn request_work() -> Value {
-    json!({"run_id":ID,"repository":absolute_path(),"head":null})
+    json!({"graph":"g","node":null,"repository":absolute_path(),"head":null})
 }
 fn request_option() -> Value {
     json!({"id":"continue","label":"Continue","description":"Proceed"})
@@ -263,9 +263,8 @@ cases! {
     requested_review_preserves_digest: run::RequestedRoute => json!({"kind":"review","name":"senior","effort":null,"excluded_families":[],"distinct_families":false});
     route_record_preserves_digest: run::RouteRecord => route_record();
     usage_record_preserves_digest: run::UsageRecord => json!({});
-    run_record_preserves_digest: run::RunRecord => json!({"schema_version":1,"run_id":ID,"project_id":ID,"actor_id":ID,"operation_id":"operation","request_digest":digest(),"task_ids":[ID],"children":[],"revision":1,"generation":1,"created_at":NOW,"closure":"open"});
-    operation_record_preserves_digest: run::OperationRecord => json!({"schema_version":1,"project_id":ID,"actor_id":ID,"operation_id":"operation","kind":"dispatch","request_digest":digest(),"run_id":ID,"state":"accepted"});
-    refused_operation_preserves_digest: run::OperationRecord => json!({"schema_version":1,"project_id":ID,"actor_id":ID,"operation_id":"operation","kind":"dispatch","request_digest":digest(),"run_id":ID,"state":"refused","refusal":{"code":"REFUSED","detail":"not admitted"},"worktree":"lane-branch","refused_at":NOW,"refusal_chair":{"host":ID,"actor":ID}});
+    operation_record_preserves_digest: run::OperationRecord => json!({"schema_version":1,"project_id":ID,"actor_id":ID,"operation_id":"operation","kind":"dispatch","request_digest":digest(),"state":"accepted"});
+    refused_operation_preserves_digest: run::OperationRecord => json!({"schema_version":1,"project_id":ID,"actor_id":ID,"operation_id":"operation","kind":"dispatch","request_digest":digest(),"state":"refused","refusal":{"code":"REFUSED","detail":"not admitted"},"worktree":"lane-branch","refused_at":NOW,"refusal_chair":{"host":ID,"actor":ID}});
     queued_state_preserves_digest: run::AttemptState => json!({"state":"queued"});
     starting_state_preserves_digest: run::AttemptState => json!({"state":"starting"});
     running_state_preserves_digest: run::AttemptState => json!({"state":"running"});
@@ -277,7 +276,7 @@ cases! {
     attempt_record_preserves_digest: run::AttemptRecord => attempt();
     lane_wait_preserves_digest: run::LaneWait => json!({"attempt_id":ID,"lane_class":"writer","waiting_for":"capacity"});
     admission_ticket_preserves_digest: run::AdmissionTicket => json!({"schema_version":1,"operation_id":"operation","attempt_id":ID,"project_id":ID,"sequence":1,"generation":1,"active":true,"memory_floor_basis_points":1000,"disk_floor_bytes":1,"startup_spacing_ms":1,"run_concurrency":1,"admission_deadline":NOW});
-    run_event_preserves_digest: run::RunEvent => json!({"schema_version":1,"sequence":1,"project_id":ID,"run_id":ID,"attempt_id":ID,"revision":1,"change":terminal_state(),"trace":{}});
+    run_event_preserves_digest: run::RunEvent => json!({"schema_version":1,"sequence":1,"project_id":ID,"attempt_id":ID,"revision":1,"change":terminal_state(),"trace":{}});
 
     resolved_route_preserves_digest: ResolvedRoute => resolved_route();
     route_selection_receipt_preserves_digest: RouteSelectionReceipt => selection();

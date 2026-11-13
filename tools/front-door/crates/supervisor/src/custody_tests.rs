@@ -53,8 +53,7 @@ fn check_release_fence_fixture(slot_root: bool) -> TestResult {
     };
     let tree_identity = tree.metadata()?;
     let git_identity = git.metadata()?;
-    let fixture = r#"{"schema_version":1,"scope":{"run":"@RUN@","attempt":"@ATTEMPT@","generation":1},"launch_state":"prepared","attempt_device":null,"attempt_inode":null,"reservation_device":@SLOT_DEVICE@,"reservation_inode":@SLOT_INODE@,"binding":{"kind":"worktree","worktree_device":@TREE_DEVICE@,"worktree_inode":@TREE_INODE@,"git_device":@GIT_DEVICE@,"git_inode":@GIT_INODE@,"branch":"refs/heads/lane","base":"@BASE@"},"boot":"linux:00000000-0000-0000-0000-000000000001","guardian":null,"provider":null,"unresolved_cleanup":true,"descendants":[],"census_incomplete":true,"omitted_descendants":0}"#
-    .replace("@RUN@", &scope.run.to_string())
+    let fixture = r#"{"schema_version":1,"scope":{"attempt":"@ATTEMPT@","generation":1},"launch_state":"prepared","attempt_device":null,"attempt_inode":null,"reservation_device":@SLOT_DEVICE@,"reservation_inode":@SLOT_INODE@,"binding":{"kind":"worktree","worktree_device":@TREE_DEVICE@,"worktree_inode":@TREE_INODE@,"git_device":@GIT_DEVICE@,"git_inode":@GIT_INODE@,"branch":"refs/heads/lane","base":"@BASE@"},"boot":"linux:00000000-0000-0000-0000-000000000001","guardian":null,"provider":null,"unresolved_cleanup":true,"descendants":[],"census_incomplete":true,"omitted_descendants":0}"#
     .replace("@ATTEMPT@", &scope.attempt.to_string())
     .replace("@SLOT_DEVICE@", &slot_identity.device.to_string())
     .replace("@SLOT_INODE@", &slot_identity.inode.to_string())
@@ -569,7 +568,6 @@ fn admission_uses_flock_and_retains_predecessor_evidence() -> TestResult {
         .join("reservation.json");
     let first_bytes = std::fs::read(&first_path)?;
     let next = Scope {
-        run: RunId::from_bytes([3; 16]),
         attempt: AttemptId::from_bytes([4; 16]),
         generation: 1,
     };
@@ -731,7 +729,6 @@ fn persisted_custody_accepts_future_fields_without_changing_scope_checks() -> Te
     let record = serde_json::json!({
         "schema_version": 1,
         "scope": {
-            "run": scope().run,
             "attempt": scope().attempt,
             "generation": 1,
             "future_scope": {"value": true}
@@ -858,7 +855,6 @@ fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResu
 }
 fn scope() -> Scope {
     Scope {
-        run: RunId::from_bytes([1; 16]),
         attempt: AttemptId::from_bytes([2; 16]),
         generation: 1,
     }

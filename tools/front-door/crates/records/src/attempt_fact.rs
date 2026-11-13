@@ -1,6 +1,4 @@
-use provenant_core::{
-    ActorId, AttemptId, DeliveryId, GitOid, OperationId, ProjectId, TaskId, WallTime,
-};
+use provenant_core::{ActorId, AttemptId, DeliveryId, GitOid, ProjectId, WallTime};
 use serde::Serialize;
 
 use crate::{FileDigest, PathWire, Trace};
@@ -93,9 +91,9 @@ pub struct AttemptFact {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<crate::run::WorkContext>,
     pub attempt_id: AttemptId,
-    pub task_id: TaskId,
+    /// The attempt's work identity.
+    pub key: crate::WorkKey,
     pub attempt_number: u64,
-    pub operation_id: OperationId,
     pub project_id: ProjectId,
     pub terminal_state: AttemptOutcome,
     pub exit_code: Option<i64>,

@@ -421,7 +421,6 @@ mod tests {
 
     fn scope() -> Scope {
         Scope {
-            run: provenant_core::RunId::from_bytes([1; 16]),
             attempt: provenant_core::AttemptId::from_bytes([2; 16]),
             generation: 1,
         }

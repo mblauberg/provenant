@@ -24,8 +24,8 @@ macro_rules! lane_row {
 lane_row! {
     required {
         project_id: String => string();
-        run_id: String => string();
-        task_id: String => string();
+        graph: String => string();
+        node: String => string();
         attempt_id: String => string();
         attempt_number: u64 => unsigned();
         retry_of: Option<String> => nullable(string());
@@ -268,8 +268,8 @@ impl LaneRow {
             }
         ) {
             terminal_reason = Some(format!(
-                "the lane outcome is uncertain; inspect status for operation {} before retrying",
-                lane.operation_id
+                "the lane outcome is uncertain; inspect `provenant status {}` before retrying",
+                lane.key
             ));
         }
         let git_import_failure =
@@ -366,8 +366,8 @@ impl LaneRow {
             });
         Self {
             project_id: lane.project_id.to_string(),
-            run_id: lane.run_id.to_string(),
-            task_id: lane.task_id.to_string(),
+            graph: lane.key.graph().to_owned(),
+            node: lane.key.node().to_owned(),
             attempt_id: lane.attempt_id.to_string(),
             attempt_number: lane.attempt_number,
             retry_of: lane.retry_of.map(|id| id.to_string()),

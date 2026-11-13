@@ -149,7 +149,7 @@ fn settlement_recovery(
 ) -> Result<Recovery> {
     let lock_directory = lock_directory.map_err(|error| {
         CustodyError::Io(io::Error::other(format!(
-            "cannot clone writer lock directory for settlement; run `provenant reconcile --id {}`: {error}",
+            "cannot clone writer lock directory for settlement of attempt {}; run `provenant reconcile`: {error}",
             reservation.scope.attempt
         )))
     })?;

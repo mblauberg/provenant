@@ -244,7 +244,6 @@ mod tests {
         let directory = Directory::open_anchor(root.path())?;
         let (census, provider, spared) = fixture();
         let scope = Scope {
-            run: provenant_core::RunId::from_bytes([1; 16]),
             attempt: provenant_core::AttemptId::from_bytes([2; 16]),
             generation: 1,
         };
@@ -276,7 +275,6 @@ mod tests {
         std::fs::create_dir(root.path().join(PAUSE_FILE))?;
         let (census, provider, spared) = fixture();
         let scope = Scope {
-            run: provenant_core::RunId::from_bytes([1; 16]),
             attempt: provenant_core::AttemptId::from_bytes([2; 16]),
             generation: 1,
         };

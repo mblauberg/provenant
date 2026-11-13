@@ -124,7 +124,7 @@ fn cancellation_directory_watch_allows_idle_backoff_with_polling_fallback() {
 #[allow(clippy::disallowed_methods)]
 fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
     use crate::census::{CensusError, ProcessObservation, ProcessObserver};
-    use provenant_core::{AttemptId, RunId, WaitBudget};
+    use provenant_core::{AttemptId, WaitBudget};
     use provenant_os::clock::SystemClock;
     use std::os::fd::{AsFd, AsRawFd};
     use std::sync::{
@@ -215,7 +215,6 @@ fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
     let child_path = root.path().join("child.pid");
     let clock = SystemClock::new();
     let scope = Scope {
-        run: RunId::from_bytes([31; 16]),
         attempt: AttemptId::from_bytes([32; 16]),
         generation: 1,
     };
@@ -654,7 +653,7 @@ fn spawn_missing_attempt_guardian(
     PathBuf,
     Scope,
 ) {
-    use provenant_core::{AttemptId, RunId, WaitBudget};
+    use provenant_core::{AttemptId, WaitBudget};
     use provenant_os::clock::SystemClock;
     use std::os::fd::{AsFd, AsRawFd};
 
@@ -667,7 +666,6 @@ fn spawn_missing_attempt_guardian(
     std::fs::create_dir(&attempt_path).unwrap();
     let clock = SystemClock::new();
     let scope = Scope {
-        run: RunId::from_bytes([41; 16]),
         attempt: AttemptId::from_bytes([42; 16]),
         generation: 1,
     };
@@ -1143,7 +1141,7 @@ fn descriptor_identity_distinguishes_removal_replacement_and_rename() {
 
 #[test]
 fn settlement_lock_clone_failure_retains_exclusion_and_returns_reconcile_hint() {
-    use provenant_core::{AttemptId, Clock, RunId, WaitBudget};
+    use provenant_core::{AttemptId, Clock, WaitBudget};
     use provenant_os::{
         clock::SystemClock,
         fs::{FsError, LockMode},
@@ -1152,7 +1150,6 @@ fn settlement_lock_clone_failure_retains_exclusion_and_returns_reconcile_hint() 
     let directory = Directory::open_anchor(root.path()).unwrap();
     let clock = SystemClock;
     let scope = Scope {
-        run: RunId::from_bytes([1; 16]),
         attempt: AttemptId::from_bytes([2; 16]),
         generation: 1,
     };
@@ -1182,7 +1179,7 @@ fn settlement_lock_clone_failure_retains_exclusion_and_returns_reconcile_hint() 
     assert!(
         error
             .to_string()
-            .contains(&format!("provenant reconcile --id {}", scope.run))
+            .contains("provenant reconcile")
     );
     assert!(writer.lease.is_some());
     assert!(matches!(
@@ -1269,7 +1266,6 @@ fn handoff_round_trips_one_mib_stdin_with_claude_argv_and_environment() {
         priority: 0,
         schema_version: 1,
         scope: Scope {
-            run: provenant_core::RunId::from_bytes([1; 16]),
             attempt: provenant_core::AttemptId::from_bytes([2; 16]),
             generation: 1,
         },
