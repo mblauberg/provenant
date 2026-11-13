@@ -471,7 +471,7 @@ fn checks_with(
             let checks = ci(expected, revalidated)?;
             let mergeable = check_head()?;
             let state = observe(
-                &head,
+                expected.as_str(),
                 &checks,
                 &policy.checks,
                 jiff::Timestamp::now(),
