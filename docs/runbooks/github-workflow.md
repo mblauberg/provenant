@@ -60,7 +60,7 @@ Push with `git push -u origin BRANCH`; a writer pushes its own branch unless
 [the template](../../.github/pull_request_template.md): fill a copy (evidence
 rows bound to the exact head, the independent-review block) and pass it with
 `--body-file`, or build it from recorded attempts with
-`provenant pr open --from-attempt A --review B --summary-file summary.md --issue N --dry-run`.
+`provenant pr open --from-attempt TARGET --review TARGET --summary-file summary.md --issue N --dry-run`.
 Complete rows marked `pending` before asking for review.
 
 A stack is a linear chain of dependent slices: the bottom PR targets `main`,
@@ -71,7 +71,7 @@ heads and review evidence. Land bottom-first with `provenant land`.
 ## Merge
 
 Agents merge directly: once a pull request has the lens review its risk
-requires (`provenant run --use review`) and `ci-status`
+requires (`provenant run review`) and `ci-status`
 is green on the exact head, merge without waiting for the user. A change that
 only repairs CI or restores a red `main` merges on green `ci-status` alone; one
 that skips or weakens a check takes its normal review. Before merging a

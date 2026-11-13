@@ -89,7 +89,9 @@ Documentation claims sit in three tiers, and the third is deliberate:
    and tests. Relative Markdown links in `docs/` and each `SKILL.md` are
    machine-checked. `scripts/check-doc-truth` requires every runbook and spec
    `Anchor:` to resolve to a source file and compares the delivery
-   table with the code it projects. `scripts/check-harness` rejects
+   table with the code it projects. It fails on a `provenant` command or flag
+   that `help --all --json` does not list, in runbooks, skills and the ambient
+   instruction files; specs stay advisory. `scripts/check-harness` rejects
    a skill `references/` path named outside its skill.
 2. **Review-checked.** The README skill count and architecture risk factors are
    maintained from current files and code; no harness check binds those regions

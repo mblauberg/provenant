@@ -27,11 +27,8 @@ plain-language explanation about law goes to `writing`.
    redactions.
 4. Draft the minimum complete text: relief or answer first, one proposition per
    paragraph, exact pinpoints, no internal agent language.
-5. Lint, then check what the lint cannot see:
-
-```sh
-provenant check writing PATH --rules legal
-```
+5. Lint with `provenant check writing --help` (the legal rule set), then check
+   what the lint cannot see.
 
 ## Fixed points
 

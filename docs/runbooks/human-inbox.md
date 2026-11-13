@@ -100,7 +100,7 @@ Fabric store first; older binaries refuse the added schema).
 
 ## Steering
 
-`provenant steer ATTEMPT --text-stdin` and `provenant chair message SESSION
+`provenant steer TARGET --text-stdin` and `provenant chair message SESSION
 --text-stdin --channel CHANNEL` record up to 4 KiB of guidance as Fabric mail
 with no authority; both are refused inside a lane. `chair message` queues to
 that session's own mailbox, read with `provenant fabric mail read --session
