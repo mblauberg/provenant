@@ -1017,7 +1017,21 @@ fn claude_network_on_enables_web_tools_and_codex_toolchain_without_writer_grants
             }
             assert!(launch.profile.spec.authentication.is_empty());
             assert!(launch.profile.spec.deny_keychain_access);
-            assert!(launch.profile.spec.tool_writes.is_empty());
+            // Writers share only lane downloads. Trusted host sources,
+            // installed binaries and read-only lanes remain unwritable.
+            if access == Access::ReadOnly {
+                assert!(launch.profile.spec.tool_writes.is_empty());
+            } else {
+                let shared = home.join("Library/Caches/provenant-cargo-downloads");
+                assert!(
+                    launch
+                        .profile
+                        .spec
+                        .tool_writes
+                        .iter()
+                        .all(|grant| grant.path == shared)
+                );
+            }
             let rendered = provenant_confinement::permissions::snapshot::render(
                 plan.permissions(),
                 &launch.profile,

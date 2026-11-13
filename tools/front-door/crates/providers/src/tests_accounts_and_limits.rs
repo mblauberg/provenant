@@ -437,9 +437,17 @@ fn claude_writer_shell_has_private_config_and_rust_tools() -> Result<(), Provide
             "{path}"
         );
     }
-    // No shared toolchain store is writable; the compiler hard-denies Cargo
-    // credentials.
-    assert!(launch.profile.spec.tool_writes.is_empty());
+    // Only lane downloads are shared for writes. Host toolchains, trusted
+    // sources and Cargo credentials remain protected.
+    let shared = Path::new("/fixture/home/Library/Caches/provenant-cargo-downloads");
+    assert!(
+        launch
+            .profile
+            .spec
+            .tool_writes
+            .iter()
+            .all(|grant| grant.path == shared)
+    );
     // Claude's env scrub drops GIT_CONFIG_GLOBAL from Bash, so scratch git is a
     // wrapper that sets it, and its directory is executable.
     assert!(launch.setup.iter().any(|step| matches!(
