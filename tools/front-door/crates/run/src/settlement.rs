@@ -1133,7 +1133,7 @@ mod tests {
                      SELECT ?1,project,'refused-graph','refused-node',1,digest,actor,'refused-operation',run,task,number,1,operation_record,1,1,NULL,1 \
                      FROM attempts WHERE id=?2",
                     rusqlite::params![
-                        provenant_core::AttemptId::from_bytes([6; 16]).to_string(),
+                        provenant_core::AttemptId::from_bytes([0xfe; 16]).to_string(),
                         bad.to_string()
                     ],
                 )?;

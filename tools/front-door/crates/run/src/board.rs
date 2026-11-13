@@ -264,6 +264,7 @@ mod tests {
         ));
         let history = store.record(AttemptId::from_bytes([1; 16]), &call)?;
         let mut history = history;
+        let source_attempt_id = history.attempt_id;
         history.attempt_id = AttemptId::from_bytes([0xee; 16]);
         history.trace.attempt = Some(history.attempt_id);
         history.prompt.path = crate::artifacts::artifact_path(history.attempt_id, "prompt.txt")?;
@@ -286,7 +287,7 @@ mod tests {
         let event_record = String::from_utf8(serde_json::to_vec(&event)?)?;
         let operation_record: Vec<u8> = store.db.query_row(
             "SELECT operation_record FROM attempts WHERE id=?1",
-            [history.attempt_id.to_string()],
+            [source_attempt_id.to_string()],
             |row| row.get(0),
         )?;
         store.write(&call, |tx| {
