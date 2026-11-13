@@ -39,13 +39,35 @@ impl Driver<'_> {
             .current_path()
             .unwrap_or_else(|_| self.lock_dir.anchored_path())
             .join("writer.lock");
+        let mut found = false;
+        // Explain known custody blockers before spending the diagnostic budget
+        // on host-wide descriptor discovery. Their identity is already pinned.
+        if let Some(census) = census {
+            for fact in census.facts().filter(|fact| {
+                !fact.zombie
+                    && (self.tracked.contains(&fact.identity)
+                        || self.reservation.provider.as_ref() == Some(&fact.identity))
+            }) {
+                found = true;
+                push_warning(
+                    warnings,
+                    omitted,
+                    &format!(
+                        "cleanup deadline: pid {} command {:?} remains in attempt process custody; resource {} cannot be released; close the service or wait for it to exit, then run `provenant reconcile --id {}`; writer custody remains fenced",
+                        fact.identity.pid,
+                        fact.command.as_deref().unwrap_or("unknown"),
+                        resource.display(),
+                        self.reservation.scope.attempt,
+                    ),
+                );
+            }
+        }
         let full = self
             .observer
             .census_while(crate::census::MAX_CENSUS_ENTRIES, &|| {
                 Instant::now() < deadline
             })
             .ok();
-        let mut found = false;
         if let Some(census) = full.as_ref().or(census) {
             for fact in census.facts() {
                 if Instant::now() >= deadline {
