@@ -305,7 +305,10 @@ pub(crate) fn publish_branch(
     head: GitOid,
 ) -> Result<()> {
     let current = resolve_ref(git, repo, branch)?;
-    let advances_current = current == base || is_ancestor(git, repo, current, head);
+    // Fast-forward from the launch base or from later lane commits, but not
+    // from a branch rewound behind its base.
+    let advances_current = current == base
+        || (is_ancestor(git, repo, current, head) && !is_ancestor(git, repo, current, base));
     if !advances_current && !is_ancestor(git, repo, head, current) {
         return Err(invalid());
     }
