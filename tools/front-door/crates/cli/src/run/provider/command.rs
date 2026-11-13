@@ -328,6 +328,7 @@ pub(super) fn prepare_command(
         .collect(),
         ..Default::default()
     };
+    let sandboxed = sandbox.sandboxed;
     apply_sandbox_mode(sandbox, &mut spec.env, &mut route);
     Ok(run::PreparedLaunch {
         skipped_routes: Vec::new(),
@@ -346,7 +347,7 @@ pub(super) fn prepare_command(
             home,
             cargo_registry_seed: false,
             state_root: roots.state.as_path().to_owned(),
-            sandboxed: sandbox.sandboxed,
+            sandboxed,
         }),
     })
 }

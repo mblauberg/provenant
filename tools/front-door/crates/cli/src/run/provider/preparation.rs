@@ -3548,6 +3548,7 @@ pub(super) fn prepare_candidates(
                 }
             }
         }
+        let sandboxed = sandbox.sandboxed;
         apply_sandbox_mode(sandbox, &mut spec.env, &mut provider);
         return Ok(run::PreparedLaunch {
             skipped_routes: reasons,
@@ -3566,7 +3567,7 @@ pub(super) fn prepare_candidates(
                 home: home.clone(),
                 cargo_registry_seed: config.domains.fabric.lanes.cargo_seed.enabled,
                 state_root: roots.state.as_path().to_path_buf(),
-                sandboxed: sandbox.sandboxed,
+                sandboxed,
             }),
         });
     }
