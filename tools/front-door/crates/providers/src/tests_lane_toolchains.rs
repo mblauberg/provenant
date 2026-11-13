@@ -1338,3 +1338,47 @@ fn fresh_codex_home_setup_never_includes_provider_history() -> Result<(), Provid
     }
     Ok(())
 }
+
+#[test]
+fn native_adapter_finalisation_supplies_cargo_environment_without_tool_discovery()
+-> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture".into());
+    let mut route = route("claude", "fixture-model");
+    route.account_key = None;
+    let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
+    let token = fixture_token();
+    let native =
+        |key: &str| (key == provenant_confinement::run_config::SANDBOX_ENV).then(|| "off".into());
+    let mut input = fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        Path::new("/fixture/repo"),
+        Some(&token),
+    );
+    input.host_var = &native;
+    let mut launch = claude::Claude.prepare(input)?;
+    // The CLI finalises every adapter, even those that skip sandbox-only Rust
+    // discovery. Repeated finalisation must retain one set of selectors.
+    launch.complete_tool_requirements(
+        &plan,
+        Path::new("/fixture/home"),
+        Path::new("/fixture/repo"),
+    );
+    for (name, expected) in [
+        (
+            "CARGO_HOME",
+            "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/cargo-home",
+        ),
+        ("RUSTUP_HOME", "/fixture/home/.rustup"),
+        (
+            "PROVENANT_LANE_CARGO_LINT_TARGET",
+            "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target-lint",
+        ),
+    ] {
+        let values: Vec<_> = launch.env.iter().filter(|(key, _)| key == name).collect();
+        assert_eq!(values.len(), 1, "{name}");
+        assert_eq!(values[0].1, expected);
+    }
+    Ok(())
+}

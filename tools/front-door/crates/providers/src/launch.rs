@@ -758,9 +758,7 @@ fn grant_exec_path(git: &Path, spec: &mut LaunchSpec) {
 /// Resolve all exact executable requirements in the profile once, then use
 /// those same facts both to add exact read grants and to report preparation.
 pub(crate) fn prepare_tool_requirements(input: &PrepareInput<'_>, spec: &mut LaunchSpec) {
-    if input.sandboxed() {
-        spec.complete_tool_requirements(input.confined, input.home, input.cwd);
-    }
+    spec.complete_tool_requirements(input.confined, input.home, input.cwd);
 }
 
 impl LaunchSpec {
@@ -773,6 +771,18 @@ impl LaunchSpec {
     /// Resolve any additional exact executables added by launch configuration.
     pub fn complete_tool_requirements(&mut self, plan: &ConfinedPlan, home: &Path, cwd: &Path) {
         if self.native_environment() {
+            if let provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) =
+                &plan.permissions().mode
+                && rust_tools_available(home)
+            {
+                cargo_environment(
+                    home,
+                    &authority.cargo_cache().path,
+                    Access::WorktreeWrite,
+                    true,
+                    &mut self.env,
+                );
+            }
             return;
         }
         let spec = self;
@@ -1083,7 +1093,9 @@ pub(crate) fn rust_tools(
     env: &mut Vec<(OsString, OsString)>,
     setup: &mut Vec<SetupStep>,
 ) {
-    let native = !input.sandboxed();
+    if !input.sandboxed() {
+        return;
+    }
     // Subtree grants must anchor to existing directories. Keep this decision
     // here so every adapter gets the same system-tool fallback on non-Rust
     // hosts; the grants below it hold either way.
@@ -1101,9 +1113,6 @@ pub(crate) fn rust_tools(
         requirements.writes.push(subtree(
             input.home.join("Library/Caches/provenant-cargo-downloads"),
         ));
-    }
-    if native {
-        return;
     }
     system_tools(access, &mut requirements.reads, &mut requirements.exec, env);
     crate::swift::swift_tools(input, access, requirements, env, setup);
@@ -1170,6 +1179,30 @@ fn rust_toolchain(
             target: cargo.join(name),
         }));
     }
+    cargo_environment(input.home, cache, access, !input.sandboxed(), env);
+    if access == Access::ReadOnly {
+        // Cache clean-up must not touch shared stores behind the links.
+        if input.confined.permissions().network
+            != provenant_confinement::permissions::NetworkAccess::Open
+        {
+            env.push(("CARGO_NET_OFFLINE".into(), "true".into()));
+        }
+        setup.push(SetupStep::CreateDir(target));
+    }
+}
+
+/// One finalisation seam for all native adapters, including those that skip
+/// sandbox-only tool discovery. This must run before Run verifies target seeds.
+fn cargo_environment(
+    home: &Path,
+    cache: &Path,
+    access: Access,
+    native: bool,
+    env: &mut Vec<(OsString, OsString)>,
+) {
+    let cargo_home = cache.join("cargo-home");
+    let rustup = home.join(".rustup");
+    let target = cache.join("target");
     // Replace inherited native values too: seeding and the launched Cargo must
     // agree on one home, compiler and target. No duplicate selectors.
     env.retain(|(key, _)| {
@@ -1180,12 +1213,13 @@ fn rust_toolchain(
             "CARGO_TARGET_DIR",
             "CARGO_BUILD_BUILD_DIR",
             "CARGO_CACHE_AUTO_CLEAN_FREQUENCY",
+            "PROVENANT_LANE_CARGO_LINT_TARGET",
         ]
         .iter()
         .any(|name| key == *name)
     });
     env.push(("CARGO_CACHE_AUTO_CLEAN_FREQUENCY".into(), "never".into()));
-    if !input.sandboxed() {
+    if native {
         for (name, value) in [
             (
                 "CARGO_BUILD_JOBS",
@@ -1220,15 +1254,6 @@ fn rust_toolchain(
             "PROVENANT_LANE_CARGO_LINT_TARGET".into(),
             cache.join("target-lint").into_os_string(),
         ));
-    }
-    if access == Access::ReadOnly {
-        // Cache clean-up must not touch shared stores behind the links.
-        if input.confined.permissions().network
-            != provenant_confinement::permissions::NetworkAccess::Open
-        {
-            env.push(("CARGO_NET_OFFLINE".into(), "true".into()));
-        }
-        setup.push(SetupStep::CreateDir(target));
     }
 }
 
