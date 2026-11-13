@@ -1040,7 +1040,10 @@ mod tests {
                 std::fs::create_dir_all(&slot)?;
                 drop(provenant_supervisor::custody::acquire_reader(
                     Directory::open_anchor(&slot)?,
-                    scope,
+                    Scope {
+                        generation: 1,
+                        ..scope
+                    },
                     call.lock_budget(),
                     &cancel,
                     &clock,
