@@ -247,6 +247,23 @@ pub struct AttemptSpec {
     /// `delivery` (default) keeps the delivery receipt; `none` withholds it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipts: Option<String>,
+    /// `on` sandboxes this node's lane, `off` runs unsandboxed (overriding route,
+    /// network and parent floors), and `auto` (default) runs unsandboxed for every
+    /// lane kind. Sets the `lanes.sandbox` knob for this node alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<String>,
+    /// The node whose lane or plan added or replaced this one, set by patch
+    /// admission. When that lane was sandboxed by distrust (its route, its
+    /// parent or the knob), the graph owner sandboxes this node too. Admission
+    /// overwrites any value an author supplies, and a value can only add a
+    /// sandbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitted_by: Option<String>,
+    /// Set by the graph owner from `admitted_by` before launch, and carried to
+    /// a peer. It only narrows: the lane is then sandboxed whatever `sandbox`
+    /// says.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub parent_sandboxed: bool,
 }
 
 /// The `light` preset: no private source view, minimal supervision and no
@@ -306,6 +323,9 @@ impl AttemptSpec {
         if self.effective_receipts() != "delivery" {
             knobs.push(format!("lanes.receipts={}", self.effective_receipts()));
         }
+        if let Some(sandbox) = &self.sandbox {
+            knobs.push(format!("lanes.sandbox={sandbox}"));
+        }
         knobs
     }
 
@@ -332,6 +352,9 @@ impl AttemptSpec {
             && self.isolation.is_none()
             && self.supervision.is_none()
             && self.receipts.is_none()
+            && self.sandbox.is_none()
+            && self.admitted_by.is_none()
+            && !self.parent_sandboxed
     }
 }
 

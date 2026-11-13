@@ -67,12 +67,149 @@ dropped whole.
 - Retention and collection (`[retention]`, `[gc]`, `[gc.projects."ID"]`) are in
   [gc](gc.md).
 
+## Git pre-push hook and local gate
+
+Connect the Git pre-push hook to Provenant so it checks pushes, including its
+existing default-branch protection. Pass both Git arguments and leave standard
+input connected: Git supplies the remote name and URL as arguments and the ref
+updates on standard input. For a plain `.git/hooks/pre-push` (make it executable):
+
+```sh
+#!/bin/sh
+exec provenant hook git pre-push "$@"
+```
+
+For Husky, put `provenant hook git pre-push "$@"` in `.husky/pre-push`.
+For Lefthook, configure `use_stdin` so Git's ref updates reach Provenant:
+
+```yaml
+pre-push:
+  commands:
+    provenant:
+      run: 'provenant hook git pre-push "{1}" "{2}"'
+      use_stdin: true
+```
+
+Lefthook sends standard input to only one command configured with `use_stdin`.
+Keep any other checks in the manager's hook.
+
+The optional local gate runs after the push checks in the selected project
+checkout. Configure it in the host `config.toml`:
+
+```toml
+[domains.pr.land.local_gate]
+mode = "warn"              # warn (default), enforce or off
+commands = ["cargo check"] # default: []
+timeout_seconds = 60       # per command; positive integer
+```
+
+Commands run in order through `sh -c`, with a separate timeout for each.
+`warn` reports failures and continues; `enforce` refuses the push at the first
+failure; `off` or an empty command list skips the gate. Failure includes a
+redacted, bounded tail of combined stdout and stderr. Project-specific values
+can override these keys under `[domains.pr.land.projects."ID".local_gate]`.
+
+## Worktree setup
+
+Project setup uses the existing project-ID overrides in the selected state
+root's `config.toml`, rather than a repository overlay for `[knobs]`. Find the
+project ID with `provenant fabric identity`, then declare shell commands:
+
+```toml
+[worktrees.projects."PROJECT_ID"]
+setup = ["pnpm install --frozen-lockfile", "./scripts/check-links"]
+timeout_seconds = 300
+```
+
+`[worktrees]` supplies host-wide defaults for the same fields. Setup is unset
+by default (an empty command list); a project's list replaces the default,
+and `setup = []` disables it for that project. `config show` reports these
+settings and their sources; `config schema` lists their types and bounds.
+The total timeout across all commands defaults to 300 seconds and accepts
+1 to 3600 seconds.
+
+Commands run in order through `/bin/sh -c`, with the new worktree as their
+working directory, after `worktree create` or writer `run --branch/--base`
+creates it and before the writer starts. A nonzero exit, timeout or launch
+failure stops setup and warns with the captured output tail, leaving the
+worktree usable. Reusing an existing worktree never runs setup again; retry a
+failed setup manually from that worktree. Configure only commands you trust
+to run on the host.
+
 ## Run host policy
 
 `[domains.run.host_policy]` (`deny_read`, `deny_write`, `network =
 "open|local|provider"`) adds optional restrictions on top of the mandatory
 boundaries; absolute paths only, no per-project override. The effective
-network is the narrower of the ceiling and the lane's request.
+network is the narrower of the ceiling and the lane's request. Path denials
+apply only to sandboxed lanes; keep a route in `sandboxed_routes` to keep a
+path from it. A narrowed network sandboxes the lane unless an explicit `off`
+overrides that restriction.
+
+## Lane sandbox mode
+
+Each macOS attempt resolves whether it runs under Seatbelt. The registry default is
+`auto`: every lane kind (writers and read-only lanes alike) runs unsandboxed unless
+a configured floor requires sandboxing. Only an explicit `off` overrides those
+floors. In precedence order:
+
+1. **Unsupported backend:** Off macOS every lane resolves as sandboxed (`platform`),
+   so Linux keeps refusing lane launch.
+2. **Inherited OS sandbox:** A process already running inside an operating-system sandbox
+   (e.g. Seatbelt) cannot remove it. An inherited OS sandbox is always reported honestly as
+   effective (`parent`), even if unsandboxed execution was requested.
+3. **Explicit knob:**
+   - `on` / `--sandbox` explicitly sandboxes the lane (`knob`).
+   - `off` / `--no-sandbox` explicitly runs the lane unsandboxed (`knob`). An explicit
+     `off` takes precedence over route floors (`sandboxed_routes`), narrowed-network
+     floors, and parent floors where Provenant decides them, emitting a one-line warning
+     naming each restriction dropped.
+4. **Default (under `auto` or unset knob):**
+   - Floors apply when configured: a lane started by a lane that was itself sandboxed
+     by distrust (`parent`), a route id matching `[domains.run] sandboxed_routes` (`route`;
+     empty by default), or an effective network of `provider` or `local` (`network`). "Started by"
+     covers `run` from inside a lane and every graph node a lane or planner adds or replaces:
+     admission names the admitting node in `attempt.admitted_by`, overwriting any value the author
+     wrote. A sandbox that only enforces read-only access or a narrowed network does not pass
+     on, so a read-only planner's writers stay unsandboxed. An unreadable record, or an admitting
+     attempt on another host, counts as sandboxed.
+   - When no floor applies, every lane kind runs unsandboxed (`default`).
+
+The lane sees `PROVENANT_SANDBOX=on|off`. `PROVENANT_PROCESS_TREE` is the
+path to the supervisor's lane process-tree sample, used by `provenant
+process-tree`; preserve it when invoking that tool from a scrubbed environment.
+The receipt's `applied_route.sandbox` and `status` record requested and
+effective mode and its source.
+
+`[domains.run] sandbox_cache_reads` (absolute directories, replaced per project
+by `[domains.run.projects."ID"] sandbox_cache_reads`) gives sandboxed lanes
+read-only access to host caches such as an sccache directory or prebuilt
+database clusters. Missing paths are skipped; paths overlapping the lane's own
+grants keep the grant. Unsandboxed lanes need no grant.
+
+What holds in each mode:
+
+- **Credentials.** Every lane's environment is rebuilt from the adapter's
+  allowlist, and hosted-cloud and API-key variables (`AWS_*`, `NEON_*`,
+  `CLOUDFLARE_*`, `*_API_KEY`, `*_ACCESS_TOKEN` and similar; `GH_TOKEN` is
+  kept for publishing) are stripped. An unsandboxed lane can read on-disk
+  credential stores such as `~/.aws` and `~/.ssh`: route trust replaces the
+  file denial.
+- **Git.** Writer custody (one registered writer per worktree), the lane's
+  private Git directory and host-owned delivery with object and expected-ref
+  checks hold in both modes. Only a sandboxed lane is kernel-denied writes to
+  the shared Git directory, other worktrees and the primary checkout; an
+  unsandboxed writer is trusted not to bypass its Git shim or write there.
+- **Host state.** An unsandboxed lane can also write the state directory,
+  including `config.toml` (`sandboxed_routes`, `[knobs]`) and run records, so
+  every floor above holds only as far as the unsandboxed routes are trusted.
+- **Process tree.** Sandboxed lanes are walked by their sandbox mark,
+  unsandboxed lanes by ancestry, so heavy-lock accounting covers both.
+  Cleanup of escapees that left the process tree relies on the sandbox mark:
+  a daemon an unsandboxed lane detaches (for example `setsid`, `pg_ctl` or a
+  compiler-cache server) is not killed, and while it holds the lane's
+  inherited descriptors the attempt cannot settle. Start shared daemons from
+  the host, or close inherited descriptors when a lane starts one.
 
 ## Unreadable process census exceptions
 

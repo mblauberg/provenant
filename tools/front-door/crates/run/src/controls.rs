@@ -3247,6 +3247,10 @@ impl RunStore {
         call: &Request<'_>,
         observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
+        let directory = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        if crate::settlement::queued_abandonment_pending(&directory, record)? {
+            return Ok(None);
+        }
         if let Some(state) = self.settle_rebooted(record, call, observer)? {
             return Ok(Some(state));
         }

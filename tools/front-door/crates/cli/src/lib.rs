@@ -217,10 +217,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
                 core_help(&model)
             } else {
                 if command.is_empty() && *all {
-                    format!(
-                        "{}\nFor advanced options, run provenant help COMMAND --all.\n",
-                        selected.render_long_help()
-                    )
+                    all_command_help(selected)
                 } else {
                     selected.render_long_help().to_string()
                 }
@@ -699,62 +696,58 @@ fn core_help(model: &clap::Command) -> String {
             .unwrap_or_default();
         text.push_str(&format!("  {name:<8}  {about}\n            {example}\n"));
     }
-    text.push_str("  --full    Complete human detail; --json keeps machine output\n  help --all  All commands and advanced options\n              provenant help --all\n");
+    let arguments: Vec<_> = model
+        .get_arguments()
+        .filter(|arg| !arg.is_hide_set() && arg.get_long().is_some())
+        .collect();
+    if !arguments.is_empty() {
+        text.push_str("\nOptions:\n");
+        for arg in arguments {
+            let Some(long) = arg.get_long() else {
+                continue;
+            };
+            let help = arg.get_help().map(ToString::to_string).unwrap_or_default();
+            text.push_str(&format!("  --{long:<16} {help}\n"));
+        }
+    }
+    text.push_str(
+        "  help --all  All commands and advanced options\n              provenant help --all\n",
+    );
+    text
+}
+fn all_command_help(model: &clap::Command) -> String {
+    fn append(command: &clap::Command, path: String, text: &mut String) {
+        if command.is_hide_set() {
+            return;
+        }
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(
+            &command
+                .clone()
+                .bin_name(path.clone())
+                .render_long_help()
+                .to_string(),
+        );
+        for child in command.get_subcommands() {
+            append(child, format!("{path} {}", child.get_name()), text);
+        }
+    }
+    let mut text = String::new();
+    append(model, model.get_name().to_owned(), &mut text);
+    text.push_str("\nFor focused command help, run provenant help COMMAND.\n");
     text
 }
 fn expanded_model() -> clap::Command {
     build_model(false, true)
 }
-fn hide_compact_arguments(mut command: clap::Command) -> clap::Command {
-    // Day-to-day controls only; visibility never changes the parsing grammar.
-    let visible: &[&str] = match command.get_name() {
-        "run" => &[
-            "use", "tier", "model", "effort", "over", "file", "set", "wait", "explain",
-        ],
-        "status" => &["all", "wait", "target", "until", "follow"],
-        "output" => &["part", "tail", "trace"],
-        "steer" => &["text-stdin", "operation-id"],
-        "edit" | "templates" => &["file"],
-        "stop" => &["wait", "reason"],
-        "retry" => &["node", "brief", "extend", "wait"],
-        "land" => &["wait", "head", "batch", "shadow", "tier", "explain"],
-        "help" => &["all"],
-        _ => &[],
-    };
-    let hidden: Vec<_> = command
-        .get_arguments()
-        .filter(|arg| {
-            !arg.is_positional()
-                && !matches!(arg.get_id().as_str(), "json" | "full" | "project")
-                && !arg.get_long().is_some_and(|long| visible.contains(&long))
-        })
-        .map(|arg| arg.get_id().clone())
-        .collect();
-    for id in hidden {
-        command = command.mut_arg(id, |arg| arg.hide(true));
-    }
-    command
-}
 fn compact_help_model() -> clap::Command {
-    fn hide_arguments(mut command: clap::Command) -> clap::Command {
-        command = hide_compact_arguments(command);
-        let children: Vec<_> = command.get_subcommands().cloned().collect();
-        let quota = command.get_name() == "quota";
-        for child in children {
-            let name = child.get_name();
-            command = command.mut_subcommand(name, |_| {
-                let child = hide_arguments(child.clone());
-                if quota { child.hide(true) } else { child }
-            });
-        }
-        command
-    }
-    hide_arguments(expanded_model())
+    build_model(false, false)
 }
 fn build_model(passive: bool, advanced: bool) -> clap::Command {
-    // Keep the compact help contract small enough to scan. Every argument
-    // remains available through `help --all`; these are the options most
-    // callers need to start, locate and steer graph work.
+    // Compact help keeps the command catalogue small, while each command's
+    // arguments remain visible directly from the clap grammar.
     fn configure(
         mut command: clap::Command,
         globals: &[Arg],
@@ -780,9 +773,6 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
             .disable_help_flag(true)
             .disable_version_flag(true)
             .version(env!("CARGO_PKG_VERSION"));
-        if !advanced {
-            command = hide_compact_arguments(command);
-        }
         if command.get_name() == "resolve" {
             command = command.group(
                 ArgGroup::new("route_choice")
@@ -803,15 +793,6 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
                     .args(["branch", "since"])
                     .multiple(false),
             );
-        }
-        if advanced {
-            let ids: Vec<_> = command
-                .get_arguments()
-                .map(|arg| arg.get_id().clone())
-                .collect();
-            for id in ids {
-                command = command.mut_arg(id, |arg| arg.hide(false));
-            }
         }
         let children: Vec<_> = command
             .get_subcommands()
@@ -1361,40 +1342,98 @@ mod tests {
         }
     }
     #[test]
-    fn compact_catalogue_keeps_documented_knobs_below_the_repository_limit() {
-        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "--json"]) else {
-            panic!("compact help")
-        };
-        let steer = catalog
-            .commands
-            .iter()
-            .find(|command| command.command == "provenant steer")
-            .expect("documented steer command");
-        assert!(
-            steer
-                .arguments
-                .iter()
-                .any(|argument| { argument.long.as_deref() == Some("operation-id") })
-        );
-        let mut globals = std::collections::BTreeSet::new();
-        let rows = catalog
-            .commands
-            .iter()
-            .flat_map(|command| &command.arguments)
-            .filter(|argument| {
-                let Some(flag) = argument.long.as_deref() else {
-                    return false;
+    fn every_public_command_help_shows_each_non_hidden_long_argument() {
+        fn check(command: &clap::Command, path: String, all_help: &str, paths: &mut Vec<String>) {
+            if command.is_hide_set() {
+                return;
+            }
+            let rendered = command
+                .clone()
+                .bin_name(path.clone())
+                .render_long_help()
+                .to_string();
+            assert!(all_help.contains(&rendered), "help --all omits {path}");
+            for argument in command
+                .get_arguments()
+                .filter(|argument| !argument.is_hide_set())
+            {
+                let Some(long) = argument.get_long() else {
+                    continue;
                 };
-                if matches!(flag, "help" | "version") {
-                    return false;
-                }
-                if matches!(flag, "json" | "full" | "project" | "state-dir") {
-                    return globals.insert(flag);
-                }
-                true
-            })
-            .count();
-        assert!(rows < 40, "{rows} documented flag rows");
+                assert!(
+                    rendered.contains(&format!("--{long}")),
+                    "{path} omits --{long}"
+                );
+            }
+            for argument in command
+                .get_arguments()
+                .filter(|argument| argument.is_hide_set())
+            {
+                let Some(long) = argument.get_long() else {
+                    continue;
+                };
+                assert!(
+                    !rendered.contains(&format!("--{long}")),
+                    "{path} exposes hidden --{long}"
+                );
+            }
+            paths.push(path.clone());
+            for child in command.get_subcommands() {
+                check(
+                    child,
+                    format!("{path} {}", child.get_name()),
+                    all_help,
+                    paths,
+                );
+            }
+        }
+
+        let model = expanded_model();
+        let ParseOutcome::Help { text: all_help, .. } = parsed(&["help", "--all"]) else {
+            panic!("expected help --all")
+        };
+        let mut paths = Vec::new();
+        check(&model, model.get_name().to_owned(), &all_help, &mut paths);
+        for path in paths {
+            let args = path
+                .split_whitespace()
+                .skip(1)
+                .chain(std::iter::once("--help"))
+                .collect::<Vec<_>>();
+            let ParseOutcome::Help { text, .. } = parsed(&args) else {
+                panic!("expected help for {path}")
+            };
+            let command = path
+                .split_whitespace()
+                .skip(1)
+                .fold(&model, |command, name| {
+                    command.find_subcommand(name).unwrap()
+                });
+            for argument in command
+                .get_arguments()
+                .filter(|argument| !argument.is_hide_set())
+            {
+                let Some(long) = argument.get_long() else {
+                    continue;
+                };
+                assert!(
+                    text.contains(&format!("--{long}")),
+                    "{path} --help omits --{long}"
+                );
+            }
+            for argument in command
+                .get_arguments()
+                .filter(|argument| argument.is_hide_set())
+            {
+                let Some(long) = argument.get_long() else {
+                    continue;
+                };
+                assert!(
+                    !text.contains(&format!("--{long}")),
+                    "{path} --help exposes hidden --{long}"
+                );
+            }
+        }
     }
     #[test]
     fn catalogue_paths_exist_in_command_model() {
@@ -1519,28 +1558,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn run_operation_identity_is_an_advanced_option() {
-        for (args, expected) in [
-            (vec!["help", "run"], false),
-            (vec!["help", "run", "--all"], true),
-        ] {
-            let ParseOutcome::Help { catalog, .. } = parsed(&args) else {
-                panic!("help");
-            };
-            let run = catalog
-                .commands
-                .iter()
-                .find(|command| command.command == "provenant run")
-                .unwrap();
-            assert_eq!(
-                run.arguments
-                    .iter()
-                    .any(|argument| argument.name == "operation_id"),
-                expected
-            );
-        }
-    }
     #[test]
     fn compact_run_help_keeps_skill_prescribed_options_visible() {
         let ParseOutcome::Help { catalog, .. } = parsed(&["help", "run"]) else {
@@ -1706,19 +1723,8 @@ mod tests {
                 .is_some_and(|text| !text.is_empty())
         );
         for name in [
-            "brief",
-            "template",
-            "tier",
-            "model",
-            "effort",
-            "account",
-            "host",
-            "operation_id",
-            "over",
-            "set",
-            "file",
-            "explain",
-            "wait",
+            "brief", "template", "tier", "model", "effort", "account", "host", "over", "set",
+            "file", "explain", "wait",
         ] {
             assert!(
                 run.arguments.iter().any(|argument| argument.name == name),

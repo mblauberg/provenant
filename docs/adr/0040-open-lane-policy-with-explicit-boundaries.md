@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 
-Changed: 2026-11-08.
+Changed: 2026-11-08; 2026-11-12 (sandbox mode, #3246).
 
 ## Context
 
@@ -122,6 +122,30 @@ refusal; it must never fall back to unconfined execution. Fixture checks cover
 policy resolution, mandatory roots, exception boundaries and provider private
 state. Configured-host native checks cover actual enforcement. A lane returning
 `ProbeFailed`/skip supplies no native enforcement evidence.
+
+## Sandbox mode
+
+Every lane kind (writers and read-only lanes alike) runs without Seatbelt by
+default, like the same CLI started by hand, so they can share host build caches
+and services. `[domains.run] sandboxed_routes` defaults to empty; users can add
+route prefixes whose lanes should sandbox under default policy. Explicit `--sandbox`
+opts into Seatbelt confinement.
+
+An explicit `--no-sandbox` / knob `off` takes precedence over route floors,
+narrowed-network floors, and parent floors where Provenant decides them, warning
+of the dropped restriction. An OS-inherited sandbox cannot be dropped and is
+always reported honestly as effective. The
+[configuration runbook](../runbooks/configuration.md#lane-sandbox-mode) owns
+the rules and what holds in each mode.
+
+For an unsandboxed lane, ADR 0035's lane Git and credentials boundaries rest
+on the private Git directory, host-owned delivery, writer custody and the
+stripped environment, not on kernel denials: route trust replaces the file
+and shared-Git write denials, and `host_policy` path denials do not apply.
+Such a lane can also write the host state that records the floors, and
+detached daemons it starts escape cleanup.
+Overturn when a trusted route is traced to writing shared Git state or using
+an on-disk credential it was not given.
 
 ## Known limits
 

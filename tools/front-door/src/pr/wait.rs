@@ -2,7 +2,7 @@
 use super::{
     Result, execute_for,
     observer::{Check, ObserveError},
-    status::Required,
+    status::{CiCheck, CiCompletion, Required, ci_completion},
 };
 use provenant_core::GitOid;
 use provenant_core::retry::{Backoff, RetryCause, is_transient};
@@ -61,13 +61,14 @@ enum State {
 /// Fold mergeability and an expired wait into a CI state. A conflicting pull
 /// request never starts CI; an empty head after the wait was never scheduled.
 fn observe(
+    head: &str,
     checks: &[Check],
     required: &[Required],
     now: jiff::Timestamp,
     mergeable: Option<&str>,
     expired: bool,
 ) -> State {
-    match state(checks, required, now) {
+    match state_for(head, checks, required, now) {
         State::Pending | State::Settling | State::Unavailable
             if mergeable == Some("CONFLICTING") =>
         {
@@ -77,49 +78,29 @@ fn observe(
         other => other,
     }
 }
+#[allow(dead_code, reason = "helper used by the wait unit tests")]
 fn state(checks: &[Check], required: &[Required], now: jiff::Timestamp) -> State {
-    let selected: Vec<_> = checks
+    let head = checks.first().map_or("", |check| check.head.as_str());
+    state_for(head, checks, required, now)
+}
+fn state_for(head: &str, checks: &[Check], required: &[Required], now: jiff::Timestamp) -> State {
+    let normalized: Vec<_> = checks
         .iter()
-        .filter(|check| {
-            required.is_empty()
-                || required
-                    .iter()
-                    .any(|need| need.matches(&check.name, check.app))
+        .map(|check| CiCheck {
+            head: check.head.clone(),
+            name: check.name.clone(),
+            bucket: check.bucket.clone(),
+            app: check.app,
         })
         .collect();
-    if selected
-        .iter()
-        .any(|check| matches!(check.bucket.as_str(), "fail" | "cancel"))
-    {
-        return State::Failed;
+    match ci_completion(head, &normalized, required) {
+        CiCompletion::Pending => return State::Pending,
+        CiCompletion::Failed => return State::Failed,
+        CiCompletion::Unavailable => return State::Unavailable,
+        CiCompletion::Green => {}
     }
-    if required.iter().any(|need| {
-        !checks
-            .iter()
-            .any(|check| need.matches(&check.name, check.app))
-    }) || selected.is_empty()
-    {
-        return State::Pending;
-    }
-    if selected
-        .iter()
-        .any(|check| !matches!(check.bucket.as_str(), "pass" | "skipping" | "pending"))
-    {
-        return State::Unavailable;
-    }
-    if selected.iter().any(|check| check.bucket == "pending") {
-        return State::Pending;
-    }
-    // A required check that did not run has not verified this head, even where
-    // GitHub's own merge button would accept it.
-    if !required.is_empty() && selected.iter().any(|check| check.bucket == "skipping") {
-        return State::Unavailable;
-    }
-    if !selected.iter().any(|check| check.bucket == "pass") {
-        return State::Unavailable;
-    }
-    // With no named requirement, the first green check proves little: a slower
-    // workflow may not have registered yet.
+    // With no named requirement, allow late workflows to register only after
+    // at least one current-head check has completed successfully.
     if required.is_empty() && settle_remaining(checks, now).is_some() {
         return State::Settling;
     }
@@ -475,6 +456,7 @@ fn checks_with(
     };
     let mut progress = 0;
     let mut pending = 0_u64;
+    let head = expected.to_string();
     let pacing = Backoff::new(
         Duration::from_secs(poll),
         2,
@@ -491,6 +473,7 @@ fn checks_with(
             let checks = ci(expected, revalidated)?;
             let mergeable = check_head()?;
             let state = observe(
+                &head,
                 &checks,
                 &policy.checks,
                 jiff::Timestamp::now(),
@@ -557,7 +540,8 @@ fn checks_with(
 #[cfg(test)]
 #[allow(dead_code)] // The worktree driver includes this module without libtest.
 pub(super) fn verdict(checks: &[Check], now: jiff::Timestamp) -> &'static str {
-    match state(checks, &[], now) {
+    let head = checks.first().map_or("", |check| check.head.as_str());
+    match state_for(head, checks, &[], now) {
         State::Passed => "passed",
         State::Pending | State::Settling => "pending",
         State::Failed => "failed",
@@ -580,6 +564,7 @@ mod tests {
     }
     fn check(name: &str, bucket: &str) -> Check {
         Check {
+            head: "head".into(),
             name: name.into(),
             bucket: bucket.into(),
             app: None,
@@ -597,6 +582,45 @@ mod tests {
         }
     }
     const NOW: &str = "2026-01-01T00:00:00Z";
+
+    #[test]
+    fn recorded_rollups_only_complete_green_for_their_current_head() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/ci-rollups.json")).expect("fixture");
+        let head = fixture["head"].as_str().expect("head");
+        let required = [need("build")];
+        let parse = |key: &str| {
+            let rollup = &fixture[key];
+            let runs = json!({
+                "total_count": rollup["total_count"],
+                "check_runs": rollup["check_runs"]
+            });
+            let statuses = rollup["statuses"].clone();
+            super::super::observer::parse_pages(&[runs], &[statuses], head)
+        };
+
+        let queued = parse("queued_required").expect("queued rollup");
+        assert_eq!(state_for(head, &queued, &required, at(NOW)), State::Pending);
+
+        let stale = &fixture["stale_pass"];
+        let stale_page = json!({
+            "total_count": stale["total_count"],
+            "check_runs": stale["check_runs"]
+        });
+        assert!(
+            super::super::observer::parse_pages(&[stale_page], &[stale["statuses"].clone()], head)
+                .is_none()
+        );
+
+        let empty = parse("no_checks").expect("empty rollup");
+        assert_eq!(state_for(head, &empty, &[], at(NOW)), State::Pending);
+
+        let green = parse("all_green").expect("green rollup");
+        assert_eq!(
+            state_for(head, &green, &required, at("2026-01-01T00:02:00Z")),
+            State::Passed
+        );
+    }
 
     #[test]
     fn rate_limit_headers_include_429_and_retry_after_dates() {
@@ -714,10 +738,9 @@ mod tests {
             &read,
             &mut |_, revalidate| {
                 asked.borrow_mut().push(revalidate);
-                Ok(vec![check(
-                    "build",
-                    if revalidate { "fail" } else { "pass" },
-                )])
+                let mut observed = check("build", if revalidate { "fail" } else { "pass" });
+                observed.head = oid.to_string();
+                Ok(vec![observed])
             },
             clock + Duration::from_secs(600),
             &|| clock,
@@ -774,7 +797,9 @@ mod tests {
             &read,
             &mut |_, _| {
                 calls.set(calls.get() + 1);
-                Ok(vec![check("build", "pending")])
+                let mut observed = check("build", "pending");
+                observed.head = oid.to_string();
+                Ok(vec![observed])
             },
             deadline,
             &|| clock.get(),
@@ -802,11 +827,12 @@ mod tests {
         let required = [need("build")];
         // A conflicting PR never starts CI, whatever else has registered.
         assert_eq!(
-            observe(&[], &required, now, Some("CONFLICTING"), false),
+            observe("head", &[], &required, now, Some("CONFLICTING"), false),
             State::Conflict
         );
         assert_eq!(
             observe(
+                "head",
                 &[check("lint", "pending")],
                 &required,
                 now,
@@ -818,6 +844,7 @@ mod tests {
         // A failed required check stays failed.
         assert_eq!(
             observe(
+                "head",
                 &[check("build", "fail")],
                 &required,
                 now,
@@ -828,16 +855,16 @@ mod tests {
         );
         // Nothing registered: pending while the wait runs, unscheduled once it expires.
         assert_eq!(
-            observe(&[], &required, now, Some("MERGEABLE"), false),
+            observe("head", &[], &required, now, Some("MERGEABLE"), false),
             State::Pending
         );
         assert_eq!(
-            observe(&[], &required, now, None, true),
+            observe("head", &[], &required, now, None, true),
             State::NotScheduled
         );
         // Something registered is still pending after expiry; the timeout reports it.
         assert_eq!(
-            observe(&[check("lint", "pass")], &required, now, None, true),
+            observe("head", &[check("lint", "pass")], &required, now, None, true),
             State::Pending
         );
     }
@@ -895,6 +922,15 @@ mod tests {
         assert_eq!(
             state(&[check("build", "skipping")], &[], now),
             State::Unavailable
+        );
+    }
+
+    #[test]
+    fn optional_in_progress_check_keeps_a_required_green_head_pending() {
+        let checks = [check("build", "pass"), check("slow-optional", "pending")];
+        assert_eq!(
+            state_for("head", &checks, &[need("build")], at(NOW)),
+            State::Pending
         );
     }
     #[test]

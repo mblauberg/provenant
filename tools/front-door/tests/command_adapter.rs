@@ -79,6 +79,29 @@ fn configure_commands(rig: &TestRig, commands: Value) -> Result {
     Ok(())
 }
 
+/// Set one host config entry, such as `[knobs]` or `[domains.run]`.
+fn configure(rig: &TestRig, table: &[&str], key: &str, value: toml_edit::Item) -> Result {
+    let mut config: toml_edit::DocumentMut =
+        fs::read_to_string(rig.state.join("config.toml"))?.parse()?;
+    let mut item = config.as_item_mut();
+    for name in table {
+        item = item
+            .as_table_like_mut()
+            .ok_or("config table")?
+            .entry(name)
+            .or_insert(toml_edit::table());
+    }
+    item.as_table_like_mut()
+        .ok_or("config table")?
+        .insert(key, value);
+    fs::write(rig.state.join("config.toml"), config.to_string())?;
+    Ok(())
+}
+
+fn strings(values: &[&str]) -> toml_edit::Item {
+    toml_edit::value(values.iter().copied().collect::<toml_edit::Array>())
+}
+
 /// Submit a single command node through the graph CLI.
 fn dispatch(rig: &TestRig, name: &str, timeout: u64) -> Result<Value> {
     dispatch_with(rig, name, timeout, None, true)
@@ -270,9 +293,25 @@ printf '%s\n' "$PROVENANT_PROCESS_TREE"
 /bin/cat "$TMPDIR/sample.json"
 "#;
     let command = json!({"argv":["/bin/sh","-c",script,"memory",binary], "runtimes":[binary]});
-    let mut rig = rig(json!({"memory":command.clone(), "memory-foreign":command}))?;
+    let mut rig = rig(json!({
+        "memory": command.clone(),
+        "memory-foreign": command.clone(),
+        "memory-sandboxed": command,
+    }))?;
+    // An unsandboxed lane is walked by ancestry; a sandboxed one by its mark.
+    // Lanes run unsandboxed by default; sandboxed_routes sandboxes the listed route.
+    configure(
+        &rig,
+        &["domains", "run"],
+        "sandboxed_routes",
+        strings(&["command/memory-sandboxed"]),
+    )?;
     let _cleanup = rig.process_cleanup();
-    for (name, foreign) in [("memory", false), ("memory-foreign", true)] {
+    for (name, foreign) in [
+        ("memory", false),
+        ("memory-foreign", true),
+        ("memory-sandboxed", false),
+    ] {
         rig.env
             .retain(|(key, _)| key != provenant_supervisor::process_tree::ENV);
         if foreign {
@@ -285,6 +324,16 @@ printf '%s\n' "$PROVENANT_PROCESS_TREE"
         let id = attempt_id(&submitted)?;
         let lane = settled(&rig, id)?;
         assert_eq!(lane["state"], "succeeded", "{lane}");
+        let sandboxed = name == "memory-sandboxed";
+        assert_eq!(
+            lane["applied_route"]["sandbox"]["effective"], sandboxed,
+            "{lane}"
+        );
+        assert_eq!(
+            lane["applied_route"]["sandbox"]["source"],
+            if sandboxed { "route" } else { "default" },
+            "{lane}"
+        );
         let output = fs::read_to_string(attempt_dir(&rig, id)?.join("stdout.log"))?;
         let (snapshot_path, json) = output.split_once('\n').ok_or("snapshot path output")?;
         assert_eq!(
@@ -339,6 +388,8 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
         "tail":{"argv":["/bin/sh","-c","/usr/bin/yes x | /usr/bin/head -c 2000000; printf '\\nlast-output\\n'"]},
         "missing":{"argv":["/missing/command"]}
     }))?;
+    // This test exercises denied checkout writes as well as command settlement.
+    configure(&rig, &["knobs"], "lanes.sandbox", toml_edit::value("on"))?;
     let _cleanup = rig.process_cleanup();
     for (name, expected, verdict) in [
         ("pass", "succeeded", "PASS"),
@@ -481,10 +532,17 @@ printf 'custom interpreter ran; credentials and writes denied\n'
             "granted": {"argv": [script], "runtimes": [runtime]}
         }),
     )?;
+    // Lanes run unsandboxed by default; the host knob sandboxes this one.
+    configure(&rig, &["knobs"], "lanes.sandbox", toml_edit::value("on"))?;
     let submitted = dispatch(&rig, "granted", 10)?;
     let id = attempt_id(&submitted)?;
     let lane = settled(&rig, id)?;
     assert_eq!(lane["state"], "succeeded", "{lane}");
+    assert_eq!(
+        lane["applied_route"]["sandbox"]["effective"], true,
+        "{lane}"
+    );
+    assert_eq!(lane["applied_route"]["sandbox"]["source"], "knob", "{lane}");
     // Network is on unless the task turns it off.
     assert_eq!(lane["network"], "open", "{submitted}");
     let result = fs::read_to_string(attempt_dir(&rig, id)?.join("result.md"))?;
@@ -498,12 +556,70 @@ printf 'custom interpreter ran; credentials and writes denied\n'
 }
 
 #[test]
+fn sandboxed_lanes_read_host_caches_without_writing_and_see_their_mode() -> Result {
+    if !available()? {
+        return Ok(());
+    }
+    let rig = rig(json!({}))?;
+    let _cleanup = rig.process_cleanup();
+    let cache = rig.root.join("host-cache");
+    fs::create_dir_all(&cache)?;
+    fs::write(cache.join("entry"), "cached")?;
+    let script = r#"
+set -eu
+printf 'mode=%s\n' "$PROVENANT_SANDBOX"
+printf 'read=%s\n' "$(/bin/cat "$1/entry")"
+if /usr/bin/touch "$1/written-by-$PROVENANT_SANDBOX" 2>/dev/null; then
+    printf 'write=allowed\n'
+else
+    printf 'write=denied\n'
+fi
+"#;
+    let command = |name: &str| json!({"argv":["/bin/sh","-c",script,name,cache]});
+    configure_commands(
+        &rig,
+        json!({"cache-sandboxed": command("cache-sandboxed"), "cache-open": command("cache-open")}),
+    )?;
+    configure(
+        &rig,
+        &["domains", "run"],
+        "sandboxed_routes",
+        strings(&["command/cache-sandboxed"]),
+    )?;
+    configure(
+        &rig,
+        &["domains", "run"],
+        "sandbox_cache_reads",
+        strings(&[cache.to_str().ok_or("cache path")?]),
+    )?;
+    for (name, mode, write) in [
+        ("cache-sandboxed", "on", "denied"),
+        ("cache-open", "off", "allowed"),
+    ] {
+        let submitted = dispatch(&rig, name, 10)?;
+        let id = attempt_id(&submitted)?;
+        let lane = settled(&rig, id)?;
+        assert_eq!(lane["state"], "succeeded", "{lane}");
+        let output = fs::read_to_string(attempt_dir(&rig, id)?.join("stdout.log"))?;
+        assert!(
+            output.contains(&format!("mode={mode}\nread=cached\nwrite={write}\n")),
+            "{name}: {output}"
+        );
+    }
+    assert!(!cache.join("written-by-on").exists());
+    assert!(cache.join("written-by-off").exists());
+    Ok(())
+}
+
+#[test]
 fn command_timeout_cleans_descendants_and_running_replay_keeps_one_attempt() -> Result {
     if !available()? {
         return Ok(());
     }
+    // Outlive the outer test deadline: a missing descendant kill must not
+    // pass merely because the child completed its sleep naturally.
     let rig = rig(
-        json!({"slow":{"argv":["/bin/sh","-c","/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); sleep 30' & child=$!; printf 'child=%s\\n' \"$child\"; wait"]}}),
+        json!({"slow":{"argv":["/bin/sh","-c","/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); sleep 300' & child=$!; printf 'child=%s\\n' \"$child\"; wait"]}}),
     )?;
     let _cleanup = rig.process_cleanup();
     let first = dispatch_with(&rig, "slow", 5, None, false)?;

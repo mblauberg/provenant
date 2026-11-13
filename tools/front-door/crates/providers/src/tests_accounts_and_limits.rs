@@ -1,4 +1,3 @@
-
 #[test]
 fn opencode_free_limit_preserves_provider_message() -> Result<(), Box<dyn std::error::Error>> {
     // Synthetic protocol regression from #1216, not an activation recording.
@@ -313,7 +312,8 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
                 assert!(
                     spec.env
                         .iter()
-                        .any(|(k, v)| k == "CLAUDE_CONFIG_DIR" && v == "/fixture/state/claude-config")
+                        .any(|(k, v)| k == "CLAUDE_CONFIG_DIR"
+                            && v == "/fixture/state/claude-config")
                 );
                 assert!(
                     spec.profile
@@ -571,6 +571,35 @@ fn codex_rollout_skips_long_unparsable_and_unrelated_lines() {
     let turn = observed.unwrap();
     assert_eq!(turn.model, "gpt-6-luna");
     assert_eq!(turn.effort.as_deref(), Some("low"));
+}
+
+/// A real Codex home holds more rollouts than the full-scan bound; a UUIDv7
+/// thread is found from its creation date, filed under the local date.
+#[test]
+fn codex_rollout_finds_a_v7_thread_by_date_in_a_large_home() {
+    let home = std::env::temp_dir().join(format!("provenant-rollout-v7-{}", std::process::id()));
+    for year in 0..4100 {
+        std::fs::create_dir_all(home.join(format!("sessions/{:04}", 3000 + year))).unwrap();
+    }
+    // Created 2026-11-13T06:45Z and filed under the next day, the window's edge.
+    let thread = "01a1d3a7-96ef-7032-a58f-5d1770a43b6e";
+    let day = home.join("sessions/2026/11/14");
+    std::fs::create_dir_all(&day).unwrap();
+    let rollout = format!(
+        "{}\n{}\n",
+        serde_json::json!({"type":"session_meta","payload":{"id":thread}}),
+        serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-luna","effort":"low"}}),
+    );
+    std::fs::write(
+        day.join(format!("rollout-2026-11-14T00-00-00-{thread}.jsonl")),
+        rollout,
+    )
+    .unwrap();
+    let observed = crate::codex_rollout::observe(&home, thread);
+    let missing = crate::codex_rollout::observe(&home, "01a1d3a7-96ef-7032-a58f-000000000000");
+    std::fs::remove_dir_all(&home).unwrap();
+    assert_eq!(observed.unwrap().model, "gpt-6-luna");
+    assert!(matches!(missing, Err(ProviderError::UnknownIdentity)));
 }
 
 #[test]

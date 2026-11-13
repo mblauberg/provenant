@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 
-Changed: 2026-10-30, #2284; 2026-11-04 (shims and provider guards).
+Changed: 2026-10-30, #2284; 2026-11-04 (shims and provider guards); 2026-11-12 (unsandboxed trusted routes, #3246).
 
 ## Context
 
@@ -16,7 +16,9 @@ credential exposure and unauthorised change.
 Four boundaries are strict and fail closed:
 
 1. **Lane Git:** a writer lane works in its private Git directory and cannot
-   reach shared refs except through host-owned delivery.
+   reach shared refs except through host-owned delivery. A sandboxed lane is
+   kernel-denied shared Git writes; an unsandboxed lane on a trusted route is
+   held by delivery checks and route trust ([ADR 0040](0040-open-lane-policy-with-explicit-boundaries.md#sandbox-mode)).
 2. **Credentials:** credentials never cross hosts. GitHub access and its
    read-only credential-store exception are governed by [ADR 0040](0040-open-lane-policy-with-explicit-boundaries.md#permitted-exceptions).
 3. **Object integrity:** Git objects are digest-checked and fsck-verified on

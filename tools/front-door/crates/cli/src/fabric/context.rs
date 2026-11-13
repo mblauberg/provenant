@@ -761,7 +761,9 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         FacadeError::OwnerUnavailable => (Outcome::Refused, ErrorKind::OwnerUnavailable),
         FacadeError::ProviderStateExpired => (Outcome::Refused, ErrorKind::ProviderStateExpired),
         FacadeError::Cancelled => (Outcome::Error, ErrorKind::Cancelled),
-        FacadeError::StateCorrupt => (Outcome::Error, ErrorKind::StateCorrupt),
+        FacadeError::StateCorrupt | FacadeError::StateCorruptDetail { .. } => {
+            (Outcome::Error, ErrorKind::StateCorrupt)
+        }
         FacadeError::UpgradeRefused => (Outcome::Refused, ErrorKind::UpgradeRefused),
         FacadeError::UpgradeRequired { .. } => (Outcome::Refused, ErrorKind::UpgradeRequired),
         FacadeError::Timeout => (Outcome::Error, ErrorKind::Timeout),

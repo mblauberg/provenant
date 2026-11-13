@@ -34,6 +34,10 @@ possibly stale tracking ref. Unreachable or ambiguous remote bases refuse
 creation. The implementation owner is
 [`inventory.rs`](../tools/front-door/crates/confinement/src/worktrees/inventory.rs).
 
+New worktrees can run [project setup commands](runbooks/configuration.md#worktree-setup)
+before a writer starts. Setup failures warn and preserve the checkout; reusing
+a checkout does not rerun setup.
+
 Removal preserves dirty trees, active writers and unfinished Git operations.
 Ignored-only trees are dirty for removal even though a session handoff may treat
 them as clean. A held writer lock proves exclusion, not a live process; observed

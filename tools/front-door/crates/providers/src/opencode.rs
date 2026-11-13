@@ -32,7 +32,7 @@ impl provenant_os::capture::FrameDecoder for OpenCode {
     }
 }
 
-/// Only a line beginning with the provider's error class is live evidence.
+/// Recognise provider quota errors and its rate-limit retry notice live.
 pub struct StderrQuota;
 impl provenant_os::capture::FrameDecoder for StderrQuota {
     fn decode(
@@ -61,7 +61,7 @@ impl provenant_os::capture::FrameDecoder for StderrQuota {
             };
             line = &rest[end + 1..];
         }
-        line.starts_with("AI.Error.QuotaExceeded:")
+        line.starts_with("AI.Error.QuotaExceeded:") || rate_limit_retry(line)
     }
 }
 
@@ -418,6 +418,20 @@ fn prepare(
         tool_exec_roots.push(exact(rg));
         tool_exec_roots.push(exact("/usr/bin/grep"));
     }
+    // Native environments already contain host selectors. Replace them so the
+    // child cannot observe an earlier duplicate instead of its private state.
+    env.retain(|(key, _)| {
+        ![
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_NOSYSTEM",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+        ]
+        .iter()
+        .any(|name| key == *name)
+    });
     env.extend([
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
@@ -539,6 +553,56 @@ fn failure_diagnostic(stderr: &[u8]) -> Option<String> {
     })
 }
 
+/// Extract only bounded protocol identifiers, never provider messages or bodies.
+pub fn stdout_error_diagnostic(stdout: &[u8]) -> Option<String> {
+    fn identifier(value: Option<&str>) -> &str {
+        value
+            .filter(|s| {
+                !s.is_empty()
+                    && s.len() <= 64
+                    && s.bytes().all(|b| {
+                        b.is_ascii_lowercase()
+                            || b.is_ascii_digit()
+                            || matches!(b, b'.' | b'_' | b'-')
+                    })
+            })
+            .unwrap_or("unknown")
+    }
+    stdout.split(|b| *b == b'\n').find_map(|line| {
+        let value: serde_json::Value = serde_json::from_slice(line).ok()?;
+        if value.get("type")?.as_str()? != "error" {
+            return None;
+        }
+        let error = value.get("error")?;
+        let body = error
+            .pointer("/response/body")
+            .and_then(|v| v.as_str())
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .or_else(|| error.pointer("/response/body").cloned());
+        let kind = identifier(error.get("type").and_then(|v| v.as_str()));
+        let code = identifier(
+            body.as_ref()
+                .and_then(|v| v.pointer("/error/code"))
+                .and_then(|v| v.as_str()),
+        );
+        let status = error
+            .get("status")
+            .and_then(|v| v.as_u64())
+            .filter(|n| (100..=599).contains(n))
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unknown".into());
+        Some(provenant_confinement::redact::bounded_line(
+            &format!("opencode provider error: type={kind}, status={status}, code={code}"),
+            240,
+        ))
+    })
+}
+
+fn rate_limit_retry(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("rate limit exceeded") && lower.contains("retrying")
+}
+
 /// Recognise OpenCode's unstructured quota errors without treating arbitrary
 /// provider output as protocol events. Pool and retry evidence come only from
 /// the matched line and the one after it, so unrelated stderr cannot steer them.
@@ -547,7 +611,9 @@ pub fn stderr_quota(stderr: &[u8]) -> Option<E> {
     let mut lines = text.lines();
     let matched = lines.find(|line| {
         let lower = line.to_ascii_lowercase();
-        lower.contains("ai.error.quotaexceeded") || lower.contains("usage limit exceeded")
+        lower.contains("ai.error.quotaexceeded")
+            || lower.contains("usage limit exceeded")
+            || rate_limit_retry(line)
     })?;
     let scope = format!("{matched}\n{}", lines.next().unwrap_or_default()).to_ascii_lowercase();
     let pool = if scope.contains("free tier") || scope.contains("free usage") {
@@ -667,6 +733,8 @@ struct LimitError {
     #[serde(default, rename = "type", alias = "name")]
     kind: String,
     message: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
     #[serde(rename = "retryAfterMs", default)]
     retry_after_ms: Option<serde_json::Value>,
 }
@@ -777,7 +845,38 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             if let Some(session) = session.filter(|session| !session.is_empty()) {
                 events.push(E::Session(session));
             }
-            let event = if error.kind == "provider.quota" || error.kind == "provider.free-limit" {
+            let body = error.response.as_ref().and_then(|response| match response {
+                Response::Body {
+                    body: Some(Body::Json(body)),
+                } => body.error.code.clone(),
+                Response::Body {
+                    body: Some(Body::Text(text)),
+                } => wire::<ErrorBody>(text.as_bytes())
+                    .ok()
+                    .and_then(|body| body.error.code),
+                _ => None,
+            });
+            let auth = error.kind == "provider.auth"
+                || matches!(error.status, Some(401 | 403))
+                || body.as_deref() == Some("api_key_expired");
+            let limited = error.status == Some(429)
+                || error.message.as_deref().is_some_and(|message| {
+                    message
+                        .to_ascii_lowercase()
+                        .contains("insufficient balance")
+                })
+                || body.as_deref().is_some_and(|code| {
+                    matches!(
+                        code,
+                        "insufficient_balance" | "insufficient_quota" | "rate_limit_exceeded"
+                    )
+                });
+            let event = if auth {
+                E::AuthRequired
+            } else if error.kind == "provider.quota"
+                || error.kind == "provider.free-limit"
+                || limited
+            {
                 let is_free_kind = error.kind == "provider.free-limit";
                 quota(
                     error.message,
@@ -823,6 +922,32 @@ mod tests {
     use crate::Adapter;
 
     #[test]
+    fn structured_errors_classify_auth_and_quota() {
+        for (error, auth) in [
+            (serde_json::json!({"type":"provider.auth"}), true),
+            (serde_json::json!({"type":"unknown", "status":401}), true),
+            (serde_json::json!({"type":"unknown", "status":403}), true),
+            (
+                serde_json::json!({"type":"unknown", "response":{"body":"{\"error\":{\"code\":\"api_key_expired\"}}"}}),
+                true,
+            ),
+            (serde_json::json!({"type":"unknown", "status":429}), false),
+            (
+                serde_json::json!({"type":"unknown", "response":{"body":{"error":{"code":"insufficient_balance"}}}}),
+                false,
+            ),
+        ] {
+            let event = serde_json::json!({"type":"error", "error":error}).to_string();
+            let events = decode(event.as_bytes()).unwrap();
+            assert!(events.iter().any(|event| if auth {
+                matches!(event, E::AuthRequired)
+            } else {
+                matches!(event, E::QuotaLimited { .. })
+            }));
+        }
+    }
+
+    #[test]
     fn live_stderr_quota_requires_error_class_at_line_start() {
         use provenant_os::capture::{FrameDecoder, FrameEvent};
         let decoder = super::StderrQuota;
@@ -838,6 +963,19 @@ mod tests {
                 .unwrap(),
             FrameEvent::Terminal
         );
+        for line in [
+            "Rate limit exceeded, retrying in 5 seconds",
+            "Rate limit exceeded, retrying in 10 seconds",
+        ] {
+            assert_eq!(
+                decoder.decode(line.as_bytes()).unwrap(),
+                FrameEvent::Terminal
+            );
+            assert!(matches!(
+                stderr_quota(line.as_bytes()),
+                Some(E::QuotaLimited { .. })
+            ));
+        }
         for text in [
             "The documentation mentions quota and usage limit exceeded",
             "example AI.Error.QuotaExceeded: Go usage limit exceeded",

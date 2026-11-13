@@ -847,6 +847,49 @@
         Ok(())
     }
 
+    #[test]
+    fn observed_display_names_with_spaces_are_skipped() -> Result<(), Box<dyn Error>> {
+        use provenant_quota::{AccountRecord, AccountScope, QuotaSnapshot, QuotaStatus};
+        let account = AccountScope {
+            adapter: "opencode".into(),
+            account_key: "go".into(),
+            label: "go".into(),
+        };
+        let mut record = AccountRecord::empty(account.clone());
+        record.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account,
+            revision: 0,
+            status: QuotaStatus::Exhausted,
+            observed_unix_seconds: 100,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: None,
+            windows: Vec::new(),
+        });
+        let availability = [provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: "opencode".into(),
+            executable: "opencode".into(),
+            version: "fixture".into(),
+            last_update: None,
+            fixture_ref: "fixture".into(),
+            catalogue_revision: "fixture".into(),
+            account_key: Some("go".into()),
+            observed_models: vec!["opencode-go/glm-5.1".into(), "opencode-go/GPT-OSS 120B (Medium)".into()],
+            observed_unix_seconds: 100,
+            expires_unix_seconds: 200,
+        }];
+        let catalogue = super::Catalogue::bundled()?;
+        let policies = provenant_providers::quota_policies(provenant_providers::REGISTRY);
+        let observed =
+            super::quota_observations(&catalogue, &availability, &[record], &policies, &[])?;
+        let bound: Vec<_> = observed.iter().map(|o| o.model.as_str()).collect();
+        assert!(bound.contains(&"opencode/opencode-go/glm-5.1"));
+        assert!(bound.iter().all(|m| !m.contains(' ')));
+        Ok(())
+    }
+
     fn resolved(adapter: &str, model: &str, roll: u64) -> ResolvedRoute {
         let readiness = RouteReadiness::Ready {
             extra: Default::default(),

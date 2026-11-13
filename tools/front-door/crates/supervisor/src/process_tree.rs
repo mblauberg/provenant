@@ -56,6 +56,25 @@ impl TreeSource for NativeSource<'_> {
     }
 }
 
+/// An unsandboxed lane carries no sandbox mark, so membership is ancestry
+/// alone: every descendant of the provider root belongs to the lane. A daemon
+/// that reparents away (a shared compiler-cache server, say) leaves the tree.
+struct AncestrySource<S>(S);
+impl<S: TreeSource> TreeSource for AncestrySource<S> {
+    fn swap(&self) -> Option<SwapUsage> {
+        self.0.swap()
+    }
+    fn member(&self, _: u32) -> ObservationResult<bool> {
+        Ok(true)
+    }
+    fn process(&self, pid: u32) -> ObservationResult<NativeProcess> {
+        self.0.process(pid)
+    }
+    fn children(&self, pid: u32) -> ObservationResult<Vec<u32>> {
+        self.0.children(pid)
+    }
+}
+
 /// One descriptor-derived path for the exact read grant and guardian publisher.
 pub fn snapshot_path(attempt: &Directory) -> Result<std::path::PathBuf> {
     Ok(attempt.current_path().map_err(|_| Unavailable)?.join(FILE))
@@ -128,6 +147,7 @@ impl Sampler {
         directory: &Directory,
         root: &ProcessIdentity,
         attempt: AttemptId,
+        sandboxed: bool,
     ) -> Option<Self> {
         let directory = directory.try_clone().ok()?;
         let root = root.clone();
@@ -138,7 +158,7 @@ impl Sampler {
                 loop {
                     // Reconcile transient fork/exit churn without overlapping
                     // walks. Retain the last good observation until it expires.
-                    let snapshot = observe_refresh(|| observe(&root, attempt));
+                    let snapshot = observe_refresh(|| observe(&root, attempt, sandboxed));
                     if receiver.try_recv() != Err(std::sync::mpsc::TryRecvError::Empty) {
                         break;
                     }
@@ -166,10 +186,14 @@ impl Drop for Sampler {
 /// Sample only descendants of the supervisor-held provider identity. A child
 /// listing, identity or RSS failure invalidates the whole observation.
 pub fn sample(root: &ProcessIdentity, attempt: AttemptId) -> Result<Snapshot> {
-    observe(root, attempt).map_err(|_| Unavailable)
+    observe(root, attempt, true).map_err(|_| Unavailable)
 }
 
-fn observe(root: &ProcessIdentity, attempt: AttemptId) -> ObservationResult<Snapshot> {
+fn observe(
+    root: &ProcessIdentity,
+    attempt: AttemptId,
+    sandboxed: bool,
+) -> ObservationResult<Snapshot> {
     let clock = SystemClock::new();
     let monotonic_micros = clock
         .host_monotonic_micros()
@@ -189,28 +213,29 @@ fn observe(root: &ProcessIdentity, attempt: AttemptId) -> ObservationResult<Snap
     let name = std::ffi::CString::new(attempt.sandbox_lookup_name())
         .map_err(|_| ObservationError::Unavailable)?;
     let pid = u32::try_from(root.pid).map_err(|_| ObservationError::Unavailable)?;
-    walk(
-        root,
-        Snapshot {
-            sample: Sample {
-                schema_version: 2,
-                root_pid: pid,
-                sampled_at,
-                swap_used_bytes: None,
-                swap_total_bytes: None,
-                processes: Vec::new(),
-            },
-            starts: BTreeMap::new(),
-            boot,
-            monotonic_micros,
+    let snapshot = Snapshot {
+        sample: Sample {
+            schema_version: 2,
+            root_pid: pid,
+            sampled_at,
+            swap_used_bytes: None,
+            swap_total_bytes: None,
+            processes: Vec::new(),
         },
-        || {
-            clock
-                .host_monotonic_micros()
-                .map_err(|_| ObservationError::Unavailable)
-        },
-        &NativeSource(&name),
-    )
+        starts: BTreeMap::new(),
+        boot,
+        monotonic_micros,
+    };
+    let now = || {
+        clock
+            .host_monotonic_micros()
+            .map_err(|_| ObservationError::Unavailable)
+    };
+    if sandboxed {
+        walk(root, snapshot, now, &NativeSource(&name))
+    } else {
+        walk(root, snapshot, now, &AncestrySource(NativeSource(&name)))
+    }
 }
 
 fn deadline(
@@ -416,6 +441,7 @@ mod tests {
         reads: RefCell<Vec<u32>>,
         expire_during_revalidation: bool,
         oversized: bool,
+        unmarked: bool,
     }
     impl TreeSource for FixtureSource {
         fn swap(&self) -> Option<SwapUsage> {
@@ -425,7 +451,7 @@ mod tests {
             })
         }
         fn member(&self, _: u32) -> ObservationResult<bool> {
-            Ok(true)
+            Ok(!self.unmarked)
         }
         fn process(&self, pid: u32) -> ObservationResult<NativeProcess> {
             let mut reads = self.reads.borrow_mut();
@@ -462,6 +488,7 @@ mod tests {
             reads: RefCell::new(Vec::new()),
             expire_during_revalidation: expire,
             oversized,
+            unmarked: false,
         }
     }
 
@@ -486,6 +513,25 @@ mod tests {
         std::os::unix::fs::symlink(&parent, &alias).unwrap();
         let directory = Directory::open_anchor(&alias.join("attempt")).unwrap();
         assert_eq!(snapshot_path(&directory).unwrap(), attempt.join(FILE));
+    }
+
+    #[test]
+    fn an_unsandboxed_lane_is_walked_by_ancestry_alone() {
+        let source = FixtureSource {
+            unmarked: true,
+            ..fixture_source(false, false)
+        };
+        // An unmarked root is not a sandboxed lane: the marked walk refuses it.
+        assert_eq!(
+            walk(&root(), snapshot(), || Ok(source.now.get()), &source).err(),
+            Some(ObservationError::Unavailable)
+        );
+        let ancestry = AncestrySource(source);
+        let observed = walk(&root(), snapshot(), || Ok(ancestry.0.now.get()), &ancestry)
+            .expect("ancestry walk");
+        let mut pids: Vec<_> = observed.sample.processes.iter().map(|p| p.pid).collect();
+        pids.sort_unstable();
+        assert_eq!(pids, [10, 11]);
     }
 
     #[test]

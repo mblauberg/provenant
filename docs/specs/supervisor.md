@@ -31,14 +31,22 @@ deadline.
 ### Signals need proven identity and scope
 
 The PID stays reserved until the handle is reaped last. Only the unreaped
-provider, its group while the leader is unreaped, and proven attempt-sandbox
-escapees may be signalled; a nested owner with proven custody is spared. A
-census or cwd observation never grants signal authority, and recovery signals
-only a PID whose recorded identity matches.
+provider, its group while the leader is unreaped, descendants with retained
+proof of provider ancestry, and proven attempt-sandbox escapees may be signalled.
+Descendant proof survives session changes and reparenting, but every signal
+revalidates the full native identity. Native descendants may be stopped only for
+a recorded provider stop (cancellation, deadline, budget, context handoff, protocol
+rejection or supervisor signal); an ordinary provider exit leaves them under
+conservative custody. Registry and host child checks must permit cleanup. When
+there is no native child registry, a present host holder must affirm that no graph
+child remains. Spared and protected owners and their possible descendants stay excluded.
+A census listing or cwd observation alone never grants signal authority, and
+recovery signals only a PID whose recorded identity matches.
 - Why: signalling a recycled PID or a sibling's group kills unrelated work.
 - Test: `crates/supervisor/tests/process.rs::inherited_wait_policy_preserves_pid_reservation`;
   `crates/supervisor/tests/custody.rs::stale_complete_census_does_not_signal_a_late_shared_group_owner`;
   `::nested_owner_stays_protected_when_native_custody_proof_is_uncertain`;
+  `crates/supervisor/src/process_os/provider.rs::tests::native_cleanup_targets_require_owned_identity_and_preserve_exclusions`;
   `crates/supervisor/src/custody/orphans.rs::an_unprovable_pid_is_never_signalled_and_is_named`
 - Owner: `crates/supervisor/src/process_os/`, `crates/supervisor/src/custody.rs`
 
@@ -64,6 +72,26 @@ decision with matching authority clears one, and that decision permits no signal
 - Test: `crates/supervisor/src/guardian/tests.rs::darwin_settlement_requires_complete_absence_of_members_and_recorded_escapes`;
   `crates/supervisor/src/custody_tests.rs::an_unrecorded_escape_cannot_be_cleared_by_an_empty_census`;
   `::reconcile_requires_matching_authority_and_records_before_release`
+
+### Provider descriptors and detached services
+
+Writer, custody, port and directory descriptors close on provider exec. Only
+explicit executable inputs (secrets and confinement profiles) cross that edge;
+the private guardian handoff retains its capability transfer. An ordinary
+service detached by an unsandboxed provider therefore cannot retain the lane's
+inherited writer lease. Guardian loss still leaves the durable unresolved
+reservation fenced against every new attempt, even if the kernel lease is free.
+
+Cleanup has a bounded stop budget. At its deadline a separate, cooperatively
+bounded diagnostic census names observable PIDs, short native command names and
+open writer-lock paths, with a reconcile action. An open path is not proof of
+flock ownership and grants no signal authority. Unknown or unreadable holders
+remain explicit uncertainty. The guardian continues retaining unresolved
+custody; a timeout alone never authorises settlement or an unrelated signal.
+- Test: `crates/supervisor/src/process_os/provider.rs::lane_descriptors_are_cloexec`;
+  `::orphaned_provider_descendant_does_not_retain_writer_flock`;
+  `crates/supervisor/tests/custody.rs::unsandboxed_detached_service_does_not_block_settlement`;
+  `::guardian_loss_never_invents_exit_or_releases_the_reservation`
 
 ### Durable exit publication
 
@@ -136,12 +164,25 @@ compare-and-swap.
 - Test: `crates/confinement/src/permissions/tests/grants.rs::linked_worktree_grants_derive_from_verified_git_paths_and_ref`;
   `crates/confinement/tests/lane_git_conformance.rs::lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only`
 
-### No writes to stores the host runs later
+### Native environment and sandbox tool stores
 
-No lane writes the Cargo registry, Git, pnpm, npm or Node caches the host later
-runs unconfined; writers get a private per-worktree cache.
-- Why: a poisoned `build.rs` or package would run on the host's next build.
-- Test: `crates/providers/src/tests_lane_toolchains.rs::no_lane_can_write_shared_toolchain_stores`;
+Unsandboxed lanes inherit the host environment, PATH, tool caches and
+credentials in place. Provider account selectors still choose the registered
+account; agy uses that account's HOME when its keychain requires it. Environment
+values stay in the live launch, never in prompts or receipts. Native launches
+skip skill copies, tool dependency discovery, credential symlink inventory and
+the private Cargo home, target directory and build-slot shim.
+
+Sandboxed lanes use the minimal environment and staged skills, discover tool
+dependencies and credential aliases, and report inventory omissions in one
+actionable warning. They cannot write the Cargo registry, Git, pnpm, npm or
+Node caches the host later runs unconfined; writers get a private per-worktree
+cache.
+- Why: native lanes use ordinary tools and login state; sandboxed lanes keep
+  packages they can change out of the host's later builds.
+- Test: `crates/providers/src/tests_launch_access.rs::native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation`;
+  `crates/confinement/src/permissions/policy/host.rs::credential_alias_inventory_runs_only_for_sandboxed_lanes`;
+  `crates/providers/src/tests_lane_toolchains.rs::no_lane_can_write_shared_toolchain_stores`;
   `crates/confinement/src/permissions/tests/grants.rs::writer_cache_is_private_and_bound_to_repository_and_worktree_identity`
 
 ### Network, IPC and process information

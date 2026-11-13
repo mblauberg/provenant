@@ -484,6 +484,7 @@ impl RunStore {
             Err(error) => return Err(error),
         };
         if crate::settlement::abandoned(&attempt, Self::scope(record))?.is_some()
+            || crate::settlement::queued_abandonment_pending(&attempt, record)?
             || crate::holder::object_import_refused(&attempt, Self::scope(record))?.is_some()
         {
             return Ok(None);

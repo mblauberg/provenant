@@ -2433,6 +2433,40 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         result
     }
 }
+
+/// Reconstruct an [`AttemptSpec`] from an accepted task request and the node's admitter,
+/// round-tripping all fields that affect dispatch and request hashing.
+pub(crate) fn recovered_attempt_spec(
+    task: &provenant_records::run::TaskRequest,
+    admitted_by: Option<&str>,
+) -> provenant_fabric_runtime::graph::AttemptSpec {
+    provenant_fabric_runtime::graph::AttemptSpec {
+        account: task.account.clone(),
+        build_heavy: task.build_heavy,
+        confidential: task
+            .profile
+            .extra
+            .get("confidential")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        parent_sandboxed: task
+            .profile
+            .extra
+            .get(provenant_records::run::PARENT_SANDBOXED_FIELD)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        admitted_by: task
+            .profile
+            .extra
+            .get("admitted_by")
+            .and_then(serde_json::Value::as_str)
+            .or(admitted_by)
+            .map(str::to_owned),
+        provider_timeout: Some(task.provider_timeout_seconds),
+        ..Default::default()
+    }
+}
+
 impl BoundGraphOwner<'_> {
     #[allow(clippy::too_many_arguments)] // Launch facts stay outside the kernel's public input shape.
     fn observe_or_start_inner(
@@ -2717,18 +2751,10 @@ impl BoundGraphOwner<'_> {
                             accepted_retry_limit = Some(task.profile.settlement_retry_limit);
                             accepted_access = Some(task.access.clone());
                             accepted_skill_location = Some(task.profile.require_skill_location);
-                            accepted_attempt = Some(provenant_fabric_runtime::graph::AttemptSpec {
-                                account: task.account.clone(),
-                                build_heavy: task.build_heavy,
-                                confidential: task
-                                    .profile
-                                    .extra
-                                    .get("confidential")
-                                    .and_then(serde_json::Value::as_bool)
-                                    .unwrap_or(false),
-                                provider_timeout: Some(task.provider_timeout_seconds),
-                                ..Default::default()
-                            });
+                            accepted_attempt = Some(recovered_attempt_spec(
+                                task,
+                                node.attempt.and_then(|spec| spec.admitted_by.as_deref()),
+                            ));
                         }
                         task.context.clone()
                     }
@@ -4726,6 +4752,146 @@ mod peer_capture_tests {
                 }),
                 Err(FacadeError::StateCorrupt)
             ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod recovery_rebuild_tests {
+    #[allow(
+        unused_imports,
+        reason = "the custom worktree driver includes this module without libtest"
+    )]
+    use super::*;
+
+    #[test]
+    fn recovery_rebuild_preserves_request_digest_for_any_submitted_spec()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for parent_sandboxed in [false, true] {
+            for confidential in [false, true] {
+                for build_heavy in [false, true] {
+                    for account in [None, Some("special-account".to_owned())] {
+                        for provider_timeout in [None, Some(1800)] {
+                            for admitted_by in [None, Some("parent-admitter".to_owned())] {
+                                let spec = provenant_fabric_runtime::graph::AttemptSpec {
+                                    account: account.clone(),
+                                    build_heavy,
+                                    confidential,
+                                    parent_sandboxed,
+                                    admitted_by: admitted_by.clone(),
+                                    provider_timeout,
+                                    ..Default::default()
+                                };
+
+                                let mut profile = provenant_records::run::HarnessProfile::default();
+                                if spec.confidential {
+                                    profile
+                                        .extra
+                                        .insert("confidential".into(), serde_json::json!(true));
+                                }
+                                if spec.parent_sandboxed {
+                                    profile.extra.insert(
+                                        provenant_records::run::PARENT_SANDBOXED_FIELD.into(),
+                                        serde_json::json!(true),
+                                    );
+                                }
+
+                                let original_task = provenant_records::run::TaskRequest {
+                                    context: None,
+                                    extra: Default::default(),
+                                    build_heavy: spec.build_heavy,
+                                    title: None,
+                                    profile,
+                                    task_id: provenant_core::TaskId::from_bytes([1; 16]),
+                                    prompt_digest: provenant_records::CanonicalV1::file_digest(
+                                        b"prompt",
+                                    ),
+                                    head: None,
+                                    source_head: None,
+                                    base: None,
+                                    base_ref: None,
+                                    route: provenant_records::run::RequestedRoute::Named {
+                                        extra: Default::default(),
+                                        name: "junior".into(),
+                                        effort: None,
+                                    },
+                                    account: spec.account.clone(),
+                                    authority_digest: provenant_core::Digest::from_bytes([0; 32]),
+                                    writer: None,
+                                    deliver: None,
+                                    provider_timeout_seconds: spec.provider_timeout.unwrap_or(3600),
+                                    delivery_id: None,
+                                    access: Default::default(),
+                                };
+
+                                let original_request = provenant_records::run::CanonicalRequest {
+                                    extra: Default::default(),
+                                    child_attempt_id_version: None,
+                                    chair: None,
+                                    fresh_continuation: None,
+                                    schema_version: 1,
+                                    tasks: vec![original_task.clone()],
+                                    concurrency: 1,
+                                    parent: None,
+                                    lane_depth: None,
+                                    parent_attempt: None,
+                                };
+
+                                let rebuilt_spec = recovered_attempt_spec(
+                                    &original_task,
+                                    spec.admitted_by.as_deref(),
+                                );
+
+                                assert_eq!(rebuilt_spec.parent_sandboxed, spec.parent_sandboxed);
+                                assert_eq!(rebuilt_spec.admitted_by, spec.admitted_by);
+                                assert_eq!(rebuilt_spec.confidential, spec.confidential);
+                                assert_eq!(rebuilt_spec.build_heavy, spec.build_heavy);
+                                assert_eq!(rebuilt_spec.account, spec.account);
+                                assert_eq!(
+                                    rebuilt_spec.provider_timeout,
+                                    Some(original_task.provider_timeout_seconds)
+                                );
+
+                                let mut rebuilt_profile =
+                                    provenant_records::run::HarnessProfile::default();
+                                if rebuilt_spec.confidential {
+                                    rebuilt_profile
+                                        .extra
+                                        .insert("confidential".into(), serde_json::json!(true));
+                                }
+                                if rebuilt_spec.parent_sandboxed {
+                                    rebuilt_profile.extra.insert(
+                                        provenant_records::run::PARENT_SANDBOXED_FIELD.into(),
+                                        serde_json::json!(true),
+                                    );
+                                }
+
+                                let rebuilt_task = provenant_records::run::TaskRequest {
+                                    profile: rebuilt_profile,
+                                    build_heavy: rebuilt_spec.build_heavy,
+                                    account: rebuilt_spec.account.clone(),
+                                    provider_timeout_seconds: rebuilt_spec
+                                        .provider_timeout
+                                        .unwrap_or(original_task.provider_timeout_seconds),
+                                    ..original_task.clone()
+                                };
+
+                                let rebuilt_request = provenant_records::run::CanonicalRequest {
+                                    tasks: vec![rebuilt_task],
+                                    ..original_request.clone()
+                                };
+
+                                assert_eq!(
+                                    original_request.digest()?,
+                                    rebuilt_request.digest()?,
+                                    "request digest must match after recovery rebuild"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }

@@ -13,6 +13,7 @@ mod lifecycle;
 mod owner;
 mod refs;
 mod removal;
+mod setup;
 pub use census::*;
 pub use context::{
     with_context, with_context_using_facts, with_context_using_workers,

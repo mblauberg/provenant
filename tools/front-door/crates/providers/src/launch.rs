@@ -1,4 +1,4 @@
-//! Prepared launches: exact argv, environment allow-list, stdin, cwd and the
+//! Prepared launches: exact argv, environment, stdin, cwd and the
 //! confinement profile. Nothing here executes a process.
 use crate::{Continuation, Prompt, ProviderError, StreamState};
 use provenant_confinement::ConfinedPlan;
@@ -368,11 +368,19 @@ pub struct PrepareInput<'a> {
 }
 
 impl PrepareInput<'_> {
+    pub(crate) fn sandboxed(&self) -> bool {
+        (self.host_var)(provenant_confinement::run_config::SANDBOX_ENV)
+            .is_none_or(|value| value != "off")
+    }
+
     pub fn user_skills(&self) -> bool {
         self.route.user_skills()
     }
 
     pub(crate) fn stage_user_skills(&self) -> crate::StagedUserSkills {
+        if !self.sandboxed() {
+            return crate::StagedUserSkills::default();
+        }
         let Some(source) = self
             .user_skills()
             .then(|| locate_user_skills(&self.route.adapter, self.home, self.host_var))
@@ -475,7 +483,9 @@ pub(crate) fn tool_search_path(home: &Path, include_cargo: bool) -> OsString {
     path
 }
 
-/// Minimal environment: the user's identity, a fixed search path and TMPDIR
+/// Native launches inherit the host environment in memory; provider selectors
+/// are applied by each adapter. Sandboxed launches use a minimal environment:
+/// the user's identity, a fixed search path and TMPDIR
 /// under the attempt's private tmp directory. zsh ignores TMPDIR for the
 /// temporary files behind here-documents and here-strings and defaults
 /// TMPPREFIX to `/tmp/zsh`, which a lane cannot write, so TMPPREFIX points
@@ -487,7 +497,21 @@ pub(crate) fn base_env(
     scratch: &Path,
     path: impl AsRef<std::ffi::OsStr>,
 ) -> Vec<(OsString, OsString)> {
+    if !input.sandboxed() {
+        let mut env: Vec<_> = std::env::vars_os()
+            .filter(|(name, _)| name != provenant_confinement::run_config::SANDBOX_ENV)
+            .collect();
+        env.push((
+            provenant_confinement::run_config::SANDBOX_ENV.into(),
+            "off".into(),
+        ));
+        return env;
+    }
     let mut env = vec![
+        (
+            provenant_confinement::run_config::SANDBOX_ENV.into(),
+            "on".into(),
+        ),
         ("HOME".into(), input.home.into()),
         ("USER".into(), input.user.into()),
         ("PATH".into(), path.as_ref().to_owned()),
@@ -599,8 +623,10 @@ pub(crate) fn private_git_objects(
         path: config.clone(),
         bytes: config_text.into_bytes(),
     });
-    spec.env.retain(|(key, _)| key != "GIT_CONFIG_NOSYSTEM");
-    crate::lane::install_token_config(&mut spec.env)?;
+    if input.sandboxed() {
+        spec.env.retain(|(key, _)| key != "GIT_CONFIG_NOSYSTEM");
+        crate::lane::install_token_config(&mut spec.env)?;
+    }
     if let Some((_, current)) = spec
         .env
         .iter_mut()
@@ -647,7 +673,7 @@ pub(crate) fn private_git_objects(
         if identity {
             bound.push((key.clone(), value.clone()));
         }
-        !identity
+        !identity || !input.sandboxed()
     });
     spec.git_wrapper.bound = Some(crate::lane::BoundGit {
         worktree: worktree.to_owned(),
@@ -732,12 +758,23 @@ fn grant_exec_path(git: &Path, spec: &mut LaunchSpec) {
 /// Resolve all exact executable requirements in the profile once, then use
 /// those same facts both to add exact read grants and to report preparation.
 pub(crate) fn prepare_tool_requirements(input: &PrepareInput<'_>, spec: &mut LaunchSpec) {
-    spec.complete_tool_requirements(input.confined, input.home, input.cwd);
+    if input.sandboxed() {
+        spec.complete_tool_requirements(input.confined, input.home, input.cwd);
+    }
 }
 
 impl LaunchSpec {
+    pub(crate) fn native_environment(&self) -> bool {
+        self.env.iter().any(|(name, value)| {
+            name == provenant_confinement::run_config::SANDBOX_ENV && value == "off"
+        })
+    }
+
     /// Resolve any additional exact executables added by launch configuration.
     pub fn complete_tool_requirements(&mut self, plan: &ConfinedPlan, home: &Path, cwd: &Path) {
+        if self.native_environment() {
+            return;
+        }
         let spec = self;
         use provenant_confinement::permissions::PathScope;
 
@@ -1049,6 +1086,9 @@ pub(crate) fn rust_tools(
     env: &mut Vec<(OsString, OsString)>,
     setup: &mut Vec<SetupStep>,
 ) {
+    if !input.sandboxed() {
+        return;
+    }
     // Subtree grants must anchor to existing directories. Keep this decision
     // here so every adapter gets the same system-tool fallback on non-Rust
     // hosts; the grants below it hold either way.

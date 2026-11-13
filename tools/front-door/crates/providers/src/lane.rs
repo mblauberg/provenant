@@ -55,6 +55,9 @@ impl crate::LaunchSpec {
     }
     /// Restore selected environment before the provider starts a shell command.
     pub fn configure_shell(&mut self, scratch: &Path, adapter: &provenant_records::AdapterSpec) {
+        if self.native_environment() {
+            return;
+        }
         let Some((relative, selector)) = adapter.shell_prefix else {
             return;
         };
@@ -82,6 +85,9 @@ impl crate::LaunchSpec {
         scratch: &Path,
         gate: &BuildSlotGate<'_>,
     ) -> Result<(), ProviderError> {
+        if self.native_environment() {
+            return Ok(());
+        }
         let text = |path: &Path| -> Result<String, ProviderError> {
             let value = path.to_str().ok_or(ProviderError::InvalidPath)?;
             if !path.is_absolute() || value.chars().any(char::is_control) {

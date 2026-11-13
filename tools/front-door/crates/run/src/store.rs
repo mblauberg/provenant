@@ -1132,6 +1132,25 @@ impl RunStore {
         withdrawal: Withdrawal<'_>,
         call: &Request<'_>,
     ) -> Result<Option<AttemptRecord>> {
+        self.withdraw_inner(id, withdrawal, false, call)
+    }
+
+    pub(crate) fn withdraw_preserving_evidence(
+        &self,
+        id: AttemptId,
+        withdrawal: Withdrawal<'_>,
+        call: &Request<'_>,
+    ) -> Result<Option<AttemptRecord>> {
+        self.withdraw_inner(id, withdrawal, true, call)
+    }
+
+    fn withdraw_inner(
+        &self,
+        id: AttemptId,
+        withdrawal: Withdrawal<'_>,
+        preserve_evidence: bool,
+        call: &Request<'_>,
+    ) -> Result<Option<AttemptRecord>> {
         let Withdrawal {
             expected,
             outcome,
@@ -1290,7 +1309,9 @@ impl RunStore {
                 {
                     return self.record(id, call).map(Some);
                 }
-                self.settle_cleanup(&record, None, call);
+                if !preserve_evidence {
+                    self.settle_cleanup(&record, None, call);
+                }
                 self.record(id, call).map(Some)
             }
             other => other,
@@ -1309,6 +1330,9 @@ impl RunStore {
             crate::settlement::abandoned(&attempt_dir, Self::scope(record)),
             Ok(None)
         ) {
+            return;
+        }
+        if crate::settlement::queued_abandonment_pending(&attempt_dir, record).unwrap_or(true) {
             return;
         }
         if !self.import_release_permitted(record, call).unwrap_or(false) {

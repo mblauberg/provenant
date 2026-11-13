@@ -510,6 +510,47 @@ impl BinaryRunOwner<'_> {
         Ok(self.session_with_facts(cancel, facts)?.store)
     }
 
+    /// Whether the node that admitted this launch's node floors it; see
+    /// [`admitter_floors`].
+    fn admitter_floors_launch(
+        &self,
+        tasks: &[provenant_fabric_runtime::coordination::facade::SubmittedTask],
+        attempt: Option<&provenant_fabric_runtime::graph::AttemptSpec>,
+        cancel: &CancelToken,
+    ) -> bool {
+        let Some(admitter) = attempt.and_then(|spec| spec.admitted_by.as_deref()) else {
+            return false;
+        };
+        let ctx = &self.factory.context;
+        let graph = tasks
+            .iter()
+            .find_map(|task| task.context.as_ref()?.graph_id.as_deref());
+        let mut store = None;
+        admitter_floors(
+            admitter,
+            || {
+                provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
+                    &ctx.roots.state,
+                    ctx.identity.project,
+                    graph?,
+                )
+                .ok()
+                .flatten()
+            },
+            &ctx.identity.host.to_string(),
+            &mut |id| {
+                store
+                    .get_or_insert_with(|| self.read_session(cancel).ok())
+                    .as_ref()
+                    .is_none_or(|session| {
+                        session
+                            .store
+                            .attempt_floors_children(id, &self.call(cancel))
+                    })
+            },
+        )
+    }
+
     pub(crate) fn read_session(
         &self,
         cancel: &CancelToken,
@@ -951,6 +992,7 @@ impl BinaryRunOwner<'_> {
             // An accepted pre-cutover operation may have no context. The sealed
             // request digest below still rejects any change to its launch inputs.
         }
+        let floored = self.admitter_floors_launch(&tasks, attempt.as_ref(), cancel);
         if let Some(host) = host.filter(|host| *host != self.factory.context.identity.host) {
             if !self.allow_remote
                 || tasks.iter().any(|task| {
@@ -974,6 +1016,7 @@ impl BinaryRunOwner<'_> {
             }
             let mut attempt = attempt.unwrap_or_default();
             attempt.host = None;
+            attempt.parent_sandboxed |= floored;
             let mut extra = provenant_records::ExtraFields::default();
             extra.insert(
                 "graph_launch_actor".into(),
@@ -1047,13 +1090,17 @@ impl BinaryRunOwner<'_> {
             )
             .map_err(fail_error)?;
             submitted.push(Submitted {
-                attempt: attempt.clone().unwrap_or_else(|| {
-                    provenant_fabric_runtime::graph::AttemptSpec {
-                        account: task.account,
-                        build_heavy: task.build_heavy,
-                        ..Default::default()
-                    }
-                }),
+                attempt: {
+                    let mut spec = attempt.clone().unwrap_or_else(|| {
+                        provenant_fabric_runtime::graph::AttemptSpec {
+                            account: task.account,
+                            build_heavy: task.build_heavy,
+                            ..Default::default()
+                        }
+                    });
+                    spec.parent_sandboxed |= floored;
+                    spec
+                },
                 require_skill_location: task.require_skill_location,
                 settlement_retry_limit,
                 context: task.context,
@@ -1708,6 +1755,41 @@ fn require_graph_context(
     }
 }
 
+/// Whether the lane of `admitter`, the node whose lane or plan admitted the
+/// node being launched, was sandboxed by distrust, so the node is sandboxed
+/// too. An unreadable graph, an admitter without recorded attempts, an attempt
+/// on another host and a record that cannot be read all floor.
+pub(crate) fn admitter_floors(
+    admitter: &str,
+    checkpoint: impl FnOnce() -> Option<provenant_fabric_runtime::graph::GraphCheckpoint>,
+    local_host: &str,
+    floors: &mut dyn FnMut(provenant_core::AttemptId) -> bool,
+) -> bool {
+    let Some(checkpoint) = checkpoint() else {
+        return true;
+    };
+    let mut references = checkpoint
+        .nodes
+        .iter()
+        .filter(|row| row.id == admitter)
+        .flat_map(|row| row.recorded_attempts())
+        .filter_map(|row| row.attempt_ref.as_deref())
+        .peekable();
+    if references.peek().is_none() {
+        return true;
+    }
+    references.any(|reference| {
+        match reference
+            .split_once('/')
+            .filter(|(host, _)| *host == local_host)
+            .and_then(|(_, id)| id.parse::<provenant_core::AttemptId>().ok())
+        {
+            Some(id) => floors(id),
+            None => true,
+        }
+    })
+}
+
 #[cfg(test)]
 #[allow(
     unused_imports,
@@ -1715,6 +1797,55 @@ fn require_graph_context(
 )]
 mod graph_control_tests {
     use super::*;
+    #[test]
+    fn nodes_admitted_by_a_distrusted_lane_are_sandboxed() {
+        let open = provenant_core::AttemptId::from_bytes([1; 16]);
+        let closed = provenant_core::AttemptId::from_bytes([2; 16]);
+        let checkpoint = |reference: String| {
+            move || {
+                serde_json::from_value(serde_json::json!({
+                    "schema_version":1,"graph_id":"g","plan_digest":"fixture",
+                    "nodes":[
+                        {"id":"composite","state":"running","attempts":[]},
+                        {"id":"lane","state":"running","attempts":[{
+                            "key":{"graph_id":"g","node_id":"lane","route_index":0},
+                            "launched":true,"route":{"alias":"junior"},"state":"running",
+                            "attempt_ref":reference,"launch_actor":"fixture"}]},
+                    ]
+                }))
+                .ok()
+            }
+        };
+        let mut lookup = |id| id == closed;
+        let local = |id: provenant_core::AttemptId| format!("host/{id}");
+        assert!(!admitter_floors(
+            "lane",
+            checkpoint(local(open)),
+            "host",
+            &mut lookup
+        ));
+        assert!(admitter_floors(
+            "lane",
+            checkpoint(local(closed)),
+            "host",
+            &mut lookup
+        ));
+        // Another host's attempt, an unreadable graph and an admitter without
+        // attempts all fail closed.
+        assert!(admitter_floors(
+            "lane",
+            checkpoint(format!("peer/{open}")),
+            "host",
+            &mut lookup
+        ));
+        assert!(admitter_floors("lane", || None, "host", &mut lookup));
+        assert!(admitter_floors(
+            "composite",
+            checkpoint(local(open)),
+            "host",
+            &mut lookup
+        ));
+    }
     #[test]
     fn blocked_launches_refuse_without_echoing_untrusted_text() {
         let attempt = provenant_core::AttemptId::from_bytes([7; 16]);

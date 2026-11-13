@@ -33,7 +33,7 @@ criterion as the owner's.
 
 ## Size to the class
 
-A bug is repro, expected, observed and a regression check. A task has 2 to 5
+A bug is repro, expected, observed and an invariant or minimal regression check. A task has 2 to 5
 criteria, a feature about 10. Anything larger is an epic: a `Done when` plus
 backlog lines. Over-specifying a small change is a defect.
 

@@ -32,8 +32,10 @@ priorities) is in the [run spec](../specs/run.md) and
   or second checkout to bypass it. A host-authorised merge of `origin/main` is
   the alternative.
 - Linux has no enforcing backend and refuses lane launch rather than run
-  unconfined. On macOS, lanes cannot create hard links or bind Unix sockets
-  outside granted paths; `cargo nextest run --profile lane` excludes fixtures
+  unconfined. Each macOS lane resolves a
+  [sandbox mode](configuration.md#lane-sandbox-mode); `status` shows
+  `sandboxed(<source>)` on sandboxed lanes. Sandboxed lanes cannot create hard
+  links or bind Unix sockets outside granted paths; `cargo nextest run --profile lane` excludes fixtures
   needing them and CI's `ci` profile keeps them.
 
 ## Delivery
@@ -54,6 +56,11 @@ writer is on by default and gives it your GitHub credential; set
 delivery. An advisory `gh` deny list (`deny_verbs`, `deny_labels`) goes in
 `projects/PROJECT_ID/github.json`; it guards against accident, not as a boundary.
 
+GitHub login lookup uses the host-recorded executable search path and GitHub
+configuration paths for initial launches and background retries alike. Missing
+GitHub tools, failed login lookup or access policy restrictions produce a warning;
+ordinary lane work can continue without publishing credentials.
+
 ## Recovery
 
 Read `status TARGET`, `output TARGET` and `output TARGET --trace` before
@@ -73,7 +80,10 @@ seconds it reports the request pending and settles as it unwinds. Started
 attempts are immutable; `edit` changes unstarted nodes only. A fenced import
 names the retained attempt and an explicit abandonment command; abandonment
 keeps the private Git evidence but stops automatic import, so recover that work
-by hand. `reconcile` reports storage errors in `writer_reservation_errors`
+by hand. For a retained queued lane that never dispatched, use
+`provenant reconcile --abandon RUN/ATTEMPT --reason TEXT`; this preserves its
+evidence and refuses attempts with process evidence, a fence or worktree custody.
+`reconcile` reports storage errors in `writer_reservation_errors`
 and exits non-zero. A valid handoff declaring `stopped_early` or `blocked` makes
 an otherwise successful lane settle as `review_required`.
 
@@ -91,7 +101,7 @@ provenant status --wait=1h --follow --target graph:GRAPH --json
 
 `--target` is repeatable (`lane:`, `graph:`, `pr:`, `land:`, `operation:`);
 `land:N` observes only and grants no merge authority (`provenant land N --wait`
-merges). `--until all` (default) waits for every target to be terminal, `any`
+merges). `--until all` (default) waits for every target to be terminal or a graph to be paused, `any`
 returns on the first transition; `--follow` streams and always waits for all.
 An expired wait exits 124 and leaves work running; a refused operation exits 1.
 Sources are sampled, so intermediate states between samples are not reported.

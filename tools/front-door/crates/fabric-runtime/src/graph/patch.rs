@@ -1373,6 +1373,13 @@ pub(super) fn prepare(
         }
         replaced.push(node);
     }
+    // Every node a lane or planner adds or replaces names it, whatever the
+    // author wrote, so the graph owner can apply that lane's sandbox floor.
+    if let Some(parent) = parent {
+        for node in nodes.iter_mut().chain(replaced.iter_mut()) {
+            stamp_admitter(node, &parent.id);
+        }
+    }
 
     let revision = current + 1;
     let mut expansion = Expansion {
@@ -1446,6 +1453,25 @@ pub(super) fn prepare(
         plan,
         warnings,
     })))
+}
+
+/// Name `admitter` on `node` and every node nested in it, including loop
+/// bodies and a planner's fallback stage, which expand later.
+pub(super) fn stamp_admitter(node: &mut GraphNode, admitter: &str) {
+    node.attempt
+        .get_or_insert_with(Default::default)
+        .admitted_by = Some(admitter.to_owned());
+    let nested = [
+        node.composite.as_mut().map(|spec| &mut spec.nodes),
+        node.loop_body.as_mut().map(|spec| &mut spec.body),
+        node.plan
+            .as_mut()
+            .and_then(|spec| spec.fallback.as_mut())
+            .map(|spec| &mut spec.nodes),
+    ];
+    for member in nested.into_iter().flatten().flatten() {
+        stamp_admitter(member, admitter);
+    }
 }
 
 /// Journal an admission: skip its targets, record the expansion and align

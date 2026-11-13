@@ -60,6 +60,7 @@ pub use git_context::{
 };
 pub use holder::{
     HolderContext, HostLaunchContext, RetainedGit, RootSeed, RunHolder, SealedTask, retained_git,
+    writer_base,
 };
 #[cfg(test)]
 pub(crate) use launch::fixture_refusal;

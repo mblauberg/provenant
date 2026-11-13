@@ -648,9 +648,9 @@ fn refresh_account(
 }
 
 /// The host reads the selected Claude login token
-/// and passes it through an inherited pipe, so the keychain stays
-/// unreadable. Both lane types deny keychain services and the security
-/// executable. Both lane types use attempt-private configuration and transcripts.
+/// and passes it through an inherited pipe. Sandboxed lanes deny keychain
+/// services and use attempt-private configuration; native lanes keep the
+/// ordinary configuration unless an account selects another directory.
 /// Provenant and its hook helpers are added explicitly for lane MCP use.
 fn prepare(
     input: &PrepareInput<'_>,
@@ -789,9 +789,23 @@ fn prepare(
     let toolchain = shell || web;
     let path = crate::launch::tool_search_path(input.home, toolchain);
     let mut env = base_env(input, scratch, path);
+    if input.account.is_some() {
+        // The selected login takes precedence over ambient provider selectors.
+        env.retain(|(key, _)| {
+            ![
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_BASE_URL",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+            ]
+            .iter()
+            .any(|name| key == *name)
+        });
+    }
     input
         .provenant
-        .environment(scratch, &mut env, &mut setup, true)?;
+        .environment(scratch, &mut env, &mut setup, input.sandboxed())?;
     env.extend(
         [
             ("CLAUDE_CODE_TMPDIR", scratch.as_os_str()),
@@ -810,9 +824,21 @@ fn prepare(
         .as_ref()
         .ok_or(ProviderError::UnsupportedPolicy)?
         .path;
-    let config = private.join("claude-config");
-    env.push(("CLAUDE_CONFIG_DIR".into(), config.clone().into_os_string()));
-    setup.push(SetupStep::CreateDir(config.clone()));
+    let config = if input.sandboxed() {
+        private.join("claude-config")
+    } else {
+        input.account.map_or_else(
+            || input.home.join(".claude"),
+            |account| account.directory().to_owned(),
+        )
+    };
+    if input.sandboxed() || input.account.is_some() {
+        env.retain(|(key, _)| key != "CLAUDE_CONFIG_DIR");
+        env.push(("CLAUDE_CONFIG_DIR".into(), config.clone().into_os_string()));
+    }
+    if input.sandboxed() {
+        setup.push(SetupStep::CreateDir(config.clone()));
+    }
     if let Some(user_skills) = &user_skills {
         setup.push(SetupStep::Symlink {
             link: config.join("skills"),
@@ -829,15 +855,17 @@ fn prepare(
     }
     let mut tool_exec_roots = ["/bin", "/usr/bin", "/usr/libexec"].map(subtree).to_vec();
     let tool_writes = Vec::new();
-    env.extend([
-        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-    ]);
+    if input.sandboxed() {
+        env.extend([
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ]);
+    }
     // The git wrapper script remains available to Bash.
     tool_exec_roots.push(subtree(scratch.join("bin")));
     // Use the same read-only toolchain, public TLS configuration and CLT
     // selection as Codex. Access still controls private caches and writes.
-    if toolchain {
+    if toolchain && input.sandboxed() {
         crate::launch::rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
         crate::launch::node_tools(
             input.home,

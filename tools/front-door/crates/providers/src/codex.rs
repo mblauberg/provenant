@@ -76,11 +76,10 @@ fn live_usage(frame: &[u8]) -> Option<u64> {
 /// The exec JSON stream carries no answering-model position.
 const MODEL_ON_WIRE: bool = false;
 
-/// Codex runs with a private `CODEX_HOME` (the attempt's private state) that
-/// links only `auth.json` from the selected registered identity (the default
-/// login source when no account was selected). Its own seatbelt cannot nest
-/// inside ours, so it runs unsandboxed inside the outer profile, which is the
-/// real boundary. Its shell tool may run system and install-prefix programs.
+/// Sandboxed Codex uses a private `CODEX_HOME` linked to the selected login.
+/// Native lanes retain the ordinary provider home unless an account selects
+/// another one. Codex's own sandbox is disabled; the outer profile supplies
+/// confinement when requested.
 fn prepare(
     input: &PrepareInput<'_>,
     access: Access,
@@ -112,7 +111,6 @@ fn prepare(
         [
             "--json",
             "--skip-git-repo-check",
-            "--ignore-user-config",
             "--ignore-rules",
             "--dangerously-bypass-approvals-and-sandbox",
             "-c",
@@ -122,6 +120,16 @@ fn prepare(
         ]
         .map(OsString::from),
     );
+    if input.sandboxed() {
+        argv.push("--ignore-user-config".into());
+    } else {
+        argv.extend([
+            "-c".into(),
+            "shell_environment_policy.inherit=\"all\"".into(),
+            "-c".into(),
+            "shell_environment_policy.ignore_default_excludes=true".into(),
+        ]);
+    }
     if let Some(effort) = &input.route.effort {
         argv.extend([
             "-c".into(),
@@ -150,10 +158,14 @@ fn prepare(
     let tool_writes = Vec::new();
     let staged_skills = input.stage_user_skills();
     let omitted_discovery = package_omissions;
-    let mut setup = vec![SetupStep::Symlink {
-        link: codex_home.join("auth.json"),
-        target: credential.clone(),
-    }];
+    let mut setup = if input.sandboxed() {
+        vec![SetupStep::Symlink {
+            link: codex_home.join("auth.json"),
+            target: credential.clone(),
+        }]
+    } else {
+        Vec::new()
+    };
     if let Some(skills) = &staged_skills.root {
         runtime_reads.push(subtree(skills));
         setup.push(SetupStep::CreateDir(codex_home.join(".agents")));
@@ -164,32 +176,50 @@ fn prepare(
     }
     let path = crate::launch::tool_search_path(input.home, true);
     let mut env = base_env(input, &plan.scratch.path, path);
+    if input.account.is_some() {
+        // The selected login takes precedence over ambient provider selectors.
+        env.retain(|(key, _)| {
+            !["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"]
+                .iter()
+                .any(|name| key == *name)
+        });
+    }
     input
         .provenant
         .environment(&plan.scratch.path, &mut env, &mut setup, false)?;
     crate::launch::rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
-    crate::launch::node_tools(
-        input.home,
-        access,
-        crate::launch::lane_cache(input),
-        &mut tool_requirements,
-        &mut env,
-    );
-    // Git may inspect global config even for status. Keep host hooks,
-    // includes and credential helpers outside the lane's environment.
-    env.extend([
-        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-    ]);
-    if staged_skills.root.is_some() || !input.user_skills() {
+    if input.sandboxed() {
+        crate::launch::node_tools(
+            input.home,
+            access,
+            crate::launch::lane_cache(input),
+            &mut tool_requirements,
+            &mut env,
+        );
+        env.extend([
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ]);
+    }
+    if input.sandboxed() && (staged_skills.root.is_some() || !input.user_skills()) {
         for (key, value) in &mut env {
             if key == "HOME" {
                 *value = codex_home.into();
             }
         }
     }
-    env.push(("CODEX_HOME".into(), codex_home.into()));
-    env.push(("SHELL".into(), "/bin/zsh".into()));
+    let selected_home = if input.sandboxed() {
+        Some(codex_home.as_path())
+    } else {
+        input.account.map(|account| account.directory())
+    };
+    if let Some(selected_home) = selected_home {
+        env.retain(|(key, _)| key != "CODEX_HOME");
+        env.push(("CODEX_HOME".into(), selected_home.into()));
+    }
+    if input.sandboxed() {
+        env.push(("SHELL".into(), "/bin/zsh".into()));
+    }
     let mut spec = LaunchSpec {
         argv,
         env,

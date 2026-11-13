@@ -176,6 +176,7 @@ impl Providers for Confined {
             home: "/fixture/home".into(),
             cargo_registry_seed: false,
             state_root: std::path::PathBuf::from("/fixture/state"),
+            sandboxed: true,
         });
         Ok(launch)
     }

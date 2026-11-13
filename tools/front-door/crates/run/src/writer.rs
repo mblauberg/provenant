@@ -306,15 +306,34 @@ impl WriterLaunch {
         status_paths(&output)
     }
 
+    /// Select the lane head while settlement holds writer exclusion. Native Git
+    /// advances the shared branch without updating the private candidate ref.
+    fn effective_head(&self, attempt: &Directory, base: GitOid) -> Result<(GitOid, bool)> {
+        let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+        if let Some(source) = crate::objects::bound_source(attempt)? {
+            let private = crate::objects::private_tip(&source, self.branch.as_str())?;
+            if private != base {
+                return Ok((private, false));
+            }
+        }
+        let head = crate::objects::resolve_ref(&git, self.worktree.repo(), self.branch.as_str())?;
+        Ok((head, head != base))
+    }
+
     /// When a writer lane passes its token budget and stops, commit its
     /// uncommitted work in the lane's worktree so it ends up committed on its branch.
-    fn commit_budget_stop(&self, attempt: &Directory) -> Result<BudgetCommit> {
+    fn commit_budget_stop(&self, attempt: &Directory, base: GitOid) -> Result<BudgetCommit> {
         let repo = self.worktree.repo();
         let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
         let source = crate::objects::bound_source(attempt)?.ok_or(RunError::Validation(
             "budget commit needs private Git state",
         ))?;
-        let tip = crate::objects::private_tip(&source, self.branch.as_str())?;
+        let (tip, native) = self.effective_head(attempt, base)?;
+        let index_dir = if native {
+            repo.private_dir()
+        } else {
+            &source.refs
+        };
         // Never stage away conflict stages or finish a merge, cherry-pick,
         // revert or rebase on the lane's behalf. A merge is restored by the
         // existing stopped-merge import; the others stay as the lane left them.
@@ -325,13 +344,18 @@ impl WriterLaunch {
             ("rebase-merge", "rebase"),
             ("rebase-apply", "rebase"),
         ] {
-            match source.refs.metadata_at(OsStr::new(name), false) {
+            match index_dir.metadata_at(OsStr::new(name), false) {
                 Ok(_) => return Ok(BudgetCommit::note(in_progress_note(operation))),
                 Err(error) if error.is_not_found() => {}
                 Err(error) => return Err(error.into()),
             }
         }
         let objects = crate::objects::prepare_budget_objects(&source.objects, repo)?;
+        if native {
+            // Snapshot through a private index; do not mutate the native index
+            // before the new objects have passed import verification.
+            crate::objects::copy_index(&git, index_dir, &source.refs, repo.root_path())?;
+        }
         // Reuse stable, no-follow reading before passing the index path to Git.
         source
             .refs
@@ -791,6 +815,10 @@ pub struct LaunchConfinement {
     pub cargo_registry_seed: bool,
     /// Host state root containing target seed generations.
     pub state_root: PathBuf,
+    /// Whether the lane runs under the compiled sandbox profile. Without it
+    /// the plan still prepares writer directories and records access, but the
+    /// provider starts directly, like the same CLI started by hand.
+    pub sandboxed: bool,
 }
 struct ResolvedLaunchLimits {
     limits: ProfileLimits,
@@ -983,6 +1011,18 @@ impl LaunchConfinement {
             );
         }
     }
+    /// Run holds writer custody here: create the derived ref parents and the
+    /// private lane cache, before they are anchored or used unsandboxed.
+    pub(crate) fn prepare_writer_directories(&self) -> Result<()> {
+        if let (Some(writer), AccessMode::WorktreeWrite(authority)) =
+            (&self.writer, &self.plan.permissions().mode)
+        {
+            prepare_writer_directories(&writer.worktree, &writer.branch, authority, &self.home)
+                .map_err(RunError::Confinement)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn command(
         &self,
         argv: &[OsString],
@@ -1003,14 +1043,7 @@ impl LaunchConfinement {
         )
         .map_err(RunError::Confinement)?;
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
-        // Run holds writer custody here: create the derived ref parents and the
-        // private lane cache before they are anchored.
-        if let (Some((worktree, branch)), AccessMode::WorktreeWrite(authority)) =
-            (writer, &self.plan.permissions().mode)
-        {
-            prepare_writer_directories(worktree, branch, authority, &self.home)
-                .map_err(RunError::Confinement)?;
-        }
+        self.prepare_writer_directories()?;
         let directories = required_anchors(self.plan.permissions(), &self.profile, writer)
             .into_iter()
             .map(AnchoredDirectory::open_canonical)
@@ -2528,7 +2561,7 @@ impl WriterLaunch {
         {
             // Recovery holds writer exclusion and custody is absent. Commit
             // failure is diagnostic and must not replace the budget outcome.
-            let (note, work) = match self.commit_budget_stop(attempt) {
+            let (note, work) = match self.commit_budget_stop(attempt, base) {
                 Ok(commit) => (commit.note.to_owned(), commit.committed),
                 Err(error) => (format!("budget commit failed: {error}"), None),
             };
@@ -2551,14 +2584,7 @@ impl WriterLaunch {
         }
         let verified_tip = match settlement.head() {
             Some(head) => head,
-            None => match &source {
-                Some(source) => crate::objects::private_tip(source, self.branch.as_str())?,
-                None => crate::objects::resolve_ref(
-                    &git_executable,
-                    self.worktree.repo(),
-                    self.branch.as_str(),
-                )?,
-            },
+            None => self.effective_head(attempt, base)?.0,
         };
         settlement.set_head(verified_tip)?;
         let import_cancel = settlement.cancellation();
@@ -2610,6 +2636,7 @@ impl WriterLaunch {
                 ));
             }
             if let Some(source) = &source
+                && crate::objects::private_tip(source, self.branch.as_str())? == verified_tip
                 && crate::objects::resolve_ref(
                     &git_executable,
                     self.worktree.repo(),
@@ -2699,6 +2726,8 @@ impl WriterLaunch {
             "writer-terminal.json",
             &crate::db::bytes(&WriterTerminal {
                 schema_version: 1,
+                // Replay may observe a later writer's descendant on the branch.
+                // Attribute only the head pinned for this attempt's settlement.
                 head: verified_tip,
             })?,
             crate::RECORD_LIMIT,

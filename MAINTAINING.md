@@ -236,11 +236,9 @@ triggers under **Change a skill** apply unchanged.
 
 ## What a test may pin
 
-- Pin externally visible behaviour, authority boundaries, and stable machine contracts.
-- Prefer stable codes and focused fields over prose, full outputs, or incidental counts.
-- Derive expected registries and lists from their source of truth.
-- Keep security, confidentiality, evidence, lease, and schema assertions.
-- When an unbreaking change fails a test, rewrite it to pin behaviour or delete it; never bend product code around it.
+- Invariants and properties at public boundaries first: pin observable contracts, authority boundaries, and machine-checkable properties. Avoid rigid tests, example snapshots, exact strings, or incidental counts that go stale as code evolves.
+- Regression tests minimal: add at most one small test per real defect, and only where no invariant covers it. Pruning redundant, duplicate, rigid, or implementation-pinned tests is normal, welcome work.
+- On any test failure: first decide whether the test pins implementation details. Rewrite it as an invariant or delete it; never bend product code or bump expected values around brittle tests.
 
 Three advisory test-strength signals run in `.github/workflows/test-signals.yml`.
 They always exit 0, so they only warn:

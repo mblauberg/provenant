@@ -76,8 +76,9 @@ fn config_directory(
         .unwrap_or_else(|| home.join(".config/gh"))
 }
 
-/// Codex removes *TOKEN* by default. Override that filter only within the
-/// complete, already sanitised launch environment's explicit name list.
+/// Let Codex shells use the prepared launch environment, including native
+/// credentials in place. Only variable names enter argv; values stay in the
+/// process environment.
 pub(super) fn codex_shell_environment(
     environment: &[(OsString, OsString)],
     argv: &mut Vec<OsString>,

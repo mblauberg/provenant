@@ -200,7 +200,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
     // The Fabric MCP server is opt-in; these cases drive it inside the lane.
     let config = |depth: u8| {
         format!(
-            "schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.max_depth'={depth}\n'fabric.mcp_server'=true\n{accounts}"
+            "schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.max_depth'={depth}\n'lanes.sandbox'='on'\n'fabric.mcp_server'=true\n{accounts}"
         )
     };
     fs::write(rig.state.join("config.toml"), config(1))?;
@@ -220,13 +220,16 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         if !writer {
             task.writer = None;
         }
-        // Publishing defaults on (`lanes.publish`), so the
-        // publishing rows request it the way dispatch resolves the knob.
-        if publishing {
-            task.profile
-                .knobs
-                .insert("lanes.publish".into(), serde_json::json!(true));
-        }
+        // These cases exercise confined state and write boundaries, so opt in
+        // explicitly instead of relying on the default execution mode.
+        task.profile
+            .knobs
+            .insert("lanes.sandbox".into(), serde_json::json!("on"));
+        // Select publishing explicitly; missing host configuration does not
+        // disable it because the login may live in a relocated store or keychain.
+        task.profile
+            .knobs
+            .insert("lanes.publish".into(), serde_json::json!(publishing));
         // Catalogue models only: production refuses unverified exact IDs.
         task.route = provenant_run::RequestedRoute::Model {
             extra: Default::default(),
