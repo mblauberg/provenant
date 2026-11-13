@@ -168,7 +168,6 @@ mod tests {
             },
             project_id: provenant_core::ProjectId::from_bytes([1; 16]),
             actor_id: provenant_core::ActorId::from_bytes([2; 16]),
-            run_id: provenant_core::RunId::from_bytes([3; 16]),
             attempt_id: provenant_core::AttemptId::from_bytes([4; 16]),
             host_delivery: None,
             launch: None,

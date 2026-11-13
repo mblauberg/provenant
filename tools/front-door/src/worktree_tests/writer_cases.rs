@@ -19,7 +19,7 @@ pub(super) fn writer_dispatch_edits_a_linked_worktree() -> Result {
     let absolute =
         provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
     let first = writer_run(absolute, "writer-first", 41, "write the fixture file")?;
-    let first_attempt = first.attempts[0].attempt_id;
+    let first_attempt = first.attempt_id;
     let first_record = store.create(&first, &call)?;
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
@@ -28,7 +28,7 @@ pub(super) fn writer_dispatch_edits_a_linked_worktree() -> Result {
         mode: "instruction-edit",
     };
     let holder = holder_context(&rig, &roots, &context);
-    let started = start_writer(&store, first_record.run_id, &provider, &holder, &call)?;
+    let started = start_writer(&store, first_record.attempt_id, &provider, &holder, &call)?;
     assert!(
         matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == first_attempt),
         "{started:?}"
@@ -69,9 +69,9 @@ pub(super) fn writer_dispatch_edits_a_linked_worktree() -> Result {
         Path::new(".worktrees/writer"),
     )?;
     let second = writer_run(relative, "writer-released", 42, "write after release")?;
-    let second_attempt = second.attempts[0].attempt_id;
+    let second_attempt = second.attempt_id;
     let second_record = store.create(&second, &call)?;
-    let started = start_writer(&store, second_record.run_id, &provider, &holder, &call)?;
+    let started = start_writer(&store, second_record.attempt_id, &provider, &holder, &call)?;
     assert!(
         matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == second_attempt),
         "{started:?}"
@@ -105,7 +105,7 @@ pub(super) fn second_writer_is_refused_while_first_holds_the_worktree() -> Resul
         Path::new(".worktrees/writer"),
     )?;
     let first = writer_run(relative.clone(), "writer-held", 51, "hold the writer lease")?;
-    let first_attempt = first.attempts[0].attempt_id;
+    let first_attempt = first.attempt_id;
     let first_record = store.create(&first, &call)?;
     let release = path.join(".writer-fixture-release");
     let ready = path.join(".writer-fixture-ready");
@@ -119,7 +119,13 @@ pub(super) fn second_writer_is_refused_while_first_holds_the_worktree() -> Resul
         mode: "hold",
     };
     let holder = holder_context(&rig, &roots, &context);
-    let started = start_writer(&store, first_record.run_id, &first_provider, &holder, &call)?;
+    let started = start_writer(
+        &store,
+        first_record.attempt_id,
+        &first_provider,
+        &holder,
+        &call,
+    )?;
     assert!(
         matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == first_attempt),
         "{started:?}"
@@ -132,7 +138,7 @@ pub(super) fn second_writer_is_refused_while_first_holds_the_worktree() -> Resul
     )?;
 
     let second = writer_run(relative, "writer-contender", 52, "contend for writer lease")?;
-    let second_attempt = second.attempts[0].attempt_id;
+    let second_attempt = second.attempt_id;
     let second_record = store.create(&second, &call)?;
     let second_provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
@@ -142,7 +148,7 @@ pub(super) fn second_writer_is_refused_while_first_holds_the_worktree() -> Resul
     };
     let started = start_writer(
         &store,
-        second_record.run_id,
+        second_record.attempt_id,
         &second_provider,
         &holder,
         &call,
@@ -191,7 +197,7 @@ pub(super) fn writer_settlement_merges_upstream_advance() -> Result {
         101,
         "merge upstream and writer changes",
     )?;
-    let attempt = prepared.attempts[0].attempt_id;
+    let attempt = prepared.attempt_id;
     let record = store.create(&prepared, &call)?;
 
     // Advance origin/main after the writer worktree exists.
@@ -219,7 +225,7 @@ pub(super) fn writer_settlement_merges_upstream_advance() -> Result {
         mode: "hold",
     };
     let holder = holder_context(&rig, &roots, &context);
-    let started = start_writer(&store, record.run_id, &provider, &holder, &call)?;
+    let started = start_writer(&store, record.attempt_id, &provider, &holder, &call)?;
     assert!(
         matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == attempt),
         "{started:?}"
@@ -235,8 +241,6 @@ pub(super) fn writer_settlement_merges_upstream_advance() -> Result {
     let scratch = context
         .state_root
         .as_path()
-        .join("runs")
-        .join(record.run_id.to_string())
         .join("attempts")
         .join(attempt.to_string())
         .join("tmp/candidate-0");
@@ -326,7 +330,7 @@ pub(super) fn writer_terminal_refuses_sequencer_state() -> Result {
         b"fixture sequencer state",
     )?;
     let prepared = writer_run(request, "writer-sequencer", 61, "create sequencer state")?;
-    let attempt = prepared.attempts[0].attempt_id;
+    let attempt = prepared.attempt_id;
     let record = store.create(&prepared, &call)?;
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
@@ -335,7 +339,7 @@ pub(super) fn writer_terminal_refuses_sequencer_state() -> Result {
         mode: "control",
     };
     let holder = holder_context(&rig, &roots, &context);
-    let started = start_writer(&store, record.run_id, &provider, &holder, &call)?;
+    let started = start_writer(&store, record.attempt_id, &provider, &holder, &call)?;
     assert!(matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == attempt));
     let terminal = await_terminal(&store, attempt, &call)?;
     let provenant_run::AttemptState::Terminal {
@@ -354,8 +358,6 @@ pub(super) fn writer_terminal_refuses_sequencer_state() -> Result {
     let quarantine = context
         .state_root
         .as_path()
-        .join("runs")
-        .join(record.run_id.to_string())
         .join("attempts")
         .join(attempt.to_string())
         .join("quarantine");
@@ -398,7 +400,7 @@ pub(super) fn writer_terminal_refuses_sequencer_state() -> Result {
         91,
         "hold while the base is rewritten",
     )?;
-    let attempt = prepared.attempts[0].attempt_id;
+    let attempt = prepared.attempt_id;
     let record = store.create(&prepared, &call)?;
     let release = path.join(".writer-fixture-release");
     let _release_on_drop = ReleaseOnDrop(release.clone());
@@ -408,7 +410,7 @@ pub(super) fn writer_terminal_refuses_sequencer_state() -> Result {
         project: context.project_id,
         mode: "hold",
     };
-    let started = start_writer(&store, record.run_id, &provider, &holder, &call)?;
+    let started = start_writer(&store, record.attempt_id, &provider, &holder, &call)?;
     assert!(
         matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == attempt),
         "{started:?}"
@@ -426,8 +428,6 @@ pub(super) fn writer_terminal_refuses_sequencer_state() -> Result {
     let scratch = context
         .state_root
         .as_path()
-        .join("runs")
-        .join(record.run_id.to_string())
         .join("attempts")
         .join(attempt.to_string())
         .join("tmp/candidate-0");
@@ -470,7 +470,7 @@ pub(super) fn writer_production_plan_denies_outside_writes() -> Result {
         71,
         "probe the production write boundary",
     )?;
-    let attempt = prepared.attempts[0].attempt_id;
+    let attempt = prepared.attempt_id;
     let record = store.create(&prepared, &call)?;
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
@@ -480,7 +480,7 @@ pub(super) fn writer_production_plan_denies_outside_writes() -> Result {
     };
     let started = start_writer(
         &store,
-        record.run_id,
+        record.attempt_id,
         &provider,
         &holder_context(&rig, &roots, &context),
         &call,
@@ -529,7 +529,7 @@ pub(super) fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> 
     let writer =
         provenant_run::prepare_writer(&request, context.state_root.as_path(), context.project_id)?;
     let prepared = writer_run(request, "writer-recovered", 81, "recover an exited writer")?;
-    let attempt = prepared.attempts[0].attempt_id;
+    let attempt = prepared.attempt_id;
     let record = store.create(&prepared, &call)?;
     let provider = WriterProvider {
         state: context.state_root.as_path().to_owned(),
@@ -539,7 +539,7 @@ pub(super) fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> 
     };
     let started = start_writer(
         &store,
-        record.run_id,
+        record.attempt_id,
         &provider,
         &holder_context(&rig, &roots, &context),
         &call,
@@ -551,8 +551,6 @@ pub(super) fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> 
     let attempt_path = context
         .state_root
         .as_path()
-        .join("runs")
-        .join(record.run_id.to_string())
         .join("attempts")
         .join(attempt.to_string());
     let process_exit = attempt_path.join("process-exit.json");
@@ -575,7 +573,7 @@ pub(super) fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> 
             .join("CHERRY_PICK_HEAD"),
         b"unfinished cherry-pick",
     )?;
-    let found = store.reconcile_for_fixture(record.run_id, &provider, &call)?;
+    let found = store.reconcile_for_fixture(record.attempt_id, &provider, &call)?;
     // Recovery refuses the unfinished operation, settles once and releases custody.
     assert_eq!(found, vec![(attempt, provenant_run::Reconciled::Finished)]);
     let terminal = store.record(attempt, &call)?;
@@ -604,7 +602,6 @@ pub(super) fn recreated_worktree_accepts_writer_after_settlement() -> Result {
     let clock = provenant_os::clock::SystemClock::new();
     let cancel = provenant_core::CancelToken::new();
     let scope = Scope {
-        run: provenant_core::RunId::from_bytes([31; 16]),
         attempt: provenant_core::AttemptId::from_bytes([32; 16]),
         generation: 1,
     };
@@ -658,7 +655,6 @@ pub(super) fn recreated_worktree_accepts_writer_after_settlement() -> Result {
         .is_err_and(|error| is_fenced(error.as_ref()))
     );
     let lease = acquire(Scope {
-        run: provenant_core::RunId::from_bytes([33; 16]),
         attempt: provenant_core::AttemptId::from_bytes([34; 16]),
         ..scope
     })?;

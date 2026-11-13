@@ -172,8 +172,6 @@ fn resumed_lane_settlement_ignores_terminal_graph()
         fixture
             .rig
             .state
-            .join("runs")
-            .join(fixture.settled.run_id.to_string())
             .join("attempts")
             .join(fixture.settled.attempt_id.to_string())
             .join("worktree-settlement.json")
@@ -225,8 +223,6 @@ fn resumed_lane_settlement_defers_cleanup_and_records_its_receipt()
         fixture
             .rig
             .state
-            .join("runs")
-            .join(fixture.settled.run_id.to_string())
             .join("attempts")
             .join(fixture.settled.attempt_id.to_string())
             .join("worktree-settlement.json")

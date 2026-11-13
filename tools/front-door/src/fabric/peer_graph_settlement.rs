@@ -47,10 +47,10 @@ fn graph_review_launch_submits_pinned_source_and_base() -> Result<(), Box<dyn st
             delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor,
         })?;
         let operation = store.operation(&graph_operation("graph-attempt-operation", &key)?, &call)?.ok_or("missing operation")?;
-        let request = store.request(operation.run_id, &call)?;
-        assert_eq!(request.tasks[0].profile.settlement_retry_limit, Some(1));
-        assert_eq!(request.tasks[0].base.as_deref(), Some(expected_base.as_str()));
-        assert_eq!(request.tasks[0].head.as_deref(), Some(head.as_str()));
+        let request = store.request(store.operation_attempt(&operation.operation_id, &call)?, &call)?;
+        assert_eq!(request.task.profile.settlement_retry_limit, Some(1));
+        assert_eq!(request.task.base.as_deref(), Some(expected_base.as_str()));
+        assert_eq!(request.task.head.as_deref(), Some(head.as_str()));
         let reference = match observation {
             graph::AttemptObservation::Pending { attempt_ref } | graph::AttemptObservation::Unknown { attempt_ref } | graph::AttemptObservation::Terminal { attempt_ref, .. } => attempt_ref.ok_or("missing attempt reference")?,
         };
@@ -187,13 +187,13 @@ fn pinned_review_range_survives_moved_ref_and_another_checkout() -> Result<(), B
     let call = run_owner.call(&cancel);
     let store = run_owner.store(&cancel)?;
     let operation = store.operation(&graph_operation("graph-attempt-operation", &key)?, &call)?.ok_or("operation")?;
-    let request = store.request(operation.run_id, &call)?;
-    assert_eq!(request.tasks[0].base.as_deref(), Some(base.as_str()));
-    assert_eq!(request.tasks[0].head.as_deref(), Some(head.as_str()));
-    assert_eq!(request.tasks[0].access.source_root.as_deref(), Some(rig.project.as_path()));
-    assert!(request.tasks[0].access.read_roots.is_empty());
-    assert!(request.tasks[0].build_heavy);
-    assert_eq!(request.tasks[0].access.write_roots, vec![write_root]);
+    let request = store.request(store.operation_attempt(&operation.operation_id, &call)?, &call)?;
+    assert_eq!(request.task.base.as_deref(), Some(base.as_str()));
+    assert_eq!(request.task.head.as_deref(), Some(head.as_str()));
+    assert_eq!(request.task.access.source_root.as_deref(), Some(rig.project.as_path()));
+    assert!(request.task.access.read_roots.is_empty());
+    assert!(request.task.build_heavy);
+    assert_eq!(request.task.access.write_roots, vec![write_root]);
     let scratch = rig.root.join("review-evidence");
     std::fs::create_dir(&scratch)?;
     let directory = provenant_os::fs::Directory::open_anchor(&scratch)?;
@@ -283,205 +283,6 @@ fn integrating_graph_writer_refuses_a_source_outside_the_pinned_base() -> Result
     let binary = BinaryRunOwner { factory: &factory, allow_remote: true, actor: None, chair: None };
     let refusal = binary.store(&cancel)?.operation(&graph_operation("graph-attempt-operation", &key)?, &binary.call(&cancel))?.ok_or("refusal operation missing")?;
     assert_eq!(refusal.state, provenant_run::OperationState::Refused);
-    Ok(())
-}
-
-#[test]
-fn graph_replay_preserves_accepted_context_without_a_checkpoint_reference()
--> Result<(), Box<dyn std::error::Error>> {
-    if host_test(
-        "fabric::peer_tests::peer_graph_settlement::graph_replay_preserves_accepted_context_without_a_checkpoint_reference",
-    )? {
-        return Ok(());
-    }
-    use provenant_fabric_runtime::graph::{self, AttemptOwner};
-    let rig = crate::worktree_tests::repository()?;
-    let original_head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
-    crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "successor"])?;
-    let successor_head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
-    let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
-    let factory = Factory {
-        context: Context::open(roots, &rig.home, &rig.project)?,
-        project_attribution: false,
-        clock: SystemClock,
-        backoff: ThreadPause,
-        executor: SystemExecutor::new(1)?,
-        home: rig.home.clone(),
-        cwd: rig.project.clone(),
-        assets: rig.project.clone(),
-        host_launch: None,
-        mcp_project: None,
-        workers: &FreeWorkers,
-    };
-    let cancel = CancelToken::new();
-    let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-    let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
-        "graph_id":"legacy-context", "node_id":"inspect", "route_index":0
-    }))?;
-    let mut run_owner = BinaryRunOwner {
-        factory: &factory,
-        allow_remote: true,
-        actor: None,
-        chair: None,
-    };
-    let replay_prompt = "Review the slice. ".repeat(5_000);
-    assert!(replay_prompt.len() > provenant_records::run::OUTPUT_LIMIT as usize);
-    let input: SubmitInput = serde_json::from_value(serde_json::json!({
-        "op":"submit", "operation_id":graph_operation("graph-attempt-operation", &key)?,
-        "tasks":[{
-            "title":"inspect", "prompt":replay_prompt,
-            "base":original_head,
-            "head":successor_head,
-            "source_head":original_head,
-            "route":{"kind":"model", "provider":"fixture", "model":"fixture/model"},
-            "timeout_seconds":factory.context.config.limits.graph_timeout_seconds
-        }], "concurrency":1, "knobs":["routing.graph_exclude=[\"codex/gpt-6-luna\"]"]
-    }))?;
-    let write_root = rig.root.join("extra-write");
-    std::fs::create_dir(&write_root)?;
-    let grants = provenant_records::run::LaneAccess {
-        write_roots: vec![write_root.clone()],
-        ..Default::default()
-    };
-    let accepted = graph::AttemptSpec { build_heavy: true, ..Default::default() };
-    let execution_store = rig.state.join("run.sqlite3");
-    assert!(!execution_store.exists());
-    assert!(matches!(
-        run_owner.submit_with_access(input, budget, &cancel, grants.clone(), None, Some(accepted), &provenant_confinement::worktrees::RepoFacts::default(), Default::default()),
-        Err(FacadeError::InvalidInput { .. })
-    ));
-    assert!(!execution_store.exists());
-    // Seed a retained pre-cutover launch below the new graph-only boundary.
-    // Recovery must preserve its absent context without reopening graphless submission.
-    let session = run_owner.session(&cancel)?;
-    let accepted_operation = graph_operation("graph-attempt-operation", &key)?;
-    let accepted_task = provenant_cli::run::Submitted {
-        attempt: graph::AttemptSpec { build_heavy: true, ..Default::default() },
-        require_skill_location: false, settlement_retry_limit: None, context: None,
-        title: Some("inspect".into()),
-        task_id: provenant_cli::run::derived_task(&accepted_operation, 0).map_err(|_| "retained task id")?,
-        prompt: replay_prompt.clone(), base: Some(original_head.clone()), pinned_base: None,
-        head: Some(successor_head.clone()), source_head: Some(original_head.clone()),
-        route: serde_json::from_value(serde_json::json!({"kind":"model", "provider":"fixture", "model":"fixture/model"}))?,
-        provider_timeout: factory.context.config.limits.graph_timeout_seconds,
-        delivery_id: None, deliver: None, worktree: None, access: grants,
-    };
-    let (accepted_run, accepted_started) = run_owner.with_edge(|edge| {
-        let submitted = provenant_cli::run::submit_with_host(
-        &session, edge, provenant_cli::run::Submission { chair: None, operation_id: accepted_operation.clone(),
-            tasks: vec![accepted_task], concurrency: Some(1), knobs: vec!["routing.graph_exclude=[\"codex/gpt-6-luna\"]".into()] },
-        &run_owner.call(&cancel), None);
-        super::run_owner::recover_accepted_launch(&session, &accepted_operation, &run_owner.call(&cancel), submitted)
-    })?;
-    let receipt = run_owner.receipt(&session, accepted_operation, &accepted_run, &accepted_started, &run_owner.call(&cancel))?;
-    let target = receipt.targets.first().ok_or("target")?;
-    // The plain lane and graph owner both lower through the same submission
-    // boundary; compare their durable launch fields, excluding identities.
-    let plain_key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
-        "graph_id":"plain-parity", "node_id":"inspect", "route_index":0
-    }))?;
-    let plain_operation = graph_operation("graph-attempt-operation", &plain_key)?;
-    let session = run_owner.session(&cancel)?;
-    let plain_task = provenant_cli::run::Submitted {
-        attempt: graph::AttemptSpec { build_heavy: true, ..Default::default() },
-        require_skill_location: false, settlement_retry_limit: None, context: None,
-        title: Some("inspect".into()),
-        task_id: provenant_cli::run::derived_task(&plain_operation, 0).map_err(|_| "plain task id")?,
-        prompt: replay_prompt.clone(), base: Some(original_head.clone()), pinned_base: None,
-        head: Some(successor_head.clone()),
-        source_head: Some(original_head.clone()),
-        route: serde_json::from_value(serde_json::json!({"kind":"model", "provider":"fixture", "model":"fixture/model"}))?,
-        provider_timeout: factory.context.config.limits.graph_timeout_seconds,
-        delivery_id: None, deliver: None, worktree: None,
-        access: provenant_records::run::LaneAccess { write_roots: vec![write_root.clone()], ..Default::default() },
-    };
-    let (plain_run, _) = run_owner.with_edge(|edge| {
-        let submitted = provenant_cli::run::submit_with_host(
-        &session, edge, provenant_cli::run::Submission { chair: None, operation_id: plain_operation.clone(),
-            tasks: vec![plain_task], concurrency: Some(1), knobs: vec!["routing.graph_exclude=[\"codex/gpt-6-luna\"]".into()] },
-        &run_owner.call(&cancel), None);
-        super::run_owner::recover_accepted_launch(&session, &plain_operation, &run_owner.call(&cancel), submitted)
-    })?;
-    let graph_record = session.store.record(target.attempt, &run_owner.call(&cancel))?;
-    let graph_request = session.store.request(graph_record.run_id, &run_owner.call(&cancel))?;
-    let plain_request = session.store.request(plain_run.run_id, &run_owner.call(&cancel))?;
-    let graph_task = &graph_request.tasks[0];
-    let plain_task = &plain_request.tasks[0];
-    assert_eq!(graph_task.build_heavy, plain_task.build_heavy);
-    assert_eq!(graph_task.account, plain_task.account);
-    assert_eq!(graph_task.route, plain_task.route);
-    assert_eq!(graph_task.access, plain_task.access);
-    assert_eq!(graph_task.prompt_digest, plain_task.prompt_digest);
-    let mut graph_owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
-        factory: &factory,
-        integration_base: None,
-        integration_branch: None,
-        network: None, capability_overrides: Default::default(),
-        exclude: Vec::new(),
-        budget,
-        cancel: &cancel,
-        prices: None,
-        tick: false,
-    };
-    let actor = graph_owner.actor();
-    let route = serde_json::from_value(
-        serde_json::json!({"adapter":"fixture", "model":"fixture/model"}),
-    )?;
-    let store = run_owner.store(&cancel)?;
-    {
-        let observation = graph_owner.observe_or_start(
-            &key,
-            graph::NodeInput { review_launch: false, capabilities: None, capability_sources: None, attempt: None, require_skill_location: false,
-                settlement_retries: None,
-                prior_attempts: &[],
-                family_peers: &[],
-                context: provenant_records::run::WorkContext {
-                    graph_id: Some(key.graph_id.clone()),
-                    node_id: Some(key.node_id.clone()),
-                    pattern: Some("council".into()),
-                    ..Default::default()
-                },
-                read_roots: &[],
-                attachments: &[],
-                distinct_from_attempts: &[],
-                require_distinct: false,
-                source_commit: None,
-                review_base: None,
-                title: "inspect",
-                prompt: &replay_prompt,
-                required_verdict: None,
-                deadline_seconds: None,
-                inputs_dir: None,
-            },
-            &route,
-            graph::AccessMode::ReadOnly,
-            None,
-            graph::Replay {
-                delivery: None,
-                branch: None,
-                fast_forward_only: false,
-                stored_ref: None,
-                launch_actor: &actor,
-            },
-        ).map_err(|error| format!("recover accepted graph launch: {error:?}"))?;
-        let graph::AttemptObservation::Terminal { attempt_ref, .. } = observation else {
-            return Err("expected settled fixture attempt".into());
-        };
-        assert_eq!(
-            attempt_ref,
-            Some(format!(
-                "{}/{}",
-                factory.context.identity.host, target.attempt
-            ))
-        );
-        let record = store.record(target.attempt, &run_owner.call(&cancel))?;
-        assert!(record.context.is_none());
-        let request = store.request(record.run_id, &run_owner.call(&cancel))?;
-        assert!(request.tasks[0].build_heavy);
-        assert_eq!(request.tasks[0].source_head.as_deref(), Some(original_head.as_str()));
-        assert_eq!(request.tasks[0].head.as_deref(), Some(successor_head.as_str()));
-        assert_eq!(request.tasks[0].access.write_roots, vec![write_root]);
-    }
     Ok(())
 }
 
@@ -632,13 +433,14 @@ fn graph_hint_requires_a_matching_attempt() -> Result<(), Box<dyn std::error::Er
     journal.bind(provenant_fabric_runtime::graph::GraphExecution { extra: Default::default(), integration_base: None, review_base: None, directory: fixture.rig.project.clone(), document })?;
     journal.save(&checkpoint)?;
     drop(journal);
-    assert!(matching_graph_hint(&fixture.roots.state, fixture.settled.project_id, &record).is_none());
+    let operation = fixture.store.attempt_operation(record.attempt_id, &call)?.operation_id;
+    assert!(matching_graph_hint(&fixture.roots.state, fixture.settled.project_id, &record, &operation).is_none());
     record.context = Some(provenant_records::run::WorkContext { graph_id: Some("unknown".into()), ..Default::default() });
-    assert!(matching_graph_hint(&fixture.roots.state, fixture.settled.project_id, &record).is_none());
+    assert!(matching_graph_hint(&fixture.roots.state, fixture.settled.project_id, &record, &operation).is_none());
     record.context.as_mut().ok_or("context")?.graph_id = Some("hint-test".into());
-    assert_eq!(matching_graph_hint(&fixture.roots.state, fixture.settled.project_id, &record).as_deref(), Some("hint-test"));
+    assert_eq!(matching_graph_hint(&fixture.roots.state, fixture.settled.project_id, &record, &operation).as_deref(), Some("hint-test"));
     record.attempt_id = AttemptId::from_bytes([99; 16]);
-    assert!(matching_graph_hint(&fixture.roots.state, fixture.settled.project_id, &record).is_none());
+    assert!(matching_graph_hint(&fixture.roots.state, fixture.settled.project_id, &record, &operation).is_none());
     Ok(())
 }
 

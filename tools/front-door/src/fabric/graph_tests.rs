@@ -479,7 +479,7 @@ mod graph_writer_admission_tests {
                 "route":{"adapter":"mock","model":"mock-model"}
             }]
         })).unwrap();
-        for detail in [Some(InvalidInputDetail::FieldTooLarge { field:"tasks[0].prompt".into(), limit:1_048_576 }), None] {
+        for detail in [Some(InvalidInputDetail::FieldTooLarge { field:"task.prompt".into(), limit:1_048_576 }), None] {
             let cause = FacadeError::InvalidInput { detail };
             let projection = cause.diagnostic();
             let run = advance(&document, &mut Refuse(cause), &mut MemoryJournal::default()).unwrap();
@@ -582,15 +582,15 @@ mod graph_writer_admission_tests {
         let session = binary.session(&cancel)?;
         let call = binary.call(&cancel);
         let operation = session.store.operation(&operation_id, &call)?.ok_or("durable operation")?;
-        let run = session.store.run(operation.run_id, &call)?;
+        let run = session.store.record(session.store.operation_attempt(&operation.operation_id, &call)?, &call)?;
         // start() skips this saved terminal attempt, so an identical replay
         // has an empty Started batch and still accepts its terminal target.
-        let replayed = binary.with_edge(|edge| provenant_cli::run::launch(&session, run.run_id, edge, &call))?;
+        let replayed = binary.with_edge(|edge| provenant_cli::run::launch(&session, run.attempt_id, edge, &call))?;
         assert!(replayed.is_empty());
         let replay_receipt = binary.receipt(&session, operation_id.clone(), &run, &replayed, &call)?;
         assert!(!replay_receipt.targets.is_empty());
         let lanes = session.service().lanes(&provenant_run::LaneQuery {
-            targets:vec![provenant_run::LaneTarget {run:run.run_id,task:None,attempt:None}],
+            targets:vec![run.attempt_id],
             all:true,limit:100,after:0,newest_first:false,owner:None,unseen_after:None,
         }, &call)?.lanes;
         assert!(durable_launch_refusal(&lanes).is_none());
@@ -641,7 +641,7 @@ mod graph_writer_admission_tests {
         for kind in [
             provenant_run::RefusalKind::Policy,
             provenant_run::RefusalKind::PacingReserve,
-            provenant_run::RefusalKind::RetainedImport { run:run.run_id, attempt, worktree:rig.project.clone() },
+            provenant_run::RefusalKind::RetainedImport { attempt, worktree:rig.project.clone() },
         ] {
             let started = [provenant_run::Started::Refused { attempt, reason:"HOST_DISK_ERROR_SENTINEL".into(), kind }];
             let lane = sealed(provenant_records::run::TerminalCause::DiskFloor)?;
@@ -674,21 +674,22 @@ mod graph_writer_admission_tests {
         let blocked_operation: provenant_core::OperationId = "blocked-replay-fixture".parse()?;
         let input: SubmitInput = serde_json::from_value(serde_json::json!({
             "op":"submit", "operation_id":blocked_operation,
-            "tasks":[{"prompt":"review the fixture", "access":"read_only", "context":{"graph_id":"blocked-replay-fixture","node_id":"inspect"},
+            "task":{"prompt":"review the fixture", "access":"read_only", "context":{"graph_id":"blocked-replay-fixture","node_id":"inspect","attempt":1},
                 "timeout_seconds":factory.context.config.limits.graph_timeout_seconds, "route":{
                 "kind":"model", "provider":"codex", "model":"codex/gpt-6-luna"
-            }}], "concurrency":1
+            }}
         }))?;
         let mut queued_owner = BinaryRunOwner {factory:&factory,allow_remote:true,actor:None,chair:None};
         let queued_receipt = provenant_cli::run::with_deferred_provider_launch(|| queued_owner.submit_with_access(input, budget, &cancel, Default::default(), None, None, &Default::default(), Default::default()))?;
         assert!(!queued_receipt.targets.is_empty());
         let mut saved = session.store.operation(&blocked_operation, &call)?.ok_or("queued operation")?;
-        let queued_run = session.store.run(saved.run_id, &call)?;
+        let queued_attempt = session.store.operation_attempt(&blocked_operation, &call)?;
+        let queued_run = session.store.record(queued_attempt, &call)?;
         saved.state = provenant_run::OperationState::Blocked;
         saved.blocked_reason = Some("fixture custody release pending".into());
         let database = rusqlite::Connection::open(roots.state.as_path().join("run.sqlite3"))?;
-        database.execute("UPDATE attempts SET operation_record=?1 WHERE run=?2", rusqlite::params![
-            provenant_records::CanonicalV1::bytes(&saved)?.as_bytes(), saved.run_id.to_string()
+        database.execute("UPDATE attempts SET operation_record=?1 WHERE id=?2", rusqlite::params![
+            provenant_records::CanonicalV1::bytes(&saved)?.as_bytes(), queued_attempt.to_string()
         ])?;
         assert!(matches!(binary.receipt(&session, blocked_operation, &queued_run, &[], &call), Err(FacadeError::DispatchRefused { .. })));
         Ok(())
@@ -2402,16 +2403,14 @@ mod result_tests {
             usage: serde_json::Value,
             provider_ms: Option<u64>,
         ) -> provenant_records::run::AttemptRecord {
-            use provenant_core::{AttemptId, Digest, ProjectId, RunId, TaskId, WallTime};
+            use provenant_core::{AttemptId, Digest, ProjectId, WallTime};
             use serde_json::json;
             let now = WallTime::from_micros(1).unwrap();
             serde_json::from_value(json!({
                 "schema_version": 1,
                 "attempt_id": AttemptId::from_bytes([1; 16]),
-                "run_id": RunId::from_bytes([2; 16]),
                 "project_id": ProjectId::from_bytes([3; 16]),
-                "task_id": TaskId::from_bytes([4; 16]),
-                "operation_id": "graph-usage-test",
+                "key": {"project": ProjectId::from_bytes([3; 16]), "graph": "graph-usage-test", "node": "node", "attempt": 1},
                 "attempt_number": 1, "revision": 1, "generation": 0,
                 "requested_route": {"kind":"model", "provider":"p", "model":model},
                 "resolved_route": {"provider":"p", "model":model, "effort":null, "account_label":null},
@@ -2985,8 +2984,8 @@ mod provisioned_writer_submission_tests {
             let store = binary.store(&cancel)?;
             let call = binary.call(&cancel);
             let record = store.record(id.parse()?, &call)?;
-            let request = store.request(record.run_id, &call)?;
-            let task = request.tasks.first().ok_or("sealed reader")?;
+            let request = store.request(record.attempt_id, &call)?;
+            let task = &request.task;
             if condition != "unpinned" {
                 assert_eq!(task.head.as_deref(), Some(head.as_str()), "{condition}");
             }
@@ -3100,8 +3099,8 @@ mod provisioned_writer_submission_tests {
         let store = binary.store(&cancel)?;
         let call = binary.call(&cancel);
         let record = store.record(id.parse()?, &call)?;
-        let request = store.request(record.run_id, &call)?;
-        let task = request.tasks.first().ok_or("sealed task missing")?;
+        let request = store.request(record.attempt_id, &call)?;
+        let task = &request.task;
         assert_eq!(
             task.writer
                 .as_ref()
@@ -3125,7 +3124,7 @@ mod provisioned_writer_submission_tests {
         let exit = ExitObservation {
             launch_refusal: None,
             publication: PublicationState::Durable,
-            scope: Scope { run: record.run_id, attempt: record.attempt_id, generation: record.generation },
+            scope: Scope { attempt: record.attempt_id, generation: record.generation },
             termination: Some(provenant_os::exec::Termination::Exit(0)), never_spawned: false, stop_reason: None,
             delivered_signals: Vec::new(), reaped: Vec::new(), omitted_reaped: 0, spared: Vec::new(),
             cancel_delivered_before_exit: None, omitted_spared: 0, warnings: Vec::new(), omitted_warnings: 0,
@@ -3133,8 +3132,7 @@ mod provisioned_writer_submission_tests {
             settlement_evidence: SettlementEvidence::DarwinCensusAndCustodyLease,
             stdout: Default::default(), stderr: Default::default(),
         };
-        let directory = provenant_os::fs::Directory::open_anchor(&rig.state.join("runs")
-            .join(record.run_id.to_string()).join("attempts").join(id))?;
+        let directory = provenant_os::fs::Directory::open_anchor(&rig.state.join("attempts").join(id))?;
         drop(directory.try_lock(std::ffi::OsStr::new("custody.lock"), provenant_os::fs::LockMode::Exclusive)?);
         let mut sealed_exit = serde_json::to_value(&exit)?;
         let object = sealed_exit.as_object_mut().ok_or("exit object")?;
@@ -3234,22 +3232,22 @@ mod provisioned_writer_submission_tests {
                 .1
                 .parse()?;
             let next = store.record(successor_id, &call)?;
-            let next_request = store.request(next.run_id, &call)?;
-            assert_eq!(next_request.tasks[0].writer, task.writer);
+            let next_request = store.request(next.attempt_id, &call)?;
+            assert_eq!(next_request.task.writer, task.writer);
             assert_eq!(
-                next_request.tasks[0]
+                next_request.task
                     .context
                     .as_ref()
                     .and_then(|context| context.writer_predecessor),
                 Some(record.attempt_id)
             );
             assert_eq!(
-                next_request.tasks[0].source_head.as_deref(),
+                next_request.task.source_head.as_deref(),
                 Some(head.as_str())
             );
             // Simulate a lost checkpoint reply: accepted delivery must resolve
             // the foreign checkout again and observe the same sealed operation.
-            store.refuse_queued(next.run_id, "fixture settles accepted continuation", &call)?;
+            store.refuse_queued(next.attempt_id, "fixture settles accepted continuation", &call)?;
             let mut replay = continued.checkpoint;
             replay.nodes[0]
                 .attempts
@@ -3266,7 +3264,7 @@ mod provisioned_writer_submission_tests {
                     .and_then(|attempt| attempt.attempt_ref.as_deref()),
                 Some(successor_ref.as_str())
             );
-            assert_eq!(store.request(next.run_id, &call)?, next_request);
+            assert_eq!(store.request(next.attempt_id, &call)?, next_request);
         }
         Ok(())
     }

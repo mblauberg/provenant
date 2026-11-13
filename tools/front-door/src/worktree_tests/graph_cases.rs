@@ -44,7 +44,7 @@ pub(super) fn graph_run_refuses_low_disk_writers() -> Result {
         "{message}"
     );
     assert!(message.contains("provenant gc"), "{message}");
-    assert!(!rig.state.join("runs").exists());
+    assert!(!rig.state.join("attempts").exists());
     fs::write(
         &document,
         serde_json::to_vec(&serde_json::json!({
@@ -85,7 +85,7 @@ pub(super) fn graph_run_refuses_low_disk_writers() -> Result {
         reader_node["attempts"][0]["attempt_ref"].as_str().is_some(),
         "{reader_value}"
     );
-    assert!(rig.state.join("runs").exists());
+    assert!(rig.state.join("attempts").exists());
     Ok(())
 }
 
