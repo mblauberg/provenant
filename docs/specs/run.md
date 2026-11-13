@@ -476,7 +476,10 @@ always describe one commit.
 
 A chair can release an unsettleable writer fence with
 `provenant reconcile --abandon RUN/ATTEMPT --reason TEXT`. Ordinary reconcile
-continues retrying by default. Abandonment requires a terminal attempt,
+continues retrying by default. A never-dispatched queued attempt can also be
+abandoned when it has no process evidence, writer fence or worktree custody;
+it is withdrawn as cancelled before recording abandonment. Other abandonment
+requires a terminal attempt,
 exclusive settlement and writer locks, and proven absence of custody. It records
 an explicit abandoned settlement outcome with the chair, time, reason and prior
 phase before releasing the reservation. It preserves the last error, provider

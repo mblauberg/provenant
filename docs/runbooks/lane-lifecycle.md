@@ -80,7 +80,10 @@ seconds it reports the request pending and settles as it unwinds. Started
 attempts are immutable; `edit` changes unstarted nodes only. A fenced import
 names the retained attempt and an explicit abandonment command; abandonment
 keeps the private Git evidence but stops automatic import, so recover that work
-by hand. `reconcile` reports storage errors in `writer_reservation_errors`
+by hand. For a retained queued lane that never dispatched, use
+`provenant reconcile --abandon RUN/ATTEMPT --reason TEXT`; this preserves its
+evidence and refuses attempts with process evidence, a fence or worktree custody.
+`reconcile` reports storage errors in `writer_reservation_errors`
 and exits non-zero. A valid handoff declaring `stopped_early` or `blocked` makes
 an otherwise successful lane settle as `review_required`.
 
