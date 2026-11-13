@@ -24,7 +24,7 @@ claim, acknowledgement token or redelivery.
 
 Provider execution belongs to run, providers and supervisor. Fabric's thin MCP
 surface delegates to those owners under
-[ADR 0022](0022-thin-fabric-mcp-execution-facade.md). Delivery acceptance belongs
+[ADR 0021](0021-configured-workspace-dispatch-boundaries.md). Delivery acceptance belongs
 to workflow, separately from execution evidence. There is no daemon capability
 compiler, review-portal custody protocol or persistent provider session pool.
 

@@ -1,45 +1,62 @@
-# ADR 0021: Configured-workspace access and one execution owner
+# ADR 0021: Crate layering, one execution owner and delegation bounds
 
 **Status:** Accepted
 
-Changed: 2026-10-26, #1754.
+Changed: 2026-11-11, #3233.
 
 ## Context
 
-Ordinary configured-provider work needs a clear permission boundary without
-mistaking route diversity for assurance or a successful attempt for accepted
-delivery.
+Provenant ships one Rust binary built from many library crates. Without one-way
+edges, policy cannot be tested without the command layer, and a second launch
+path, scheduler or lifecycle store can grow beside the first.
 
 ## Decision
 
-An authorised chair may send ordinary workspace work to any configured provider
-family, within the approved path, write and resource scope. Exclude credential
-and authentication stores, secrets, unrelated paths and explicitly denied
-content. Platform rules and external-action gates still apply. Delegation can
-narrow authority, never widen it.
+The `provenant` executable is the only binary, composed from the member crates
+under `tools/front-door/crates/`. A member crate may depend only on the internal
+crates the `LAYERS` table in `tools/front-door/tests/workspace_policy.rs` allows.
+Bottom up:
 
-Execution permission and assurance are distinct. Ordinary work may use one
-family or mixed workers. An independence claim needs its own verified route
-and evidence; provider names or agreement between workers do not prove it.
+- `core` has no internal dependencies. `os` and `records` sit on `core`, and
+  `sqlite` on `core` and `os`.
+- `config`, `supervisor`, `telemetry` and `quota` sit on those foundations.
+  `confinement` builds on `config` and `supervisor`. `providers` builds on
+  `confinement` and `quota`, and `routing` on `providers` and `quota`.
+- `run` builds on `confinement`, `supervisor` and `sqlite`. It does not depend
+  on `providers` or `routing`.
+- `fabric-store` and `workflow` sit on `sqlite`. `fabric-runtime` composes
+  `routing`, `confinement` and `fabric-store`.
+- `fabric-mcp` is a transport over `fabric-runtime`. It depends on neither
+  `providers` nor `run`.
+- `cli` composes the domain crates. Libraries never depend on `cli`.
 
-There is one execution stack: routing resolves routes, confinement compiles
-access plans, providers prepares native launches, supervisor owns processes,
-and run owns attempts and terminal evidence. CLI and Fabric MCP compose those
-owners. Neither creates another adapter parser, scheduler or lifecycle store.
+Execution has one owner per concern. Routing resolves routes, confinement
+compiles access plans, providers prepare launches, supervisor owns processes,
+and run owns attempts and terminal evidence. The CLI and Fabric MCP compose
+those owners. Neither adds an adapter parser, scheduler or lifecycle store.
 
-A provider receives only the configuration and credentials admitted by its
-launch plan. Codex uses a private home and clean configuration; host hooks,
-MCP processes or personal settings must not silently widen a lane's access.
-Wire forms belong to the providers crate.
+Delegation can narrow authority, never widen it. Access boundaries are those of
+[ADR 0035](0035-four-hard-boundaries-and-flexible-everything-else.md) and
+[ADR 0040](0040-open-lane-policy-with-explicit-boundaries.md).
 
-Attempts retain actual route lineage, observed exit and output paths once in
-the run store. They may be partial or failed. Workflow's delivery receipt
-separately binds the subject, authors, risk, review attempts and delivery
-decision. Verification and release evidence have separate owners; the receipt
-does not attest every lifecycle gate or duplicate execution transcripts.
+Rust is the sole runtime for Provenant-owned execution. The external provider,
+hook, skill and MCP contracts remain owned by those tools.
+
+## Why
+
+- One-way edges keep policy testable without the command layer. Typed events
+  break cycles instead of importing `run` into `providers`.
+- One binary and no interpreter on the call path remove per-call startup cost.
+  No Python or TypeScript fallback is kept.
+- One launch path keeps CLI and MCP behaviour aligned. Attempt evidence has one
+  owner, so a provider's success does not certify delivery acceptance.
+- Existing seams are completed under change pressure. No universal dispatcher,
+  unit of work or event framework is added before a concrete need.
 
 ## Consequences
 
-Cheap ordinary batches remain useful without claiming independent assurance.
-One launch owner keeps CLI and MCP behaviour aligned. Launch plans enforce
-workspace access while delivery evidence retains a distinct acceptance owner.
+Each subsystem has one implementation. A new internal edge changes `LAYERS` in
+the same pull request, and the policy test enforces it. Dependency choices are
+owned by [ADR 0028](0028-rust-port-dependencies.md). The
+[workspace spec](../specs/rust-workspace.md) states the rules that apply to
+each crate.
