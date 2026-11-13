@@ -69,14 +69,13 @@ fn removed_requirements(nodes: &[GraphNode], producer: &str) -> Vec<serde_json::
         {
             removed.push(serde_json::json!({"consumer": node.id, "required_outputs": input.required_outputs}));
         }
-        if let Some(spec) = &node.composite {
-            if spec.reduce_verdict
-                && spec.exports.iter().any(|export| {
-                    export.node == producer && export.outputs.contains(&OutputKind::Verdict)
-                })
-            {
-                removed.push(serde_json::json!({"consumer": node.id, "verdict_input": true}));
-            }
+        if let Some(spec) = &node.composite
+            && spec.reduce_verdict
+            && spec.exports.iter().any(|export| {
+                export.node == producer && export.outputs.contains(&OutputKind::Verdict)
+            })
+        {
+            removed.push(serde_json::json!({"consumer": node.id, "verdict_input": true}));
         }
     }
     removed

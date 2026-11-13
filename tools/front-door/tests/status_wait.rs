@@ -10,6 +10,7 @@ fn envelope(output: &provenant_os::exec::ExecOutcome) -> Result<Value> {
 }
 
 #[test]
+#[allow(clippy::disallowed_methods)] // Asserts the real wait deadline is not consumed.
 fn an_unknown_target_fails_before_waiting() -> Result {
     let rig = TestRig::new()?;
     let started = Instant::now();

@@ -644,7 +644,6 @@ fn publication_cleanup_never_removes_another_import_pin()
         attempt: provenant_core::AttemptId::from_bytes([99; 16]),
         // A live lease never has generation 0; the record's own scope does.
         generation: 1,
-        ..RunStore::scope(&record)
     };
     let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
         directory,

@@ -363,15 +363,15 @@ fn opus_advisory_uses_the_applied_pool_tier() -> Result<(), Box<dyn std::error::
     let config = RoutingConfig::default();
     let context = context(&catalogue, &config, now()?);
     for warn_model in &catalogue.writer_advisory.warn_models {
-        if let Ok(route) = resolve(&request(warn_model.as_str())?, &context) {
-            if let Some(advisory) = config.opus_writer_advisory(&catalogue, &route) {
-                assert!(advisory.contains(warn_model.as_str()), "{advisory}");
-                let quiet = RoutingConfig {
-                    suppress_opus_writer_warning: true,
-                    ..RoutingConfig::default()
-                };
-                assert!(quiet.opus_writer_advisory(&catalogue, &route).is_none());
-            }
+        if let Ok(route) = resolve(&request(warn_model.as_str())?, &context)
+            && let Some(advisory) = config.opus_writer_advisory(&catalogue, &route)
+        {
+            assert!(advisory.contains(warn_model.as_str()), "{advisory}");
+            let quiet = RoutingConfig {
+                suppress_opus_writer_warning: true,
+                ..RoutingConfig::default()
+            };
+            assert!(quiet.opus_writer_advisory(&catalogue, &route).is_none());
         }
     }
     Ok(())

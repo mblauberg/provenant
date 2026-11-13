@@ -446,10 +446,10 @@ impl RunStore {
                 let listing = provenant_supervisor::custody::list_writer_reservations(&directory)
                     .map_err(|error| std::io::Error::other(error.to_string()))?;
                 if !listing.issues.is_empty()
-                    || listing.reservations.iter().any(|reservation| {
-                        reservation.scope.attempt == record.attempt_id
-                            && reservation.scope.attempt == record.attempt_id
-                    })
+                    || listing
+                        .reservations
+                        .iter()
+                        .any(|reservation| reservation.scope.attempt == record.attempt_id)
                 {
                     return Err(RunError::Validation(
                         "writer reservation retained or unreadable",

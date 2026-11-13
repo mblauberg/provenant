@@ -354,7 +354,7 @@ pub enum PeerAction {
     Submit {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
-        input: crate::coordination::facade::SubmitInput,
+        input: Box<crate::coordination::facade::SubmitInput>,
     },
     Output {
         #[serde(flatten)]
@@ -481,11 +481,11 @@ impl PeerRequest {
             PeerAction::Coordination { operation_id, .. } => operation_id.clone(),
             PeerAction::CancelSubmission { operation_id, .. } => Some(operation_id.clone()),
             PeerAction::SessionHandoff { input, .. } => Some(input.operation_id.clone()),
-            PeerAction::Submit {
-                input: facade::SubmitInput::Submit { operation_id, .. },
-                ..
+            PeerAction::Submit { input, .. } => {
+                let facade::SubmitInput::Submit { operation_id, .. } = input.as_ref();
+                Some(operation_id.clone())
             }
-            | PeerAction::Run {
+            PeerAction::Run {
                 input:
                     facade::RunInput::Cancel { operation_id, .. }
                     | facade::RunInput::Resume { operation_id, .. },
@@ -1523,13 +1523,13 @@ mod tests {
         .unwrap();
         submit.action = PeerAction::Submit {
             extra: Default::default(),
-            input: facade::SubmitInput::Submit {
+            input: Box::new(facade::SubmitInput::Submit {
                 extra: Default::default(),
                 operation_id: operation.clone(),
                 task,
                 knobs: Vec::new(),
                 host: None,
-            },
+            }),
         };
         assert!(matches!(
             transport.exchange_within(&peer, &submit, budget, &CancelToken::new(), Duration::ZERO),

@@ -180,15 +180,6 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 filter = 'test(=read_only_lane_builds_and_tests_swift_in_scratch) | test(=read_only_lane_builds_and_tests_cargo_in_scratch)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-# Creates and settles over a thousand durable lanes to exercise a stale cursor.
-[[profile.default.overrides]]
-filter = 'test(=run::tests::wait_handles_a_stale_default_cursor)'
-slow-timeout = { period = "60s", terminate-after = 5 }
-
-[[profile.ci.overrides]]
-filter = 'test(=run::tests::wait_handles_a_stale_default_cursor)'
-slow-timeout = { period = "60s", terminate-after = 5 }
-
 # Creating 100 real worktrees for the repository-facts counting test is slow
 # on shared hosts; keep the test bounded without terminating it at 30 seconds.
 [[profile.default.overrides]]

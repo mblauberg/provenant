@@ -457,7 +457,7 @@ pub fn peer(
                     {
                         return Err(FacadeError::ConfinementRefused { resource: None });
                     }
-                    let SubmitInput::Submit { task, host, .. } = input;
+                    let SubmitInput::Submit { task, host, .. } = &**input;
                     if host.is_some()
                         || task
                             .context
@@ -503,7 +503,7 @@ pub fn peer(
                         }),
                         ..Default::default()
                     };
-                    let mut input = input.clone();
+                    let mut input = SubmitInput::clone(input);
                     let SubmitInput::Submit { task, .. } = &mut input;
                     {
                         let context = task

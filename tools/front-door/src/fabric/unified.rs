@@ -355,7 +355,7 @@ pub(crate) fn render_graph_status(rows: &[Value]) -> String {
     }
     for (node, attempt) in lines.iter().take(LISTING_ROWS) {
         let name = attempt.map_or_else(|| plain(&node["id"]), |attempt| plain(&attempt["id"]));
-        let model = attempt.map_or_else(|| "-".to_owned(), |attempt| row_model(attempt));
+        let model = attempt.map_or_else(|| "-".to_owned(), row_model);
         human.push_str(&status_line(&name, node, Some(&model)));
     }
     if lines.len() > LISTING_ROWS {

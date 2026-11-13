@@ -16,15 +16,14 @@ fn skipped_required_inputs_are_recorded_in_the_plan() {
         {"id":"b","access":"read_only","prompt":"b","depends_on":["a"],"inputs":[{"node":"a","outputs":["result"],"required_outputs":["result"]}]}
     ]})).unwrap();
     let pruned = when::prune(&document).unwrap().unwrap();
-    assert!(pruned.nodes[0].extra.get("removed_requirements").is_some());
+    assert!(pruned.nodes[0].extra.contains_key("removed_requirements"));
     let (plan, _) = validate_flat_plan(&document, &crate::config::GraphLimits::default()).unwrap();
     let checkpoint =
         transitions::initial_checkpoint(&document, &plan, "digest".into(), None, None, None, None);
     assert!(
         checkpoint.nodes[0]
             .extra
-            .get("removed_requirements")
-            .is_some()
+            .contains_key("removed_requirements")
     );
 }
 

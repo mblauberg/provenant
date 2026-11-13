@@ -817,8 +817,7 @@ impl Factory {
         if let Some(choice) = input
             .get("route")
             .filter(|value| !value.is_null())
-            .map(|_| route.as_ref())
-            .flatten()
+            .and(route.as_ref())
         {
             let mut typed = serde_json::from_value(compiled).map_err(|_| invalid())?;
             override_tier(&mut typed, choice);

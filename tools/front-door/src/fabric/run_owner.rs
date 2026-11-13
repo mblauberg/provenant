@@ -1022,13 +1022,13 @@ impl BinaryRunOwner<'_> {
                 "graph_network".into(),
                 serde_json::to_value(access.network).map_err(|_| FacadeError::StateCorrupt)?,
             );
-            let input = SubmitInput::Submit {
+            let input = Box::new(SubmitInput::Submit {
                 extra: Default::default(),
                 operation_id: operation_id.clone(),
                 task,
                 knobs,
                 host: None,
-            };
+            });
             return match self.peer(host, PeerAction::Submit { extra, input }, budget, cancel)? {
                 PeerResult::Submitted { data, .. }
                     if data.operation_id == operation_id

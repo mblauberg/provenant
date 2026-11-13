@@ -1582,7 +1582,6 @@ impl RunStore {
                     return Ok(());
                 }
                 if saved.attempt_id != old.attempt_id
-                    || saved.attempt_id != old.attempt_id
                     || saved.project_id != old.project_id
                     || saved.key != old.key
                     || saved.generation != old.generation
