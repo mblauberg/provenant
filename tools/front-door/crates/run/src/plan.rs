@@ -211,7 +211,7 @@ mod tests {
         let store = RunStore::open(&context, &call)?;
         let run = input();
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         std::fs::create_dir_all(repo_path.join(".agent-run/locks"))?;
         let policy_path = context
             .state_root

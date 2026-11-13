@@ -2658,7 +2658,8 @@ impl crate::RunStore {
         };
         let request = self
             .request(record.attempt_id, call)?
-            .task.deliver
+            .task
+            .deliver
             .ok_or(RunError::Validation("delivered destination missing"))?;
         Ok(Some((request, receipt)))
     }
@@ -2765,9 +2766,7 @@ impl crate::RunStore {
                 ));
             }
         };
-        let task = self
-            .request(record.attempt_id, call)?
-            .task;
+        let task = self.request(record.attempt_id, call)?.task;
         let writer = task
             .writer
             .ok_or(RunError::Validation("delivery needs a writer"))?;

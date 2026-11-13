@@ -191,9 +191,7 @@ impl RunStore {
             let mut query = self.db.prepare(
                 "SELECT id,project,record FROM attempts WHERE terminal=1 AND refused=0 ORDER BY sequence",
             )?;
-            let rows = query.query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?;
+            let rows = query.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
             rows.collect::<std::result::Result<_, _>>()?
         };
         let mut report = ProviderStateGc::default();
@@ -228,9 +226,7 @@ impl RunStore {
             let result = (|| -> Result<()> {
                 let record: AttemptRecord = crate::db::decode_attempt(&raw)?;
                 crate::reader::validate_attempt(&record)?;
-                if record.attempt_id.to_string() != id
-                    || record.project_id.to_string() != project
-                {
+                if record.attempt_id.to_string() != id || record.project_id.to_string() != project {
                     return Err(RunError::Validation("retention attempt index identity"));
                 }
                 let AttemptState::Terminal { finished_at, .. } = record.state else {
@@ -432,7 +428,9 @@ impl RunStore {
                     }
                     let request: CanonicalRequest = crate::db::decode(&raw)?;
                     request
-                        .task.writer.as_ref()
+                        .task
+                        .writer
+                        .as_ref()
                         .map(|writer| crate::writer::writer_project_id(writer, record.project_id))
                         .transpose()?
                         .unwrap_or(record.project_id)
@@ -782,9 +780,7 @@ impl RunStore {
             let mut query = self.db.prepare(
                 "SELECT id,project,record FROM attempts WHERE terminal=1 AND refused=0 ORDER BY sequence",
             )?;
-            let rows = query.query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?;
+            let rows = query.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
             rows.collect::<std::result::Result<_, _>>()?
         };
         let mut attempts = BTreeMap::new();
@@ -800,9 +796,7 @@ impl RunStore {
             let result = (|| -> Result<Option<LedgerEntry>> {
                 let record: AttemptRecord = crate::db::decode_attempt(&raw)?;
                 crate::reader::validate_attempt(&record)?;
-                if record.attempt_id.to_string() != id
-                    || record.project_id.to_string() != project
-                {
+                if record.attempt_id.to_string() != id || record.project_id.to_string() != project {
                     return Err(RunError::Validation("retention attempt index identity"));
                 }
                 let AttemptState::Terminal { finished_at, .. } = record.state else {
@@ -1552,7 +1546,7 @@ mod tests {
         let attempt = context
             .state_root
             .as_path()
-            .join(format!("attempts/{}", input.attempts[0].attempt_id));
+            .join(format!("attempts/{}", input.attempt_id));
         let candidate = attempt.join("provider-state/candidate-0");
         fs::create_dir_all(candidate.join("sessions"))?;
         fs::set_permissions(
@@ -1571,7 +1565,7 @@ mod tests {
         fs::write(candidate.join("thread_history_1.sqlite"), "history")?;
         fs::write(candidate.join("auth.json"), "credential")?;
         store.withdraw(
-            input.attempts[0].attempt_id,
+            input.attempt_id,
             AttemptState::Queued {
                 extra: Default::default(),
             },
@@ -1611,7 +1605,7 @@ mod tests {
         let attempt = context
             .state_root
             .as_path()
-            .join(format!("attempts/{}", input.attempts[0].attempt_id));
+            .join(format!("attempts/{}", input.attempt_id));
         for path in [
             "provider-state/candidate-0/sessions",
             "provider-state/candidate-0/claude-config/projects",
@@ -1659,7 +1653,7 @@ mod tests {
     ) -> crate::Result<AttemptRecord> {
         store
             .withdraw(
-                input.attempts[0].attempt_id,
+                input.attempt_id,
                 AttemptState::Queued {
                     extra: Default::default(),
                 },
@@ -1841,7 +1835,7 @@ mod tests {
         crate::artifacts::seal(&directory, "stderr.log.tail", b"older tail", 65_536)?;
         let read = || {
             store.read_output(
-                input.attempts[0].attempt_id,
+                input.attempt_id,
                 crate::ArtifactPart::Stderr,
                 crate::ByteRange {
                     offset: 0,
@@ -1874,7 +1868,7 @@ mod tests {
         let (_temp, context, store, input, _attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         withdraw(&store, &input, &call)?;
 
         let events_before = store.events(0, 64, Some(id), &call)?;
@@ -1922,7 +1916,7 @@ mod tests {
         let (_temp, context, store, input, _attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         let selection = "retention-unseen";
         // Save a cursor before settlement, then leave the settlement unacknowledged.
         store.ack_seen(selection, store.last_event_sequence(id, &call)?, &call)?;
@@ -1941,14 +1935,7 @@ mod tests {
             unseen_after: Some(cursor),
         };
         // Exercise both the owned and explicit-target unseen filters.
-        for targets in [
-            vec![],
-            vec![LaneTarget {
-                run: input.attempt_id,
-                task: None,
-                attempt: Some(id),
-            }],
-        ] {
+        for targets in [vec![], vec![id]] {
             query.targets = targets;
             let page = store.lanes(&query, &call)?;
             assert_eq!(page.lanes.len(), 1, "expired settlement must remain unseen");
@@ -1959,48 +1946,6 @@ mod tests {
             assert!(store.lanes(&query, &call)?.lanes.is_empty());
             query.unseen_after = Some(cursor);
         }
-        Ok(())
-    }
-
-    #[test]
-    fn gc_retains_events_while_sibling_attempt_in_same_run_is_open() -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let context = context(temp.path())?;
-        let (clock, cancel) = (clock(), CancelToken::new());
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&context, &call)?;
-        let mut input = input();
-        let task2 = provenant_core::TaskId::from_bytes([20; 16]);
-        let attempt2 = AttemptId::from_bytes([21; 16]);
-        let mut task_def = input.request.task.clone();
-        task_def.task_id = task2;
-        input.request.tasks.push(task_def);
-        input.attempts.push(NewAttempt {
-            task_id: task2,
-            attempt_id: attempt2,
-            prompt: "exact prompt".into(),
-        });
-        store.create(&input, &call)?;
-        let first = input.attempts[0].attempt_id;
-        store.withdraw(
-            first,
-            AttemptState::Queued {
-                extra: Default::default(),
-            },
-            Outcome::Cancelled,
-            "first finished",
-            WallTime::from_micros(200)?,
-            &call,
-        )?;
-        let events = store.events(0, 64, Some(first), &call)?;
-        assert!(!events.is_empty());
-        // Sibling attempt2 is still Queued (terminal == 0).
-        sweep(&store, &context, 7, 31 * DAY_MICROS, false, &call)?;
-        assert_eq!(
-            store.events(0, 64, Some(first), &call)?.len(),
-            events.len(),
-            "events must survive while run has an open attempt"
-        );
         Ok(())
     }
 
@@ -2048,48 +1993,29 @@ mod tests {
     }
 
     #[test]
-    fn gc_logs_use_configured_age_and_keep_an_open_runs_captures() -> TestResult {
+    fn gc_logs_use_configured_age() -> TestResult {
         let temp = tempfile::tempdir()?;
         let context = context(temp.path())?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
-        let mut input = input();
-        let sibling_id = AttemptId::from_bytes([91; 16]);
-        let sibling_task = provenant_core::TaskId::from_bytes([92; 16]);
-        let mut task = input.request.task.clone();
-        task.task_id = sibling_task;
-        input.request.tasks.push(task);
-        input.attempts.push(NewAttempt {
-            attempt_id: sibling_id,
-            task_id: sibling_task,
-            prompt: input.attempts[0].prompt.clone(),
-        });
+        let input = input();
         store.create(&input, &call)?;
         let attempt = context
             .state_root
             .as_path()
-            .join(format!("attempts/{}", input.attempts[0].attempt_id));
+            .join(format!("attempts/{}", input.attempt_id));
         withdraw(&store, &input, &call)?;
         fs::write(attempt.join("stdout.log"), vec![1; 200_000])?;
         let root = Directory::open_anchor(context.state_root.as_path())?;
         let now = WallTime::from_micros(200 + 2 * DAY_MICROS)?;
         assert!(
             store
-                .gc_provider_state_with_logs(&root, 7, 1, now, false, &call)?
+                .gc_provider_state_with_logs(&root, 7, 3, now, false, &call)?
                 .attempt_logs
-                .is_empty()
+                .is_empty(),
+            "logs younger than the configured age stay"
         );
-        store.withdraw(
-            sibling_id,
-            AttemptState::Queued {
-                extra: Default::default(),
-            },
-            Outcome::Cancelled,
-            "fixture",
-            WallTime::from_micros(200)?,
-            &call,
-        )?;
         assert_eq!(
             store
                 .gc_provider_state_with_logs(&root, 7, 1, now, false, &call)?
@@ -2128,7 +2054,7 @@ mod tests {
         let (_temp, context, store, input, attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-        let record = store.record(input.attempts[0].attempt_id, &call)?;
+        let record = store.record(input.attempt_id, &call)?;
         store.commit_lost(RunStore::scope(&record), "fixture", &call)?;
         let temporary = attempt.join("tmp");
         fs::DirBuilder::new().mode(0o700).create(&temporary)?;
@@ -2284,7 +2210,7 @@ mod tests {
         let (_temp, context, store, input, attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         withdraw(&store, &input, &call)?;
         fs::DirBuilder::new()
             .mode(0o700)
@@ -2315,7 +2241,7 @@ mod tests {
             let (clock, cancel) = (clock(), CancelToken::new());
             let call = call(&clock, &cancel);
             withdraw(&store, &input, &call)?;
-            let id = input.attempts[0].attempt_id;
+            let id = input.attempt_id;
             store.set_temporary_retained(id, true, &call)?;
             // Payload disposal refuses a root accessible to other users.
             let temporary = attempt.join("tmp");
@@ -2351,7 +2277,7 @@ mod tests {
         let (_temp, mut context, store, input, attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         let terminal = withdraw(&store, &input, &call)?;
         fs::DirBuilder::new()
             .mode(0o700)
@@ -2575,7 +2501,7 @@ mod tests {
         );
         assert!(attempt.join("tmp/keep").exists());
         drop(writer);
-        let evidence = attempt.join(input.attempts[0].attempt_id.to_string());
+        let evidence = attempt.join(input.attempt_id.to_string());
         fs::create_dir_all(&evidence)?;
         fs::write(evidence.join("reservation.json"), "{}")?;
         assert_eq!(
@@ -2740,7 +2666,7 @@ mod tests {
         fs::write(candidate1.join("sessions/legacy-session.jsonl"), "session")?;
         fs::write(candidate1.join("config.toml"), "disposable")?;
 
-        let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+        let mut record = store.record(input.attempt_id, &call)?;
         record.state = AttemptState::Terminal {
             extra: Default::default(),
             outcome: Outcome::Cancelled,
@@ -2860,10 +2786,9 @@ mod tests {
         withdraw(&store, &input, &call)?;
         let resume = Resume {
             extend: Vec::new(),
-            prior: input.attempts[0].attempt_id,
+            prior: input.attempt_id,
             expected_generation: 0,
             operation_id: OperationId::parse("continue-fixture")?,
-            run_id: AttemptId::from_bytes([8; 16]),
             attempt_id: AttemptId::from_bytes([9; 16]),
             prompt: "continue".into(),
             created_at: WallTime::from_micros(300)?,
@@ -2985,7 +2910,7 @@ mod tests {
         let mut second = input();
         second.attempt_id = provenant_core::AttemptId::from_bytes([14; 16]);
         second.operation_id = provenant_core::OperationId::parse("run-test-b")?;
-        second.attempts[0].attempt_id = AttemptId::from_bytes([16; 16]);
+        second.attempt_id = AttemptId::from_bytes([16; 16]);
         crate::tests::rekey(&mut second);
         let mut paths = vec![];
         for (index, prepared) in [&first, &second].into_iter().enumerate() {
@@ -2993,7 +2918,7 @@ mod tests {
             let attempt = context
                 .state_root
                 .as_path()
-                .join(format!("attempts/{}", prepared.attempts[0].attempt_id));
+                .join(format!("attempts/{}", prepared.attempt_id));
             let candidate = attempt.join("provider-state/candidate-0");
             fs::DirBuilder::new()
                 .recursive(true)
@@ -3002,7 +2927,7 @@ mod tests {
             fs::write(candidate.join("provider.txt"), "codex")?;
             fs::write(candidate.join("blob"), vec![7_u8; 262_144])?;
             store.withdraw(
-                prepared.attempts[0].attempt_id,
+                prepared.attempt_id,
                 AttemptState::Queued {
                     extra: Default::default(),
                 },
@@ -3134,7 +3059,7 @@ mod tests {
         ));
         assert!(
             pair.store
-                .record(pair.newer_input.attempts[0].attempt_id, &call)
+                .record(pair.newer_input.attempt_id, &call)
                 .is_ok()
         );
         assert!(

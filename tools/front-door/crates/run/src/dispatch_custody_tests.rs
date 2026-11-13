@@ -30,34 +30,29 @@ fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult
         });
         stores.push(store);
     }
-    // Each store fills half the project's host-wide limit, in runs that stay
-    // inside one batch's concurrency.
-    let per_run = PROJECT_ACTIVE / 4;
-    let batches = [
-        batch(1, per_run),
-        batch(4, per_run),
-        batch(2, per_run),
-        batch(5, per_run),
-    ];
-    for (store, run) in stores.iter().flat_map(|s| [s, s]).zip(&batches) {
+    // Each store fills half the project's host-wide limit, one attempt per launch.
+    let half = PROJECT_ACTIVE as u8 / 2;
+    let launches: Vec<_> = (0..PROJECT_ACTIVE as u8)
+        .map(|index| lane(index + 10, false))
+        .collect();
+    for (index, run) in launches.iter().enumerate() {
+        let store = &stores[usize::from(index as u8 >= half)];
         store.create(run, &call)?;
-        for attempt in &run.attempts {
-            store.mark_starting(
-                &store.record(attempt.attempt_id, &call)?,
-                &route(),
-                &[],
-                &Default::default(),
-                None,
-                &call,
-            )?;
-            store
-                .claim(attempt.attempt_id, &now, &call)?
-                .ok_or("within the host limit")?;
-        }
+        store.mark_starting(
+            &store.record(run.attempt_id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        store
+            .claim(run.attempt_id, &now, &call)?
+            .ok_or("within the host limit")?;
     }
     // Counted per store, the second store would admit another attempt.
-    let extra = batch(3, 1);
-    let waiting = extra.attempts[0].attempt_id;
+    let extra = lane(3, false);
+    let waiting = extra.attempt_id;
     stores[1].create(&extra, &call)?;
     stores[1].mark_starting(
         &stores[1].record(waiting, &call)?,
@@ -73,11 +68,10 @@ fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult
     );
     // The first attempt's owner dies; recovery commits its terminal from the
     // sealed exit, as reconcile does, and that frees its host lease.
-    let dead = batches[0].attempts[0].attempt_id;
+    let dead = launches[0].attempt_id;
     let dir = stores[0].attempt_dir(dead, false)?;
     artifacts::seal(&dir, "stdout.log", b"partial", CAPTURE_LIMIT)?;
     let mut observed = exit();
-    observed.scope.attempt = batches[0].attempt_id;
     observed.scope.attempt = dead;
     observed.scope.generation = 1;
     observed.termination = Some(Termination::Signal(9));
@@ -121,20 +115,19 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
         .context
         .state_root
         .as_path()
-        .join(format!("attempts/{}", run.attempts[0].attempt_id));
+        .join(format!("attempts/{}", run.attempt_id));
     assert!(prompt.contains(&path.join("result.md").display().to_string()));
     assert!(prompt.contains(&path.join("process-exit.json").display().to_string()));
     assert!(prompt.contains("only durable outputs"));
     assert!(prompt.contains("Files in $TMPDIR are discarded when the attempt ends."));
     assert!(prompt.contains("Provider history and handoff progress are kept."));
     assert!(prompt.ends_with("exact prompt"));
-    let fact = store.attempt(run.attempts[0].attempt_id, &call)?;
+    let fact = store.attempt(run.attempt_id, &call)?;
     assert_eq!(
         fact.terminal_state,
         provenant_records::AttemptOutcome::Rejected
     );
     assert!(fact.started_at.is_none());
-    assert_eq!(store.run(run.attempt_id, &call)?.closure, Closure::Closed);
     assert!(
         store
             .start(run.attempt_id, &fake, &|_, _| unreachable!(), &call)?
@@ -171,7 +164,7 @@ fn stored_cloud_request_is_refused_and_never_launched_locally() -> TestResult {
         serde_json::json!({"target": "t", "provider": "claude"}),
     );
     store.create(&run, &call)?;
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     let fake = Fake::default();
     let started = store.start(run.attempt_id, &fake, &|_, _| unreachable!(), &call)?;
     assert!(matches!(
@@ -212,8 +205,10 @@ fn publication_holder_commits_decoded_success_only_with_exit_zero_and_observed_i
         read_only_spacing_ms: 0,
         ..AdmissionPolicy::default()
     });
-    let batch = two_tasks(2);
-    store.create(&batch, &call)?;
+    let batch = [input(), lane(8, false)];
+    for prepared in &batch {
+        store.create(prepared, &call)?;
+    }
     let now = at_micros(100);
     let fake = Fake {
         refuse: false,
@@ -221,7 +216,7 @@ fn publication_holder_commits_decoded_success_only_with_exit_zero_and_observed_i
         ..Fake::default()
     };
     for (index, code) in [(0, 0), (1, 1)] {
-        let id = batch.attempts[index].attempt_id;
+        let id = batch[index].attempt_id;
         store.mark_starting(
             &store.record(id, &call)?,
             &route(),
@@ -275,12 +270,11 @@ fn publication_holder_commits_decoded_success_only_with_exit_zero_and_observed_i
         provenant_supervisor::custody::publish_release(&dir, observed.scope)?;
     }
     assert_eq!(fake.decoded.get(), 2);
-    let fact = store.attempt(batch.attempts[0].attempt_id, &call)?;
+    let fact = store.attempt(batch[0].attempt_id, &call)?;
     assert_eq!(
         fact.output_refs[0].digest,
         CanonicalV1::file_digest(DONE_ANSWER.as_bytes())
     );
-    assert_eq!(store.run(batch.attempt_id, &call)?.closure, Closure::Closed);
     Ok(())
 }
 #[test]
@@ -291,7 +285,7 @@ fn never_spawned_exit_is_a_refusal_with_its_reason() -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
     store.create(&run, &call)?;
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.mark_starting(
         &store.record(id, &call)?,
         &route(),
@@ -341,12 +335,14 @@ fn private_temporary_directories_are_removed_after_terminal_and_withdrawal() -> 
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let run = two_tasks(2);
+    let run = input();
+    let other = lane(8, false);
     store.create(&run, &call)?;
+    store.create(&other, &call)?;
     let outside = temp.path().join("outside.txt");
     std::fs::write(&outside, "keep")?;
 
-    let withdrawn = run.attempts[0].attempt_id;
+    let withdrawn = run.attempt_id;
     let withdrawn_tmp = store.temporary_path(withdrawn, &call)?;
     std::fs::write(withdrawn_tmp.join("provider.tmp"), "discard")?;
     symlink(&outside, withdrawn_tmp.join("outside-link"))?;
@@ -362,7 +358,7 @@ fn private_temporary_directories_are_removed_after_terminal_and_withdrawal() -> 
     )?;
     assert!(!withdrawn_tmp.exists());
 
-    let terminal = run.attempts[1].attempt_id;
+    let terminal = other.attempt_id;
     let terminal_tmp = store.temporary_path(terminal, &call)?;
     std::fs::write(terminal_tmp.join("provider.tmp"), "discard")?;
     symlink(&outside, terminal_tmp.join("outside-link"))?;
@@ -409,7 +405,7 @@ fn writer_private_temporary_directories_are_removed_after_terminal_and_withdrawa
             worktree: temp.path().join("checkout/.worktrees/lane"),
         });
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         let attempt = store.attempt_dir(id, false)?;
         let scratch = artifacts::subdir(&attempt, std::ffi::OsStr::new("scratch"), true)?;
         let temporary = store.temporary_path(id, &call)?;
@@ -454,9 +450,10 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let batch = two_tasks(2);
-    store.create(&batch, &call)?;
-    let [queued, starting] = [batch.attempts[0].attempt_id, batch.attempts[1].attempt_id];
+    let (first, second) = (input(), lane(8, false));
+    store.create(&first, &call)?;
+    store.create(&second, &call)?;
+    let [queued, starting] = [first.attempt_id, second.attempt_id];
 
     assert_eq!(
         store.cancel(queued, "stop", &call)?,
@@ -486,7 +483,6 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
     };
     // A held custody lock is a live handoff: cancel leaves it untouched.
     let scope = provenant_supervisor::custody::Scope {
-        run: batch.attempt_id,
         attempt: starting,
         generation: 1,
     };
@@ -536,6 +532,5 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
     seal_exit(&store, &observed)?;
     store.finish(starting, &dir, &observed, &Fake::default(), &call)?;
     assert_eq!(terminal(&store, starting, &call)?, Outcome::Cancelled);
-    assert_eq!(store.run(batch.attempt_id, &call)?.closure, Closure::Closed);
     Ok(())
 }

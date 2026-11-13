@@ -1,6 +1,7 @@
 use super::tests::{call, clock, context};
 use super::*;
 use provenant_core::{CancelToken, Clock, OperationId};
+use provenant_records::CanonicalV1;
 
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
@@ -15,7 +16,7 @@ fn dispatch_preserves_launch_fields_on_request_reopen() -> TestResult {
         ("write", vec![temp.path().join("shared")]),
     ] {
         let mut request = submission("run a test");
-        request.operation_id = OperationId::parse(name)?;
+        rename(&mut request, name);
         request.task.account = Some("account-a".into());
         request.task.build_heavy = true;
         request.task.access.write_roots = roots.clone();
@@ -37,7 +38,7 @@ fn peer_wait_views_keep_terminal_and_show_custody_until_released() -> TestResult
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let input = super::tests::input();
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let attempt = store.attempt_dir(id, false)?;
     let custody = attempt.try_lock(
         std::ffi::OsStr::new("custody.lock"),
@@ -169,15 +170,31 @@ fn dispatch_validates_review_commits() -> TestResult {
     Ok(())
 }
 
+/// Name the operation and the work key it admits under. One launch admits one
+/// attempt, so two operations in one store need distinct keys.
+pub(super) fn rename(input: &mut DispatchRequest, name: &str) {
+    input.operation_id = OperationId::parse(name).unwrap();
+    let context = input.task.context.get_or_insert_with(Default::default);
+    context.graph_id = Some(format!("graph-{name}"));
+}
+
+/// A dispatch whose work key is named for its prompt, so distinct prompts
+/// dispatched into one store never share a key.
 pub(super) fn submission(prompt: &str) -> DispatchRequest {
+    let digest = CanonicalV1::file_digest(prompt.as_bytes()).to_string();
+    let digest = digest.trim_start_matches("sha256:");
     DispatchRequest {
         chair: None,
         operation_id: OperationId::parse("service-dispatch").unwrap(),
-        tasks: vec![DispatchTask {
-            context: None,
+        task: DispatchTask {
+            context: Some(provenant_records::run::WorkContext {
+                graph_id: Some(format!("graph-{}", &digest[..12])),
+                node_id: Some("node".into()),
+                attempt: Some(1),
+                ..Default::default()
+            }),
             build_heavy: false,
             title: None,
-            task_id: TaskId::from_bytes([3; 16]),
             prompt: prompt.into(),
             base: None,
             pinned_base: None,
@@ -195,8 +212,7 @@ pub(super) fn submission(prompt: &str) -> DispatchRequest {
             deliver: None,
             worktree: None,
             access: LaneAccess::default(),
-        }],
-        concurrency: 1,
+        },
         lane_depth: 1,
         parent_attempt: None,
     }
@@ -236,11 +252,9 @@ fn child_dispatch_accepts_database_proposal_but_keeps_other_access_restricted() 
         match case {
             "database" => input.task.access.database_ipc = true,
             "network" => input.task.access.network = Some(NetworkAccess::Provider),
-            "read" => input.task
-                .access
-                .read_roots
-                .push(temp.path().join("read")),
-            "write" => input.task
+            "read" => input.task.access.read_roots.push(temp.path().join("read")),
+            "write" => input
+                .task
                 .access
                 .write_roots
                 .push(temp.path().join("write")),
@@ -253,7 +267,7 @@ fn child_dispatch_accepts_database_proposal_but_keeps_other_access_restricted() 
 }
 
 #[test]
-fn child_dispatch_replays_original_id_scheme() -> TestResult {
+fn child_dispatch_replays_the_original_attempt() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -265,48 +279,9 @@ fn child_dispatch_replays_original_id_scheme() -> TestResult {
         input
     };
     let original = Service::new(&store).dispatch(proposal(), temp.path(), &call)?;
-    let original_attempt = store.pending_attempts(original.attempt_id, &call)?[0].clone();
-    assert_eq!(
-        Service::new(&store)
-            .dispatch(proposal(), temp.path(), &call)?
-            .attempt_id,
-        original.attempt_id
-    );
-    assert_eq!(
-        store.pending_attempts(original.attempt_id, &call)?[0].attempt_id,
-        original_attempt.attempt_id
-    );
-    let legacy_dir = temp.path().join("legacy");
-    std::fs::create_dir(&legacy_dir)?;
-    let legacy = RunStore::open(&context(&legacy_dir)?, &call)?;
-    let mut request = store.request(original.attempt_id, &call)?;
-    request.child_attempt_id_version = None;
-    let accepted = legacy.create(
-        &PreparedRun {
-            run_id: original.attempt_id,
-            operation_id: original.operation_id,
-            request,
-            attempts: vec![NewAttempt {
-                attempt_id: original_attempt.attempt_id,
-                task_id: original_attempt.task_id,
-                prompt: "child".into(),
-            }],
-            created_at: original.created_at,
-        },
-        &call,
-    )?;
-    assert_eq!(
-        Service::new(&legacy)
-            .dispatch(proposal(), temp.path(), &call)?
-            .attempt_id,
-        accepted.attempt_id
-    );
-    assert_eq!(
-        legacy
-            .request(accepted.attempt_id, &call)?
-            .child_attempt_id_version,
-        None
-    );
+    let replay = Service::new(&store).dispatch(proposal(), temp.path(), &call)?;
+    assert_eq!(replay.attempt_id, original.attempt_id);
+    assert_eq!(replay.key, original.key);
     Ok(())
 }
 
@@ -343,7 +318,7 @@ fn task_title_roundtrip() -> TestResult {
     let mut input = submission("review this code");
     input.task.title = Some("Review changes".into());
     let run = Service::new(&store).dispatch(input, temp.path(), &call)?;
-    let attempt = store.request(run.attempt_id, &call)?.task.task_id;
+    let attempt = run.attempt_id;
     drop(store);
     let store = RunStore::open(&context, &call)?;
     let request = store.request(run.attempt_id, &call)?;
@@ -360,7 +335,7 @@ fn task_title_roundtrip() -> TestResult {
         },
         &call,
     )?;
-    assert_eq!(page.lanes[0].task_id, attempt);
+    assert_eq!(page.lanes[0].attempt_id, attempt);
     assert_eq!(page.lanes[0].title.as_deref(), Some("Review changes"));
     for title in [
         "x".repeat(257),
@@ -454,29 +429,6 @@ fn secret_input_is_refused_before_publication() -> TestResult {
         Service::new(&store).dispatch(submission("changed"), temp.path(), &call),
         Err(RunError::OperationConflict)
     ));
-    Ok(())
-}
-
-#[test]
-fn later_secret_is_refused_before_preparing_any_writer() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    let mut input = submission("ordinary first task");
-    // A missing writer would fail if preparation ran before the later scan.
-    input.task.worktree = Some(temp.path().join("missing-writer"));
-    let mut later = submission("sk-abcdefghijklmnopqrstuvwxyz123456")
-        .tasks
-        .remove(0);
-    later.task_id = TaskId::from_bytes([4; 16]);
-    input.tasks.push(later);
-    let operation = input.operation_id.clone();
-    assert!(matches!(
-        Service::new(&store).dispatch(input, temp.path(), &call),
-        Err(RunError::RecordedRefusal(ref diagnostic)) if diagnostic.code == ErrorKind::SecretInput.code()
-    ));
-    assert!(store.operation(&operation, &call)?.is_some());
     Ok(())
 }
 
@@ -632,7 +584,8 @@ fn preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
             actor: provenant_core::ActorId::from_bytes([8; 16]),
             session: Some("original".into()),
         });
-        input.task
+        input
+            .task
             .profile
             .knobs
             .insert("chair.refusal_notice".into(), serde_json::json!("off"));
@@ -700,18 +653,26 @@ fn refusal_only_chair_leaves_accepted_identity_and_settlement_unbound() -> TestR
     // A fresh accepted operation keeps the same canonical request even when
     // the host supplies a destination reserved for a possible refusal.
     let mut input = submission("accepted");
-    input.operation_id = OperationId::parse("accepted-with-refusal-chair")?;
+    let accepted_operation = OperationId::parse("accepted-with-refusal-chair")?;
+    rename(&mut input, "accepted-with-refusal-chair");
     let accepted = Service::new(&store)
         .with_refusal_context(RefusalContext {
             chair: Some(chair.clone()),
             intent_digest: Some(provenant_core::Digest::from_bytes([6; 32])),
         })
         .dispatch(input, temp.path(), &call)?;
-    assert_eq!(accepted.request_digest, first.request_digest);
+    let strip = |mut request: provenant_records::run::CanonicalRequest| {
+        request.task.context = None;
+        request
+    };
+    assert_eq!(
+        strip(store.request(accepted.attempt_id, &call)?),
+        strip(original.clone())
+    );
     assert!(store.request(accepted.attempt_id, &call)?.chair.is_none());
     assert!(
         !store
-            .operation(&accepted.operation_id, &call)?
+            .operation(&accepted_operation, &call)?
             .ok_or("accepted operation")?
             .extra
             .contains_key("origin_intent_digest")
@@ -719,12 +680,14 @@ fn refusal_only_chair_leaves_accepted_identity_and_settlement_unbound() -> TestR
     for nested in [false, true] {
         let make = || {
             let mut input = submission("refused");
-            input.operation_id = OperationId::parse(if nested {
-                "nested-refusal-chair"
-            } else {
-                "refusal-chair"
-            })
-            .unwrap();
+            rename(
+                &mut input,
+                if nested {
+                    "nested-refusal-chair"
+                } else {
+                    "refusal-chair"
+                },
+            );
             input.parent_attempt = nested.then_some(provenant_core::AttemptId::from_bytes([9; 16]));
             input.task.route = RequestedRoute::Model {
                 extra: Default::default(),
@@ -787,10 +750,7 @@ fn nested_preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
         Service::new(&store).dispatch(make("first"), temp.path(), &call),
         Err(RunError::RecordedRefusal(_))
     ));
-    assert_eq!(
-        store.operation(&operation, &call)?.unwrap().attempt_id,
-        saved.attempt_id
-    );
+    assert_eq!(store.operation(&operation, &call)?.unwrap(), saved);
     assert!(matches!(
         Service::new(&store).dispatch(make("changed"), temp.path(), &call),
         Err(RunError::OperationConflict)
@@ -864,26 +824,22 @@ fn explicit_skill_location_is_rechecked_before_dispatch() -> TestResult {
 }
 
 #[test]
-fn every_task_is_checked_before_any_writer_is_prepared() -> TestResult {
+fn the_task_is_checked_before_a_writer_is_prepared() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let mut input = submission("two tasks");
+    let mut input = submission("invalid route");
     let operation = input.operation_id.clone();
-    // The first task names a writer path that cannot resolve, so reaching its
-    // preparation would fail with a different error than the second task's.
+    // The writer path cannot resolve, so reaching its preparation would fail
+    // with a different error than the route check.
     input.task.worktree = Some(temp.path().join("no-such-writer"));
-    let mut second = submission("second").tasks.remove(0);
-    second.task_id = TaskId::from_bytes([4; 16]);
-    second.worktree = None;
-    second.route = RequestedRoute::Model {
+    input.task.route = RequestedRoute::Model {
         extra: Default::default(),
         provider: "cursor".into(),
         model: "cursor/m".into(),
         effort: Some("high".into()),
     };
-    input.tasks.push(second);
     let error = Service::new(&store)
         .dispatch(input, temp.path(), &call)
         .unwrap_err();
@@ -993,8 +949,8 @@ fn work_context_never_widens_authority() -> TestResult {
     });
     let labelled = service.dispatch(labelled, temp.path(), &call)?;
     let (plain, labelled) = (
-        store.request(plain.attempt_id, &call)?.tasks.remove(0),
-        store.request(labelled.attempt_id, &call)?.tasks.remove(0),
+        store.request(plain.attempt_id, &call)?.task,
+        store.request(labelled.attempt_id, &call)?.task,
     );
     assert!(plain.context.is_none() && labelled.context.is_some());
     assert_eq!(plain.authority_digest, labelled.authority_digest);
@@ -1069,7 +1025,7 @@ fn legacy_writer_replay_preserves_sealed_request_and_authority() -> TestResult {
     )?
     .trim()
     .to_owned();
-    let make = || {
+    let make = |node: &str, attempt: u32| {
         let mut input = submission("writer task");
         input.task.worktree = Some(root.join(".worktrees/writer"));
         input.task.head = Some(head.clone());
@@ -1077,14 +1033,16 @@ fn legacy_writer_replay_preserves_sealed_request_and_authority() -> TestResult {
         input.task.base = Some(head.clone());
         input.task.context = Some(WorkContext {
             graph_id: Some("legacy-graph".into()),
-            node_id: Some("writer".into()),
+            node_id: Some(node.into()),
+            attempt: Some(attempt),
             ..Default::default()
         });
         input
     };
-    let run = Service::new(&store).dispatch(make(), &root, &call)?;
+    let run = Service::new(&store).dispatch(make("seed", 1), &root, &call)?;
     let mut legacy = store.request(run.attempt_id, &call)?;
     let task = &mut legacy.task;
+    task.context.as_mut().ok_or("context")?.node_id = Some("writer".into());
     let writer = task.writer.as_mut().ok_or("writer")?;
     assert_eq!(
         writer.extra.remove("custody_project"),
@@ -1095,34 +1053,37 @@ fn legacy_writer_replay_preserves_sealed_request_and_authority() -> TestResult {
         2,
         &serde_json::json!({"writer":writer,"cwd":root}),
     )?;
-    let task_id = task.task_id;
     let prepared = PreparedRun {
-        run_id: provenant_core::AttemptId::from_bytes([91; 16]),
+        attempt_id: provenant_core::AttemptId::from_bytes([92; 16]),
         operation_id: OperationId::parse("legacy-writer")?,
         request: legacy.clone(),
-        attempts: vec![NewAttempt {
-            attempt_id: provenant_core::AttemptId::from_bytes([92; 16]),
-            task_id,
-            prompt: "writer task".into(),
-        }],
+        prompt: "writer task".into(),
         created_at: clock.wall_now()?,
     };
     store.create(&prepared, &call)?;
-    let saved = store.run(prepared.attempt_id, &call)?;
-    let mut replay = make();
+    let saved = store.record(prepared.attempt_id, &call)?;
+    let mut replay = make("writer", 1);
     replay.operation_id = prepared.operation_id.clone();
     let reopened = Service::new(&store).dispatch(replay, &root, &call)?;
     assert_eq!(reopened.attempt_id, saved.attempt_id);
-    assert_eq!(reopened.request_digest, saved.request_digest);
+    assert_eq!(
+        store
+            .attempt_operation(reopened.attempt_id, &call)?
+            .request_digest,
+        store
+            .attempt_operation(saved.attempt_id, &call)?
+            .request_digest
+    );
     assert_eq!(store.request(saved.attempt_id, &call)?, legacy);
     store.refuse_queued(saved.attempt_id, "fixture terminal predecessor", &call)?;
-    let mut retry = make();
+    let mut retry = make("writer", 2);
     retry.operation_id = OperationId::parse("legacy-graph-retry")?;
-    retry.task
+    retry
+        .task
         .context
         .as_mut()
         .ok_or("context")?
-        .writer_predecessor = Some(prepared.attempts[0].attempt_id);
+        .writer_predecessor = Some(prepared.attempt_id);
     let retried = Service::new(&store).dispatch(retry, &root, &call)?;
     let retry_request = store.request(retried.attempt_id, &call)?;
     let retry_task = &retry_request.task;
@@ -1131,7 +1092,7 @@ fn legacy_writer_replay_preserves_sealed_request_and_authority() -> TestResult {
         context.state_root.as_path(),
         context.project_id,
     )?;
-    let pending = store.pending_attempts(retried.attempt_id, &call)?.remove(0);
+    let pending = store.record(retried.attempt_id, &call)?;
     store.check_launch_writer_lineage(&pending, retry_task, &launch.worktree, &call)?;
     assert_eq!(store.request(saved.attempt_id, &call)?, legacy);
     // Legacy predecessor identity defaults only custody to attribution. Paths,

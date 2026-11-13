@@ -7,7 +7,7 @@ use crate::{
     AttemptRecord, AttemptState, Request, Result, RunError, RunStore, WriterDeliveryState,
     db::bytes, db::decode,
 };
-use provenant_core::{ActorId, CancelToken, Clock, ProjectId, AttemptId};
+use provenant_core::{ActorId, AttemptId, CancelToken, Clock, ProjectId};
 use provenant_records::run::ChairBinding;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};

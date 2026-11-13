@@ -14,7 +14,7 @@ fn holder_seals_redacted_results_and_digests_the_stored_bytes() -> TestResult {
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let run = input();
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.create(&run, &call)?;
         store.mark_starting(
             &store.record(id, &call)?,
@@ -63,7 +63,7 @@ fn settlement_scrubs_provider_session_history() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.create(&run, &call)?;
     store.mark_starting(
         &store.record(id, &call)?,
@@ -144,7 +144,7 @@ fn empty_success_is_rejected_at_settlement() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.create(&run, &call)?;
     store.mark_starting(
         &store.record(id, &call)?,
@@ -173,7 +173,6 @@ fn empty_success_is_rejected_at_settlement() -> TestResult {
             ..
         }
     ));
-    assert!(store.pending_attempts(run.attempt_id, &call)?.is_empty());
     Ok(())
 }
 #[test]
@@ -183,7 +182,7 @@ fn failed_lane_reason_reports_path_denial_without_captured_text() -> TestResult 
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.create(&run, &call)?;
     store.mark_starting(
         &store.record(id, &call)?,
@@ -225,7 +224,7 @@ fn a_lane_without_a_handoff_reports_a_stdout_path_denial_in_its_reason() -> Test
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.create(&run, &call)?;
     store.mark_starting(
         &store.record(id, &call)?,
@@ -268,7 +267,7 @@ fn a_path_denial_leaves_a_finished_lanes_answer_and_success_intact() -> TestResu
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.create(&run, &call)?;
     store.mark_starting(
         &store.record(id, &call)?,
@@ -307,7 +306,7 @@ fn denial_evidence_does_not_turn_an_empty_answer_into_success() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.create(&run, &call)?;
     store.mark_starting(
         &store.record(id, &call)?,
@@ -356,7 +355,7 @@ fn quota_limited_empty_result_stays_quota_limited() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.create(&run, &call)?;
     store.mark_starting(
         &store.record(id, &call)?,
@@ -397,7 +396,7 @@ fn unredactable_result_settles_failed_with_a_placeholder() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.create(&run, &call)?;
     store.mark_starting(
         &store.record(id, &call)?,
@@ -449,7 +448,7 @@ fn a_busy_publication_lock_leaves_the_sealed_decision_to_replay() -> TestResult 
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let run = input();
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.mark_starting(
             &store.record(id, &call)?,
             &route(),
@@ -501,7 +500,7 @@ fn cancelled_lane_keeps_its_outcome_and_reason_when_session_scrub_fails() -> Tes
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.create(&run, &call)?;
     store.mark_starting(
         &store.record(id, &call)?,
@@ -568,7 +567,7 @@ fn orphan_result_with_plaintext_settles_once_and_preserves_its_bytes() -> TestRe
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.create(&run, &call)?;
     store.mark_starting(
         &store.record(id, &call)?,
@@ -751,7 +750,7 @@ fn identity_failure_names_requested_and_observed_models() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.create(&run, &call)?;
     store.mark_starting(
         &store.record(id, &call)?,
@@ -798,7 +797,7 @@ fn runtime_deadline_reason_survives_a_cancellation_record() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.create(&run, &call)?;
     store.mark_starting(
         &store.record(id, &call)?,
@@ -850,7 +849,7 @@ fn skipped_fallback_candidates_are_recorded_on_the_attempt() -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
     store.create(&run, &call)?;
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     let skipped = vec![SkippedRoute {
         extra: Default::default(),
         route: "claude".into(),
@@ -872,7 +871,7 @@ fn skipped_fallback_candidates_are_recorded_on_the_attempt() -> TestResult {
     Ok(())
 }
 #[test]
-fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
+fn admission_holds_spacing_floors_and_deadline() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -884,19 +883,17 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
         read_only_spacing_ms: 0,
         ..AdmissionPolicy::default()
     });
-    let serial = two_tasks(1);
-    store.create(&serial, &call)?;
-    let [first, second] = [serial.attempts[0].attempt_id, serial.attempts[1].attempt_id];
-    for id in [first, second] {
-        store.mark_starting(
-            &store.record(id, &call)?,
-            &route(),
-            &[],
-            &Default::default(),
-            None,
-            &call,
-        )?;
-    }
+    let initial = input();
+    store.create(&initial, &call)?;
+    let first = initial.attempt_id;
+    store.mark_starting(
+        &store.record(first, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
     let running = store
         .claim(first, &now, &call)?
         .ok_or("first not admitted")?;
@@ -907,24 +904,18 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
         }
     );
     assert_eq!(running.started_at, Some(now.wall_now()?));
-    assert!(
-        store.claim(second, &now, &call)?.is_none(),
-        "run concurrency 1"
-    );
 
     store.set_admission_policy(AdmissionPolicy {
         startup_spacing_ms: 20_000,
         read_only_spacing_ms: 2_000,
         ..AdmissionPolicy::default()
     });
-    let mut spaced = two_tasks(2);
-    spaced.attempt_id = provenant_core::AttemptId::from_bytes([10; 16]);
+    let mut spaced = input();
     spaced.operation_id = provenant_core::OperationId::parse("spaced")?;
-    spaced.attempts[0].attempt_id = AttemptId::from_bytes([11; 16]);
-    spaced.attempts[1].attempt_id = AttemptId::from_bytes([12; 16]);
+    spaced.attempt_id = AttemptId::from_bytes([11; 16]);
     crate::tests::rekey(&mut spaced);
     store.create(&spaced, &call)?;
-    let id = spaced.attempts[0].attempt_id;
+    let id = spaced.attempt_id;
     store.mark_starting(
         &store.record(id, &call)?,
         &route(),
@@ -949,10 +940,10 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     let mut expired = input();
     expired.attempt_id = provenant_core::AttemptId::from_bytes([13; 16]);
     expired.operation_id = provenant_core::OperationId::parse("expired")?;
-    expired.attempts[0].attempt_id = AttemptId::from_bytes([14; 16]);
+    expired.attempt_id = AttemptId::from_bytes([14; 16]);
     crate::tests::rekey(&mut expired);
     store.create(&expired, &call)?;
-    let id = expired.attempts[0].attempt_id;
+    let id = expired.attempt_id;
     let attempt = store.attempt_dir(id, false)?;
     store.mark_starting(
         &store.record(id, &call)?,
@@ -982,7 +973,7 @@ fn graph_readers_get_the_sealed_handoff_not_a_rereading_of_the_text() -> TestRes
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.create(&run, &call)?;
     store.mark_starting(
         &store.record(id, &call)?,

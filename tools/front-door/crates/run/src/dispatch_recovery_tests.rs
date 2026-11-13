@@ -22,7 +22,7 @@ fn reconcile_rebooted_slot_handoff_after_device_numbers_change() -> TestResult {
         worktree: worktree.clone(),
     });
     store.create(&run, &call)?;
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.mark_starting(
         &store.record(id, &call)?,
         &route(),
@@ -97,7 +97,7 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let run = input();
     store.create(&run, &call)?;
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.mark_starting(
         &store.record(id, &call)?,
         &route(),
@@ -292,7 +292,7 @@ fn reconcile_sealed_never_spawned_exit_without_a_stop_request() -> TestResult {
         let context = context(temp.path())?;
         let store = RunStore::open(&context, &call)?;
         let run = input();
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.create(&run, &call)?;
         store.mark_starting(
             &store.record(id, &call)?,
@@ -347,9 +347,10 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
         read_only_spacing_ms: 0,
         ..AdmissionPolicy::default()
     });
-    let batch = two_tasks(2);
-    store.create(&batch, &call)?;
-    let [exited, orphan] = [batch.attempts[0].attempt_id, batch.attempts[1].attempt_id];
+    let (first, second) = (input(), lane(8, false));
+    store.create(&first, &call)?;
+    store.create(&second, &call)?;
+    let [exited, orphan] = [first.attempt_id, second.attempt_id];
 
     // The guardian sealed an exit but died before its terminal commit.
     store.mark_starting(
@@ -387,7 +388,6 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
         &call,
     )?;
     let scope = provenant_supervisor::custody::Scope {
-        run: batch.attempt_id,
         attempt: orphan,
         generation: 1,
     };
@@ -403,32 +403,25 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
         observed: Some(route()),
         ..Fake::default()
     };
-    let found = store.reconcile_with_observer(
-        batch.attempt_id,
-        &fake,
-        &call,
-        &provenant_supervisor::census::SystemProcessObserver,
-    )?;
+    let observer = provenant_supervisor::census::SystemProcessObserver;
     assert_eq!(
-        found,
-        vec![
-            (exited, Reconciled::Finished),
-            (orphan, Reconciled::Withdrawn)
-        ]
+        store.reconcile_with_observer(exited, &fake, &call, &observer)?,
+        vec![(exited, Reconciled::Finished)]
+    );
+    assert_eq!(
+        store.reconcile_with_observer(orphan, &fake, &call, &observer)?,
+        vec![(orphan, Reconciled::Withdrawn)]
     );
     assert_eq!(terminal(&store, exited, &call)?, Outcome::Succeeded);
     assert!(artifacts::read_sealed(&dir, "release.json", RECORD_LIMIT)?.is_some());
     assert_eq!(terminal(&store, orphan, &call)?, Outcome::Rejected);
-    assert!(
-        store
-            .reconcile_with_observer(
-                batch.attempt_id,
-                &fake,
-                &call,
-                &provenant_supervisor::census::SystemProcessObserver
-            )?
-            .is_empty()
-    );
+    for id in [exited, orphan] {
+        assert!(
+            store
+                .reconcile_with_observer(id, &fake, &call, &observer)?
+                .is_empty()
+        );
+    }
     Ok(())
 }
 #[test]
@@ -445,7 +438,7 @@ fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult
         worktree: temp.path().join("removed-lane"),
     });
     store.create(&run, &call)?;
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.mark_starting(
         &store.record(id, &call)?,
         &route(),
@@ -459,7 +452,6 @@ fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult
         .ok_or("not admitted")?;
     let attempt = store.attempt_dir(id, false)?;
     let scope = provenant_supervisor::custody::Scope {
-        run: run.attempt_id,
         attempt: id,
         generation: 1,
     };
@@ -534,7 +526,7 @@ fn reconcile_withdraws_a_start_that_died_before_reserving() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.create(&run, &call)?;
     store.mark_starting(
         &store.record(id, &call)?,
@@ -562,7 +554,7 @@ fn cancelling_a_start_that_holds_only_a_writer_fence_frees_the_writer() -> TestR
     let context = context(temp.path())?;
     let store = RunStore::open(&context, &call)?;
     let run = input();
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.create(&run, &call)?;
     store.mark_starting(
         &store.record(id, &call)?,
@@ -610,7 +602,7 @@ fn repeat_cancel_while_the_launcher_holds_keeps_one_request_and_settles_on_relea
     let context = context(temp.path())?;
     let store = RunStore::open(&context, &call)?;
     let run = input();
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.create(&run, &call)?;
     store.mark_starting(
         &store.record(id, &call)?,
@@ -673,7 +665,7 @@ fn a_cancelled_unlaunched_start_frees_the_worktree_writer_for_the_next_run() -> 
     let context = context(temp.path())?;
     let store = RunStore::open(&context, &call)?;
     let first = input();
-    let first_id = first.attempts[0].attempt_id;
+    let first_id = first.attempt_id;
     store.create(&first, &call)?;
     store.mark_starting(
         &store.record(first_id, &call)?,
@@ -702,10 +694,10 @@ fn a_cancelled_unlaunched_start_frees_the_worktree_writer_for_the_next_run() -> 
     let mut next = input();
     next.attempt_id = AttemptId::from_bytes([9; 16]);
     next.operation_id = provenant_core::OperationId::parse("run-test-next")?;
-    next.attempts[0].attempt_id = AttemptId::from_bytes([10; 16]);
+    next.attempt_id = AttemptId::from_bytes([10; 16]);
     crate::tests::rekey(&mut next);
     store.create(&next, &call)?;
-    let next_id = next.attempts[0].attempt_id;
+    let next_id = next.attempt_id;
     store.mark_starting(
         &store.record(next_id, &call)?,
         &route(),
@@ -764,10 +756,11 @@ fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt
     let call = call(&clock, &cancel);
     let context = context(temp.path())?;
     let store = RunStore::open(&context, &call)?;
-    let prepared = two_tasks(2);
+    let (prepared, other) = (input(), lane(8, false));
     store.create(&prepared, &call)?;
-    let first = prepared.attempts[0].attempt_id;
-    let second = prepared.attempts[1].attempt_id;
+    store.create(&other, &call)?;
+    let first = prepared.attempt_id;
+    let second = other.attempt_id;
     let first_tmp = store.temporary_path(first, &call)?;
     let second_tmp = store.temporary_path(second, &call)?;
     assert_ne!(first_tmp, second_tmp);

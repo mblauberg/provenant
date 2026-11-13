@@ -625,7 +625,7 @@ pub(crate) fn with_cancellation<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{AttemptId};
+    use provenant_core::AttemptId;
     use provenant_core::{DurationMicros, MonoTime, TestClock, WallTime};
 
     fn clock() -> TestClock {
@@ -739,7 +739,7 @@ mod tests {
         let store = crate::RunStore::open(&crate::tests::context(temp.path())?, &call)?;
         let run = crate::tests::input();
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.queue_reconcile_mode_with_probe(
             run.attempt_id,
             &call,
@@ -805,7 +805,7 @@ mod tests {
         let store = crate::RunStore::open(&crate::tests::context(temp.path())?, &call)?;
         let run = crate::tests::input();
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.mark_starting(
             &store.record(id, &call)?,
             &crate::tests::route(),
@@ -959,7 +959,7 @@ mod tests {
         let store = crate::RunStore::open(&crate::tests::context(temp.path())?, &call)?;
         let run = crate::tests::input();
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         let record = store.mark_starting(
             &store.record(id, &call)?,
             &crate::tests::route(),
@@ -1025,7 +1025,7 @@ mod tests {
             let store = crate::RunStore::open(&context, &call)?;
             let run = crate::tests::input();
             store.create(&run, &call)?;
-            let id = run.attempts[0].attempt_id;
+            let id = run.attempt_id;
             let attempt = store.attempt_dir(id, false)?;
             let scope = crate::RunStore::scope(&store.record(id, &call)?);
             crate::artifacts::seal(&attempt, "retained-evidence", b"keep", RECORD_LIMIT)?;
@@ -1091,7 +1091,7 @@ mod tests {
         let store = crate::RunStore::open(&context, &call)?;
         let run = crate::tests::input();
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         let record = store.mark_starting(
             &store.record(id, &call)?,
             &crate::tests::route(),
@@ -1111,7 +1111,6 @@ mod tests {
             Ok(())
         })?;
         assert!(store.pending_reactions(run.attempt_id, &call)?.is_empty());
-        assert!(store.pending_attempts(run.attempt_id, &call)?.is_empty());
         let slot = context
             .state_root
             .as_path()
@@ -1170,105 +1169,6 @@ mod tests {
     }
 
     #[test]
-    fn queue_and_reap_skip_bad_attempts_and_still_spawn_for_healthy_work() -> TestResult {
-        for explicit in [false, true] {
-            for failure in ["record", "directory", "journal", "reset"] {
-                if !explicit && failure == "reset" {
-                    continue;
-                }
-                let temp = tempfile::tempdir()?;
-                let clock = crate::tests::clock();
-                let cancel = CancelToken::new();
-                let call = crate::tests::call(&clock, &cancel);
-                let context = crate::tests::context(temp.path())?;
-                let store = crate::RunStore::open(&context, &call)?;
-                let mut run = crate::tests::input();
-                let bad = run.attempts[0].attempt_id;
-                let good = provenant_core::AttemptId::from_bytes([7; 16]);
-                let mut task = run.request.task.clone();
-                task.task_id = provenant_core::TaskId::from_bytes([8; 16]);
-                run.attempts.push(crate::NewAttempt {
-                    attempt_id: good,
-                    task_id: task.task_id,
-                    prompt: run.attempts[0].prompt.clone(),
-                });
-                run.request.tasks.push(task);
-                store.create(&run, &call)?;
-                store.db.execute(
-                    "INSERT INTO attempts(id,project,graph,node,attempt,digest,actor,operation,run,task,number,refused,operation_record,revision,terminal,record,tmp_retained) \
-                     SELECT ?1,project,'refused-graph','refused-node',1,digest,actor,'refused-operation',run,task,number,1,operation_record,1,1,NULL,1 \
-                     FROM attempts WHERE id=?2",
-                    rusqlite::params![
-                        provenant_core::AttemptId::from_bytes([0xfe; 16]).to_string(),
-                        bad.to_string()
-                    ],
-                )?;
-                for id in [bad, good] {
-                    store.mark_starting(
-                        &store.record(id, &call)?,
-                        &crate::tests::route(),
-                        &[],
-                        &Default::default(),
-                        None,
-                        &call,
-                    )?;
-                }
-                let path = context.state_root.as_path().join(format!("attempts/{bad}"));
-                match failure {
-                    "record" => {
-                        store.db.execute(
-                            "UPDATE attempts SET record=?1 WHERE id=?2",
-                            rusqlite::params![b"{".as_slice(), bad.to_string()],
-                        )?;
-                    }
-                    "directory" => std::fs::remove_dir_all(&path)?,
-                    "journal" => std::fs::write(path.join(FILE), b"{")?,
-                    "reset" => std::fs::create_dir(path.join("settlement.lock"))?,
-                    _ => unreachable!(),
-                }
-                let mut spawned = false;
-                let found = store.queue_reconcile_mode(
-                    run.attempt_id,
-                    &call,
-                    |_, _| {
-                        spawned = true;
-                        Ok(())
-                    },
-                    explicit,
-                )?;
-                assert!(spawned, "{failure}, explicit={explicit}");
-                assert!(
-                    matches!(&found[0], (id, crate::Reconciled::Uncertain { .. }) if *id == bad),
-                    "{found:?}"
-                );
-                assert!(
-                    matches!(&found[1], (id, crate::Reconciled::Settling { .. }) if *id == good),
-                    "{found:?}"
-                );
-                let queued = store.attempt_dir(run.attempt_id, false)?;
-                assert!(read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?.is_some());
-                queued.unlink(OsStr::new("settlement-queued.json"))?;
-                crate::artifacts::seal(
-                    &store.attempt_dir(good, false)?,
-                    "cancel.json",
-                    b"{}",
-                    RECORD_LIMIT,
-                )?;
-                let reaped = std::cell::Cell::new(false);
-                assert_eq!(
-                    store.reap_with(&call, |_, _| {
-                        reaped.set(true);
-                        Ok(())
-                    })?,
-                    1
-                );
-                assert!(reaped.get());
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
     fn retained_terminal_without_fence_is_queued() -> TestResult {
         let temp = tempfile::tempdir()?;
         let clock = crate::tests::clock();
@@ -1277,7 +1177,7 @@ mod tests {
         let store = crate::RunStore::open(&crate::tests::context(temp.path())?, &call)?;
         let run = crate::tests::input();
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         let record = store.mark_starting(
             &store.record(id, &call)?,
             &crate::tests::route(),
@@ -1332,7 +1232,7 @@ mod tests {
             let run = crate::tests::input();
             let call = crate::tests::call(&clock, &cancel);
             store.create(&run, &call)?;
-            let id = run.attempts[0].attempt_id;
+            let id = run.attempt_id;
             let record = store.mark_starting(
                 &store.record(id, &call)?,
                 &crate::tests::route(),
@@ -1445,7 +1345,7 @@ mod tests {
             .with_writer_registry(&registry);
         let run = crate::tests::input();
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         let record = store.mark_starting(
             &store.record(id, &call)?,
             &crate::tests::route(),
@@ -1500,7 +1400,7 @@ mod tests {
         let run = crate::tests::input();
         let call = crate::tests::call(&clock, &cancel);
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.mark_starting(
             &store.record(id, &call)?,
             &crate::tests::route(),
@@ -1526,8 +1426,9 @@ mod tests {
             let journal = read(&attempt, scope)?;
             assert_eq!(journal.recovery_failures, n);
             assert!(journal.blocking_reason.is_some());
-            let queued = store
-                .queue_reconcile_with(run.attempt_id, &call, |_, _| panic!("retry must be delayed"))?;
+            let queued = store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
+                panic!("retry must be delayed")
+            })?;
             assert!(
                 matches!(queued.as_slice(), [(_, crate::Reconciled::Uncertain { reason })] if reason.to_string() == journal.blocking_reason.clone().unwrap())
             );
@@ -1559,7 +1460,7 @@ mod tests {
         let store = crate::RunStore::open(&crate::tests::context(temp.path())?, &call)?;
         let run = crate::tests::input();
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         let queued_lane = store.record(id, &call)?;
         store.mark_starting(
             &store.record(id, &call)?,
@@ -1613,7 +1514,7 @@ mod tests {
         let run = crate::tests::input();
         let call = crate::tests::call(&clock, &cancel);
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.mark_starting(
             &store.record(id, &call)?,
             &crate::tests::route(),
@@ -1719,7 +1620,6 @@ mod tests {
 
     fn scope() -> Scope {
         Scope {
-            run: AttemptId::from_bytes([1; 16]),
             attempt: AttemptId::from_bytes([2; 16]),
             generation: 1,
         }
@@ -2111,9 +2011,7 @@ impl crate::RunStore {
                 ));
             }
         }
-        if let Some(slot) =
-            self.attempt_writer_slot(record.attempt_id, record.project_id, call)?
-        {
+        if let Some(slot) = self.attempt_writer_slot(record.attempt_id, record.project_id, call)? {
             match Directory::open_anchor(&slot) {
                 Ok(slot) => {
                     if provenant_supervisor::custody::reservation_present(
@@ -2412,7 +2310,10 @@ impl crate::RunStore {
             .collect::<Result<Vec<_>>>()?;
         let listing_error = match self.writer_fences() {
             Ok(fences) => {
-                for fence in fences.into_iter().filter(|fence| fence.scope.attempt == run) {
+                for fence in fences
+                    .into_iter()
+                    .filter(|fence| fence.scope.attempt == run)
+                {
                     if !ids.contains(&fence.scope.attempt) {
                         ids.push(fence.scope.attempt);
                     }

@@ -570,7 +570,9 @@ impl RunError {
             }
             Self::PromptTooLarge { limit } => {
                 diagnostic = diagnostic
-                    .detail(format!("invalid input field `prompt`: exceeds {limit} bytes"))
+                    .detail(format!(
+                        "invalid input field `prompt`: exceeds {limit} bytes"
+                    ))
                     .next("reduce the prompt input before retrying")
                     .fact(DiagnosticFact::PromptLimit { limit: *limit });
             }

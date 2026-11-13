@@ -2,7 +2,7 @@
 //! shaped for the providers crate's launch specification: the composition edge
 //! resolves routes, applies fallback and builds the exact invocation.
 use crate::{artifacts::read_sealed, db::decode, *};
-use provenant_core::{ActorId, OperationId, AttemptId};
+use provenant_core::{ActorId, AttemptId, OperationId};
 use provenant_supervisor::custody::{
     self, CapturePlan, ExitObservation, OwnedLaunch, ProviderCommand, PublicationReservation, Scope,
 };
@@ -1630,7 +1630,7 @@ mod policy_reporting_tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let run = input();
         store.create(&run, &call)?;
-        let expected = store.record(run.attempts[0].attempt_id, &call)?;
+        let expected = store.record(run.attempt_id, &call)?;
         let grant = |path: &str| PathGrant {
             path: path.into(),
             scope: PathScope::Subtree,
@@ -1772,7 +1772,7 @@ mod resource_status_tests {
             let context = context(temp.path())?;
             let store = RunStore::open(&context, &call)?;
             let run = input();
-            let id = run.attempts[0].attempt_id;
+            let id = run.attempt_id;
             store.create(&run, &call)?;
             let started = store.start_inner(
                 run.attempt_id,

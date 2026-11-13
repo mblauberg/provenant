@@ -89,7 +89,7 @@ fn review_delivery_requires_acceptance_and_exact_head()
     input.request.task.writer = Some(fixture.writer.clone());
     input.request.task.deliver = Some(fixture.request.clone());
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let host = fixture.prepare()?;
     let head = host.head(&fixture.writer)?;
     let attempt = store.attempt_dir(id, false)?;
@@ -264,7 +264,7 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
     let mut input = tests::input();
     input.request.task.writer = Some(fixture.writer.clone());
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let host = fixture.prepare()?;
     let head = host.head(&fixture.writer)?;
     let attempt = store.attempt_dir(id, false)?;

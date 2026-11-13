@@ -1,6 +1,6 @@
 use provenant_core::{
-    ActorId, AttemptId, CancelToken, Digest, MonoTime, OperationId, ProjectId, RootInputs, RunId,
-    TaskId, TestClock, WallTime,
+    ActorId, AttemptId, CancelToken, Digest, MonoTime, OperationId, ProjectId, RootInputs,
+    TestClock, WallTime,
 };
 use provenant_records::CanonicalV1;
 use provenant_run::*;
@@ -22,19 +22,22 @@ fn context(base: &std::path::Path) -> TestResultContext {
 type TestResultContext = std::result::Result<ExecutionContext, Box<dyn std::error::Error>>;
 
 fn input() -> std::result::Result<PreparedRun, Box<dyn std::error::Error>> {
-    let task = TaskId::from_bytes([3; 16]);
     Ok(PreparedRun {
-        run_id: RunId::from_bytes([4; 16]),
+        attempt_id: AttemptId::from_bytes([6; 16]),
         operation_id: OperationId::parse("receipt")?,
         created_at: WallTime::from_micros(100)?,
         request: CanonicalRequest {
             extra: Default::default(),
-            child_attempt_id_version: None,
             chair: None,
             fresh_continuation: None,
             schema_version: 1,
-            tasks: vec![TaskRequest {
-                context: None,
+            task: TaskRequest {
+                context: Some(WorkContext {
+                    graph_id: Some("receipt".into()),
+                    node_id: Some("node".into()),
+                    attempt: Some(1),
+                    ..Default::default()
+                }),
                 extra: Default::default(),
                 build_heavy: false,
                 title: None,
@@ -44,7 +47,6 @@ fn input() -> std::result::Result<PreparedRun, Box<dyn std::error::Error>> {
                 base_ref: None,
                 writer: None,
                 profile: HarnessProfile::default(),
-                task_id: task,
                 prompt_digest: CanonicalV1::file_digest(b"prompt"),
                 route: RequestedRoute::Model {
                     extra: Default::default(),
@@ -58,17 +60,12 @@ fn input() -> std::result::Result<PreparedRun, Box<dyn std::error::Error>> {
                 delivery_id: None,
                 deliver: None,
                 access: Default::default(),
-            }],
-            concurrency: 1,
+            },
             parent: None,
             lane_depth: Some(1),
             parent_attempt: None,
         },
-        attempts: vec![NewAttempt {
-            task_id: task,
-            attempt_id: AttemptId::from_bytes([6; 16]),
-            prompt: "prompt".into(),
-        }],
+        prompt: "prompt".into(),
     })
 }
 
@@ -85,7 +82,7 @@ fn receipt_replay_and_independent_effects() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let input = input()?;
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.withdraw(
         id,
         AttemptState::Queued {
@@ -167,7 +164,7 @@ fn receipt_withdrawal_does_not_invent_an_exit() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let input = input()?;
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let terminal = store
         .withdraw(
             id,
@@ -223,7 +220,7 @@ fn receipt_failed_seal_does_not_commit_terminal() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let input = input()?;
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let attempt = context
         .state_root
         .as_path()
@@ -264,7 +261,7 @@ fn receipt_delivery_effect_and_late_cancellation_persist() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let input = input()?;
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.withdraw(
         id,
         AttemptState::Queued {

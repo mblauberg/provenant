@@ -255,7 +255,7 @@ mod tests {
         let input = input();
         writer.create(&input, &call)?;
         let state = context.state_root.as_path();
-        let attempt = state.join(format!("attempts/{}", input.attempts[0].attempt_id));
+        let attempt = state.join(format!("attempts/{}", input.attempt_id));
         for part in ["tmp", "scratch", "provider-state", "quarantine"] {
             fs::create_dir(attempt.join(part))?;
             fs::write(attempt.join(part).join("keep"), part)?;
@@ -263,9 +263,7 @@ mod tests {
         for name in ["stdout.log", "stderr.log"] {
             fs::write(attempt.join(name), "capture")?;
         }
-        let child = state
-            .join("children")
-            .join(input.attempts[0].attempt_id.to_string());
+        let child = state.join("children").join(input.attempt_id.to_string());
         fs::create_dir_all(child.join("attempts/child/tmp"))?;
         fs::write(child.join("run.sqlite3"), "opaque child store")?;
         let before = snapshot(state)?;
@@ -313,7 +311,7 @@ mod tests {
                 .any(|entry| entry.class == "child_store" && entry.path == child)
         );
         writer.withdraw(
-            input.attempts[0].attempt_id,
+            input.attempt_id,
             AttemptState::Queued {
                 extra: Default::default(),
             },

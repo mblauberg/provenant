@@ -945,12 +945,7 @@ fn preflight_digest(input: &DispatchRequest, cwd: &Path) -> Result<provenant_cor
     Ok(CanonicalV1::record_digest(
         "dispatch-preflight",
         1,
-        &(
-            &input.task,
-            input.lane_depth,
-            input.parent_attempt,
-            cwd,
-        ),
+        &(&input.task, input.lane_depth, input.parent_attempt, cwd),
     )?)
 }
 fn input_error(kind: ErrorKind, message: impl Into<String>) -> RunError {
@@ -1000,8 +995,6 @@ fn check_launch_capabilities(task: &DispatchTask, route: &RequestedRoute) -> Res
 #[cfg(test)]
 mod target_tests {
     use super::*;
-    use crate::tests::{call, clock, context, input};
-    use provenant_core::CancelToken;
 
     #[test]
     fn registry_lock_contention_is_distinct_from_a_live_writer() {

@@ -12,7 +12,7 @@ fn reconcile_does_not_spawn_for_queued_or_terminal_attempts() -> TestResult {
         panic!("a queued attempt has no settlement work");
     })?;
     store.withdraw(
-        run.attempts[0].attempt_id,
+        run.attempt_id,
         AttemptState::Queued {
             extra: Default::default(),
         },
@@ -103,9 +103,9 @@ fn resolved_named_route_survives_launch_admission() -> TestResult {
         effort: None,
     };
     store.create(&prepared, &call)?;
-    let pending = store.record(prepared.attempts[0].attempt_id, &call)?;
+    let pending = store.record(prepared.attempt_id, &call)?;
     store.mark_starting(&pending, &route, &[], &Default::default(), None, &call)?;
-    let record = store.record(prepared.attempts[0].attempt_id, &call)?;
+    let record = store.record(prepared.attempt_id, &call)?;
     assert_eq!(
         record
             .applied_route
@@ -186,7 +186,7 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let run = input();
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.create(&run, &call)?;
         let started = store.start(
             run.attempt_id,
@@ -263,9 +263,14 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let run = input();
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.create(&run, &call)?;
-        store.start(run.attempt_id, &SignedOut(mixed), &|_, _| unreachable!(), &call)?;
+        store.start(
+            run.attempt_id,
+            &SignedOut(mixed),
+            &|_, _| unreachable!(),
+            &call,
+        )?;
         assert_eq!(
             terminal(&store, id, &call)?,
             if mixed {
@@ -306,7 +311,7 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
 }
 
 #[test]
-fn reconcile_retries_busy_store_and_keeps_judging_other_records() -> TestResult {
+fn reconcile_retries_busy_store() -> TestResult {
     use std::{sync::mpsc, time::Duration};
     for clears in [true, false] {
         provenant_sqlite::with_busy_timeout(Duration::from_millis(300), || -> TestResult {
@@ -319,10 +324,9 @@ fn reconcile_retries_busy_store_and_keeps_judging_other_records() -> TestResult 
             };
             let context = context(temp.path())?;
             let store = RunStore::open(&context, &call)?;
-            let run = two_tasks(2);
+            let run = input();
             store.create(&run, &call)?;
-            let first = run.attempts[0].attempt_id;
-            let second = run.attempts[1].attempt_id;
+            let first = run.attempt_id;
             store.mark_starting(
                 &store.record(first, &call)?,
                 &route(),
@@ -353,7 +357,6 @@ fn reconcile_retries_busy_store_and_keeps_judging_other_records() -> TestResult 
                 release.send(())?;
             }
             holder.join().unwrap();
-            assert!(found.contains(&(second, Reconciled::Queued)), "{found:?}");
             if clears {
                 assert!(found.contains(&(first, Reconciled::Withdrawn)), "{found:?}");
                 assert!(
@@ -364,8 +367,7 @@ fn reconcile_retries_busy_store_and_keeps_judging_other_records() -> TestResult 
                             &call,
                             &provenant_supervisor::census::SystemProcessObserver
                         )?
-                        .iter()
-                        .all(|(id, _)| *id == second)
+                        .is_empty()
                 );
             } else {
                 assert!(
