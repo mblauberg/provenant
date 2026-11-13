@@ -394,9 +394,14 @@ output use the same selection; historical reads are paged.
 Landing merges only the head it verified. When the caller pins a reviewed
 head, a mismatch refuses before checks or merge. Otherwise, verification
 captures the current head. Reports retain the full verified object ID.
-`pr watch` and `land` need at least one passing check (the rest passing or
-skipped), refuse a head change during verification and fail closed on
-incomplete evidence.
+`pr watch` and `land` use one CI completion rule for the exact head SHA when
+the landing CI policy selects a wait. They
+wait while any check on that head is queued or in progress, and required checks
+must be present and pass. With no named requirements, watch needs at least one
+passing check and waits 60 seconds after the newest check is reported before
+accepting the rollup. An empty rollup stays pending; the quiet period starts
+only after a current-head check reports. Both commands refuse a head change
+during verification and fail closed on incomplete evidence.
 - Why (default): a merge must land exactly the head that CI verified.
 - Test: `tests/pr.rs::land_refuses_head_changes_before_and_after_checks`;
   `tests/pr.rs::land_refuses_unpassed_missing_and_malformed_checks`

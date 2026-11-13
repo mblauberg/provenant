@@ -8,7 +8,7 @@ use super::{
     ports::{AlarmSink, Forge, GateRunner, Repo},
     publish, receipt, reconcile, split,
 };
-use provenant_cli::domains::LandSettings;
+use provenant_cli::domains::{GateKind, LandSettings};
 use std::collections::{BTreeMap, VecDeque};
 
 pub struct Request<'a> {
@@ -281,10 +281,16 @@ fn run_inner(
         if prs.is_empty() {
             continue;
         }
+        let required_ci = if request.gate.kind == GateKind::Checks {
+            request.gate.checks.clone()
+        } else {
+            Vec::new()
+        };
         gate::await_pr_ci(
             forge,
             &prs,
             &request.settings.pr_ci,
+            &required_ci,
             request.settings.poll_seconds,
         )?;
         let mut rebuilds = 0;
