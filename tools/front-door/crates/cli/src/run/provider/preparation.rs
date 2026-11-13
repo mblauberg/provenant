@@ -3386,6 +3386,41 @@ pub(super) fn prepare_candidates(
             reasons.push(setup_skip(&label, format!("setup failed: {error}")));
             continue;
         }
+        if !sandbox.sandboxed
+            && let Some((environment, fallback)) = adapter_spec
+                .filter(|spec| {
+                    spec.model_observation == provenant_records::ModelObservation::Rollout
+                })
+                .and_then(|spec| spec.default_account_directory)
+        {
+            // Native Codex writes its rollout beside the selected login rather
+            // than in this candidate's private state. Retain the launch-time
+            // selector outside the lane-writable candidate subtree so settlement
+            // observes the same trusted home after recovery.
+            let codex_home = spec
+                .env
+                .iter()
+                .find(|(key, _)| key == environment)
+                .map(|(_, value)| PathBuf::from(value))
+                .unwrap_or_else(|| home.join(fallback));
+            let selector = paths
+                .provider_state
+                .join(format!("codex-observation-{scratch_name}.json"));
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "home": provenant_records::StructuredPathWire::from_path(&codex_home)
+                    .map_err(|error| error.to_string())?,
+            }))
+            .map_err(|error| error.to_string())?;
+            // This is host settlement metadata, outside the adapter's writable
+            // candidate subtree. Keep it out of the adapter setup steps, whose
+            // file writes are deliberately restricted to scratch.
+            if let Err(error) = write_setup_file(&[&paths.provider_state], &selector, &bytes, false)
+            {
+                reasons.push(setup_skip(&label, error));
+                continue;
+            }
+        }
         if AdapterSpec::get(&route.adapter).is_some_and(|spec| {
             spec.login_observation == provenant_records::LoginObservation::ExecutableOnly
         }) && availability.iter().any(|record| {

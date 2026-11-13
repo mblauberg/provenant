@@ -614,10 +614,10 @@
       "safe": "on",
       "type": "enum",
       "values": ["auto", "on", "off"],
-      "default": "off",
+      "default": "auto",
       "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run/provider/confinement.rs",
-      "effect": "Whether a macOS lane runs under the Seatbelt sandbox. Defaults to off for every lane kind (including read-only). Explicit off / --no-sandbox takes precedence over route, narrowed-network and parent floors where Provenant decides them, with a one-line warning naming the dropped restriction; an inherited operating-system sandbox is always reported honestly as effective. Off macOS every lane resolves as sandboxed, so Linux keeps refusing lanes. on / --sandbox explicitly opts into sandboxing. Set per run with --sandbox or --no-sandbox, per graph node or template with attempt.sandbox, or as the host default in [knobs]. The lane sees PROVENANT_SANDBOX=on or off, and status and the receipt show requested and effective mode and its source (parent, route, network, platform, knob, read_only or default).",
+      "effect": "Whether a macOS lane runs under the Seatbelt sandbox. The default auto runs every lane kind (including read-only) unsandboxed unless a configured route, narrowed network or parent floor requires sandboxing. Explicit off / --no-sandbox takes precedence over route, narrowed-network and parent floors where Provenant decides them, with a one-line warning naming the dropped restriction; an inherited operating-system sandbox is always reported honestly as effective. Off macOS every lane resolves as sandboxed, so Linux keeps refusing lanes. on / --sandbox explicitly opts into sandboxing. Set per run with --sandbox or --no-sandbox, per graph node or template with attempt.sandbox, or as the host default in [knobs]. The lane sees PROVENANT_SANDBOX=on or off, and status and the receipt show requested and effective mode and its source (parent, route, network, platform, knob, read_only or default).",
       "trade_off": "Unsandboxed lanes work like the same CLI started by hand: they share host build caches and services, and can read on-disk credential stores and write outside their worktree. The environment is still rebuilt from an allowlist with hosted-cloud keys stripped, Git delivery stays host-owned with one writer per worktree, and host_policy path denials apply only to sandboxed lanes. A sandboxed lane reads domains.run.sandbox_cache_reads and never writes there."
     }
   },

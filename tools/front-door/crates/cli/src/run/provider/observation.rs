@@ -10,7 +10,7 @@ pub(super) struct Probe<'a> {
 }
 
 /// Each explicit fallback candidate has its own private state, and only the
-/// launched one holds Codex's rollout. Exactly one candidate may match.
+/// launched one selects Codex's rollout home. Exactly one distinct home may match.
 pub(crate) fn observe_codex_rollout(
     provider_state: &Path,
     thread: &str,
@@ -18,7 +18,9 @@ pub(crate) fn observe_codex_rollout(
     use provenant_providers::ProviderError;
     let entries = std::fs::read_dir(provider_state).map_err(|_| ProviderError::UnknownIdentity)?;
     let mut observed = Err(ProviderError::UnknownIdentity);
-    for entry in entries.take(64) {
+    let mut homes = std::collections::BTreeSet::new();
+    // Each candidate may also have one host-owned native-home selector.
+    for entry in entries.take(128) {
         let name = entry
             .map_err(|_| ProviderError::UnknownIdentity)?
             .file_name();
@@ -30,7 +32,44 @@ pub(crate) fn observe_codex_rollout(
         }) {
             continue;
         }
-        match provenant_providers::codex_rollout::observe(&provider_state.join(&name), thread) {
+        let candidate = provider_state.join(&name);
+        let directory =
+            Directory::open_anchor(provider_state).map_err(|_| ProviderError::UnknownIdentity)?;
+        let home = match directory.read_stable(
+            std::ffi::OsStr::new(&format!(
+                "codex-observation-{}.json",
+                name.to_string_lossy()
+            )),
+            16 * 1024,
+        ) {
+            Ok(bytes) => {
+                #[derive(serde::Deserialize)]
+                struct NativeHome {
+                    schema_version: u64,
+                    home: provenant_records::StructuredPathWire,
+                }
+                let record: NativeHome =
+                    serde_json::from_slice(&bytes).map_err(|_| ProviderError::UnknownIdentity)?;
+                if record.schema_version != 1 {
+                    return Err(ProviderError::UnknownIdentity);
+                }
+                let home = record
+                    .home
+                    .to_path_buf()
+                    .map_err(|_| ProviderError::UnknownIdentity)?;
+                if !home.is_absolute() {
+                    return Err(ProviderError::UnknownIdentity);
+                }
+                home
+            }
+            Err(error) if error.is_not_found() => candidate,
+            Err(_) => return Err(ProviderError::UnknownIdentity),
+        };
+        // Native fallback candidates may select the same account home.
+        if !homes.insert(home.clone()) {
+            continue;
+        }
+        match provenant_providers::codex_rollout::observe(&home, thread) {
             Ok(_) if observed.is_ok() => return Err(ProviderError::IdentityMismatch),
             Ok(turn) => observed = Ok(turn),
             Err(ProviderError::UnknownIdentity) => {}

@@ -1,4 +1,3 @@
-
 /// Exercises the actual Seatbelt file-open decision without a provider login
 /// or an external HTTPS service. An inherited lane cannot install a nested
 /// sandbox; CI requires this probe instead of accepting that limitation.
@@ -475,8 +474,8 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
             continue;
         }
         let argv: Vec<_> = spec.argv.iter().map(|arg| arg.to_string_lossy()).collect();
-        // Nothing is inherited: the environment is exactly the allow-list.
-        let keys: Vec<_> = spec
+        // Launch controls are required regardless of environment insertion order.
+        let keys: std::collections::BTreeSet<_> = spec
             .env
             .iter()
             .map(|(key, _)| key.to_string_lossy())
@@ -505,7 +504,9 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
             ],
             _ => &[],
         };
-        let mut expected: Vec<_> = [
+        let required: std::collections::BTreeSet<_> = [
+            "PROVENANT_SANDBOX",
+            "PROVENANT_GIT",
             "HOME",
             "USER",
             "PATH",
@@ -523,46 +524,25 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
         .chain(extra)
         .copied()
         .collect();
-        if cfg!(target_os = "macos")
-            && id == "codex"
-            && Path::new("/Library/Developer/CommandLineTools").is_dir()
-        {
-            let index = expected
+        assert!(
+            required.iter().all(|key| keys.contains(*key)),
+            "{id} is missing launch controls: {:?}",
+            required
                 .iter()
-                .position(|key| *key == "CARGO_NET_OFFLINE")
-                .expect("cargo env")
-                + 1;
-            expected.splice(index..index, ["DEVELOPER_DIR", "SDKROOT"]);
-        }
-        if id == "codex"
-            && ["/opt/homebrew", "/usr/local"]
-                .iter()
-                .any(|prefix| Path::new(prefix).join("bin/node").exists())
-        {
-            let index = expected
-                .iter()
-                .position(|key| *key == "GIT_CONFIG_GLOBAL")
-                .expect("git env");
-            expected.splice(
-                index..index,
-                [
-                    "npm_config_cache",
-                    "npm_config_cache_dir",
-                    "pnpm_config_cache_dir",
-                    "COREPACK_HOME",
-                    "pnpm_config_verify_deps_before_run",
-                    "npm_config_manage_package_manager_versions",
-                    "pnpm_config_manage_package_manager_versions",
-                    "npm_config_package_manager_strict",
-                    "pnpm_config_package_manager_strict",
-                    "COREPACK_ENABLE_PROJECT_SPEC",
-                    "COREPACK_ENABLE_DOWNLOAD",
-                ],
+                .filter(|key| !keys.contains(**key))
+                .collect::<Vec<_>>()
+        );
+        for forbidden in [
+            "OPENAI_API_KEY",
+            "CODEX_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        ] {
+            assert!(
+                !keys.contains(forbidden),
+                "{id} must not expose {forbidden} in its environment"
             );
         }
-        // Git selection is replaced after the adapter's environment is built.
-        expected.push("PROVENANT_GIT");
-        assert_eq!(keys, expected, "{id}");
         if id == "codex" {
             // This fixture grants provider-only networking. Cargo must use
             // cached sources rather than attempting dependency downloads.
@@ -1153,10 +1133,16 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
     let prompt = Prompt::new("fixture prompt".into());
     let route = route("opencode", "configured/model");
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
-        for git_context in [false, true] {
+        for (git_context, sandboxed) in [(false, true), (true, true), (false, false), (true, false)]
+        {
             let plan = fixture_access_plan(access, Some("login"), false);
             let input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+            let sandbox_mode = |key: &str| {
+                (key == provenant_confinement::run_config::SANDBOX_ENV)
+                    .then(|| if sandboxed { "on" } else { "off" }.into())
+            };
             let spec = opencode::OpenCode.prepare(PrepareInput {
+                host_var: &sandbox_mode,
                 git_context,
                 ..input
             })?;
@@ -1166,9 +1152,48 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
                     .find(|(name, _)| name == key)
                     .map(|(_, value)| value)
             };
-            assert_eq!(
-                env("HOME"),
-                Some(&std::ffi::OsString::from("/fixture/home"))
+            let expected_home = if sandboxed {
+                Some(std::ffi::OsString::from("/fixture/home"))
+            } else {
+                std::env::var_os("HOME")
+            };
+            assert_eq!(env("HOME"), expected_home.as_ref());
+            for (key, expected) in [
+                ("XDG_CONFIG_HOME", "/fixture/state/config"),
+                ("XDG_DATA_HOME", "/fixture/state/data"),
+                ("XDG_CACHE_HOME", "/fixture/state/cache"),
+                ("XDG_STATE_HOME", "/fixture/state/state"),
+            ] {
+                let values: Vec<_> = spec
+                    .env
+                    .iter()
+                    .filter(|(name, _)| name == key)
+                    .map(|(_, value)| value.as_os_str())
+                    .collect();
+                assert_eq!(values, [std::ffi::OsStr::new(expected)], "{key}");
+            }
+            // Repository context may omit this optional selector. When present,
+            // it must be unambiguous.
+            assert!(
+                spec.env
+                    .iter()
+                    .filter(|(key, _)| key == "GIT_CONFIG_NOSYSTEM")
+                    .count()
+                    <= 1
+            );
+            let globals: Vec<_> = spec
+                .env
+                .iter()
+                .filter(|(key, _)| key == "GIT_CONFIG_GLOBAL")
+                .map(|(_, value)| Path::new(value))
+                .collect();
+            assert_eq!(globals.len(), 1, "one unambiguous Git config selector");
+            assert!(
+                globals[0] == Path::new("/dev/null")
+                    || spec.setup.iter().any(|step| {
+                        matches!(step, SetupStep::WriteFile { path, .. } if path == globals[0])
+                    }),
+                "Git config must be disabled or supplied by launch setup"
             );
             let config_home = Path::new(env("XDG_CONFIG_HOME").expect("config home"));
             let data_home = Path::new(env("XDG_DATA_HOME").expect("data home"));
@@ -1240,15 +1265,46 @@ fn cursor_and_claude_keep_sessions_private_with_or_without_skills() -> Result<()
                 route.account_key = None;
                 route.set_user_skills(skills);
                 let plan = fixture_access_plan(access, (id == "cursor").then_some("login"), false);
-                let input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), (id == "claude").then_some(&token));
-                let adapter = REGISTRY.iter().find(|entry| entry.adapter.id() == id).unwrap().adapter;
+                let input = fixture_input(
+                    &route,
+                    &plan,
+                    &prompt,
+                    Path::new("/fixture/repo"),
+                    (id == "claude").then_some(&token),
+                );
+                let adapter = REGISTRY
+                    .iter()
+                    .find(|entry| entry.adapter.id() == id)
+                    .unwrap()
+                    .adapter;
                 let spec = adapter.prepare(input)?;
-                let key = if id == "claude" { "CLAUDE_CONFIG_DIR" } else { "HOME" };
-                let expected = if id == "claude" { "/fixture/state/claude-config" } else { "/fixture/state" };
-                assert!(spec.env.iter().any(|(name, value)| name == key && value == expected));
-                assert!(spec.profile.spec.state_writes.iter().all(|grant| !grant.path.starts_with("/fixture/home")));
+                let key = if id == "claude" {
+                    "CLAUDE_CONFIG_DIR"
+                } else {
+                    "HOME"
+                };
+                let expected = if id == "claude" {
+                    "/fixture/state/claude-config"
+                } else {
+                    "/fixture/state"
+                };
+                assert!(
+                    spec.env
+                        .iter()
+                        .any(|(name, value)| name == key && value == expected)
+                );
+                assert!(
+                    spec.profile
+                        .spec
+                        .state_writes
+                        .iter()
+                        .all(|grant| !grant.path.starts_with("/fixture/home"))
+                );
                 if id == "cursor" {
-                    assert!(spec.setup.contains(&SetupStep::CreateDir("/fixture/state/.cursor/chats".into())));
+                    assert!(
+                        spec.setup
+                            .contains(&SetupStep::CreateDir("/fixture/state/.cursor/chats".into()))
+                    );
                 }
             }
         }
@@ -1289,7 +1345,9 @@ fn read_only_handoff_native_permissions_match_private_state() -> Result<(), Prov
         assert_eq!(spec.cwd, cwd);
         match id {
             "cursor" => assert!(
-                spec.argv.windows(2).any(|args| args[0] == "--mode" && args[1] == "ask")
+                spec.argv
+                    .windows(2)
+                    .any(|args| args[0] == "--mode" && args[1] == "ask")
             ),
             "codex" => assert!(
                 spec.argv

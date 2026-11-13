@@ -1274,25 +1274,8 @@ mod tests {
         let repo = temp.path().join("repo");
         let remote = temp.path().join("remote.git");
         std::fs::create_dir(&repo).unwrap();
-        use provenant_os::exec::{
-            ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
-        };
         let git = |args: &[&str]| -> String {
-            let executable = provenant_os::git::git_executable().unwrap();
-            let argv: Vec<std::ffi::OsString> = std::iter::once(executable.into_os_string())
-                .chain(args.iter().map(|arg| (*arg).into()))
-                .collect();
-            let mut options = ExecOptions::new(&argv, &repo, std::time::Duration::from_secs(5));
-            options.stdout = StreamPolicy::Capture { limit: 65536 };
-            options.stderr = StreamPolicy::Capture { limit: 65536 };
-            let output = SystemExecutor::new(1).unwrap().execute(options).unwrap();
-            assert_eq!(
-                output.termination,
-                Termination::Exit(0),
-                "{}",
-                String::from_utf8_lossy(&output.stderr.bytes)
-            );
-            String::from_utf8(output.stdout.bytes)
+            String::from_utf8(provenant_os::fixture::run_git(&repo, args).unwrap())
                 .unwrap()
                 .trim()
                 .to_owned()

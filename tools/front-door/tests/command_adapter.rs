@@ -388,6 +388,8 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
         "tail":{"argv":["/bin/sh","-c","/usr/bin/yes x | /usr/bin/head -c 2000000; printf '\\nlast-output\\n'"]},
         "missing":{"argv":["/missing/command"]}
     }))?;
+    // This test exercises denied checkout writes as well as command settlement.
+    configure(&rig, &["knobs"], "lanes.sandbox", toml_edit::value("on"))?;
     let _cleanup = rig.process_cleanup();
     for (name, expected, verdict) in [
         ("pass", "succeeded", "PASS"),
@@ -614,8 +616,10 @@ fn command_timeout_cleans_descendants_and_running_replay_keeps_one_attempt() -> 
     if !available()? {
         return Ok(());
     }
+    // Outlive the outer test deadline: a missing descendant kill must not
+    // pass merely because the child completed its sleep naturally.
     let rig = rig(
-        json!({"slow":{"argv":["/bin/sh","-c","/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); sleep 30' & child=$!; printf 'child=%s\\n' \"$child\"; wait"]}}),
+        json!({"slow":{"argv":["/bin/sh","-c","/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); sleep 300' & child=$!; printf 'child=%s\\n' \"$child\"; wait"]}}),
     )?;
     let _cleanup = rig.process_cleanup();
     let first = dispatch_with(&rig, "slow", 5, None, false)?;

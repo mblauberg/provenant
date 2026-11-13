@@ -2561,7 +2561,20 @@ impl WriterLaunch {
         let verified_tip = match settlement.head() {
             Some(head) => head,
             None => match &source {
-                Some(source) => crate::objects::private_tip(source, self.branch.as_str())?,
+                Some(source) => {
+                    let private = crate::objects::private_tip(source, self.branch.as_str())?;
+                    if private == base {
+                        // A native writer can commit through the real Git
+                        // executable, leaving its private view at the launch base.
+                        crate::objects::resolve_ref(
+                            &git_executable,
+                            self.worktree.repo(),
+                            self.branch.as_str(),
+                        )?
+                    } else {
+                        private
+                    }
+                }
                 None => crate::objects::resolve_ref(
                     &git_executable,
                     self.worktree.repo(),
@@ -2619,6 +2632,7 @@ impl WriterLaunch {
                 ));
             }
             if let Some(source) = &source
+                && crate::objects::private_tip(source, self.branch.as_str())? == verified_tip
                 && crate::objects::resolve_ref(
                     &git_executable,
                     self.worktree.repo(),
@@ -2708,7 +2722,9 @@ impl WriterLaunch {
             "writer-terminal.json",
             &crate::db::bytes(&WriterTerminal {
                 schema_version: 1,
-                head: tip,
+                // Replay may observe a later writer's descendant on the branch.
+                // Attribute only the head pinned for this attempt's settlement.
+                head: verified_tip,
             })?,
             crate::RECORD_LIMIT,
         )?;

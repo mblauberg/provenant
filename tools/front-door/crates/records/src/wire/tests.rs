@@ -180,6 +180,10 @@ fn chunk() -> OutputChunk {
         tail_clamped: None,
         changed_files: None,
         changed_files_total: None,
+        writer_base: None,
+        writer_head: None,
+        residual_tree: None,
+        publication: None,
         selected: None,
     }
 }
@@ -232,6 +236,10 @@ fn chunk_optional_members_and_encodings() {
     full.changed_files =
         Some(json!([{"kind":"relative", "relative":{"encoding":"utf8", "path":"a.rs"}}]));
     full.changed_files_total = Some(json!(1));
+    full.writer_base = Some("a".repeat(40));
+    full.writer_head = Some("b".repeat(40));
+    full.residual_tree = Some("clean (current observation)".into());
+    full.publication = Some("pushed".into());
     full.lane.provider_error = Some("failed".into());
     full.lane.result_path =
         json!(crate::StructuredPathWire::from_path(std::path::Path::new("/s/result.md")).unwrap());
@@ -240,6 +248,12 @@ fn chunk_optional_members_and_encodings() {
     let plain = serde_json::to_value(chunk()).unwrap();
     assert_eq!(plain["bytes"], json!({"encoding": "utf8", "data": "hello"}));
     assert!(plain.get("tail").is_none());
+    // Missing Git evidence is represented as null, never as an inferred clean tree.
+    let mut unavailable = plain.clone();
+    for field in ["writer_base", "writer_head", "residual_tree", "publication"] {
+        unavailable[field] = Value::Null;
+    }
+    schema::validate(&schema, &unavailable).unwrap();
     let mut invalid = plain.clone();
     invalid["bytes"] = json!({"encoding": "base64", "data": "%%%"});
     rejected(&schema, invalid);

@@ -38,8 +38,10 @@ exit code, result bytes, digests, lineage, routes and delivery fields stay exact
 
 ## Field mapping
 
-`generated_cutover_status_and_output_corpus` compares every retained attempt
-field after these structural mappings. A changed state, exit code or result is
+`generated_cutover_status_and_output_corpus` compares retained status fields
+after these structural mappings. Output checks identity, settlement, artifact
+bytes and range metadata, paths, lineage, routes and delivery against the
+capture, and validates the current reply schema while allowing added fields. A changed state, exit code or result is
 a failure, including a lost result path or staleness observation.
 
 | Pre-cut surface or field | Current surface or field | Reason |
@@ -52,7 +54,7 @@ a failure, including a lost result path or staleness observation.
 | No `outcome`, `cause_code`, `next` | Added outcome, cause and action | Graph outcome and recovery metadata accompany the retained lane fields. |
 | `lanes`-only `handoff: null` | Graph attempt predecessor evidence | The removed policy owner has no handoff in these fixtures; a nonempty old handoff fails this comparison. |
 | List envelope metadata (`next_cursor`, `capacity_cooldowns`, `review_exempt`) | Targeted row envelope (`timed_out`) | Selection envelope changed; comparisons cover each selected attempt and its command exit code. |
-| `output ID --json` data | Unchanged | Every output field is compared. |
+| `output ID --json` data | Retained read contract plus current schema | Added settlement evidence does not freeze the output member set. |
 
 ## Pre-cut terminal checkpoint
 

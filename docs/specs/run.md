@@ -625,7 +625,12 @@ unless those paths are review-exempt. Paths in the project's
 `[domains.run] review_exempt` list (release-note fragments, specs, lock files
 and `.tracker-input` by default) never count toward either, and Git metadata,
 hooks and provider control roots can never be listed. Run reads no provider
-transcript except Codex's post-exit identity projection. A read-only lane (no
+transcript except Codex's post-exit identity projection. Sandboxed Codex
+projects the exact stream thread from its candidate-local rollout. Native
+Codex uses the launch-time home selector in the bounded
+`provider-state/codex-observation-candidate-N.json` record, outside the
+lane-writable candidate subtree. Settlement reads that same home and
+requires the same exact thread, including after recovery. A read-only lane (no
 `writer`) whose complete, validated, non-empty answer is present settles
 `succeeded` without a handoff; only a writer must also report one.
 - Why (default): a crash, truncation or impostor must never read as success.

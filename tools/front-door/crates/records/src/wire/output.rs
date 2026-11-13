@@ -40,6 +40,15 @@ pub struct OutputChunk {
     pub changed_files: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changed_files_total: Option<Value>,
+    /// Settlement Git evidence; absence never implies a clean or published tree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub writer_base: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub writer_head: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub residual_tree: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publication: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected: Option<Value>,
 }
@@ -123,6 +132,10 @@ pub fn output_chunk_schema() -> Value {
                 nullable(array(nullable(super::schema::worktree_path()))),
             ),
             ("changed_files_total", any()),
+            ("writer_base", nullable(string())),
+            ("writer_head", nullable(string())),
+            ("residual_tree", nullable(string())),
+            ("publication", nullable(string())),
             ("selected", any()),
         ],
     ))

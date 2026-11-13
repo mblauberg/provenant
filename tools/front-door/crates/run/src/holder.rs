@@ -3518,6 +3518,7 @@ mod writer_recovery_tests {
             drop(provenant_supervisor::fixture::bind_writer_attempt(
                 lease, &attempt,
             )?);
+            let mut shared_head = None;
             if changed {
                 let objects = candidate.join("git-objects");
                 let private_git = |args: &[std::ffi::OsString]| {
@@ -3547,15 +3548,22 @@ mod writer_recovery_tests {
                 ])?;
                 let head = std::str::from_utf8(&head)?.trim();
                 if shared {
-                    // A native writer may commit through the shared worktree.
-                    fixture.git(&[
-                        "-C",
-                        fixture.writer.worktree.to_str().ok_or("worktree")?,
-                        "commit",
-                        "--allow-empty",
-                        "-m",
-                        "Shared commit",
-                    ])?;
+                    // A native writer may commit file changes through the shared
+                    // worktree while the private candidate remains at the base.
+                    std::fs::write(
+                        fixture.writer.worktree.join("shared-work.txt"),
+                        "committed native work",
+                    )?;
+                    fixture.lane_git(&["add", "shared-work.txt"])?;
+                    fixture.lane_git(&["commit", "-m", "Shared commit"])?;
+                    shared_head = Some(
+                        std::str::from_utf8(&provenant_os::fixture::run_git(
+                            &fixture.writer.worktree,
+                            &["rev-parse", "HEAD"],
+                        )?)?
+                        .trim()
+                        .parse::<provenant_core::GitOid>()?,
+                    );
                 } else {
                     private_git(&[
                         "update-ref".into(),
@@ -3584,6 +3592,22 @@ mod writer_recovery_tests {
                 "```handoff\n{{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"{note}\",\"remaining\":[\"Finish work\"],\"decisions\":[],\"verify\":[]}}\n```"
             ));
             let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
+            if let Some(head) = shared_head {
+                assert_eq!(finished.head, Some(head));
+                let terminal: crate::writer::WriterTerminal = crate::db::decode(
+                    &read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?
+                        .ok_or("writer terminal")?,
+                )?;
+                assert_eq!(terminal.head, head);
+                assert!(
+                    provenant_os::fixture::run_git(
+                        &fixture.writer.worktree,
+                        &["status", "--porcelain", "--untracked-files=normal"],
+                    )?
+                    .is_empty(),
+                    "settlement must preserve the native commit's clean index"
+                );
+            }
             let successor = store.pending_attempts(run.run_id, &call)?;
             assert_eq!(successor.len(), 1);
             assert_eq!(finished.superseded_by, Some(successor[0].attempt_id));
