@@ -830,7 +830,7 @@ pub(crate) fn unified_graph_steer(
 ) -> Option<u8> {
     use provenant_fabric_mcp::tools::McpFacade;
     enum SteerResult {
-        Delivered(provenant_fabric_runtime::inbox::InboxResult),
+        Delivered(Box<provenant_fabric_runtime::inbox::InboxResult>),
         Refused(String),
     }
     let result = (|| -> Result<Option<SteerResult>, Box<dyn std::error::Error>> {
@@ -874,7 +874,7 @@ pub(crate) fn unified_graph_steer(
             operation_id,
         };
         let receipt = facade.inbox_owner(input, Some(host.into()), budget, &cancel)?;
-        Ok(Some(SteerResult::Delivered(receipt)))
+        Ok(Some(SteerResult::Delivered(Box::new(receipt))))
     })();
     match result {
         Ok(None) => None,
@@ -886,7 +886,7 @@ pub(crate) fn unified_graph_steer(
             globals,
         )),
         Ok(Some(SteerResult::Delivered(data))) => {
-            let result = provenant_cli::inbox::control_result("steer", data);
+            let result = provenant_cli::inbox::control_result("steer", *data);
             let human = if result.status == provenant_records::Outcome::Ok {
                 "steering queued\n"
             } else {
@@ -913,10 +913,7 @@ struct RetainedSteerTarget {
 #[derive(Debug)]
 enum SteerResolution {
     NoMatch,
-    Resolved {
-        target: GraphTarget,
-        reference: String,
-    },
+    Resolved { reference: String },
     Refused(String),
 }
 
@@ -983,7 +980,7 @@ fn resolve_graph_steer_target(
             })
             .transpose()?;
         return match retained_steer_reference(attempt, selected_id, &retained) {
-            Ok(Some(reference)) => Ok(SteerResolution::Resolved { target, reference }),
+            Ok(Some(reference)) => Ok(SteerResolution::Resolved { reference }),
             Ok(None) => Ok(SteerResolution::Refused(format!(
                 "selected attempt is not part of node {}'s accepted launch",
                 node.id
@@ -1033,23 +1030,9 @@ fn resolve_graph_steer_target(
                     retained_steer_target(factory, &graph, node, attempt, budget, cancel)?
                 {
                     match retained_steer_reference(attempt, Some(attempt_id), &retained) {
-                        Ok(Some(reference)) => matches.push((
-                            GraphTarget {
-                                graph: graph.clone(),
-                                node: Some(node.id.clone()),
-                                attempt: None,
-                            },
-                            Ok(reference),
-                        )),
+                        Ok(Some(reference)) => matches.push(Ok(reference)),
                         Ok(None) => {}
-                        Err(message) => matches.push((
-                            GraphTarget {
-                                graph: graph.clone(),
-                                node: Some(node.id.clone()),
-                                attempt: None,
-                            },
-                            Err(message),
-                        )),
+                        Err(message) => matches.push(Err(message)),
                     }
                 }
             }
@@ -1058,9 +1041,9 @@ fn resolve_graph_steer_target(
     match matches.len() {
         0 => Ok(SteerResolution::NoMatch),
         1 => {
-            let (target, resolution) = matches.pop().expect("one match");
+            let resolution = matches.pop().ok_or(FacadeError::StateCorrupt)?;
             match resolution {
-                Ok(reference) => Ok(SteerResolution::Resolved { target, reference }),
+                Ok(reference) => Ok(SteerResolution::Resolved { reference }),
                 Err(message) => Ok(SteerResolution::Refused(message)),
             }
         }
@@ -1293,9 +1276,9 @@ fn steer_placement_host(
     Ok(local)
 }
 
-fn current_steer_targets<'a>(
-    records: &'a [provenant_records::run::AttemptRecord],
-) -> Result<Vec<&'a provenant_records::run::AttemptRecord>, FacadeError> {
+fn current_steer_targets(
+    records: &[provenant_records::run::AttemptRecord],
+) -> Result<Vec<&provenant_records::run::AttemptRecord>, FacadeError> {
     use std::collections::BTreeMap;
     let target_id = current_steer_target_id(
         &records
