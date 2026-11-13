@@ -1195,7 +1195,6 @@ fn retained_steer_target(
         if target.attempt != record.attempt_id
             || record.project_id != factory.context.identity.project
             || record.operation_id != record_operation
-            || !context.graph_template_launch
             || context.graph_id.as_deref() != Some(record_graph)
             || context.node_id.as_deref() != Some(record_node)
         {
@@ -2489,7 +2488,7 @@ mod tests {
                         "requested_route":{"kind":"named","name":"senior"},
                         "authority_digest":format!("sha256:{}", "ab".repeat(32)),
                         "queued_at":"2026-10-29T00:00:00.000000Z",
-                        "context":{"graph_template_launch":true,"graph_id":"g","node_id":"task"},
+                        "context":{"graph_template_launch":false,"graph_id":"g","node_id":"task"},
                         "state":serde_json::to_value(lane_state)?,"usage":{},
                         "prompt":{"path":{"encoding":"utf8","path":"prompt.md"},
                             "digest":format!("sha256:{}", "ab".repeat(32)),

@@ -913,8 +913,7 @@ impl BinaryRunOwner<'_> {
         if request.tasks.is_empty()
             || request.tasks.iter().any(|task| {
                 task.context.as_ref().is_none_or(|context| {
-                    !context.graph_template_launch
-                        || context.graph_id.as_ref().is_none_or(|id| id.is_empty())
+                    context.graph_id.as_ref().is_none_or(|id| id.is_empty())
                         || context.node_id.as_ref().is_none_or(|id| id.is_empty())
                 })
             })
