@@ -9,12 +9,14 @@ use std::path::{Path, PathBuf};
 pub(crate) const BLOCKED: &str = "STATE_FORMAT_BREAK";
 
 /// Dropped store classes, relative to the state root: the run store and run
-/// files (attempt tmp included), graph journals, mail and claims, the work
-/// index and PR contributions. SQLite companions are matched by suffix.
+/// files (attempt tmp included), both Fabric databases (the project store with
+/// mail and claims, and the host index with chair bindings), graph journals,
+/// the work index and PR contributions. SQLite companions are matched by suffix.
 const DROPPED: &[&str] = &[
     "run.sqlite3",
     "runs",
     "fabric/fabric.sqlite3",
+    "fabric/host.sqlite3",
     "fabric/graphs",
     "work-index.sqlite3",
     "pr-contributions.sqlite3",

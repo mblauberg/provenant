@@ -2943,6 +2943,9 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
         "fabric/fabric.sqlite3-wal",
         "fabric/fabric.sqlite3-shm",
         "fabric/fabric.sqlite3-journal",
+        "fabric/host.sqlite3",
+        "fabric/host.sqlite3-wal",
+        "fabric/host.sqlite3-shm",
         "fabric/graphs/p/g.json",
         "work-index.sqlite3",
         "pr-contributions.sqlite3",
@@ -3003,7 +3006,7 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
     for name in dropped
         .iter()
         .chain(&kept)
-        .filter(|name| !name.starts_with("run.sqlite3"))
+        .filter(|name| !name.starts_with("run.sqlite3") && !name.starts_with("fabric/host.sqlite3"))
     {
         let path = state.join(name);
         fs::create_dir_all(path.parent().ok_or("parent")?)?;
@@ -3017,7 +3020,23 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
              INSERT INTO attempts VALUES('queued', NULL);",
         )?;
     }
-    for name in ["run.sqlite3-wal", "run.sqlite3-shm", "run.sqlite3-journal"] {
+    // The old host index: Fabric schema 15, run-keyed chair bindings. Format 2
+    // refuses any schema but its own, so the reset must remove it.
+    {
+        let database = rusqlite::Connection::open(state.join("fabric/host.sqlite3"))?;
+        database.execute_batch(
+            "CREATE TABLE run_chairs(run_id TEXT PRIMARY KEY, chair TEXT);\
+             INSERT INTO run_chairs VALUES('r1', 'chair');\
+             PRAGMA user_version = 15;",
+        )?;
+    }
+    for name in [
+        "run.sqlite3-wal",
+        "run.sqlite3-shm",
+        "run.sqlite3-journal",
+        "fabric/host.sqlite3-wal",
+        "fabric/host.sqlite3-shm",
+    ] {
         fs::write(state.join(name), format!("format-1 {name}"))?;
     }
     let before = snapshot(state)?;
