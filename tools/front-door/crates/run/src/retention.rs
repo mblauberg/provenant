@@ -2698,15 +2698,12 @@ mod tests {
     }
 
     #[test]
-    fn gc_ignores_indexed_attempt_with_missing_run_directory() -> TestResult {
+    fn gc_ignores_indexed_attempt_with_missing_attempt_directory() -> TestResult {
         let (_temp, context, store, input, attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
         let terminal = withdraw(&store, &input, &call)?;
-        let run = attempt
-            .parent()
-            .and_then(std::path::Path::parent)
-            .ok_or("run path")?;
+        let attempts = attempt.parent().ok_or("attempt collection path")?;
         fs::remove_dir_all(&attempt)?;
 
         let report = sweep(&store, &context, 7, 0, false, &call)?;
@@ -2714,7 +2711,7 @@ mod tests {
         assert!(report.kept.is_empty(), "{:?}", report.kept);
         assert!(store.record(terminal.attempt_id, &call).is_ok());
 
-        fs::remove_dir_all(run)?;
+        fs::remove_dir_all(attempts)?;
         let report = sweep(&store, &context, 7, 0, false, &call)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         Ok(())

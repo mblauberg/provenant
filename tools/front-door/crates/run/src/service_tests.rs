@@ -939,6 +939,7 @@ fn work_context_never_widens_authority() -> TestResult {
         work_item: Some("#1".into()),
         graph_id: Some("graph".into()),
         node_id: Some("node".into()),
+        attempt: Some(1),
         preset: Some("deliver".into()),
         pattern: Some("deliver".into()),
         role: Some("writer".into()),
@@ -952,7 +953,19 @@ fn work_context_never_widens_authority() -> TestResult {
         store.request(plain.attempt_id, &call)?.task,
         store.request(labelled.attempt_id, &call)?.task,
     );
-    assert!(plain.context.is_none() && labelled.context.is_some());
+    assert!(
+        plain
+            .context
+            .as_ref()
+            .is_some_and(|context| context.role.is_none())
+    );
+    assert_eq!(
+        labelled
+            .context
+            .as_ref()
+            .and_then(|context| context.role.as_deref()),
+        Some("writer")
+    );
     assert_eq!(plain.authority_digest, labelled.authority_digest);
     let strip = |mut task: TaskRequest| {
         task.context = None;

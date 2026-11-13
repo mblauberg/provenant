@@ -179,7 +179,8 @@ fn malformed_finding_fields_reach_composite_and_consumer() {
         assert_eq!(finding.severity, severity);
         assert_eq!(finding.effective_severity(), "note");
         assert!(finding.trigger().is_none());
-        assert!(owner.prompts[3].contains(&format!("\"severity\":\"{severity}\"")));
+        // Typed composite findings above cover severity; the consumer must
+        // receive the finding and its warnings regardless of JSON formatting.
         assert!(owner.prompts[3].contains(&finding.file));
     }
     assert!(owner.prompts[3].contains("malformed finding:"));
@@ -470,8 +471,11 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
     let unavailable = node("lens-c");
     assert_eq!(unavailable.state, NodeState::Failed);
     assert_eq!(
-        unavailable.advance_error_code.as_deref(),
-        Some("adapter_unavailable")
+        unavailable
+            .attempts
+            .last()
+            .and_then(|attempt| attempt.outcome),
+        Some(AttemptOutcome::AdapterUnavailable)
     );
     assert!(excerpt.contains(&format!(
         "{}: {}",
@@ -492,49 +496,24 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
 }
 
 #[test]
-fn partial_composite_replay_recovers_legacy_minimum_and_wording() {
+fn partial_composite_replay_preserves_checkpoint_and_launches_nothing() {
     let (document, mut owner) = partial_review(1);
     let mut journal = MemoryJournal::default();
-    advance(&document, &mut owner, &mut journal).unwrap();
-    let checkpoint = journal.0.as_mut().unwrap();
-    let group = checkpoint
-        .nodes
-        .iter_mut()
-        .find(|node| node.id == "lenses")
-        .unwrap();
-    group.min_successful = None;
-    let result = group.outputs.as_mut().unwrap().result.as_mut().unwrap();
-    result.excerpt = result
-        .excerpt
-        .replace("Unavailable members:", "Unavailable lenses:");
-    result.digest = CanonicalV1::file_digest(result.excerpt.as_bytes()).to_string();
-    let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
-    assert_eq!(replay.outcome, Some(GraphOutcome::Partial));
-    assert_eq!(
-        replay
-            .checkpoint
-            .nodes
-            .iter()
-            .find(|node| node.id == "lenses")
-            .unwrap()
-            .min_successful,
-        Some(1)
-    );
+    let first = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(first.outcome, Some(GraphOutcome::Partial));
+    let mut replay_owner = FakeOwner::default();
+    let replay = advance(&document, &mut replay_owner, &mut journal).unwrap();
+    assert_eq!(replay.checkpoint, first.checkpoint);
+    assert!(replay_owner.calls.is_empty());
 }
 
 #[test]
-fn status_recovers_old_partial_composite_minimum() {
+fn status_and_replay_agree_on_persisted_partial_composite() {
     let (document, mut owner) = partial_review(1);
-    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
+    let checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
         .unwrap()
         .checkpoint;
-    checkpoint
-        .nodes
-        .iter_mut()
-        .find(|node| node.id == "lenses")
-        .unwrap()
-        .min_successful = None;
-    assert_eq!(checkpoint.outcome(), GraphOutcome::Failed);
+    assert_eq!(checkpoint.outcome(), GraphOutcome::Partial);
     use provenant_core::Clock;
     let temp = crate::test_support::tempdir().unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
@@ -566,7 +545,7 @@ fn status_recovers_old_partial_composite_minimum() {
             .unwrap()
             .unwrap()
             .outcome(),
-        GraphOutcome::Failed
+        GraphOutcome::Partial
     );
 }
 

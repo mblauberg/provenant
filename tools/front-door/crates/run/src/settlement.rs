@@ -1150,13 +1150,18 @@ mod tests {
             true,
         )?;
         assert!(spawned);
-        assert_eq!(found.len(), 2);
+        assert_eq!(found.len(), 1);
         assert!(
             found.iter().any(|(found, state)| *found == id
                 && matches!(state, crate::Reconciled::Settling { .. }))
         );
-        assert!(found.iter().any(|(found, state)| *found == orphan
-            && matches!(state, crate::Reconciled::Uncertain { .. })));
+        assert!(found.iter().all(|(found, _)| *found != orphan));
+        assert!(
+            store
+                .writer_fences()?
+                .iter()
+                .any(|fence| fence.scope.attempt == orphan)
+        );
         assert!(
             read_sealed(
                 &store.attempt_dir(run.attempt_id, false)?,

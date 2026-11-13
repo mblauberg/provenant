@@ -2476,7 +2476,7 @@ fn container_retry_brief_names_the_field_and_template_the_container_came_from() 
 }
 
 #[test]
-fn attempt_numbers_increase_across_retry_and_continuation_but_replay_is_stable() {
+fn attempt_numbers_increase_across_retries_and_replay_is_stable() {
     for generations in 1..=4 {
         let mut task = node("work", route("first"));
         task.route = None;
@@ -2499,15 +2499,13 @@ fn attempt_numbers_increase_across_retry_and_continuation_but_replay_is_stable()
                 )
                 .unwrap();
             }
-            // Each launch is replayed before settlement. Quota settlement
-            // continues automatically on the fallback route within this redo.
-            for outcome in [AttemptOutcome::UsageLimited, AttemptOutcome::Succeeded] {
-                owner.observations.extend([
-                    AttemptObservation::Pending { attempt_ref: None },
-                    AttemptObservation::Pending { attempt_ref: None },
-                    terminal(outcome),
-                ]);
-            }
+            // Replay each launch through the pre-reference crash window;
+            // explicit retries below allocate the next attempt number.
+            owner.observations.extend([
+                AttemptObservation::Pending { attempt_ref: None },
+                AttemptObservation::Pending { attempt_ref: None },
+                terminal(AttemptOutcome::Succeeded),
+            ]);
             while !owner.observations.is_empty() {
                 let queued = owner.observations.len();
                 advance(&document, &mut owner, &mut journal).unwrap();

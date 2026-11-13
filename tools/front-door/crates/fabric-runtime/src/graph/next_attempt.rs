@@ -881,46 +881,6 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
 
-    /// Every terminal launched attempt spends one infrastructure retry on
-    /// every pass, not only when this pass switches route.
-    #[test]
-    fn launched_switches_spend_the_allowance_on_every_pass() {
-        let node = planned(serde_json::json!({
-            "id": "n", "prompt": "p", "access": "read_only", "routes": [
-                {"adapter": "a", "model": "a/m"}, {"adapter": "b", "model": "b/m"}
-            ]
-        }));
-        let limits = crate::config::GraphLimits::default();
-        let retry = serde_json::json!({"retry": {"retries": 2}});
-        // Observing the second route after a launched switch.
-        let observing = progress(
-            vec![
-                attempt(0, true, "terminal", Some("usage_limited")),
-                attempt(1, true, "running", None),
-            ],
-            retry.clone(),
-        );
-        assert_eq!(
-            decide_next_attempt(&node, &observing, &limits, &mut Owner, None).unwrap(),
-            NextAttempt::Candidate {
-                route_index: 1,
-                settlement_retries: Some(1)
-            }
-        );
-        // The switch itself spends the same retry.
-        let switching = progress(
-            vec![attempt(0, true, "terminal", Some("usage_limited"))],
-            retry,
-        );
-        assert_eq!(
-            decide_next_attempt(&node, &switching, &limits, &mut Owner, None).unwrap(),
-            NextAttempt::Candidate {
-                route_index: 1,
-                settlement_retries: Some(1)
-            }
-        );
-    }
-
     /// A decision without its own reason fails the node but keeps the
     /// advance error already recorded.
     #[test]

@@ -1795,7 +1795,7 @@ mod tests {
                 }
             }
         }
-        let route = resolve(&request_for("custom/not-in-catalogue-at-all")?, &context)?;
+        let route = resolve(&request_for("codex/not-in-catalogue-at-all")?, &context)?;
         assert!(config.opus_writer_advisory(&catalogue, &route).is_none());
         Ok(())
     }

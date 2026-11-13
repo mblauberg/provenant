@@ -88,17 +88,18 @@ fn bare_name_no_provider_offers_is_unknown() -> Result<(), Box<dyn std::error::E
 fn pool_excludes_unsupported_effort_but_exact_and_user_pool_allow_it()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut catalogue = Catalogue::bundled()?;
-    let target = ModelId::parse("alpha/effort-model")?;
-    catalogue.models.push(ModelEntry {
-        model: target.clone(),
-        free: false,
-        evidence_ref: "evidence".into(),
-        efforts: vec!["low".into(), "high".into()],
-        family: None,
-        trains_on_prompts: None,
-        monthly_allowance_usd: None,
-        quota_pool: None,
-    });
+    // Configured pools are validated against the bundled catalogue. Select
+    // a real model with both efforts rather than inventing a pool-only model.
+    let target = catalogue
+        .models
+        .iter()
+        .find(|entry| {
+            let has = |effort| entry.efforts.iter().any(|value| value == effort);
+            entry.model.adapter() == "codex" && has("low") && has("high")
+        })
+        .ok_or("bundled Codex model supporting low and high")?
+        .model
+        .clone();
     // Pool allows only "low"
     catalogue.pools.insert(
         "test-pool".into(),
@@ -113,23 +114,33 @@ fn pool_excludes_unsupported_effort_but_exact_and_user_pool_allow_it()
     let config = RoutingConfig::default();
     let available = [AvailabilityRecord {
         schema_version: 1,
-        adapter: "alpha".into(),
+        adapter: "codex".into(),
         executable: "/fixture".into(),
         version: "fixture".into(),
         fixture_ref: "test".into(),
         catalogue_revision: catalogue.revision().into(),
-        account_key: None,
-        observed_models: vec!["effort-model".into()],
+        account_key: Some("opaque-account".into()),
+        observed_models: vec![target.model().to_owned()],
         observed_unix_seconds: 0,
         expires_unix_seconds: 10_000,
         last_update: None,
     }];
     let access = [AccessContext {
-        adapter: "alpha",
+        adapter: "codex",
         disclosure_ref: "fixture",
         confinement_ref: "fixture",
     }];
+    let reads = vec![observation(
+        "codex",
+        "opaque-account",
+        target.as_str(),
+        provenant_quota::ReadinessState::Ready,
+        None,
+        (80, 120),
+    )];
+    let lookup = readiness_over(reads);
     let ctx = RoutingContext {
+        readiness: Some(&lookup),
         availability: &available,
         access: &access,
         ..context(&catalogue, &config, now()?)

@@ -396,6 +396,11 @@ impl WriterLaunch {
         } else {
             source.refs.current_path()?
         };
+        let branch = self
+            .branch
+            .as_str()
+            .strip_prefix("refs/heads/")
+            .ok_or(RunError::Validation("writer needs a local branch"))?;
         let upstream = crate::objects::command(
             &git,
             &upstream_dir,
@@ -403,7 +408,7 @@ impl WriterLaunch {
             &[
                 "rev-parse".into(),
                 "--verify".into(),
-                format!("{}@{{upstream}}", self.branch.as_str()).into(),
+                format!("{branch}@{{upstream}}").into(),
             ],
             None,
         )?;

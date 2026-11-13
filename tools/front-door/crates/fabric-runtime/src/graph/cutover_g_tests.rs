@@ -12,8 +12,8 @@ fn obsolete_graph_continuation_is_rejected_during_decode() {
 #[test]
 fn skipped_required_inputs_are_recorded_in_the_plan() {
     let document: GraphDocument = serde_json::from_value(json!({"schema_version":1,"graph_id":"g","nodes":[
-        {"id":"a","access":"read_only","prompt":"a","when":[{"name":"on","expected":"true","actual":"false"}]},
-        {"id":"b","access":"read_only","prompt":"b","depends_on":["a"],"inputs":[{"node":"a","outputs":["result"],"required_outputs":["result"]}]}
+        {"id":"a","access":"read_only","prompt":"a","route":{"adapter":"a","model":"a/m"},"when":[{"name":"on","expected":"true","actual":"false"}]},
+        {"id":"b","access":"read_only","prompt":"b","route":{"adapter":"a","model":"a/m"},"depends_on":["a"],"inputs":[{"node":"a","outputs":["result"],"required_outputs":["result"]}]}
     ]})).unwrap();
     let pruned = when::prune(&document).unwrap().unwrap();
     assert!(pruned.nodes[0].extra.contains_key("removed_requirements"));

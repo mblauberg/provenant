@@ -1056,7 +1056,9 @@ impl RunStore {
         }
         let defer_writer_cleanup = matches!(expected, AttemptState::Starting { .. });
         self.record(id, call)?;
-        let dir = self.attempt_dir(id, false)?;
+        // The queued DB transaction can outlive an interrupted directory
+        // publication. A starting attempt must retain its launch evidence.
+        let dir = self.attempt_dir(id, matches!(expected, AttemptState::Queued { .. }))?;
         let writer = dir.lock(
             OsStr::new("publication.lock"),
             LockMode::Exclusive,
@@ -1729,8 +1731,14 @@ impl RunStore {
             return Err(RunError::Validation("terminal state missing"));
         };
         let id = old.attempt_id;
-        let request = self.request(old.attempt_id, call)?;
-        let reaction = self.freeze_reaction(next, request.task.writer.is_some())?;
+        let writer = match self.request(old.attempt_id, call) {
+            Ok(request) => request.task.writer.is_some(),
+            // A queued row may survive before its request directory is
+            // published. With no launch there are no writer effects to report.
+            Err(RunError::NotFound) if matches!(old.state, AttemptState::Queued { .. }) => false,
+            Err(error) => return Err(error),
+        };
+        let reaction = self.freeze_reaction(next, writer)?;
         let attempt = self.attempt_dir(id, false)?;
         let mut receipts = SettlementReceipts {
             cancellation: next.cancellation_disposition,
