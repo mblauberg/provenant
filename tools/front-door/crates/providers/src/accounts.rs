@@ -14,6 +14,8 @@ use std::{
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
+    /// No registrations is the default, so a configuration without them reads.
+    #[serde(default)]
     pub entries: std::collections::BTreeMap<String, Registration>,
     /// Claude settings kept identical across account directories.
     #[serde(default, skip_serializing_if = "Option::is_none")]
