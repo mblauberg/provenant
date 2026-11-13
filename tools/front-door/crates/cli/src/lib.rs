@@ -1364,6 +1364,18 @@ mod tests {
                     "{path} omits --{long}"
                 );
             }
+            for argument in command
+                .get_arguments()
+                .filter(|argument| argument.is_hide_set())
+            {
+                let Some(long) = argument.get_long() else {
+                    continue;
+                };
+                assert!(
+                    !rendered.contains(&format!("--{long}")),
+                    "{path} exposes hidden --{long}"
+                );
+            }
             paths.push(path.clone());
             for child in command.get_subcommands() {
                 check(
@@ -1406,6 +1418,18 @@ mod tests {
                 assert!(
                     text.contains(&format!("--{long}")),
                     "{path} --help omits --{long}"
+                );
+            }
+            for argument in command
+                .get_arguments()
+                .filter(|argument| argument.is_hide_set())
+            {
+                let Some(long) = argument.get_long() else {
+                    continue;
+                };
+                assert!(
+                    !text.contains(&format!("--{long}")),
+                    "{path} --help exposes hidden --{long}"
                 );
             }
         }
@@ -1533,28 +1557,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn run_operation_identity_is_an_advanced_option() {
-        for (args, expected) in [
-            (vec!["help", "run"], false),
-            (vec!["help", "run", "--all"], true),
-        ] {
-            let ParseOutcome::Help { catalog, .. } = parsed(&args) else {
-                panic!("help");
-            };
-            let run = catalog
-                .commands
-                .iter()
-                .find(|command| command.command == "provenant run")
-                .unwrap();
-            assert_eq!(
-                run.arguments
-                    .iter()
-                    .any(|argument| argument.name == "operation_id"),
-                expected
-            );
-        }
-    }
     #[test]
     fn compact_run_help_keeps_skill_prescribed_options_visible() {
         let ParseOutcome::Help { catalog, .. } = parsed(&["help", "run"]) else {
@@ -1720,19 +1722,8 @@ mod tests {
                 .is_some_and(|text| !text.is_empty())
         );
         for name in [
-            "brief",
-            "template",
-            "tier",
-            "model",
-            "effort",
-            "account",
-            "host",
-            "operation_id",
-            "over",
-            "set",
-            "file",
-            "explain",
-            "wait",
+            "brief", "template", "tier", "model", "effort", "account", "host", "over", "set",
+            "file", "explain", "wait",
         ] {
             assert!(
                 run.arguments.iter().any(|argument| argument.name == name),
