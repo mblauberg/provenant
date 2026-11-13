@@ -74,6 +74,8 @@ mod implementation_delivery_invariants;
 #[cfg(test)]
 mod next_step_tests;
 #[cfg(test)]
+mod submission_implement_invariants;
+#[cfg(test)]
 mod typed_records_tests;
 #[cfg(test)]
 mod when_requirement_invariants;

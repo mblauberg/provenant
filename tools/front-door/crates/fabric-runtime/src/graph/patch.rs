@@ -896,10 +896,12 @@ pub fn submission(
         .unwrap_or_default();
     for (index, node) in document.nodes.iter().enumerate() {
         let mut raw = serde_json::to_value(node).map_err(|e| PatchError::invalid(e.to_string()))?;
-        // Snapshot compiled nodes without inheriting dotted template behaviour
-        // a second time. Explicit extensions retain their provenance.
+        // Snapshot compiled nodes without inheriting template behaviour a
+        // second time. Bare implement also inserts a sizing plan, which must
+        // not run again after the original brief has already been compiled.
+        // Explicit extensions retain their provenance.
         let original = raw.get("template").and_then(Value::as_str).unwrap_or("raw");
-        let name = if original.contains('.') {
+        let name = if original == "implement" || original.contains('.') {
             format!("submission-node-{index}")
         } else {
             original.to_owned()
