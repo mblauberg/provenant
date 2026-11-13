@@ -265,6 +265,7 @@ struct PreviewReporter {
     home: Option<PathBuf>,
     reset: Option<crate::state_reset::Plan>,
     reset_state: Option<PathBuf>,
+    receipt_state_format: Option<u64>,
 }
 impl PreviewReporter {
     fn before_remove_with(
@@ -298,6 +299,9 @@ impl PreviewReporter {
     }
 }
 impl InstallReporter for PreviewReporter {
+    fn receipt_state_format_version(&self) -> Option<u64> {
+        self.receipt_state_format
+    }
     fn receipt_required(&self) -> bool {
         self.reset.is_some()
     }
@@ -1099,11 +1103,15 @@ fn apply_install(
             super::tick_agent::retire_gc(&home)
                 .map_err(|error| InstallError::AgentRetirement(error.to_string()))?;
         }
+        // Intermediate receipts must not claim the state transition finished:
+        // a later batch can fail while only old artifacts (no DB header) remain.
+        reporter.receipt_state_format = reset.as_ref().map(|_| 1);
         let batch_count = batches.len();
         for (index, batch) in batches.into_iter().enumerate() {
             // Only the final batch may reset state: every real batch write
             // must have succeeded before deletion and its final receipt.
             if index + 1 == batch_count {
+                reporter.receipt_state_format = None;
                 reporter.reset = reset.take();
                 reporter.reset_state = Some(state.clone());
             }

@@ -456,6 +456,11 @@ pub struct ManualInclude {
 
 /// Preview must succeed before any root, lock, staging file or receipt is made.
 pub trait InstallReporter {
+    /// Keep intermediate batch receipts on the unfinished state format until
+    /// the final batch completes its state transition.
+    fn receipt_state_format_version(&self) -> Option<u64> {
+        None
+    }
     /// Request a receipt publication even when its bytes are unchanged, so an
     /// external state transition still has a final commit boundary.
     fn receipt_required(&self) -> bool {
@@ -1260,8 +1265,18 @@ pub fn install(
     smoke: &dyn ReleaseSmoke,
     dry_run: bool,
 ) -> Result<InstallOutcome, InstallError> {
+    let mut receipt = plan.receipt.clone();
+    if let Some(version) = reporter.receipt_state_format_version() {
+        receipt.state_format_version = version;
+    }
+    let receipt_bytes = provenant_records::encode(&receipt)?;
+    if receipt_bytes.len() as u64 > Limits::CONFIG.max_bytes {
+        return Err(InstallError::Manifest("receipt byte bound"));
+    }
     let mut actions = plan.actions.clone();
-    if reporter.receipt_required() && !actions.iter().any(|a| a.selector == "receipt") {
+    if reporter.receipt_required()
+        || receipt.state_format_version != plan.receipt.state_format_version
+    {
         let path = plan
             .targets
             .roots
@@ -1273,11 +1288,18 @@ pub fn install(
             .entries
             .get(&path)
             .ok_or_else(|| InstallError::Drift(path.clone()))?;
-        actions.push(receipt_action(
-            &path,
-            current,
-            &provenant_records::encode(&plan.receipt)?,
-        )?);
+        actions.retain(|action| action.selector != "receipt");
+        if reporter.receipt_required()
+            || current.as_ref().is_none_or(|snapshot| {
+                snapshot.value
+                    != (Value::File {
+                        bytes: receipt_bytes.clone(),
+                        mode: 0o600,
+                    })
+            })
+        {
+            actions.push(receipt_action(&path, current, &receipt_bytes)?);
+        }
     }
     reporter.preview(&actions).map_err(InstallError::Preview)?;
     reporter
@@ -1350,7 +1372,7 @@ pub fn install(
             } else {
                 let value = if action.selector == "receipt" {
                     Value::File {
-                        bytes: provenant_records::encode(&plan.receipt)?,
+                        bytes: receipt_bytes.clone(),
                         mode: 0o600,
                     }
                 } else {

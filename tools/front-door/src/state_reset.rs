@@ -170,8 +170,8 @@ pub(crate) fn plan(state: &Path, receipt_format: Option<u64>) -> io::Result<Opti
             "reset requires a Provenant install directory or receipt",
         ));
     }
-    // The current OS capability can retire regular owner locks, but cannot
-    // unlink a lock-named symlink. Refuse before any archive move or deletion.
+    // Refuse unsupported entries before any archive move or deletion. Regular
+    // owner locks require custody; observed symlinks are unlinked without following.
     for entry in &entries {
         check_removal(&entry.parent, &entry.name)?;
     }

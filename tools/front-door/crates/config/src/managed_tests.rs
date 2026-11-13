@@ -1271,6 +1271,95 @@ fn context<'a>(clock: &'a SystemClock, cancel: &'a CancelToken) -> InstallContex
     }
 }
 #[test]
+fn intermediate_receipt_does_not_complete_reset_when_a_later_batch_fails() {
+    struct ResetBatch {
+        marker: PathBuf,
+        pending: bool,
+        refuse: bool,
+    }
+    impl InstallReporter for ResetBatch {
+        fn preview(&mut self, _: &[Action]) -> io::Result<()> {
+            Ok(())
+        }
+        fn receipt_state_format_version(&self) -> Option<u64> {
+            self.pending.then_some(1)
+        }
+        fn before_receipt(&mut self) -> io::Result<()> {
+            if self.pending {
+                return Ok(());
+            }
+            if self.refuse {
+                return Err(io::Error::other("reset refused"));
+            }
+            fs::remove_file(&self.marker)
+        }
+    }
+    let f = Fixture::new();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let marker = f.base.join("old-artifacts-without-store-header");
+    fs::write(&marker, "old state").unwrap();
+    let mut batch = ResetBatch {
+        marker: marker.clone(),
+        pending: true,
+        refuse: false,
+    };
+    install(
+        &f.plan(),
+        &context(&clock, &cancel),
+        &mut batch,
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    assert!(marker.exists());
+    assert_eq!(
+        read_receipt(&f.targets)
+            .unwrap()
+            .unwrap()
+            .state_format_version,
+        1
+    );
+    batch.pending = false;
+    batch.refuse = true;
+    assert!(
+        install(
+            &f.plan(),
+            &context(&clock, &cancel),
+            &mut batch,
+            &Smoke,
+            false
+        )
+        .is_err()
+    );
+    assert!(marker.exists());
+    assert_eq!(
+        read_receipt(&f.targets)
+            .unwrap()
+            .unwrap()
+            .state_format_version,
+        1
+    );
+    batch.refuse = false;
+    install(
+        &f.plan(),
+        &context(&clock, &cancel),
+        &mut batch,
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    assert!(!marker.exists());
+    assert_eq!(
+        read_receipt(&f.targets)
+            .unwrap()
+            .unwrap()
+            .state_format_version,
+        provenant_records::STATE_FORMAT_VERSION
+    );
+}
+
+#[test]
 fn receipt_callback_runs_only_after_writes_and_can_require_an_unchanged_receipt() {
     struct Boundary<'a> {
         fixture: &'a Fixture,
