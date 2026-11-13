@@ -6,7 +6,7 @@ use provenant_cli as cli;
 use provenant_config::shared_settings::SharedSettings;
 use provenant_config::{
     AccountHome, Action, HarnessTarget, InstallContext, InstallError, InstallFinding,
-    InstallOutcome, InstallReporter, ManualInclude, Targets,
+    InstallOutcome, InstallReporter, ManualInclude, ReleaseSmoke, Targets,
 };
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_fabric_runtime::peer_agent::{AgentError, launchctl};
@@ -616,17 +616,23 @@ fn output_install_noted(
 fn read_install_receipt(
     targets: &Targets,
 ) -> Result<Option<provenant_records::InstallReceipt>, InstallError> {
-    let path = targets.roots.state.as_path().join("install/receipt.json");
-    match std::fs::File::open(&path) {
-        Ok(file) => provenant_records::decode_v1(file, provenant_records::Limits::CONFIG)
-            .map(Some)
-            .map_err(InstallError::ReceiptDecode),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(InstallError::Fs(provenant_os::fs::FsError::Io {
-            operation: "read install receipt",
-            path,
-            source,
-        })),
+    let path = targets.roots.state.as_path().join("install");
+    let directory = match provenant_os::fs::Directory::open_anchor(&path) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(InstallError::Fs(error)),
+    };
+    match directory.read_stable(
+        OsStr::new("receipt.json"),
+        provenant_records::Limits::CONFIG.max_bytes,
+    ) {
+        Ok(bytes) => {
+            provenant_records::decode_v1(bytes.as_slice(), provenant_records::Limits::CONFIG)
+                .map(Some)
+                .map_err(InstallError::ReceiptDecode)
+        }
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(error) => Err(InstallError::Fs(error)),
     }
 }
 
@@ -858,7 +864,12 @@ impl Refused {
             Self::Edge(error) => edge_error(command, error, globals),
             Self::Install(error) => install_error(command, &error, globals),
             Self::Fail(status, code, message) => {
-                super::fail(command, status, code, &message, globals)
+                let exit = super::fail(command, status, code, &message, globals);
+                if code == crate::state_reset::BLOCKED {
+                    crate::state_reset::ACK_REQUIRED
+                } else {
+                    exit
+                }
             }
         }
     }
@@ -889,11 +900,9 @@ struct SyncOptions {
 }
 
 pub(super) fn run_install(args: cli::Install, globals: &cli::Globals) -> u8 {
+    let mut args = args;
     if args.upgrade_preflight {
-        return match upgrade_preflight(globals, args.reset_state) {
-            Ok(()) => 0,
-            Err(refused) => refused.emit("install", globals),
-        };
+        args.dry_run = true;
     }
     match apply_install(args, globals, true, SyncOptions::default()) {
         Ok(applied) => output_install(
@@ -916,17 +925,12 @@ fn apply_install(
     agents: bool,
     options: SyncOptions,
 ) -> Result<Applied, Refused> {
-    if !args.dry_run
-        && let Some(plan) = reset_gate(globals, args.reset_state)?
-    {
-        crate::state_reset::remove(&plan).map_err(|error| {
-            Refused::Fail(
-                Outcome::Error,
-                "STATE_RESET_FAILED",
-                format!("Cannot remove dropped state: {error}"),
-            )
-        })?;
-    }
+    // Receipt errors and downgrade attempts are refusals, never guessed formats.
+    // Dry runs describe the same reset without requiring acknowledgement.
+    reset_gate(
+        globals,
+        args.reset_state || (args.dry_run && !args.upgrade_preflight),
+    )?;
     args.source = provenant_core::PathResolver::resolve_existing_ancestor(
         &provenant_os::fs::SystemPathResolver,
         &args.source,
@@ -1027,6 +1031,41 @@ fn apply_install(
                 &smoke,
                 env!("PROVENANT_TARGET_TRIPLE"),
             )?;
+        }
+        // A dry-run install does not execute smoke checks. Complete the real
+        // release checks after every target preview and before destructive work.
+        let release =
+            provenant_config::Release::read(&args.source, env!("PROVENANT_TARGET_TRIPLE"))?;
+        let identity = smoke
+            .check(&release, &cancel)
+            .map_err(InstallError::Smoke)?;
+        if identity.source_digest != release.manifest().source_digest
+            || identity.asset_digest != release.manifest().asset_digest
+            || identity.target != release.manifest().target
+            || identity.toolchain != release.manifest().toolchain
+        {
+            return Err(InstallError::Manifest(
+                "binary identity differs from release manifest",
+            ));
+        }
+        if !args.dry_run {
+            let plan = reset_gate(globals, args.reset_state)
+                .map_err(|error| InstallError::AgentRetirement(error.message()))?;
+            if let Some(plan) = plan {
+                // On failure leave services stopped; the install is rerunnable.
+                crate::state_reset::remove(&plan, || {
+                    if provenant_fabric_runtime::peer_agent::eligible(&state, &home) {
+                        provenant_fabric_runtime::peer_agent::stop(&home).map_err(io::Error::other)?;
+                        retire_disk_guard(&home).map_err(io::Error::other)?;
+                        super::tick_agent::retire_gc(&home).map_err(io::Error::other)?;
+                    }
+                    if super::tick_agent::eligible(&state, &home) {
+                        super::tick_agent::stop(&home).map_err(io::Error::other)?;
+                    }
+                    Ok(())
+                }).map_err(|error| InstallError::AgentRetirement(format!(
+                    "STATE_RESET_FAILED: {error}; agents remain stopped; rerun install --reset-state")))?;
+            }
         }
         if agents && !args.dry_run && provenant_fabric_runtime::peer_agent::eligible(&state, &home)
         {
@@ -1521,13 +1560,6 @@ struct UpgradeRunner {
     cwd: PathBuf,
 }
 
-fn installed_state_format_version(targets: &Targets) -> Option<u64> {
-    match read_install_receipt(targets) {
-        Ok(Some(receipt)) => Some(receipt.state_format_version),
-        _ => None,
-    }
-}
-
 /// Decide the format break for this host. `Ok(None)` means nothing to reset;
 /// `Ok(Some(plan))` means the reset may proceed and is already described on
 /// stdout. A refusal carries the one typed code and changes nothing.
@@ -1537,17 +1569,33 @@ fn reset_gate(
 ) -> Result<Option<crate::state_reset::Plan>, Refused> {
     let (environment, targets) = selected_targets(globals, &[])?;
     let state = targets.roots.state.as_path();
-    let receipt = installed_state_format_version(&targets);
-    let Some(plan) = crate::state_reset::plan(state, receipt) else {
+    let receipt = read_install_receipt(&targets)?.map(|receipt| receipt.state_format_version);
+    if receipt.is_some_and(|version| version > provenant_records::STATE_FORMAT_VERSION) {
+        return Err(Refused::Fail(
+            Outcome::Refused,
+            "STATE_FORMAT_NEWER",
+            "The installed state format is newer than this binary; downgrade refused".into(),
+        ));
+    }
+    let Some(plan) = crate::state_reset::plan(state, receipt).map_err(|error| {
+        Refused::Fail(Outcome::Refused, "STATE_RESET_UNSAFE", error.to_string())
+    })?
+    else {
         return Ok(None);
     };
     let blocked =
         |message: String| Refused::Fail(Outcome::Refused, crate::state_reset::BLOCKED, message);
-    if let Some(lane) = crate::state_reset::live_lane(state) {
-        return Err(blocked(format!(
-            "A Provenant lane process is live ({}); let it finish or stop it, then rerun",
-            lane.display()
-        )));
+    if let Some(lane) = crate::state_reset::live_lane(&plan)
+        .map_err(|error| Refused::Fail(Outcome::Refused, "STATE_RESET_UNSAFE", error.to_string()))?
+    {
+        return Err(Refused::Fail(
+            Outcome::Refused,
+            "STATE_RESET_LIVE",
+            format!(
+                "A Provenant lane process is live ({}); let it finish or stop it, then rerun",
+                lane.display()
+            ),
+        ));
     }
     let unlanded = unlanded_worktrees(&environment.project);
     let description = crate::state_reset::describe(&plan, state, &unlanded);
@@ -1601,11 +1649,6 @@ fn unlanded_worktrees(project: &Path) -> Vec<String> {
             (count.parse::<u64>().ok()? > 0).then(|| format!("{} ({count})", worktree.display()))
         })
         .collect()
-}
-
-/// Run the gate for the staged binary before it replaces the installed one.
-fn upgrade_preflight(globals: &cli::Globals, reset_state: bool) -> Result<(), Refused> {
-    reset_gate(globals, reset_state).map(|_| ())
 }
 
 impl UpgradeRunner {
@@ -1673,6 +1716,9 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         }
         Err(error) => return install_error("upgrade", &error, globals),
     }
+    if let Err(error) = reset_gate(globals, args.reset_state) {
+        return error.emit("upgrade", globals);
+    }
     let upgraded = (|| -> Result<Vec<HostUpgrade>, String> {
         let config = provenant_config::read_with_domains(&targets.roots, &cli::domains::SECTIONS)
             .map_err(|error| error.to_string())?;
@@ -1684,7 +1730,8 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
             cwd: targets.home.clone(),
         };
         // Resolve latest once so every host downloads the same tag, even during a release.
-        let mut install_args: Vec<std::ffi::OsString> = vec!["--upgrade".into()];
+        let mut install_args: Vec<std::ffi::OsString> =
+            vec!["--upgrade".into(), "--non-interactive".into()];
         if args.yes {
             install_args.push("--yes".into());
         }
@@ -1793,19 +1840,14 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                 output,
             },
         };
-        let mut results = vec![report(
-            "local".into(),
-            runner.execute(&local, None, 1_048_576, 3600),
-        )];
-        if !results[0].success {
-            return Ok(results);
-        }
-        // SSH uses Fabric's validated destination, batch mode and connection deadline.
+        let mut commands: Vec<(String, Vec<std::ffi::OsString>, &[u8])> =
+            vec![("local".to_owned(), local, &[])];
+        // Construct the entire fleet before running either phase.
         for (name, peer) in fabric.peers {
             let (command, input) = if let Some(archive) = &source_archive {
                 (
                     format!(
-                        "set -eu; scratch=$(mktemp -d); trap 'rm -rf \"$scratch\"' 0; tar -xzf - -C \"$scratch\"; git -C \"$scratch\" init -q </dev/null; git -C \"$scratch\" add -f . </dev/null; sh \"$scratch/install.sh\" --upgrade {} {} --from-source \"$scratch\" </dev/null",
+                        "set -eu; scratch=$(mktemp -d); trap 'rm -rf \"$scratch\"' 0; tar -xzf - -C \"$scratch\"; git -C \"$scratch\" init -q </dev/null; git -C \"$scratch\" add -f . </dev/null; sh \"$scratch/install.sh\" --upgrade --non-interactive {} {} --from-source \"$scratch\"",
                         if args.yes { "--yes" } else { "" },
                         if args.reset_state {
                             "--reset-state"
@@ -1817,7 +1859,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                 )
             } else {
                 let command = format!(
-                    "sh -c '{}' install.sh {} </dev/null",
+                    "sh -c '{}' install.sh {}",
                     script.replace('\'', "'\\''"),
                     install_args
                         .iter()
@@ -1841,6 +1883,29 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                 peer.destination.into(),
                 command.into(),
             ];
+            commands.push((name, argv, input));
+        }
+        // No host is allowed to reset until every host's source, target
+        // previews, smoke checks and acknowledgement have passed.
+        let mut results = Vec::new();
+        for (name, argv, input) in &commands {
+            let mut preflight = argv.clone();
+            if name == "local" {
+                preflight.push("--preflight-only".into());
+            } else {
+                let last = preflight.last_mut().ok_or("missing SSH command")?;
+                last.push(" --preflight-only </dev/null");
+            }
+            let host = report(
+                name.clone(),
+                runner.execute(&preflight, Some(*input), 1_048_576, 3600),
+            );
+            if !host.success {
+                results.push(host);
+                return Ok(results);
+            }
+        }
+        for (name, argv, input) in commands {
             results.push(report(
                 name,
                 runner.execute(&argv, Some(input), 1_048_576, 3600),

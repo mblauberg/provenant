@@ -1,6 +1,7 @@
 #!/bin/sh
 # Bootstrap a verified release. Exit: 2 usage, 3 toolchain consent, 4 download/checksum,
-# 5 build/package; installation failures retain the CLI's exit code.
+# 5 build/package, 6 state-format acknowledgement required; other installation
+# failures retain the CLI's exit code.
 # Parse the entire download before executing any of it.
 main() {
 set -eu
@@ -18,6 +19,8 @@ ask() {
 
 yes=false
 reset=false
+preflight_only=false
+non_interactive=false
 source_dir=
 tag=
 state=${PROVENANT_STATE_DIR:-"$HOME/.local/share/provenant/v1"}
@@ -36,6 +39,8 @@ while [ "$#" -gt 0 ]; do
             case "$1" in --tag) tag=$2 ;; --state-dir) state=$2 ;; --bin-dir) bin_dir=$2 ;; esac
             shift 2 ;;
         --upgrade) upgrade=true; shift ;;
+        --preflight-only) preflight_only=true; shift ;;
+        --non-interactive) non_interactive=true; shift ;;
         --help)
             printf '%s\n' 'Usage: install.sh [--yes] [--reset-state] [--upgrade] [--source|--from-source [DIR]] [--tag TAG] [--state-dir DIR] [--bin-dir DIR]'
             exit 0 ;;
@@ -54,8 +59,10 @@ fi
 receipt=$state/install/receipt.json
 if "$upgrade" && [ ! -f "$receipt" ]; then die 2 'No install receipt; run install first'; fi
 
+if "$preflight_only" && ! "$upgrade"; then die 2 '--preflight-only requires --upgrade'; fi
+
 guided=false
-if ! "$yes" && [ ! -f "$receipt" ]; then
+if ! "$non_interactive" && ! "$yes" && [ ! -f "$receipt" ]; then
     if { [ -t 1 ] && ( : </dev/tty ) 2>/dev/null; } || [ "${PROVENANT_INSTALL_TTY:-}" = 1 ]; then guided=true; fi
 fi
 umask 077
@@ -187,7 +194,7 @@ if [ -n "$source_dir" ]; then
     export PATH
     if ! command -v rustup >/dev/null 2>&1 || ! rustup run "$toolchain" rustc --version </dev/null >/dev/null 2>&1; then
         if ! "$yes"; then
-            if ( : </dev/tty ) 2>/dev/null || [ "${PROVENANT_INSTALL_TTY:-}" = 1 ]; then
+            if ! "$non_interactive" && { ( : </dev/tty ) 2>/dev/null || [ "${PROVENANT_INSTALL_TTY:-}" = 1 ]; }; then
                 ask "Install Rust $toolchain with rustup? y/n" n
                 case "$answer" in y|Y|yes) ;; *) die 3 'Toolchain installation declined' ;; esac
             else die 3 'Pinned Rust toolchain missing; rerun with --yes to install it'; fi
@@ -275,16 +282,23 @@ if "$upgrade"; then
         :
     else
         preflight_status=$?
-        [ "$preflight_status" -eq 2 ] || die "$preflight_status" 'Upgrade preflight could not inspect state'
-        if ! "$reset" && { ( : </dev/tty ) 2>/dev/null || [ "${PROVENANT_INSTALL_TTY:-}" = 1 ]; }; then
+        [ "$preflight_status" -eq 6 ] || die "$preflight_status" 'Upgrade preflight could not inspect state'
+        if ! "$non_interactive" && ! "$reset" && { ( : </dev/tty ) 2>/dev/null || [ "${PROVENANT_INSTALL_TTY:-}" = 1 ]; }; then
             ask "Type reset to delete the dropped state listed above" no
             [ "$answer" = reset ] && reset=true
         fi
-        if ! "$reset" || ! preflight; then
-            die 2 'Upgrade stopped by preflight; rerun with --reset-state to acknowledge'
+        if ! "$reset"; then
+            die 6 'Upgrade stopped by preflight; rerun with --reset-state to acknowledge'
+        fi
+        if preflight; then
+            :
+        else
+            preflight_status=$?
+            die "$preflight_status" 'Upgrade preflight failed after acknowledgement'
         fi
     fi
 fi
+if "$preflight_only"; then exit 0; fi
 
 # Existing receipts always use their recorded selection, paths and hooks, and
 # every registered account directory is installed too.

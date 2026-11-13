@@ -1802,7 +1802,7 @@ fn upgrade_pins_one_release_replays_settings_and_reports_peer_failure() -> Resul
     fs::write(
         &ssh,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncat >/dev/null\nexit 17\n",
+            "#!/bin/sh\nprintf '%s\n' \"$@\" > '{}'\ncat >/dev/null\ncase \"$*\" in *--preflight-only*) [ -z \"${{PROVENANT_TEST_PEER_REFUSE:-}}\" ] && exit 0 ;; esac\nexit 17\n",
             ssh_args.display()
         ),
     )?;
@@ -2006,6 +2006,18 @@ esac
         assert!(!installed_app.join(MENU_EXECUTABLE).exists());
     }
     fs::write(&curl_log, "")?;
+    rig.env
+        .push(("PROVENANT_TEST_PEER_REFUSE".into(), "1".into()));
+    let before_peer_refusal = snapshot(&rig.state)?;
+    let result = rig.command(&["upgrade", "--hosts", "all", "--json"])?;
+    let value: serde_json::Value = serde_json::from_slice(&result.stdout.bytes)?;
+    assert_eq!(value["data"][0]["host"], "worker", "{value}");
+    assert_eq!(value["data"][0]["success"], false);
+    assert_ne!(code(&result), 0);
+    assert_eq!(snapshot(&rig.state)?, before_peer_refusal);
+    rig.env
+        .retain(|(key, _)| key != "PROVENANT_TEST_PEER_REFUSE");
+    fs::write(&curl_log, "")?;
     let result = rig.command(&["upgrade", "--hosts", "all", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&result.stdout.bytes)?;
     assert_eq!(value["data"][0]["host"], "local", "{value}");
@@ -2018,18 +2030,24 @@ esac
     assert!(arguments.contains("'--tag' 'v9.8.7'"));
     assert!(arguments.contains("-oBatchMode=yes"));
     let downloads = fs::read_to_string(&curl_log)?;
-    assert_eq!(
-        downloads
-            .matches("provenant-apps-aarch64-apple-darwin.tar.gz\n")
-            .count(),
-        1
+    // Preflight and apply may each fetch artifacts. Every fetch must stay
+    // pinned, and the app archive must always have its checksum available.
+    let artifacts: Vec<_> = downloads
+        .lines()
+        .filter(|url| url.contains("/download/"))
+        .collect();
+    assert!(!artifacts.is_empty());
+    assert!(
+        artifacts
+            .iter()
+            .all(|url| url.contains("/download/v9.8.7/"))
     );
-    assert_eq!(
-        downloads
-            .matches("provenant-apps-aarch64-apple-darwin.tar.gz.sha256\n")
-            .count(),
-        1
-    );
+    for artifact in [
+        "provenant-apps-aarch64-apple-darwin.tar.gz",
+        "provenant-apps-aarch64-apple-darwin.tar.gz.sha256",
+    ] {
+        assert!(artifacts.iter().any(|url| url.ends_with(artifact)));
+    }
     assert!(!installed_app.join("old-build").exists());
     assert!(
         installed_app
@@ -2939,6 +2957,9 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
         "run.sqlite3-shm",
         "run.sqlite3-journal",
         "runs/r1/attempts/a1/tmp/scratch",
+        "attempts/base/tmp/scratch",
+        "children/c1/attempts/detached/tmp/scratch",
+        "admission.sqlite3",
         "fabric/fabric.sqlite3",
         "fabric/fabric.sqlite3-wal",
         "fabric/fabric.sqlite3-shm",
@@ -2953,7 +2974,7 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
     let kept = [
         "usage-ledger/segment-0.jsonl",
         "quota/history/work.claude.jsonl",
-        "provider/history.jsonl",
+        "provider-history/existing.jsonl",
         "workflow/projects/p/sessions/s/checkpoint.md",
         "workflow/projects/p/chair-logs/s/log.sqlite3",
     ];
@@ -3039,12 +3060,22 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
     ] {
         fs::write(state.join(name), format!("format-1 {name}"))?;
     }
+    let histories = [
+        "attempts/base/provider-history/candidate-0/transcript.jsonl",
+        "runs/r1/attempts/a1/provider-history/candidate-0/session.jsonl",
+        "children/c1/attempts/detached/provider-history/candidate-0/history.jsonl",
+    ];
+    for name in histories {
+        fs::create_dir_all(state.join(name).parent().ok_or("history parent")?)?;
+        fs::write(state.join(name), name)?;
+    }
     let before = snapshot(state)?;
 
     // No acknowledgement: one typed code, nothing changes.
     let blocked = install(&[])?;
     let value: serde_json::Value = serde_json::from_slice(&blocked.stdout.bytes)?;
     assert_eq!(value["error"]["code"], "STATE_FORMAT_BREAK", "{value}");
+    assert_eq!(code(&blocked), 6);
     assert!(snapshot(state)? == before);
 
     // The CLI does not accept the bootstrap script's --yes as an acknowledgement.
@@ -3062,7 +3093,8 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
     let before = snapshot(state)?;
     let live = install(&["--reset-state"])?;
     let value: serde_json::Value = serde_json::from_slice(&live.stdout.bytes)?;
-    assert_eq!(value["error"]["code"], "STATE_FORMAT_BREAK", "{value}");
+    assert_eq!(value["error"]["code"], "STATE_RESET_LIVE", "{value}");
+    assert_ne!(code(&live), 6);
     assert!(snapshot(state)? == before);
     drop(held);
 
@@ -3101,6 +3133,12 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
         })
         .collect::<io::Result<_>>()?;
     assert_eq!(kept_after, kept_before);
+    for name in histories {
+        assert_eq!(
+            fs::read_to_string(state.join("provider-history/format-1").join(name))?,
+            name
+        );
+    }
     assert!(lane.join(".git").exists());
     git(
         &rig,
@@ -3109,5 +3147,384 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
     )?;
     // The receipt now names format 2, so the next install is not a break.
     assert_eq!(code(&install(&[])?), 0);
+    Ok(())
+}
+
+fn reset_fixture() -> Result<(TestRig, PathBuf)> {
+    let rig = TestRig::new()?;
+    let stage = staged(&rig)?;
+    assert_eq!(code(&reset_install(&rig, &stage, &[])?), 0);
+    set_receipt_format(&rig, 1)?;
+    fs::write(rig.state.join("run.sqlite3"), "old run store")?;
+    Ok((rig, stage))
+}
+fn set_receipt_format(rig: &TestRig, format: u64) -> Result {
+    let path = rig.state.join("install/receipt.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+    value["state_format_version"] = format.into();
+    fs::write(path, serde_json::to_vec(&value)?)?;
+    Ok(())
+}
+fn reset_install(
+    rig: &TestRig,
+    stage: &Path,
+    extra: &[&str],
+) -> Result<provenant_os::exec::ExecOutcome> {
+    let mut args = vec![
+        "install",
+        "--source",
+        stage.to_str().ok_or("source")?,
+        "--harness",
+        "claude",
+        "--json",
+    ];
+    args.extend_from_slice(extra);
+    rig.command(&args)
+}
+
+#[test]
+fn reset_invalid_source_preserves_old_state() -> Result {
+    let (rig, _) = reset_fixture()?;
+    let before = snapshot(&rig.state)?;
+    let failed = reset_install(&rig, &rig.root.join("missing"), &["--reset-state"])?;
+    assert_ne!(code(&failed), 0);
+    assert_eq!(snapshot(&rig.state)?, before);
+    Ok(())
+}
+
+#[test]
+fn reset_preview_conflict_preserves_old_state() -> Result {
+    let (rig, stage) = reset_fixture()?;
+    // A later registered account must also preview successfully before reset.
+    let account = rig.home.join(".claude-work");
+    fs::create_dir_all(account.join("skills/example"))?;
+    fs::write(
+        account.join("skills/example/SKILL.md"),
+        "user-owned conflict",
+    )?;
+    support::register_account(&rig, "claude", "work", "work-key", &account)?;
+    let before = snapshot(&rig.state)?;
+    let failed = reset_install(&rig, &stage, &["--reset-state"])?;
+    assert_ne!(code(&failed), 0, "{failed:?}");
+    assert_eq!(snapshot(&rig.state)?, before);
+    Ok(())
+}
+
+#[test]
+fn reset_failed_smoke_preserves_old_state() -> Result {
+    let (rig, _) = reset_fixture()?;
+    let bad_binary = rig.root.join("bad-binary");
+    fs::write(&bad_binary, "#!/bin/sh\nexit 9\n")?;
+    fs::set_permissions(&bad_binary, fs::Permissions::from_mode(0o755))?;
+    let stage = staged_binary(&rig, "bad-smoke", b"bad smoke", Some(&bad_binary))?;
+    let before = snapshot(&rig.state)?;
+    let failed = reset_install(&rig, &stage, &["--reset-state"])?;
+    assert_ne!(code(&failed), 0);
+    assert_eq!(snapshot(&rig.state)?, before);
+    Ok(())
+}
+
+#[test]
+fn reset_dry_run_describes_deletion_without_writes() -> Result {
+    let (rig, stage) = reset_fixture()?;
+    let before = snapshot(&rig.state)?;
+    let preview = reset_install(&rig, &stage, &["--dry-run"])?;
+    assert_eq!(code(&preview), 0, "{preview:?}");
+    let text = String::from_utf8(preview.stderr.bytes)?;
+    assert!(
+        text.contains("run.sqlite3")
+            && text.contains("admission.sqlite3")
+            && text.contains("provider-history")
+    );
+    assert_eq!(snapshot(&rig.state)?, before);
+    Ok(())
+}
+
+#[test]
+fn reset_corrupt_receipt_refuses_without_deletion() -> Result {
+    let (rig, stage) = reset_fixture()?;
+    fs::write(rig.state.join("install/receipt.json"), b"{")?;
+    let before = snapshot(&rig.state)?;
+    assert_ne!(code(&reset_install(&rig, &stage, &["--reset-state"])?), 0);
+    assert_eq!(snapshot(&rig.state)?, before);
+    Ok(())
+}
+
+#[test]
+fn reset_newer_receipt_refuses_downgrade() -> Result {
+    let (rig, stage) = reset_fixture()?;
+    set_receipt_format(&rig, 3)?;
+    let before = snapshot(&rig.state)?;
+    let failed = reset_install(&rig, &stage, &["--reset-state"])?;
+    let value: serde_json::Value = serde_json::from_slice(&failed.stdout.bytes)?;
+    assert_eq!(value["error"]["code"], "STATE_FORMAT_NEWER");
+    assert_eq!(snapshot(&rig.state)?, before);
+    Ok(())
+}
+
+#[test]
+fn reset_unmarked_root_refuses_deletion() -> Result {
+    let rig = TestRig::new()?;
+    let stage = staged(&rig)?;
+    fs::create_dir_all(&rig.state)?;
+    fs::write(rig.state.join("run.sqlite3"), "unrelated database")?;
+    let before = snapshot(&rig.state)?;
+    assert_ne!(code(&reset_install(&rig, &stage, &["--reset-state"])?), 0);
+    assert_eq!(snapshot(&rig.state)?, before);
+    Ok(())
+}
+
+#[test]
+fn reset_symlinked_fabric_refuses_outside_deletion() -> Result {
+    let (rig, stage) = reset_fixture()?;
+    let outside = rig.root.join("outside");
+    fs::create_dir(&outside)?;
+    fs::write(outside.join("fabric.sqlite3"), "outside store")?;
+    std::os::unix::fs::symlink(&outside, rig.state.join("fabric"))?;
+    let before = snapshot(&rig.state)?;
+    assert_ne!(code(&reset_install(&rig, &stage, &["--reset-state"])?), 0);
+    assert_eq!(snapshot(&rig.state)?, before);
+    assert_eq!(
+        fs::read_to_string(outside.join("fabric.sqlite3"))?,
+        "outside store"
+    );
+    Ok(())
+}
+
+#[test]
+fn reset_detached_child_custody_blocks_deletion() -> Result {
+    let (rig, stage) = reset_fixture()?;
+    let child = rig.state.join("children/c1/children/c2/attempts/a1");
+    fs::create_dir_all(&child)?;
+    let held = provenant_os::fs::Directory::open_anchor(&child)?.try_lock(
+        std::ffi::OsStr::new("custody.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    let before = snapshot(&rig.state)?;
+    assert_ne!(code(&reset_install(&rig, &stage, &["--reset-state"])?), 0);
+    assert_eq!(snapshot(&rig.state)?, before);
+    drop(held);
+    Ok(())
+}
+
+#[test]
+fn reset_restores_readonly_payload_access_and_unlinks_only_dropped_links() -> Result {
+    let (rig, stage) = reset_fixture()?;
+    let tmp = rig.state.join("attempts/a1/tmp/cache");
+    fs::create_dir_all(&tmp)?;
+    fs::write(tmp.join("Cargo.lock"), "cache lock")?;
+    let outside = rig.root.join("outside-store");
+    fs::write(&outside, "keep target")?;
+    std::os::unix::fs::symlink(&outside, rig.state.join("admission.sqlite3"))?;
+    std::os::unix::fs::symlink(&outside, tmp.join("outside-link"))?;
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o000))?;
+    let result = reset_install(&rig, &stage, &["--reset-state"])?;
+    assert_eq!(code(&result), 0, "{result:?}");
+    assert!(!rig.state.join("attempts").exists());
+    assert!(fs::symlink_metadata(rig.state.join("admission.sqlite3")).is_err());
+    assert_eq!(fs::read_to_string(outside)?, "keep target");
+    Ok(())
+}
+
+#[test]
+fn reset_partial_archive_failure_is_rerunnable_without_overwriting_history() -> Result {
+    let (rig, stage) = reset_fixture()?;
+    let source = rig.state.join("attempts/a1/provider-history");
+    let archive = rig
+        .state
+        .join("provider-history/format-1/attempts/a1/provider-history");
+    fs::create_dir_all(&source)?;
+    fs::write(source.join("transcript.jsonl"), "original transcript")?;
+    fs::create_dir_all(&archive)?;
+    fs::write(archive.join("transcript.jsonl"), "existing archive")?;
+    let failed = reset_install(&rig, &stage, &["--reset-state"])?;
+    assert_ne!(code(&failed), 0);
+    assert_eq!(
+        fs::read_to_string(source.join("transcript.jsonl"))?,
+        "original transcript"
+    );
+    assert_eq!(
+        fs::read_to_string(archive.join("transcript.jsonl"))?,
+        "existing archive"
+    );
+    assert!(rig.state.join("run.sqlite3").exists());
+    // Resolve the collision without deleting its content, then retry.
+    fs::rename(&archive, rig.state.join("provider-history/previous"))?;
+    let result = reset_install(&rig, &stage, &["--reset-state"])?;
+    assert_eq!(code(&result), 0, "{result:?}");
+    assert_eq!(
+        fs::read_to_string(archive.join("transcript.jsonl"))?,
+        "original transcript"
+    );
+    assert_eq!(
+        fs::read_to_string(rig.state.join("provider-history/previous/transcript.jsonl"))?,
+        "existing archive"
+    );
+    assert!(!rig.state.join("run.sqlite3").exists());
+    Ok(())
+}
+
+#[test]
+fn reset_recovers_foreign_store_after_format_two_receipt() -> Result {
+    let (rig, stage) = reset_fixture()?;
+    set_receipt_format(&rig, 2)?;
+    fs::remove_file(rig.state.join("run.sqlite3"))?;
+    let recreated = rig.state.join("children/c1/children/c2/run.sqlite3");
+    fs::create_dir_all(recreated.parent().ok_or("child store")?)?;
+    let database = rusqlite::Connection::open(&recreated)?;
+    database.execute_batch("PRAGMA user_version=11; CREATE TABLE old(value TEXT);")?;
+    drop(database);
+    let before = snapshot(&rig.state)?;
+    let refused = reset_install(&rig, &stage, &[])?;
+    assert_eq!(code(&refused), 6);
+    assert_eq!(snapshot(&rig.state)?, before);
+    let installed = reset_install(&rig, &stage, &["--reset-state"])?;
+    assert_eq!(code(&installed), 0, "{installed:?}");
+    assert!(!recreated.exists());
+    // A native format-2 header must not trigger another reset.
+    let database = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
+    database.execute_batch("PRAGMA user_version=12; CREATE TABLE native(value TEXT);")?;
+    drop(database);
+    assert_eq!(code(&reset_install(&rig, &stage, &[])?), 0);
+    assert!(rig.state.join("run.sqlite3").exists());
+    Ok(())
+}
+
+#[test]
+fn upgrade_refuses_format_break_before_any_captured_installer() -> Result {
+    let (rig, _) = reset_fixture()?;
+    let before = snapshot(&rig.state)?;
+    let failed = rig.command(&["upgrade", "--yes", "--json"])?;
+    assert_eq!(code(&failed), 6);
+    assert_eq!(snapshot(&rig.state)?, before);
+    Ok(())
+}
+
+#[test]
+fn bootstrap_prompts_only_for_the_format_acknowledgement_status() -> Result {
+    let mut rig = TestRig::new()?;
+    let source = rig.root.join("source");
+    fs::create_dir_all(source.join("tools/front-door"))?;
+    fs::write(
+        source.join("tools/front-door/rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.99.1\"\n",
+    )?;
+    fs::create_dir_all(rig.state.join("install"))?;
+    fs::write(rig.state.join("install/receipt.json"), "{}")?;
+    let fake_bin = rig.root.join("fake-bin");
+    fs::create_dir(&fake_bin)?;
+    let installer = rig.root.join("fixture-installer");
+    fs::write(
+        &installer,
+        r#"#!/bin/sh
+case "$*" in
+  *--upgrade-preflight*) case "$*" in *--reset-state*) exit "${ACKNOWLEDGED_STATUS:-0}" ;; esac; exit "$PREFLIGHT_STATUS" ;;
+esac
+printf installed > "$HOME/installed"
+"#,
+    )?;
+    fs::set_permissions(&installer, fs::Permissions::from_mode(0o755))?;
+    for (name, content) in [
+        ("rustup", "#!/bin/sh\nexit 0\n".to_owned()),
+        (
+            "cargo",
+            format!(
+                r#"#!/bin/sh
+[ "$1" = run ] || exit 0
+while [ "$1" != --out ]; do shift; done
+mkdir -p "$2/bin"
+cp '{}' "$2/bin/provenant"
+"#,
+                installer.display()
+            ),
+        ),
+    ] {
+        let file = fake_bin.join(name);
+        fs::write(&file, content)?;
+        fs::set_permissions(file, fs::Permissions::from_mode(0o755))?;
+    }
+    for (key, value) in &mut rig.env {
+        if key == "PATH" {
+            *value = format!("{}:/usr/bin:/bin", fake_bin.display()).into();
+        }
+    }
+    rig.env.push(("PROVENANT_INSTALL_TTY".into(), "1".into()));
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh");
+    let mut args = vec![
+        script.into_os_string(),
+        "--upgrade".into(),
+        "--from-source".into(),
+        source.into_os_string(),
+    ];
+    rig.env.push(("PREFLIGHT_STATUS".into(), "2".into()));
+    let invalid = rig.execute_os(Path::new("/bin/sh"), &args, Some(b"reset\n"))?;
+    assert_eq!(code(&invalid), 2);
+    assert!(!rig.home.join("installed").exists());
+    assert!(!String::from_utf8_lossy(&invalid.stderr.bytes).contains("Type reset"));
+    rig.env.retain(|(key, _)| key != "PREFLIGHT_STATUS");
+    rig.env.push(("PREFLIGHT_STATUS".into(), "6".into()));
+    let accepted = rig.execute_os(Path::new("/bin/sh"), &args, Some(b"reset\n"))?;
+    assert_eq!(code(&accepted), 0, "{accepted:?}");
+    assert!(rig.home.join("installed").exists());
+    fs::remove_file(rig.home.join("installed"))?;
+    rig.env.push(("ACKNOWLEDGED_STATUS".into(), "2".into()));
+    let failed_validation = rig.execute_os(Path::new("/bin/sh"), &args, Some(b"reset\n"))?;
+    assert_eq!(code(&failed_validation), 2);
+    assert!(!rig.home.join("installed").exists());
+    rig.env.retain(|(key, _)| key != "ACKNOWLEDGED_STATUS");
+    args.push("--non-interactive".into());
+    let captured = rig.execute_os(Path::new("/bin/sh"), &args, Some(b"reset\n"))?;
+    assert_eq!(code(&captured), 6);
+    assert!(!rig.home.join("installed").exists());
+    assert!(!String::from_utf8_lossy(&captured.stderr.bytes).contains("Type reset"));
+    Ok(())
+}
+
+#[test]
+fn reset_receipt_read_error_refuses_without_deletion() -> Result {
+    let (rig, stage) = reset_fixture()?;
+    let receipt = rig.state.join("install/receipt.json");
+    fs::remove_file(&receipt)?;
+    fs::create_dir(&receipt)?;
+    let before = snapshot(&rig.state)?;
+    assert_ne!(code(&reset_install(&rig, &stage, &["--reset-state"])?), 0);
+    assert_eq!(snapshot(&rig.state)?, before);
+    Ok(())
+}
+
+#[test]
+fn reset_lock_named_symlink_refuses_before_any_store_is_removed() -> Result {
+    let (rig, stage) = reset_fixture()?;
+    let outside = rig.root.join("outside-lock-target");
+    fs::write(&outside, "keep target")?;
+    std::os::unix::fs::symlink(&outside, rig.state.join("run.sqlite3.lock"))?;
+    let before = snapshot(&rig.state)?;
+    let refused = reset_install(&rig, &stage, &["--reset-state"])?;
+    assert_ne!(code(&refused), 0);
+    assert_eq!(snapshot(&rig.state)?, before);
+    assert_eq!(fs::read_to_string(outside)?, "keep target");
+    assert!(
+        fs::symlink_metadata(rig.state.join("run.sqlite3.lock"))?
+            .file_type()
+            .is_symlink()
+    );
+    Ok(())
+}
+
+#[test]
+fn reset_recovers_retired_store_companions_after_format_two_receipt() -> Result {
+    let (rig, stage) = reset_fixture()?;
+    set_receipt_format(&rig, 2)?;
+    fs::remove_file(rig.state.join("run.sqlite3"))?;
+    fs::write(
+        rig.state.join("work-index.sqlite3-wal"),
+        "retired companion",
+    )?;
+    let before = snapshot(&rig.state)?;
+    assert_eq!(code(&reset_install(&rig, &stage, &[])?), 6);
+    assert_eq!(snapshot(&rig.state)?, before);
+    let result = reset_install(&rig, &stage, &["--reset-state"])?;
+    assert_eq!(code(&result), 0, "{result:?}");
+    assert!(!rig.state.join("work-index.sqlite3-wal").exists());
     Ok(())
 }
