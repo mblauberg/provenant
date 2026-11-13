@@ -144,39 +144,22 @@ pub fn serve_with_read(
             .as_str()
             .filter(|id| !id.is_empty())
             .unwrap_or(&graph_id);
+        // Inside a lane a target names the calling graph's own nodes, as
+        // `NAME[/NODE[#N]]` or a bare `NODE[#N]` (cli.md "Targets"). Attempt
+        // IDs are not targets, so they resolve to nothing here.
         let selected = if requested == graph_id {
             graph_id.clone()
         } else {
-            let node = requested
+            let local = requested
                 .strip_prefix(&format!("{graph_id}/"))
                 .unwrap_or(requested);
-            let found = checkpoint.nodes.iter().find(|row| {
-                row.id == node || row.recorded_attempts().any(|attempt| {
-                    attempt.attempt_ref.as_deref().is_some_and(|reference| {
-                        reference == requested || reference.rsplit('/').next() == Some(requested)
-                    })
-                })
-            }).ok_or_else(|| refused("not_found", "the target is outside the calling lane's graph; use the graph or child ID from its launch receipt"))?;
-            // Canonicalise node and attempt selectors before calling the ordinary reader.
-            if node == found.id || input["op"] == "trace" || input["trace"] == true {
-                format!("{graph_id}/{}", found.id)
-            } else {
-                found
-                    .recorded_attempts()
-                    .find_map(|attempt| {
-                        attempt.attempt_ref.as_deref().filter(|reference| {
-                            *reference == requested
-                                || reference.rsplit('/').next() == Some(requested)
-                        })
-                    })
-                    .ok_or_else(|| {
-                        refused(
-                            "not_found",
-                            "the attempt is outside the calling lane's graph",
-                        )
-                    })?
-                    .to_owned()
-            }
+            let node = local.split_once('#').map_or(local, |(node, _)| node);
+            checkpoint
+                .nodes
+                .iter()
+                .find(|row| row.id == node)
+                .ok_or_else(|| refused("not_found", "the target is outside the calling lane's graph; use NAME/NODE from its launch receipt"))?;
+            format!("{graph_id}/{local}")
         };
         input["id"] = selected.into();
         return read(input);
