@@ -175,7 +175,7 @@ fn launch_input(input: &Value) -> Result<Value, FacadeError> {
             .collect();
         for key in keys {
             let value = settings.remove(&key).ok_or_else(invalid)?;
-            attempt[&key[8..]] = value;
+            attempt[&key[8..]] = type_attempt_field(&key[8..], value)?;
         }
     }
     for field in ["host", "account"] {
@@ -208,36 +208,33 @@ fn launch_input(input: &Value) -> Result<Value, FacadeError> {
         }
     }
     input["attempt"] = attempt;
-    if let Some(value) = input.get("operation_id").filter(|value| !value.is_null()) {
-        value
-            .as_str()
-            .ok_or_else(invalid)?
-            .parse::<provenant_core::OperationId>()
-            .map_err(|_| invalid())?;
-    }
     Ok(input)
 }
 
-/// Run-file operation IDs belong to the envelope, not the template schema.
-fn run_envelope(input: &Value) -> Result<Value, FacadeError> {
-    let mut input = input.clone();
-    let nested = input
-        .get_mut("document")
-        .and_then(Value::as_object_mut)
-        .and_then(|fields| fields.remove("operation_id"));
-    if input.get("operation_id").is_none()
-        && let Some(operation) = nested
-    {
-        input["operation_id"] = operation;
+/// A `--set attempt.FIELD=VALUE` that arrived as text takes the first reading
+/// the attempt schema accepts: TOML (`true`, `300`, `["a"]`), then the text as
+/// written. A value that arrived typed, as it does over MCP, is left alone.
+fn type_attempt_field(field: &str, value: Value) -> Result<Value, FacadeError> {
+    let Value::String(text) = &value else {
+        return Ok(value);
+    };
+    let parsed = toml_edit::de::from_str::<Value>(&format!("value = {text}"))
+        .ok()
+        .and_then(|mut table| table.get_mut("value").map(Value::take));
+    for candidate in parsed.into_iter().chain([value.clone()]) {
+        if decode_input::<provenant_fabric_runtime::graph::AttemptSpec>(
+            json!({ field: candidate }),
+            "attempt",
+        )
+        .is_ok()
+        {
+            return Ok(candidate);
+        }
     }
-    if let Some(operation) = input.get("operation_id").filter(|value| !value.is_null()) {
-        let id = operation.as_str().ok_or_else(|| {
-            FacadeError::invalid(InvalidInputDetail::Field("operation_id".into()))
-        })?;
-        provenant_core::OperationId::parse(id)
-            .map_err(|_| FacadeError::invalid(InvalidInputDetail::Field("operation_id".into())))?;
-    }
-    Ok(input)
+    Err(FacadeError::invalid(InvalidInputDetail::FieldDecode {
+        field: format!("attempt.{field}"),
+        missing: false,
+    }))
 }
 
 fn override_launch(
@@ -541,7 +538,7 @@ impl Factory {
     fn launch_resolvers_for_tier(
         &self,
         document: Option<&Value>,
-        tier: Option<&Value>,
+        route: Option<&RouteChoice>,
     ) -> Result<BTreeMap<String, Vec<String>>, FacadeError> {
         let config = provenant_config::read_with_domains(
             &self.context.roots,
@@ -550,8 +547,10 @@ impl Factory {
         .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         // An unknown tier is refused before panel resolution, so advisory and
         // strict diversity both give this usage error instead of a compile error.
-        if let Some(name) = tier
-            .and_then(Value::as_str)
+        for name in route
+            .map(RouteChoice::tiers)
+            .unwrap_or_default()
+            .into_iter()
             .filter(|name| !name.contains('/'))
         {
             let catalogue = provenant_routing::Catalogue::bundled()
@@ -574,8 +573,8 @@ impl Factory {
                 resolver_document[field] = value.clone();
             }
         }
-        if let Some(tier) = tier.filter(|tier| !tier.is_null()) {
-            resolver_document["review_tier_override"] = tier.clone();
+        if let Some(tier) = route.and_then(|route| route.tier_for("review")) {
+            resolver_document["review_tier_override"] = json!(tier);
         }
         let document: GraphDocument = serde_json::from_value(resolver_document)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
@@ -644,7 +643,7 @@ impl Factory {
         input: &Value,
     ) -> Result<provenant_fabric_runtime::graph::relay::ChildRequest, FacadeError> {
         use provenant_fabric_runtime::graph::relay::{ChildLaunch, ChildRequest};
-        let input = launch_input(&run_envelope(input)?)?;
+        let input = launch_input(input)?;
         let input = &input;
         let invalid = || FacadeError::invalid(InvalidInputDetail::Field("document".into()));
         let raw = input.get("document").filter(|value| !value.is_null());
@@ -676,11 +675,24 @@ impl Factory {
                 }
             }
         }
-        // Distinct calls create distinct children; callers opt into replay with a key.
+        // A name is the child's node id. Distinct unnamed calls create distinct
+        // children; a call replays by an explicit key, or by its name and input.
+        let name = match input.get("name").filter(|value| !value.is_null()) {
+            Some(value) => {
+                let name = value.as_str().ok_or_else(|| {
+                    FacadeError::invalid(InvalidInputDetail::Field("name".into()))
+                })?;
+                if let Some(fault) =
+                    provenant_fabric_runtime::graph::template::graph_name_fault(name)
+                {
+                    return Err(graph_input_reason(fault));
+                }
+                Some(name.to_owned())
+            }
+            None => None,
+        };
         let idempotency_key = match input
-            .get("operation_id")
-            .filter(|value| !value.is_null())
-            .or_else(|| input.get("idempotency_key"))
+            .get("idempotency_key")
             .or_else(|| raw.and_then(|document| document.get("idempotency_key")))
         {
             Some(value) => value
@@ -688,13 +700,20 @@ impl Factory {
                 .filter(|key| !key.is_empty() && key.len() <= 200)
                 .ok_or_else(invalid)?
                 .to_owned(),
+            None if name.is_some() => submission_digest(input, None)?,
             None => provenant_core::hex(
                 &provenant_os::fs::entropy_128().map_err(|_| FacadeError::StateCorrupt)?,
             ),
         };
-        let digest =
-            provenant_records::CanonicalV1::file_digest(idempotency_key.as_bytes()).to_string();
-        let key = format!("child-{}", &digest[7..39]);
+        let key = match &name {
+            Some(name) => name.clone(),
+            None => {
+                let digest =
+                    provenant_records::CanonicalV1::file_digest(idempotency_key.as_bytes())
+                        .to_string();
+                format!("child-{}", &digest[7..39])
+            }
+        };
         let detached = input
             .get("detached")
             .or_else(|| raw.and_then(|document| document.get("detached")))
@@ -708,7 +727,8 @@ impl Factory {
             fields.remove("detached");
         }
         let raw = launch_document.as_ref();
-        let has_overrides = ["brief", "use", "tier", "over"]
+        let route = route_choice(input, raw)?;
+        let has_overrides = ["brief", "template", "route", "over"]
             .iter()
             .any(|field| input.get(*field).is_some_and(|value| !value.is_null()))
             || input
@@ -741,20 +761,28 @@ impl Factory {
         };
         let library = self.template_library(Some(&inline))?;
         if full_document.is_none() {
-            for field in ["use", "brief", "tier", "over"] {
+            for field in ["brief", "over"] {
                 if let Some(value) = input.get(field).filter(|value| !value.is_null()) {
                     node[field] = value.clone();
                 }
             }
-            let template = library
-                .resolve(node["use"].as_str().unwrap_or("task"))
-                .map_err(|_| invalid())?;
+            if let Some(name) = input.get("template").filter(|value| !value.is_null()) {
+                node["use"] = name.clone();
+            }
+            if let Some(RouteChoice::Alias(alias)) = &route {
+                node["tier"] = json!(alias);
+            }
+            let template_name = node["use"].as_str().unwrap_or("task").to_owned();
+            let template = library.resolve(&template_name).map_err(|_| invalid())?;
             let mut parameters = node.get("with").cloned().unwrap_or_else(|| json!({}));
             if let Some(overrides) = input.get("set").filter(|value| !value.is_null()) {
-                parameters
-                    .as_object_mut()
-                    .ok_or_else(invalid)?
-                    .extend(overrides.as_object().ok_or_else(invalid)?.clone());
+                let fields = parameters.as_object_mut().ok_or_else(invalid)?;
+                for (name, value) in overrides.as_object().ok_or_else(invalid)? {
+                    fields.insert(
+                        name.clone(),
+                        typed_binding(&template, &template_name, name, value)?,
+                    );
+                }
             }
             if template.parameters.contains_key("brief")
                 && let Some(brief) = input.get("brief").filter(|value| !value.is_null())
@@ -770,24 +798,21 @@ impl Factory {
         }
         bind_launch_controls(input, &mut node, &self.cwd)?;
         node["id"] = json!(key);
-        let resolvers = self.launch_resolvers_for_tier(
-            raw,
-            input
-                .get("tier")
-                .filter(|tier| !tier.is_null())
-                .or_else(|| raw.and_then(|document| document.get("tier"))),
-        )?;
+        let resolvers = self.launch_resolvers_for_tier(raw, route.as_ref())?;
         let mut compiled = provenant_fabric_runtime::graph::template::Compiler {
             library: &library,
             resolvers: &resolvers,
         }
         .lower(&node)
         .map_err(compile_error)?;
-        if let Some(tier) = input.get("tier").filter(|value| !value.is_null()) {
-            let tier = tier.as_str().ok_or_else(invalid)?;
-            let route = serde_json::from_value(json!({"alias":tier})).map_err(|_| invalid())?;
+        if let Some(choice) = input
+            .get("route")
+            .filter(|value| !value.is_null())
+            .map(|_| route.as_ref())
+            .flatten()
+        {
             let mut typed = serde_json::from_value(compiled).map_err(|_| invalid())?;
-            override_tier(&mut typed, &route);
+            override_tier(&mut typed, choice);
             compiled = encode(typed)?;
         }
         let mut typed = serde_json::from_value(compiled).map_err(|_| invalid())?;
@@ -839,7 +864,10 @@ impl Factory {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .into(),
-            tier: input.get("tier").and_then(Value::as_str).map(str::to_owned),
+            tier: match &route {
+                Some(RouteChoice::Alias(alias)) => Some(alias.clone()),
+                _ => None,
+            },
             timeout_seconds: None,
             writer,
             write_scope,
@@ -1073,35 +1101,9 @@ impl Factory {
         cancel: &CancelToken,
         announce: Option<super::graph_execution::Announce<'_>>,
     ) -> Result<Value, FacadeError> {
-        let input = launch_input(&run_envelope(input)?)?;
-        let input = &input;
-        let operation = input.get("operation_id").and_then(Value::as_str);
-        if let Some(operation) = operation
-            && input["explain"] != true
-            && input.pointer("/document/graph_id").is_none()
-        {
-            let id = provenant_fabric_runtime::graph::template::SubmissionIdentity::Fresh
-                .graph_id(&Value::Null, "", Some(operation))
-                .map_err(graph_input_reason)?;
-            if FileJournal::read_checkpoint(
-                &self.context.roots.state,
-                self.context.identity.project,
-                &id,
-            )
-            .map_err(graph_journal_error)?
-            .is_some()
-            {
-                let execution = FileJournal::execution(
-                    &self.context.roots.state,
-                    self.context.identity.project,
-                    &id,
-                )
-                .map_err(graph_journal_error)?
-                .ok_or(FacadeError::StateCorrupt)?;
-                return self.launch_submission(execution.document, input, budget, cancel, announce);
-            }
-        }
-        let raw = input.get("document");
+        let mut input = launch_input(input)?;
+        let raw_owned = input.get("document").cloned();
+        let raw = raw_owned.as_ref();
         if let Some(document) = raw {
             provenant_fabric_runtime::graph::template::validate_document_schema_version(document)
                 .map_err(|_| {
@@ -1123,8 +1125,8 @@ impl Factory {
         }
         let has_overrides = [
             "brief",
-            "use",
-            "tier",
+            "template",
+            "route",
             "over",
             "access",
             "worktree",
@@ -1152,13 +1154,8 @@ impl Factory {
             inline["lane-document"] = template;
         }
         let library = self.template_library(Some(&inline))?;
-        let resolver = self.launch_resolvers_for_tier(
-            raw,
-            input
-                .get("tier")
-                .filter(|tier| !tier.is_null())
-                .or_else(|| raw.and_then(|document| document.get("tier"))),
-        )?;
+        let route = route_choice(&input, raw)?;
+        let resolver = self.launch_resolvers_for_tier(raw, route.as_ref())?;
         let context = PatchContext {
             library: &library,
             resolvers: &resolver,
@@ -1166,30 +1163,30 @@ impl Factory {
             journal: None,
             limits: &self.context.config.graph.limits,
         };
-        let template_name = input["use"]
+        let template_name = input["template"]
             .as_str()
             .or_else(|| lane_document.and_then(|document| document["use"].as_str()))
             .unwrap_or(if lane_document.is_some() {
                 "lane-document"
             } else {
                 "task"
-            });
-        let policy = library
-            .resolve(template_name)
-            .map_err(graph_input_reason)?
-            .identity
-            .unwrap_or_default();
-        let mut submission = input.clone();
-        if let Some(fields) = submission.as_object_mut() {
-            fields.remove("explain");
-            fields.remove("wait_seconds");
+            })
+            .to_owned();
+        let template_name = template_name.as_str();
+        // Type each `--set` value once, by the template's declaration, before
+        // the launch is hashed or compiled.
+        let declared = library.resolve(template_name).map_err(graph_input_reason)?;
+        if let Some(overrides) = input.get("set").and_then(Value::as_object).cloned() {
+            let mut typed = serde_json::Map::new();
+            for (name, value) in &overrides {
+                typed.insert(
+                    name.clone(),
+                    typed_binding(&declared, template_name, name, value)?,
+                );
+            }
+            input["set"] = Value::Object(typed);
         }
-        let mut identity = json!({
-            "submission": submission,
-            "directory": self.cwd,
-            "templates": library.snapshot(),
-            "resolvers": resolver,
-        });
+        let input = &input;
         // Review ranges are launch controls: resolve them on the host before
         // admitting a graph, and bind immutable object IDs into its identity.
         let review_launch = template_name == "review" || template_name.starts_with("review.");
@@ -1218,42 +1215,95 @@ impl Factory {
                 "review requires both subject and review_base".into(),
             )));
         }
+        let git = provenant_os::git::git_executable();
         let mut resolved_head = None;
         let mut resolved_review_base = None;
         if let (Some(subject), Some(base)) = (subject, review_base) {
-            let git = provenant_os::git::git_executable()
+            let git = git
+                .as_deref()
                 .ok_or(FacadeError::InvalidInput { detail: None })?;
             let head =
-                provenant_run::resolve_git_base(&git, &self.cwd, subject).map_err(run_error)?;
-            let base = provenant_run::resolve_git_base(&git, &self.cwd, base).map_err(run_error)?;
+                provenant_run::resolve_git_base(git, &self.cwd, subject).map_err(run_error)?;
+            let base = provenant_run::resolve_git_base(git, &self.cwd, base).map_err(run_error)?;
             if base == head {
                 return Err(FacadeError::invalid(InvalidInputDetail::Field("review_empty_range: base and subject resolve to the same commit; select a subject with changes".into())));
             }
-            identity["head"] = json!(head);
-            identity["review_base"] = json!(base);
             resolved_head = Some(head);
             resolved_review_base = Some(base);
         }
-        if resolved_head.is_none()
-            && policy == provenant_fabric_runtime::graph::template::SubmissionIdentity::Content
-            && raw.and_then(|document| document.get("graph_id")).is_none()
-        {
-            let git = provenant_os::git::git_executable()
-                .ok_or(FacadeError::InvalidInput { detail: None })?;
-            let head =
-                provenant_run::resolve_git_base(&git, &self.cwd, "HEAD").map_err(run_error)?;
-            identity["head"] = json!(head);
-            resolved_head = Some(head);
+        // The commit the launch starts from belongs to its identity. A checkout
+        // with no commit yet simply has none.
+        let source_commit = resolved_head.clone().or_else(|| {
+            git.as_deref()
+                .and_then(|git| provenant_run::resolve_git_base(git, &self.cwd, "HEAD").ok())
+        });
+        if resolved_head.is_none() && raw.and_then(|document| document.get("graph_id")).is_none() {
+            resolved_head = source_commit.clone();
         }
-        let nonce = provenant_fabric_runtime::coordination::generated_operation_id("graph")
-            .map_err(|_| FacadeError::StateCorrupt)?;
-        let generated_id = policy
-            .graph_id(&identity, &nonce, operation)
-            .map_err(graph_input_reason)?;
-        let id = raw
-            .and_then(|document| document.get("graph_id"))
-            .and_then(Value::as_str)
-            .unwrap_or(&generated_id);
+        // The name is a handle; the digest of the launch decides whether it is
+        // the same launch (replay) or a new one (the next free NAME-k).
+        let requested = input.get("name").and_then(Value::as_str).or_else(|| {
+            raw.and_then(|document| document.get("graph_id"))
+                .and_then(Value::as_str)
+        });
+        let (base, named) = match requested {
+            Some(name) => {
+                if let Some(fault) =
+                    provenant_fabric_runtime::graph::template::graph_name_fault(name)
+                {
+                    return Err(graph_input_reason(fault));
+                }
+                (name.to_owned(), true)
+            }
+            None if template_name == "lane-document" => ("graph".to_owned(), false),
+            None => (
+                provenant_fabric_runtime::graph::template::default_graph_base(template_name),
+                false,
+            ),
+        };
+        let digest = submission_digest(input, source_commit.as_deref())?;
+        let explain = input["explain"] == true;
+        let (generated_id, taken) = if explain {
+            (
+                if named {
+                    base.clone()
+                } else {
+                    format!("{base}-1")
+                },
+                None,
+            )
+        } else {
+            use provenant_fabric_runtime::graph::template::{NameDecision, decide_graph_name};
+            let state = &self.context.roots.state;
+            let project = self.context.identity.project;
+            let existing = FileJournal::graph_ids(state, project).map_err(graph_journal_error)?;
+            let stored = |id: &str| {
+                FileJournal::execution(state, project, id)
+                    .ok()
+                    .flatten()
+                    .and_then(|execution| execution.document.replay_digest().map(str::to_owned))
+            };
+            match decide_graph_name(&base, &digest, named, &existing, stored)
+                .map_err(graph_input_reason)?
+            {
+                NameDecision::Replay(id) => {
+                    let execution = FileJournal::execution(state, project, &id)
+                        .map_err(graph_journal_error)?
+                        .ok_or(FacadeError::StateCorrupt)?;
+                    let mut result = self.launch_submission(
+                        execution.document,
+                        input,
+                        budget,
+                        cancel,
+                        announce,
+                    )?;
+                    result["named"] = json!({"requested":requested, "graph":id, "replayed":true});
+                    return Ok(result);
+                }
+                NameDecision::Create { id, taken } => (id, taken),
+            }
+        };
+        let id = generated_id.as_str();
         let mut document = if let Some(raw) = raw.filter(|_| lane_document.is_none()) {
             if raw["nodes"]
                 .as_array()
@@ -1268,7 +1318,9 @@ impl Factory {
                 patch::submit(id, &patch, &context, raw["integration_branch"].as_str())
                     .map_err(graph_patch_error)?
             } else {
-                decode_input::<GraphDocument>(raw.clone(), "document")?
+                let mut document = decode_input::<GraphDocument>(raw.clone(), "document")?;
+                document.graph_id = id.to_owned();
+                document
             }
         } else {
             let mut node = match lane_document {
@@ -1286,13 +1338,16 @@ impl Factory {
             if node.get("id").is_none() {
                 node["id"] = json!("task");
             }
-            if let Some(name) = input.get("use").filter(|value| !value.is_null()) {
+            if let Some(name) = input.get("template").filter(|value| !value.is_null()) {
                 node["use"] = name.clone();
             }
-            for field in ["brief", "tier", "over"] {
+            for field in ["brief", "over"] {
                 if let Some(value) = input.get(field).filter(|value| !value.is_null()) {
                     node[field] = value.clone();
                 }
+            }
+            if let Some(RouteChoice::Alias(alias)) = &route {
+                node["tier"] = json!(alias);
             }
             let template = library
                 .resolve(node["use"].as_str().unwrap_or("task"))
@@ -1436,15 +1491,11 @@ impl Factory {
             ));
         }
         if (raw.is_none() || lane_document.is_some())
-            && let Some(tier) = input.get("tier").filter(|value| !value.is_null())
+            && input.get("route").is_some_and(|value| !value.is_null())
+            && let Some(choice) = &route
         {
-            let tier = tier
-                .as_str()
-                .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("tier".into())))?;
-            let route = serde_json::from_value(json!({"alias":tier}))
-                .map_err(|_| FacadeError::StateCorrupt)?;
             for node in &mut document.nodes {
-                override_tier(node, &route);
+                override_tier(node, choice);
             }
         }
         for node in &mut document.nodes {
@@ -1463,6 +1514,7 @@ impl Factory {
         self.confine_nodes(&mut bound)?;
         document = serde_json::from_value(bound)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        document.set_replay_digest(&digest);
         document
             .admit(&self.context.config.graph.limits)
             .map_err(FacadeError::graph_admission)?;
@@ -1491,7 +1543,11 @@ impl Factory {
                 json!({"document":document, "skipped":skipped})
             });
         }
-        self.launch_submission(document, input, budget, cancel, announce)
+        let mut result = self.launch_submission(document, input, budget, cancel, announce)?;
+        result["named"] = json!({
+            "requested": requested, "graph": id, "replayed": false, "taken": taken,
+        });
+        Ok(result)
     }
 
     fn launch_submission(
@@ -2044,17 +2100,150 @@ fn bind_read_roots(
     Ok(())
 }
 
-fn override_tier(
-    node: &mut provenant_fabric_runtime::graph::GraphNode,
-    route: &provenant_fabric_runtime::graph::GraphRoute,
-) {
+/// Type one `--set` value by the declaration of the template it binds.
+fn typed_binding(
+    template: &provenant_fabric_runtime::graph::template::Template,
+    template_name: &str,
+    name: &str,
+    value: &Value,
+) -> Result<Value, FacadeError> {
+    template
+        .type_binding(template_name, name, value.clone())
+        .map_err(|refusal| FacadeError::invalid(InvalidInputDetail::Parameter(Box::new(refusal))))
+}
+
+/// The host digest of a launch: everything the caller chose except the name and
+/// how long to wait, plus the commit the launch started from. Equal digests are
+/// the same launch.
+fn submission_digest(input: &Value, source_commit: Option<&str>) -> Result<String, FacadeError> {
+    let mut submission = input.clone();
+    if let Some(fields) = submission.as_object_mut() {
+        for field in ["explain", "wait_seconds", "name"] {
+            fields.remove(field);
+        }
+    }
+    provenant_records::CanonicalV1::record_digest(
+        "graph-replay",
+        1,
+        &json!({"submission": submission, "source_commit": source_commit}),
+    )
+    .map(|digest| digest.to_string())
+    .map_err(|_| FacadeError::StateCorrupt)
+}
+
+/// The roles a `--route` map can name.
+const ROUTE_ROLES: [&str; 5] = ["writer", "review", "synthesis", "task", "plan"];
+
+/// What `--route` selected: one tier for every launched node, or a tier per role.
+/// A role the map leaves out keeps the tier its template declares.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum RouteChoice {
+    Alias(String),
+    Roles(BTreeMap<String, String>),
+}
+
+impl RouteChoice {
+    /// Read `ROUTE`, `role=tier,role=tier` or a JSON object of roles.
+    pub(super) fn parse(value: &Value) -> Result<Self, FacadeError> {
+        let invalid = || FacadeError::invalid(InvalidInputDetail::Field("route".into()));
+        let mut roles = BTreeMap::new();
+        match value {
+            Value::String(text) if !text.contains('=') => {
+                let alias = text.trim();
+                return if alias.is_empty() {
+                    Err(invalid())
+                } else {
+                    Ok(Self::Alias(alias.to_owned()))
+                };
+            }
+            Value::String(text) => {
+                for pair in text.split(',') {
+                    let (role, tier) = pair.split_once('=').ok_or_else(invalid)?;
+                    roles.insert(role.trim().to_owned(), tier.trim().to_owned());
+                }
+            }
+            Value::Object(fields) => {
+                for (role, tier) in fields {
+                    roles.insert(role.clone(), tier.as_str().ok_or_else(invalid)?.to_owned());
+                }
+            }
+            _ => return Err(invalid()),
+        }
+        if roles.is_empty() || roles.values().any(String::is_empty) {
+            return Err(invalid());
+        }
+        if let Some(role) = roles
+            .keys()
+            .find(|role| !ROUTE_ROLES.contains(&role.as_str()))
+        {
+            return Err(FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason: format!(
+                    "unknown route role `{role}`; valid roles: {}",
+                    ROUTE_ROLES.join(", ")
+                ),
+            });
+        }
+        Ok(Self::Roles(roles))
+    }
+
+    /// The tier a node of `role` takes, `None` to keep its declared tier.
+    pub(super) fn tier_for(&self, role: &str) -> Option<&str> {
+        match self {
+            Self::Alias(alias) => Some(alias),
+            Self::Roles(roles) => roles.get(role).map(String::as_str),
+        }
+    }
+
+    fn tiers(&self) -> Vec<&str> {
+        match self {
+            Self::Alias(alias) => vec![alias],
+            Self::Roles(roles) => roles.values().map(String::as_str).collect(),
+        }
+    }
+}
+
+/// The route an envelope or its document asks for: `route` on the envelope, else
+/// the document's own `tier`.
+fn route_choice(input: &Value, raw: Option<&Value>) -> Result<Option<RouteChoice>, FacadeError> {
+    input
+        .get("route")
+        .filter(|value| !value.is_null())
+        .or_else(|| {
+            raw.and_then(|document| document.get("tier"))
+                .filter(|value| !value.is_null())
+        })
+        .map(RouteChoice::parse)
+        .transpose()
+}
+
+/// The role a launched node plays, which `--route role=tier` addresses.
+fn route_role(node: &provenant_fabric_runtime::graph::GraphNode) -> &'static str {
+    use provenant_fabric_runtime::graph::{AccessMode, NodeKind};
+    if node.extra.contains_key("review_behaviour")
+        || provenant_fabric_runtime::graph::is_review_node(node)
+    {
+        "review"
+    } else if node.plan.is_some() {
+        "plan"
+    } else if node.kind == Some(NodeKind::Synthesise) {
+        "synthesis"
+    } else if node.access == AccessMode::WorktreeWrite {
+        "writer"
+    } else {
+        "task"
+    }
+}
+
+fn override_tier(node: &mut provenant_fabric_runtime::graph::GraphNode, choice: &RouteChoice) {
     if let Some(composite) = &mut node.composite {
         for child in &mut composite.nodes {
-            override_tier(child, route);
+            override_tier(child, choice);
         }
     } else if let Some(body) = &mut node.loop_body {
         for child in &mut body.body {
-            override_tier(child, route);
+            override_tier(child, choice);
         }
     } else if !matches!(
         node.kind,
@@ -2063,7 +2252,13 @@ fn override_tier(
                 | provenant_fabric_runtime::graph::NodeKind::Decide
                 | provenant_fabric_runtime::graph::NodeKind::Land
         )
-    ) {
+    ) && let Some(alias) = choice.tier_for(route_role(node))
+    {
+        let Ok(route) = serde_json::from_value::<provenant_fabric_runtime::graph::GraphRoute>(
+            json!({"alias": alias}),
+        ) else {
+            return;
+        };
         let constraints: Vec<_> = node
             .route
             .iter()
@@ -2095,7 +2290,7 @@ fn override_tier(
     }
     if let Some(fallback) = node.plan.as_mut().and_then(|plan| plan.fallback.as_mut()) {
         for child in &mut fallback.nodes {
-            override_tier(child, route);
+            override_tier(child, choice);
         }
     }
 }
@@ -2113,8 +2308,8 @@ fn add(row: &mut Value, key: &str, value: u64) {
 mod tests {
     #[test]
     fn tier_override_preserves_leaf_family_constraints() {
-        use provenant_fabric_runtime::graph::{GraphNode, GraphRoute};
-        let override_route: GraphRoute = serde_json::from_value(json!({"alias":"senior"})).unwrap();
+        use provenant_fabric_runtime::graph::GraphNode;
+        let override_route = super::RouteChoice::Alias("senior".into());
         for fields in [
             json!({"route":{"alias":"junior", "required_family":"openai"}}),
             json!({"routes":[{"alias":"junior", "required_family":"openai"},{"alias":"principal", "required_family":"openai"}]}),
@@ -2130,6 +2325,81 @@ mod tests {
             assert_eq!(route.alias.as_deref(), Some("senior"));
             assert_eq!(route.extra.get("required_family"), Some(&json!("openai")));
         }
+    }
+
+    #[test]
+    fn a_role_map_sets_each_node_to_its_role_tier_or_keeps_the_default() {
+        use provenant_fabric_runtime::graph::GraphNode;
+        let node = |fields: Value| -> GraphNode {
+            let mut value = json!({"id":"n", "access":"read_only", "prompt":"p",
+                "route":{"alias":"declared"}});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            serde_json::from_value(value).unwrap()
+        };
+        let cases = [
+            ("writer", node(json!({"access":"worktree_write"}))),
+            ("review", node(json!({"review_behaviour":"lens"}))),
+            ("synthesis", node(json!({"kind":"synthesise"}))),
+            ("task", node(json!({}))),
+        ];
+        let choice = super::RouteChoice::parse(&json!("writer=junior, review=senior")).unwrap();
+        for (role, mut node) in cases {
+            assert_eq!(super::route_role(&node), role);
+            super::override_tier(&mut node, &choice);
+            let expected = choice.tier_for(role).unwrap_or("declared");
+            assert_eq!(
+                node.route.unwrap().alias.as_deref(),
+                Some(expected),
+                "{role}"
+            );
+        }
+        assert_eq!(
+            choice,
+            super::RouteChoice::parse(&json!({"writer":"junior","review":"senior"})).unwrap()
+        );
+        assert_eq!(
+            super::RouteChoice::parse(&json!("senior")).unwrap(),
+            super::RouteChoice::Alias("senior".into())
+        );
+    }
+
+    #[test]
+    fn an_unknown_route_role_is_refused_listing_the_valid_roles() {
+        for bad in ["wrter=junior", "writer=junior,=senior", "writer=", "="] {
+            let error = super::RouteChoice::parse(&json!(bad)).unwrap_err();
+            if let FacadeError::DispatchRefused { reason, .. } = &error {
+                assert!(
+                    super::ROUTE_ROLES.iter().all(|role| reason.contains(role)),
+                    "{reason}"
+                );
+            }
+        }
+        assert!(super::RouteChoice::parse(&json!(7)).is_err());
+    }
+
+    #[test]
+    fn attempt_settings_typed_as_text_take_the_first_reading_the_schema_accepts() {
+        for (field, text, expected) in [
+            ("build_heavy", "true", json!(true)),
+            ("provider_timeout", "42", json!(42)),
+            ("host", "'other'", json!("other")),
+            ("host", "workshop", json!("workshop")),
+            ("host", "1", json!("1")),
+        ] {
+            assert_eq!(
+                super::type_attempt_field(field, json!(text)).unwrap(),
+                expected,
+                "{field}={text}"
+            );
+        }
+        assert_eq!(
+            super::type_attempt_field("build_heavy", json!(true)).unwrap(),
+            json!(true)
+        );
+        assert!(super::type_attempt_field("provider_timeout", json!("soon")).is_err());
     }
 
     #[test]
@@ -2358,18 +2628,28 @@ mod tests {
     }
 
     #[test]
-    fn child_operation_identity_replays_the_same_launch() -> Result {
+    fn a_named_child_replays_by_name_and_input() -> Result {
         let rig = TestRig::new()?;
         let factory = factory(&rig)?;
-        let input = json!({"op":"run", "brief":"Inspect", "operation_id":"child-op"});
+        let input = json!({"op":"run", "brief":"Inspect", "name":"inspect-parser"});
         let first = factory.child_request(&input)?;
         let replay = factory.child_request(&input)?;
-        assert_eq!(first.idempotency_key, "child-op");
+        assert_eq!(first.id, "inspect-parser");
         assert_eq!(first.id, replay.id);
+        assert_eq!(first.idempotency_key, replay.idempotency_key);
         assert_eq!(first.launch, replay.launch);
+        let changed = factory
+            .child_request(&json!({"op":"run", "brief":"Inspect more", "name":"inspect-parser"}))?;
+        assert_ne!(first.idempotency_key, changed.idempotency_key);
+        // Unnamed children stay distinct.
+        let unnamed = json!({"op":"run", "brief":"Inspect"});
+        assert_ne!(
+            factory.child_request(&unnamed)?.idempotency_key,
+            factory.child_request(&unnamed)?.idempotency_key
+        );
         assert!(
             factory
-                .child_request(&json!({"op":"run", "operation_id":"invalid op"}))
+                .child_request(&json!({"op":"run", "name":"Invalid Name"}))
                 .is_err()
         );
         Ok(())
@@ -2388,7 +2668,7 @@ mod tests {
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let result = factory.graph_document(json!({"op":"run","use":"review","brief":"Review","set":{"subject":head,"review_base":"review-target"},"explain":true}), budget, &cancel)?;
+        let result = factory.graph_document(json!({"op":"run","template":"review","brief":"Review","set":{"subject":head,"review_base":"review-target"},"explain":true}), budget, &cancel)?;
         assert_eq!(result["document"]["review_base"], tip);
         Ok(())
     }
@@ -2399,7 +2679,7 @@ mod tests {
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let error = factory.graph_document(json!({"op":"run","use":"review","brief":"Review","set":{"subject":"HEAD","review_base":"HEAD"}}), budget, &cancel).unwrap_err();
+        let error = factory.graph_document(json!({"op":"run","template":"review","brief":"Review","set":{"subject":"HEAD","review_base":"HEAD"}}), budget, &cancel).unwrap_err();
         assert!(
             matches!(error, FacadeError::InvalidInput { detail: Some(InvalidInputDetail::Field(ref message)) } if message.contains("review_empty_range"))
         );
@@ -2407,7 +2687,7 @@ mod tests {
     }
 
     #[test]
-    fn submission_identity_tracks_template_content_head_and_directory() -> Result {
+    fn replay_digest_tracks_launch_input_and_source_commit() -> Result {
         let rig = crate::worktree_tests::repository()?;
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
@@ -2417,26 +2697,31 @@ mod tests {
             let response = factory
                 .graph_document(input, budget, &cancel)
                 .map_err(|error| format!("{label}: {error:?}"))?;
-            Ok(response["document"]["graph_id"]
+            Ok(response["document"]["replay_digest"]
                 .as_str()
-                .ok_or("graph id")?
+                .ok_or("replay digest")?
                 .to_owned())
         };
         let task = json!({"op":"run","brief":"same brief","explain":true});
-        assert_ne!(
+        assert_eq!(
             explain(&factory, task.clone())?,
             explain(&factory, task.clone())?
         );
-        let inline = json!({"op":"run","document":{"identity":"content","brief":"inline task","tier":"senior"},"explain":true});
+        // The name is a handle: it never changes the digest.
+        let mut named = task.clone();
+        named["name"] = json!("handle");
+        assert_eq!(explain(&factory, task.clone())?, explain(&factory, named)?);
+        let inline =
+            json!({"op":"run","document":{"brief":"inline task","tier":"senior"},"explain":true});
         assert_eq!(
             explain(&factory, inline.clone())?,
             explain(&factory, inline)?
         );
-        // Content identity includes launch policy, even when the brief and
-        // pinned repository subject are unchanged.
+        // The digest includes launch policy, even when the brief and the
+        // source commit are unchanged.
         let controlled = json!({
             "op":"run", "explain":true,
-            "document":{"identity":"content", "brief":"Inspect launch policy",
+            "document":{"brief":"Inspect launch policy",
                 "tier":"senior", "access":"read_only"},
             "attempt":{"host":"local", "confidential":true, "provider_timeout":42}
         });
@@ -2453,10 +2738,9 @@ mod tests {
                 serde_json::from_value(changed["attempt"].clone())?;
             let response = factory.graph_document(changed.clone(), budget, &cancel)?;
             let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
-            assert_ne!(document.graph_id, original, "attempt.{field}");
-            assert_eq!(
-                document.graph_id,
-                explain(&factory, changed)?,
+            assert_ne!(
+                explain(&factory, changed.clone())?,
+                original,
                 "attempt.{field}"
             );
             let expanded = document.expanded(&factory.context.config.graph.limits)?;
@@ -2467,7 +2751,7 @@ mod tests {
             );
         }
         let review = factory.graph_document(
-            json!({"op":"run","use":"review","brief":"Review","explain":true}),
+            json!({"op":"run","template":"review","brief":"Review","explain":true}),
             budget,
             &cancel,
         )?;
@@ -2488,16 +2772,16 @@ mod tests {
         crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "review subject"])?;
         let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
         let pinned = factory.graph_document(
-            json!({"op":"run","use":"review","brief":"Review","set":{"subject":head,"review_base":base},"explain":true}), budget, &cancel,
+            json!({"op":"run","template":"review","brief":"Review","set":{"subject":head,"review_base":base},"explain":true}), budget, &cancel,
         )?;
         assert_eq!(pinned["document"]["review_base"], base);
         assert_eq!(pinned["document"]["nodes"][0]["source"]["commit"], head);
-        let error = factory.graph_document(json!({"op":"run","use":"review","set":{"subject":"missing-ref","review_base":base},"explain":true}), budget, &cancel).unwrap_err();
+        let error = factory.graph_document(json!({"op":"run","template":"review","set":{"subject":"missing-ref","review_base":base},"explain":true}), budget, &cancel).unwrap_err();
         assert!(
             matches!(error, FacadeError::InvalidInput { detail: Some(InvalidInputDetail::UnresolvableBase(ref name)) } if name == "missing-ref")
         );
         for name in ["review", "review.security", "deliver"] {
-            let mut input = json!({"op":"run","use":name,"brief":"same brief","explain":true});
+            let mut input = json!({"op":"run","template":name,"brief":"same brief","explain":true});
             if name == "deliver" {
                 input["set"] = json!({"worktree":rig.project,"write_scope":["src"]});
             }
@@ -2511,27 +2795,7 @@ mod tests {
                 explain(&factory, input.clone())?,
                 explain(&factory, changed)?
             );
-            let mut elsewhere = factory.for_graph_directory(&rig.project)?;
-            let nested = rig.project.join("nested");
-            std::fs::create_dir_all(&nested)?;
-            elsewhere.cwd = nested;
-            assert_ne!(
-                explain(&factory, input.clone())?,
-                explain(&elsewhere, input)?
-            );
         }
-        let nested = json!({"op":"run","document":{"use":"task","brief":"nested","operation_id":"nested-replay"},"explain":true});
-        assert_eq!(
-            explain(&factory, nested.clone())?,
-            explain(&factory, nested)?
-        );
-        let mut replay = task;
-        replay["operation_id"] = json!("repeat-task");
-        let first = explain(&factory, replay.clone())?;
-        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "later subject"])?;
-        assert_eq!(first, explain(&factory, replay.clone())?);
-        replay["operation_id"] = json!("another-task");
-        assert_ne!(first, explain(&factory, replay)?);
         Ok(())
     }
 
@@ -2572,7 +2836,7 @@ mod tests {
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
         let input =
-            json!({"op":"run", "use":"review", "brief":"Review the parser", "tier":"senior"});
+            json!({"op":"run", "template":"review", "brief":"Review the parser", "route":"senior"});
         let mut preview = input.clone();
         preview["explain"] = json!(true);
         let document: GraphDocument = serde_json::from_value(
@@ -2638,7 +2902,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_operation_replays_terminal_execution_after_head_and_template_changes() -> Result {
+    fn a_named_launch_with_the_same_digest_returns_its_graph_without_launching() -> Result {
         use provenant_fabric_runtime::graph::{self, AttemptOwner, GraphExecution};
         struct Owner;
         impl AttemptOwner for Owner {
@@ -2673,7 +2937,7 @@ mod tests {
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
         let mut input =
-            json!({"op":"run","brief":"Original task","operation_id":"recover-run","explain":true});
+            json!({"op":"run","brief":"Original task","name":"recover-run","explain":true});
         let document: GraphDocument = serde_json::from_value(
             factory.graph_document(input.clone(), budget, &cancel)?["document"].clone(),
         )?;
@@ -2702,12 +2966,10 @@ mod tests {
         )?;
         assert_eq!(first.status, GraphStatus::Complete);
         drop(journal);
-        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "move head"])?;
-        let templates = rig.project.join(".provenant/templates");
-        std::fs::create_dir_all(&templates)?;
-        std::fs::write(templates.join("task.toml"), "invalid template")?;
+        assert_eq!(id, "recover-run");
         input["explain"] = json!(false);
         let replay = factory.graph_document(input, budget, &cancel)?;
+        assert_eq!(replay["named"]["replayed"], true);
         assert_eq!(replay["checkpoint"]["graph_id"], id);
         assert_eq!(replay["status"], "complete");
         let saved = FileJournal::read_checkpoint(
@@ -2879,7 +3141,7 @@ mod tests {
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
         let response = factory.graph_document(
             json!({
-                "op":"run", "brief":"Fix the parser", "tier":"senior",
+                "op":"run", "brief":"Fix the parser", "route":"senior",
                 "worktree":rig.project, "write_scope":["src"], "explain":true
             }),
             budget,
@@ -2930,7 +3192,7 @@ mod tests {
         assert!(
             factory
                 .graph_document(
-                    json!({"op":"run","use":"deliver","worktree":rig.project,"explain":true}),
+                    json!({"op":"run","template":"deliver","worktree":rig.project,"explain":true}),
                     budget,
                     &cancel
                 )
@@ -2997,7 +3259,7 @@ mod tests {
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
         let error = factory
             .graph_document(
-                json!({"op":"run", "use":"task.typo", "explain":true}),
+                json!({"op":"run", "template":"task.typo", "explain":true}),
                 budget,
                 &cancel,
             )
@@ -3030,7 +3292,7 @@ mod tests {
         );
         let error = factory
             .graph_document(
-                json!({"op":"run", "use":"implement", "brief":"Fix it", "explain":true}),
+                json!({"op":"run", "template":"implement", "brief":"Fix it", "explain":true}),
                 budget,
                 &cancel,
             )
@@ -3094,7 +3356,7 @@ mod tests {
             json!({"worktree":".worktrees/fix"}),
             json!({"branch":"fix","base":"origin/main"}),
         ] {
-            let mut input = json!({"op":"run","use":"implement","brief":"Fix it"});
+            let mut input = json!({"op":"run","template":"implement","brief":"Fix it"});
             input
                 .as_object_mut()
                 .unwrap()
@@ -3109,7 +3371,7 @@ mod tests {
             assert_eq!(node["access"], "worktree_write");
         }
 
-        let mut explicit_read = json!({"op":"run","use":"implement","brief":"Fix it","access":"read_only","worktree":".worktrees/fix"});
+        let mut explicit_read = json!({"op":"run","template":"implement","brief":"Fix it","access":"read_only","worktree":".worktrees/fix"});
         assert!(factory.child_request(&explicit_read).is_err());
         explicit_read["access"] = json!("worktree_write");
         let explicit_write = factory.child_request(&explicit_read)?;
@@ -3117,7 +3379,7 @@ mod tests {
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
         let cancel = CancelToken::new();
         let explicit_read = factory.graph_document(
-            json!({"op":"run","use":"implement","brief":"Inspect","access":"read_only","explain":true}),
+            json!({"op":"run","template":"implement","brief":"Inspect","access":"read_only","explain":true}),
             budget,
             &cancel,
         )?;
@@ -3182,7 +3444,7 @@ mod tests {
         let budget = WaitBudget::cli(factory.clock.mono_now(), 60)?;
         let response = factory.graph_document(
             json!({
-                "op":"run", "use":"task-fan-out", "brief":brief,
+                "op":"run", "template":"task-fan-out", "brief":brief,
                 "set":{"items":(0..8).map(|n|format!("slice-{n}")).collect::<Vec<_>>()},
                 "explain":true,
             }),
@@ -3286,7 +3548,7 @@ mod tests {
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
         let response = factory.graph_document(
-            json!({"op":"run", "use":"task", "over":["alpha","beta"], "explain":true}),
+            json!({"op":"run", "template":"task", "over":["alpha","beta"], "explain":true}),
             budget,
             &cancel,
         )?;
@@ -3361,14 +3623,14 @@ mod tests {
     fn child_launch_retains_writer_access_and_has_a_stable_logical_identity() -> Result {
         let rig = TestRig::new()?;
         let factory = factory(&rig)?;
-        let input = json!({"op":"run", "use":"implement", "brief":"Fix the parser", "idempotency_key":"parser-launch"});
+        let input = json!({"op":"run", "template":"implement", "brief":"Fix the parser", "idempotency_key":"parser-launch"});
         let first = factory.child_request(&input)?;
-        let unkeyed = json!({"op":"run", "use":"implement", "brief":"Fix the parser"});
+        let unkeyed = json!({"op":"run", "template":"implement", "brief":"Fix the parser"});
         assert_ne!(
             factory.child_request(&unkeyed)?.id,
             factory.child_request(&unkeyed)?.id
         );
-        let operation = json!({"op":"run","document":{"use":"task","brief":"Nested operation","operation_id":"child-replay"}});
+        let operation = json!({"op":"run","document":{"use":"task","brief":"Nested operation","idempotency_key":"child-replay"}});
         assert_eq!(
             factory.child_request(&operation)?,
             factory.child_request(&operation)?
@@ -3376,11 +3638,6 @@ mod tests {
         assert_eq!(
             factory.child_request(&operation)?.idempotency_key,
             "child-replay"
-        );
-        assert!(
-            factory
-                .child_request(&json!({"op":"run","operation_id":"bad id"}))
-                .is_err()
         );
         assert!(first.writer);
         assert_eq!(
@@ -3394,13 +3651,13 @@ mod tests {
         assert_ne!(
             factory
                 .child_request(
-                    &json!({"op":"run", "use":"implement", "brief":"Fix another parser"})
+                    &json!({"op":"run", "template":"implement", "brief":"Fix another parser"})
                 )?
                 .id,
             first.id
         );
         let bound = factory.child_request(&json!({"op":"run", "document":{"use":"implement", "brief":"Bound writer", "worktree":".worktrees/existing"}}))?;
-        let controlled = factory.child_request(&json!({"op":"run", "use":"implement",
+        let controlled = factory.child_request(&json!({"op":"run", "template":"implement",
             "brief":"Bound controls", "branch":"fix/child", "base":"HEAD",
             "write_scope":["src"], "detached":true}))?;
         let node = &controlled.launch.as_ref().unwrap().node;
@@ -3490,7 +3747,7 @@ mod tests {
             "op":"run", "document":{
                 "parameters":{"subject":{"type":"string", "default":"default"}},
                 "nodes":[{"id":"one", "use":"task", "brief":"Inspect ${subject} ${item}"}]
-            }, "set":{"subject":"code"}, "over":["a","b"], "tier":"junior"
+            }, "set":{"subject":"code"}, "over":["a","b"], "route":"junior"
         }))?;
         assert!(!request.writer);
         let node = &request.launch.as_ref().unwrap().node;
@@ -3525,7 +3782,7 @@ mod tests {
             "Document child"
         );
         let request = factory.child_request(
-            &json!({"op":"run", "use":"implement", "brief":"Fix ${item}", "over":["a","b"]}),
+            &json!({"op":"run", "template":"implement", "brief":"Fix ${item}", "over":["a","b"]}),
         )?;
         assert!(!request.writer);
         let children = request.launch.as_ref().unwrap().node["composite"]["nodes"]
@@ -3794,12 +4051,12 @@ mod tests {
     fn child_launch_crosses_the_lane_transport_and_provisions_writer_fanout() -> Result {
         for (input, count, disjoint) in [
             (
-                json!({"op":"run", "use":"implement", "brief":"Fix the parser"}),
+                json!({"op":"run", "template":"implement", "brief":"Fix the parser"}),
                 1,
                 false,
             ),
             (
-                json!({"op":"run", "use":"implement", "brief":"Fix ${item}", "over":["one","two"]}),
+                json!({"op":"run", "template":"implement", "brief":"Fix ${item}", "over":["one","two"]}),
                 2,
                 false,
             ),
@@ -3846,7 +4103,7 @@ mod tests {
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
-        let response = factory.graph_document(json!({"op":"run","brief":"Inspect ${item}","tier":"junior","over":["one","two"],"explain":true}),budget,&cancel)?;
+        let response = factory.graph_document(json!({"op":"run","brief":"Inspect ${item}","route":"junior","over":["one","two"],"explain":true}),budget,&cancel)?;
         let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
         let expanded = document.expanded(&factory.context.config.graph.limits)?;
         let leaves: Vec<_> = expanded
@@ -3884,7 +4141,7 @@ mod tests {
             .collect();
         assert_eq!(prompts, vec!["Inspect code a", "Inspect code b"]);
         let response = factory.graph_document(
-            json!({"op":"run","use":"task-once","brief":"Parameter brief","tier":"junior","set":{},"explain":true}),
+            json!({"op":"run","template":"task-once","brief":"Parameter brief","route":"junior","set":{},"explain":true}),
             budget,
             &cancel,
         )?;
@@ -3981,11 +4238,9 @@ mod tests {
             &cancel,
         )?;
         let compiled = &response["document"];
-        assert!(
-            compiled["graph_id"]
-                .as_str()
-                .is_some_and(|id| id.starts_with("g-"))
-        );
+        assert!(compiled["graph_id"].as_str().is_some_and(|id| {
+            provenant_fabric_runtime::graph::template::graph_name_fault(id).is_none()
+        }));
         for (field, expected) in settings.as_object().ok_or("settings object")? {
             assert_eq!(&compiled[field], expected, "lost graph setting {field}");
         }
@@ -4512,7 +4767,7 @@ mod tests {
             "the actual review legs must retain their required family"
         );
         let mut child = input.clone();
-        child["tier"] = json!("missing-family-pool");
+        child["route"] = json!("missing-family-pool");
         child["document"]["review"]["diversity"] = json!("strict");
         let error = factory.child_request(&child).unwrap_err();
         let FacadeError::DispatchRefused { reason, .. } = error else {
@@ -4575,7 +4830,7 @@ mod tests {
             .family;
         // No `diversity` key: the advisory default must refuse the tier too.
         let child = json!({
-            "op": "run", "tier": "missing-family-pool",
+            "op": "run", "route": "missing-family-pool",
             "document": {
                 "use": "review", "brief": "Review required family coverage",
                 "review": {

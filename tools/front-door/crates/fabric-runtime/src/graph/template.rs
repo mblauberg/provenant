@@ -223,7 +223,7 @@ impl ParameterKind {
 impl TemplateParameter {
     /// The shape this parameter accepts, read from its declaration alone, so a
     /// refusal never echoes the value that was supplied.
-    fn expected(&self) -> String {
+    pub fn expected(&self) -> String {
         let article = if self.kind == ParameterKind::Integer {
             "an"
         } else {
@@ -574,42 +574,121 @@ fn edit_distance(left: &str, right: &str) -> usize {
     row[right.len()]
 }
 
-/// Identity of a top-level submission, inherited by dotted flavours.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SubmissionIdentity {
-    /// Each invocation starts work, even when its brief is unchanged.
-    #[default]
-    Fresh,
-    /// Equal bound content (including cwd and resolved HEAD) reuses work.
-    Content,
+/// The longest graph name. A name is a graph's id, so it also bounds the
+/// `NAME-k` suffix a changed replay appends.
+pub const MAX_GRAPH_NAME_BYTES: usize = 48;
+
+/// Whether `name` can name a graph: a lowercase ASCII letter, then lowercase
+/// letters, digits and single hyphens, not ending in a hyphen.
+pub fn graph_name_fault(name: &str) -> Option<&'static str> {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes.len() > MAX_GRAPH_NAME_BYTES {
+        return Some("a graph name is 1 to 48 bytes");
+    }
+    if !bytes[0].is_ascii_lowercase() {
+        return Some("a graph name starts with a lowercase letter");
+    }
+    if !bytes
+        .iter()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+        || name.contains("--")
+        || name.ends_with('-')
+    {
+        return Some(
+            "a graph name holds lowercase letters, digits and single hyphens, and does not end in a hyphen",
+        );
+    }
+    None
 }
 
-impl SubmissionIdentity {
-    /// An explicit operation ID replays independently of freshness and HEAD.
-    /// The caller supplies bound content and a fresh nonce, never clock time.
-    pub fn graph_id(
-        self,
-        content: &Value,
-        nonce: &str,
-        operation_id: Option<&str>,
-    ) -> Result<String, String> {
-        let identity = if let Some(operation) = operation_id {
-            serde_json::json!({"operation_id": operation})
-        } else {
-            match self {
-                Self::Fresh => serde_json::json!({"content":content,"nonce":nonce}),
-                Self::Content => serde_json::json!({"content":content}),
-            }
-        };
-        let digest =
-            provenant_records::CanonicalV1::record_digest("graph-submission", 1, &identity)
-                .map_err(|error| error.to_string())?;
-        Ok(format!(
-            "g-{}",
-            &provenant_core::hex(digest.as_bytes())[..30]
-        ))
+/// The handle a host assigns to an unnamed graph of `template`: dots and other
+/// separators become hyphens, so `review.adversarial` reads `review-adversarial`.
+pub fn default_graph_base(template: &str) -> String {
+    let mut base = String::new();
+    for character in template.chars() {
+        if character.is_ascii_alphanumeric() {
+            base.push(character.to_ascii_lowercase());
+        } else if !base.ends_with('-') && !base.is_empty() {
+            base.push('-');
+        }
     }
+    let base = base.trim_end_matches('-');
+    if !base.starts_with(|first: char| first.is_ascii_lowercase()) {
+        return "graph".into();
+    }
+    // Leave room for `-K` within the name limit.
+    base.chars()
+        .take(MAX_GRAPH_NAME_BYTES - 6)
+        .collect::<String>()
+        .trim_end_matches('-')
+        .to_owned()
+}
+
+/// The number `k` when `id` is `base-k`, the form a family member takes.
+fn family_suffix(base: &str, id: &str) -> Option<u64> {
+    let digits = id.strip_prefix(base)?.strip_prefix('-')?;
+    (!digits.is_empty()
+        && !digits.starts_with('0')
+        && digits.bytes().all(|byte| byte.is_ascii_digit()))
+    .then(|| digits.parse().ok())
+    .flatten()
+}
+
+/// What a named launch does about the graphs already holding its name's family.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NameDecision {
+    /// A graph of the family already holds this digest; start nothing.
+    Replay(String),
+    /// Start a new graph under this id. `taken` is the family member that
+    /// forced a suffix, when the plain name was already in use.
+    Create { id: String, taken: Option<String> },
+}
+
+/// Where `input` lands among `existing` graph ids. `digest_of` reads the replay
+/// digest of one graph, `None` when it has none. A named launch looks for its
+/// digest in `NAME`, `NAME-2`, `NAME-3` and so on before taking the next free
+/// `NAME-k`; an unnamed launch (`replay` false) never replays and takes the
+/// next unused `BASE-K`, counted from 1.
+pub fn decide_graph_name(
+    base: &str,
+    digest: &str,
+    replay: bool,
+    existing: &[String],
+    mut digest_of: impl FnMut(&str) -> Option<String>,
+) -> Result<NameDecision, String> {
+    let family: Vec<&String> = existing
+        .iter()
+        .filter(|id| id.as_str() == base || family_suffix(base, id).is_some_and(|k| k >= 2))
+        .collect();
+    if replay {
+        for id in &family {
+            if digest_of(id).is_some_and(|stored| stored == digest) {
+                return Ok(NameDecision::Replay((*id).clone()));
+            }
+        }
+        if family.is_empty() {
+            return Ok(NameDecision::Create {
+                id: base.to_owned(),
+                taken: None,
+            });
+        }
+    }
+    let next = family
+        .iter()
+        .filter_map(|id| family_suffix(base, id))
+        .max()
+        .map_or(if replay { 2 } else { 1 }, |last| last + 1)
+        .max(if replay { 2 } else { 1 });
+    let id = format!("{base}-{next}");
+    if id.len() > MAX_GRAPH_NAME_BYTES {
+        return Err(format!(
+            "graph name {base} has no room for a -{next} suffix within {MAX_GRAPH_NAME_BYTES} bytes; use a shorter --name"
+        ));
+    }
+    Ok(NameDecision::Create {
+        id,
+        taken: replay.then(|| base.to_owned()),
+    })
 }
 
 /// Review protocol selected by a template, inherited by dotted flavours.
@@ -690,9 +769,6 @@ pub enum CompositeBehaviour {
 pub struct Template {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub composite_behaviour: Option<CompositeBehaviour>,
-    /// Top-level run identity. Unspecified templates start fresh work.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub identity: Option<SubmissionIdentity>,
     /// Review output protocol, enforced independently of the brief.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewBehaviour>,
@@ -743,6 +819,47 @@ impl Template {
 
     pub fn is_composite(&self) -> bool {
         !self.nodes.is_empty()
+    }
+
+    /// Type one binding that arrived as text, as `--set NAME=VALUE` does. A
+    /// string parameter takes the text as written; an integer, number, boolean,
+    /// list or table parses it as TOML and must come out as that kind. A name the
+    /// template does not declare, and a value that is not text, pass through for
+    /// the compiler to judge. A refusal quotes the declaration, never the text.
+    pub fn type_binding(
+        &self,
+        template: &str,
+        name: &str,
+        value: Value,
+    ) -> Result<Value, ParameterRefusal> {
+        let (Some(parameter), Value::String(text)) = (self.parameters.get(name), &value) else {
+            return Ok(value);
+        };
+        if parameter.kind == ParameterKind::String {
+            return Ok(value);
+        }
+        let parsed = toml_edit::de::from_str::<Value>(&format!("value = {text}"))
+            .ok()
+            .and_then(|mut table| table.get_mut("value").map(Value::take));
+        let fits = parsed.as_ref().is_some_and(|parsed| match parameter.kind {
+            ParameterKind::String => true,
+            ParameterKind::Integer => parsed.is_i64() || parsed.is_u64(),
+            ParameterKind::Number => parsed.is_number(),
+            ParameterKind::Boolean => parsed.is_boolean(),
+            ParameterKind::List => parsed.is_array(),
+            ParameterKind::Table => parsed.is_object(),
+        });
+        match parsed {
+            Some(parsed) if fits => Ok(parsed),
+            _ => Err(ParameterRefusal {
+                node: None,
+                template: template.to_owned(),
+                fault: ParameterFault::Shape {
+                    key: name.to_owned(),
+                    expected: parameter.expected(),
+                },
+            }),
+        }
     }
 
     /// Structural checks every layer shares.
@@ -981,7 +1098,6 @@ impl Template {
         base.extra.extend(own.extra.clone());
         base.composite_behaviour = own.composite_behaviour.or(base.composite_behaviour);
         base.review = own.review.or(base.review);
-        base.identity = own.identity.or(base.identity);
         base.name = own.name.clone().or(base.name);
         base.doc = own.doc.clone().or(base.doc);
         base.parameters.extend(own.parameters.clone());

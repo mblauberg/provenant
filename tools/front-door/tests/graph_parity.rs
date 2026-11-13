@@ -332,17 +332,15 @@ fn success() -> Result {
     Ok(())
 }
 
-/// The same brief is a new task after either terminal outcome, unless the
-/// caller explicitly replays an operation. Keep both runs in one journal store
-/// so an accidentally reused graph ID would return the earlier checkpoint.
+/// A changed launch is a new graph after either terminal outcome, while the
+/// same launch replays its graph. The graph name is the graph id; keep both
+/// runs in one journal store so an accidentally reused id would return the
+/// earlier checkpoint.
 #[test]
-fn rerun_after_success_or_cancellation_launches_unless_operation_is_replayed() -> Result {
-    let template = graph::template::TemplateLibrary::bundled().resolve("task")?;
-    let identity = template.identity.unwrap_or_default();
-    let content = json!({"brief":"do the work"});
+fn rerun_after_success_or_cancellation_launches_unless_the_launch_is_replayed() -> Result {
     for cancelled in [false, true] {
-        for operation_id in [None, Some("parity-operation")] {
-            let first_id = identity.graph_id(&content, "first-submission", operation_id)?;
+        for replayed in [false, true] {
+            let first_id = "parity-run".to_string();
             let mut h = Harness::new(&first_id, lane(1))?;
             let first_step = if cancelled {
                 Step::Pending(Some("h/first"))
@@ -362,14 +360,17 @@ fn rerun_after_success_or_cancellation_launches_unless_operation_is_replayed() -
             assert_eq!(first.cancelled, cancelled);
             assert_eq!(p.launches.len(), 1);
             let calls_before = p.calls.len();
-            let rerun_id = identity.graph_id(&content, "second-submission", operation_id)?;
-            assert_eq!(rerun_id == first_id, operation_id.is_some());
+            let rerun_id = if replayed {
+                first_id.clone()
+            } else {
+                "parity-run-2".to_string()
+            };
             h.id = rerun_id.clone();
             h.document.graph_id = rerun_id;
             p.script = [Step::Done(AttemptOutcome::Succeeded, true, "h/second")].into();
             let rerun = h.advance(&mut p)?;
             let checkpoint = h.checkpoint()?;
-            if operation_id.is_some() {
+            if replayed {
                 assert_eq!(p.calls.len(), calls_before);
                 assert_eq!(p.launches.len(), 1);
                 assert_eq!(checkpoint.cancelled, cancelled);

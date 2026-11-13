@@ -604,7 +604,21 @@ pub enum AdmissionError {
     },
 }
 
+/// The `GraphDocument::extra` key holding a submission's replay digest.
+pub const REPLAY_DIGEST_FIELD: &str = "replay_digest";
+
 impl GraphDocument {
+    /// The host digest of the input that created this graph. A named `run` whose
+    /// input has the same digest finds this graph instead of starting another.
+    pub fn replay_digest(&self) -> Option<&str> {
+        self.extra.get(REPLAY_DIGEST_FIELD)?.as_str()
+    }
+
+    pub fn set_replay_digest(&mut self, digest: &str) {
+        self.extra
+            .insert(REPLAY_DIGEST_FIELD.into(), serde_json::json!(digest));
+    }
+
     /// Check nested composite structure with the same expansion safety bounds
     /// used by graph admission, without starting a graph.
     pub fn check_composites(&self, limits: &crate::config::GraphLimits) -> Result<(), String> {

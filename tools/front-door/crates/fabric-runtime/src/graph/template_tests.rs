@@ -1301,3 +1301,194 @@ fn template_launch_missing_parameters_names_them() {
     assert!(example.contains("worktree"), "{example}");
     assert!(example.contains("write_scope"), "{example}");
 }
+
+#[test]
+fn set_values_parse_by_declared_kind_and_a_wrong_kind_names_the_declaration() {
+    let library = library();
+    let mut checked: Vec<ParameterKind> = Vec::new();
+    let names: Vec<_> = library.names().map(str::to_owned).collect();
+    for name in &names {
+        let template = library.resolve(name).unwrap();
+        for (key, parameter) in &template.parameters {
+            let (valid, wrong): (&str, &str) = match parameter.kind {
+                ParameterKind::String => ("a plain word", ""),
+                ParameterKind::Integer => ("7", "true"),
+                ParameterKind::Number => ("1.5", "true"),
+                ParameterKind::Boolean => ("true", "7"),
+                ParameterKind::List => ("[1, 2]", "7"),
+                ParameterKind::Table => ("{ a = 1 }", "7"),
+            };
+            if !checked.contains(&parameter.kind) {
+                checked.push(parameter.kind);
+            }
+            let bound = template
+                .type_binding(name, key, json!(valid))
+                .unwrap_or_else(|_| {
+                    panic!("{name}.{key}: valid {} text refused", parameter.kind.name())
+                });
+            let fits = match parameter.kind {
+                ParameterKind::String => bound.is_string(),
+                ParameterKind::Integer => bound.is_i64(),
+                ParameterKind::Number => bound.is_number(),
+                ParameterKind::Boolean => bound.is_boolean(),
+                ParameterKind::List => bound.is_array(),
+                ParameterKind::Table => bound.is_object(),
+            };
+            assert!(fits, "{name}.{key}: {bound}");
+            if parameter.kind == ParameterKind::String {
+                assert_eq!(bound, json!(valid), "a string is taken as written");
+                continue;
+            }
+            let refusal = template
+                .type_binding(name, key, json!(wrong))
+                .expect_err("a value of another kind must be refused");
+            match refusal.fault {
+                ParameterFault::Shape {
+                    key: named,
+                    expected,
+                } => {
+                    assert_eq!(&named, key);
+                    assert!(expected.contains(parameter.kind.name()), "{expected}");
+                }
+                other => panic!("{name}.{key}: {other:?}"),
+            }
+        }
+    }
+    assert!(checked.contains(&ParameterKind::String), "{checked:?}");
+}
+
+#[test]
+fn undeclared_set_keys_and_typed_values_pass_through_to_the_compiler() {
+    let library = library();
+    let template = library.resolve("task").unwrap();
+    assert_eq!(
+        template
+            .type_binding("task", "not-declared", json!("x"))
+            .unwrap(),
+        json!("x")
+    );
+    assert_eq!(
+        template.type_binding("task", "brief", json!(7)).unwrap(),
+        json!(7)
+    );
+}
+
+#[test]
+fn graph_names_are_valid_ids_within_the_bound() {
+    for ok in [
+        "a",
+        "review",
+        "fix-2",
+        "a1-b2",
+        &"a".repeat(MAX_GRAPH_NAME_BYTES),
+    ] {
+        assert_eq!(graph_name_fault(ok), None, "{ok}");
+    }
+    for bad in [
+        "",
+        "1a",
+        "-a",
+        "a-",
+        "a--b",
+        "A",
+        "a_b",
+        "a.b",
+        &"a".repeat(MAX_GRAPH_NAME_BYTES + 1),
+    ] {
+        assert!(graph_name_fault(bad).is_some(), "{bad}");
+    }
+    let names: Vec<_> = library().names().map(str::to_owned).collect();
+    for template in names {
+        let base = default_graph_base(&template);
+        assert_eq!(graph_name_fault(&format!("{base}-1")), None, "{template}");
+    }
+}
+
+/// Replays a series of launches against an in-memory journal of ids and digests.
+fn launch(
+    journal: &mut Vec<(String, String)>,
+    base: &str,
+    digest: &str,
+    named: bool,
+) -> Result<(String, bool), String> {
+    let existing: Vec<String> = journal.iter().map(|(id, _)| id.clone()).collect();
+    let stored = journal.clone();
+    match decide_graph_name(base, digest, named, &existing, |id| {
+        stored
+            .iter()
+            .find(|(known, _)| known == id)
+            .map(|(_, digest)| digest.clone())
+    })? {
+        NameDecision::Replay(id) => Ok((id, true)),
+        NameDecision::Create { id, .. } => {
+            journal.push((id.clone(), digest.to_owned()));
+            Ok((id, false))
+        }
+    }
+}
+
+#[test]
+fn a_name_replays_its_digest_and_takes_the_next_suffix_for_a_new_one() {
+    let mut journal = Vec::new();
+    assert_eq!(
+        launch(&mut journal, "fix", "d1", true).unwrap(),
+        ("fix".into(), false)
+    );
+    // The same input returns the same graph and starts nothing.
+    assert_eq!(
+        launch(&mut journal, "fix", "d1", true).unwrap(),
+        ("fix".into(), true)
+    );
+    assert_eq!(journal.len(), 1);
+    // Changed input takes the next free suffix and leaves the first alone.
+    assert_eq!(
+        launch(&mut journal, "fix", "d2", true).unwrap(),
+        ("fix-2".into(), false)
+    );
+    assert_eq!(journal[0], ("fix".into(), "d1".into()));
+    // Repeating either input finds its own graph.
+    assert_eq!(
+        launch(&mut journal, "fix", "d2", true).unwrap(),
+        ("fix-2".into(), true)
+    );
+    assert_eq!(
+        launch(&mut journal, "fix", "d1", true).unwrap(),
+        ("fix".into(), true)
+    );
+    assert_eq!(
+        launch(&mut journal, "fix", "d3", true).unwrap(),
+        ("fix-3".into(), false)
+    );
+    assert_eq!(journal.len(), 3);
+    // A graph whose name only looks like a family member is not one.
+    let mut other = vec![("fix-it".to_owned(), "d1".to_owned())];
+    assert_eq!(
+        launch(&mut other, "fix", "d1", true).unwrap(),
+        ("fix".into(), false)
+    );
+}
+
+#[test]
+fn an_unnamed_launch_takes_a_unique_valid_handle_and_never_replays() {
+    let mut journal = Vec::new();
+    let base = default_graph_base("review.adversarial");
+    assert_eq!(base, "review-adversarial");
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..5 {
+        let (id, replayed) = launch(&mut journal, &base, "same", false).unwrap();
+        assert!(!replayed);
+        assert_eq!(graph_name_fault(&id), None, "{id}");
+        assert!(seen.insert(id));
+    }
+    assert!(seen.contains("review-adversarial-1"));
+}
+
+#[test]
+fn a_name_without_room_for_its_suffix_is_refused_in_one_line() {
+    let base = "a".repeat(MAX_GRAPH_NAME_BYTES);
+    let mut journal = Vec::new();
+    assert_eq!(launch(&mut journal, &base, "d1", true).unwrap().0, base);
+    let error = launch(&mut journal, &base, "d2", true).unwrap_err();
+    assert!(!error.contains('\n') && error.contains("--name"), "{error}");
+    assert_eq!(journal.len(), 1);
+}

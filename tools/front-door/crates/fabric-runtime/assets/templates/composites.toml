@@ -52,7 +52,7 @@ min_ok = { type = "integer", default = 1, min = 1 }
 exports = [{ node = "repair", outputs = ["result"] }]
 doc = "Implement named slices into one integration branch, then review it."
 nodes = [
-  { id = "slices", use = "implement", over = "${items}", min_ok = "${min_ok}", brief = "Implement slice ${item}: ${brief}", delivery = "integrate:${integration_branch}", worktree = "${worktree}", write_scope = "${write_scope}" },
+  { id = "slices", use = "implement", tier = "junior", over = "${items}", min_ok = "${min_ok}", brief = "Implement slice ${item}: ${brief}", delivery = "integrate:${integration_branch}", worktree = "${worktree}", write_scope = "${write_scope}" },
   { id = "review", use = "findings-panel", after = ["slices"], source = { type = "integration" } },
   { id = "repair", use = "review-repair", after = ["review"], inputs = [{ node = "review", outputs = ["findings", "verdict"] }], with = { worktree = "${worktree}", write_scope = "${write_scope}", integration_branch = "${integration_branch}", max_repair_cycles = "${max_repair_cycles}" } },
 ]
@@ -66,7 +66,6 @@ worktree = { type = "string" }
 write_scope = { type = "list", min = 1 }
 
 [deliver]
-identity = "content"
 exports = [
   { node = "implement", outputs = ["branch", "commit"] },
   { node = "review", outputs = ["result", "findings", "verdict"] },
