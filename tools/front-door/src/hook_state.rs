@@ -379,11 +379,15 @@ fn parse_lanes(data: &Value, settled_after_unix: Option<i64>) -> (Vec<LaneLine>,
                 continue;
             }
         }
+        // The lane's target: its work key as `NAME/NODE#N`.
+        let key = &lane["key"];
         let id = format!(
-            "{}/{}/{}",
-            lane["run_id"].as_str().unwrap_or("?"),
-            lane["task_id"].as_str().unwrap_or("?"),
-            lane["attempt_id"].as_str().unwrap_or("?")
+            "{}/{}#{}",
+            key["graph"].as_str().unwrap_or("?"),
+            key["node"].as_str().unwrap_or("?"),
+            key["attempt"]
+                .as_u64()
+                .map_or_else(|| "?".to_owned(), |n| n.to_string())
         );
         lanes.push(LaneLine {
             id,
