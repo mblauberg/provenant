@@ -34,8 +34,12 @@ The PID stays reserved until the handle is reaped last. Only the unreaped
 provider, its group while the leader is unreaped, descendants with retained
 proof of provider ancestry, and proven attempt-sandbox escapees may be signalled.
 Descendant proof survives session changes and reparenting, but every signal
-revalidates the full native identity. Registry and host child checks must permit
-cleanup; spared and protected owners and their possible descendants stay excluded.
+revalidates the full native identity. Native descendants may be stopped only for
+a recorded provider stop (cancellation, deadline, budget, context handoff, protocol
+rejection or supervisor signal); an ordinary provider exit leaves them under
+conservative custody. Registry and host child checks must permit cleanup. When
+there is no native child registry, a present host holder must affirm that no graph
+child remains. Spared and protected owners and their possible descendants stay excluded.
 A census listing or cwd observation alone never grants signal authority, and
 recovery signals only a PID whose recorded identity matches.
 - Why: signalling a recycled PID or a sibling's group kills unrelated work.

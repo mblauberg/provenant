@@ -1116,7 +1116,7 @@ impl ProviderGroup {
         )
     }
 
-    /// Signal identities the guardian authorized by retained provider ancestry
+    /// Signal identities the guardian authorised by retained provider ancestry
     /// or the attempt sandbox. Re-observe each immediately before signalling
     /// so a recycled PID is never targeted.
     pub(crate) fn stop_owned_targets(

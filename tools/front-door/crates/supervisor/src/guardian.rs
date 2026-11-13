@@ -1453,7 +1453,7 @@ impl Driver<'_> {
                     cleanup_complete = match self.cleanup(
                         &mut child,
                         plan,
-                        stop_reason == Some(machine::StopReason::ExplicitCancellation),
+                        stop_reason,
                         &mut warnings,
                         &mut omitted_warnings,
                     ) {
@@ -1849,7 +1849,7 @@ impl Driver<'_> {
                             .cleanup(
                                 &mut child,
                                 plan,
-                                stop_reason == Some(machine::StopReason::ExplicitCancellation),
+                                stop_reason,
                                 &mut warnings,
                                 &mut omitted_warnings,
                             )
@@ -1931,7 +1931,11 @@ impl Driver<'_> {
                 if let Ok(true) = self.cleanup(
                     &mut child,
                     plan,
-                    cancelled,
+                    if cancelled {
+                        Some(machine::StopReason::ExplicitCancellation)
+                    } else {
+                        record.stop_reason
+                    },
                     &mut warnings,
                     &mut omitted_warnings,
                 ) {
@@ -1953,7 +1957,11 @@ impl Driver<'_> {
                         if let Ok(true) = self.cleanup(
                             &mut child,
                             plan,
-                            cancelled,
+                            if cancelled {
+                                Some(machine::StopReason::ExplicitCancellation)
+                            } else {
+                                Some(machine::StopReason::SupervisorSignal)
+                            },
                             &mut warnings,
                             &mut omitted_warnings,
                         ) && published

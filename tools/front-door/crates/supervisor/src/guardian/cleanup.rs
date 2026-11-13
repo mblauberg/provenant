@@ -604,17 +604,17 @@ impl Driver<'_> {
         &mut self,
         child: &mut crate::process_os::provider::ProviderGroup,
         plan: CapturePlan,
-        cancelled: bool,
+        stop_reason: Option<machine::StopReason>,
         warnings: &mut Vec<String>,
         omitted: &mut u64,
     ) -> Result<bool> {
-        let reason = if cancelled
+        let reason = if stop_reason == Some(machine::StopReason::ExplicitCancellation)
             || self.read_cancel(warnings, omitted)
                 == Some(machine::StopReason::ExplicitCancellation)
         {
             machine::StopReason::ExplicitCancellation
         } else {
-            machine::StopReason::PostTerminalCleanup
+            stop_reason.unwrap_or(machine::StopReason::PostTerminalCleanup)
         };
         self.terminate_group(child, plan, reason, warnings, omitted);
         let deadline = Instant::now()
@@ -696,7 +696,7 @@ impl Driver<'_> {
             // Root exit does not authorise an arbitrary PID. Descendants need
             // retained provider-ancestry proof or an attempt-sandbox mark.
             let escalation = began.elapsed() >= Duration::from_millis(plan.descendant_grace_ms);
-            let reason = machine::StopReason::PostTerminalCleanup;
+            let delivery_reason = machine::StopReason::PostTerminalCleanup;
             let signal = if escalation {
                 libc::SIGKILL
             } else {
@@ -706,7 +706,12 @@ impl Driver<'_> {
             // ESRCH means the provider is already gone (or already signalled),
             // which later ticks would only repeat; it is not a failed delivery.
             if outcome != DeliveryOutcome::Failed(DeliveryFailure::NoSuchProcess) {
-                self.record_delivery(self.reservation.provider.clone(), reason, signal, outcome);
+                self.record_delivery(
+                    self.reservation.provider.clone(),
+                    delivery_reason,
+                    signal,
+                    outcome,
+                );
                 if outcome != DeliveryOutcome::Delivered {
                     push_warning(warnings, omitted, "post-terminal provider signal failed");
                 }
@@ -714,7 +719,23 @@ impl Driver<'_> {
             #[cfg(target_os = "macos")]
             if self.holder_reports_no_live_children() {
                 let mut targets = std::collections::BTreeSet::new();
-                if self.descendant_stop_allowed {
+                // Native descendants require a requested provider stop, not
+                // merely its ordinary exit. Without a native child registry,
+                // an actual host holder must affirm that no graph child remains;
+                // an absent holder is not that proof.
+                let requested_stop = match reason {
+                    machine::StopReason::PostTerminalCleanup => false,
+                    machine::StopReason::ExplicitCancellation
+                    | machine::StopReason::WallDeadline
+                    | machine::StopReason::ProtocolRejected
+                    | machine::StopReason::SupervisorSignal
+                    | machine::StopReason::TokenBudget
+                    | machine::StopReason::ContextHandoff => true,
+                };
+                if requested_stop
+                    && (self.descendant_stop_allowed
+                        || (self.registry.is_none() && self.holder.is_some()))
+                {
                     targets.extend(child.owned_cleanup_targets(&census, &spared));
                 }
                 if self.escapee_stop_allowed {
@@ -722,7 +743,12 @@ impl Driver<'_> {
                 }
                 let targets: Vec<_> = targets.into_iter().collect();
                 for delivery in child.stop_owned_targets(escalation, &targets) {
-                    self.record_delivery(Some(delivery.identity), reason, signal, delivery.outcome);
+                    self.record_delivery(
+                        Some(delivery.identity),
+                        delivery_reason,
+                        signal,
+                        delivery.outcome,
+                    );
                 }
             }
             self.persist_tracking(warnings, omitted);
