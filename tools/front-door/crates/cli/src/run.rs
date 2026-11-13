@@ -1,15 +1,14 @@
 //! Attempt execution and retained lane observations: `status`, `output`,
 //! `reconcile` and `telemetry stats`, and the provider seam that the
 //! same-binary guardian holder shares.
-use crate::{
-    Cancel, Condition, Lanes, Output, Part, PricesRefresh, Reconcile, Resume, Stats, Switch,
-    Target, Trace, limits,
-};
+use crate::{Output, Part, PricesRefresh, Reconcile, Stats, Switch, Target, Trace, limits};
+#[cfg(test)]
+use provenant_core::ActorId;
 use provenant_core::{
-    ActorId, AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId, WallTime,
+    AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId, WallTime,
 };
 use provenant_fabric_runtime::hosts::plain_text;
-use provenant_os::{clock::SystemClock, fs::entropy_128};
+use provenant_os::clock::SystemClock;
 use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
 use provenant_records::{CanonicalV1, CommandError, CommandResult, Outcome as Status};
 use provenant_routing::{Fallback, ModelId, RouteChoice, RouteName};
@@ -20,13 +19,13 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
-    io::Read,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 mod cancel;
 mod holder;
+mod key;
 mod launch;
 mod output;
 mod provider;
@@ -35,14 +34,12 @@ mod remote;
 mod resume;
 mod status;
 mod submit;
-mod targets;
 mod telemetry;
 mod telemetry_context;
-mod wait;
-mod watch;
 mod worktree;
 pub use cancel::*;
 pub use holder::HostHolder;
+pub use key::{resolve_fail, resolve_target};
 pub use launch::*;
 pub use output::*;
 pub(crate) use provider::find_executable as provider_executable;
@@ -54,30 +51,7 @@ pub use resume::*;
 pub use status::*;
 pub use submit::*;
 pub use telemetry::*;
-pub use wait::*;
 pub use worktree::*;
-
-/// Decode the graph-shaped spelling selected by a CLI boundary. The lower run
-/// reader still has explicit ID adapters while callers move to work keys.
-fn graph_selector(target: &Target) -> Result<crate::target::Target, Fail> {
-    let selection = target.selection.as_deref().ok_or_else(|| {
-        Fail::new(
-            Status::Invalid,
-            ErrorKind::Invalid,
-            "a graph name is required",
-        )
-    })?;
-    crate::target::Target::parse(selection)
-        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))
-}
-
-fn work_key_matches(key: &provenant_records::WorkKey, target: &crate::target::Target) -> bool {
-    key.graph() == target.name
-        && target.node.as_deref().is_none_or(|node| key.node() == node)
-        && target
-            .attempt
-            .is_none_or(|attempt| key.attempt() == attempt.get())
-}
 
 /// The first typed refusal is sealed beside the attempt before quota publication.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -266,37 +240,6 @@ fn command_error(fail: &Fail) -> CommandError {
             .and_then(|projection| projection.next.clone()),
     }
 }
-/// A reply whose reader deadline expired still reports what it saw.
-fn reply_waited(command: &str, outcome: Result<(Value, String, bool), Fail>) -> Reply {
-    let mut expired = false;
-    let mut silent = false;
-    let mut out = reply(
-        command,
-        outcome.map(|(data, human, timed_out)| {
-            expired = timed_out;
-            silent = data["reason"].is_string();
-            (data, human)
-        }),
-    );
-    if silent {
-        out.result.status = Status::Failed;
-    } else if expired {
-        out.result.status = Status::Timeout;
-    }
-    apply_launch_policy(&mut out);
-    out
-}
-/// Preserve the launch receipt while projecting a typed launch refusal.
-fn apply_launch_policy(out: &mut Reply) {
-    if out.result.error.is_none()
-        && let Some(started) = out.result.data.get("started")
-        && let Ok(started) = serde_json::from_value::<Vec<run::Started>>(started.clone())
-        && let Err(failure) = check_launch_policy(&started)
-    {
-        out.result.status = failure.status;
-        out.result.error = Some(command_error(&failure));
-    }
-}
 
 pub fn read_only_checkout_warning(state: &Path, source: &Path) -> Option<String> {
     provider::confinement::read_only_checkout_warning(state, source)
@@ -368,47 +311,6 @@ impl Registry<'_> {
             provenant_records::AdapterSpec::get(entry.adapter.id())
                 .is_some_and(|spec| spec.launch.resume)
         })
-    }
-    /// Refuse before the attempt's one continuation is spent.
-    fn check_continuable(&self, prior: &run::AttemptRecord) -> Result<(), Fail> {
-        if !matches!(prior.state, run::AttemptState::Terminal { .. }) {
-            return Err(run::RunError::Nonterminal.into());
-        }
-        let unsupported = |message: String| {
-            Fail::new(Status::Refused, ErrorKind::ContinuationUnsupported, message)
-        };
-        if prior
-            .applied_route
-            .as_ref()
-            .is_some_and(|route| route.extra.contains_key("host_native"))
-        {
-            return Err(unsupported(
-                "host-native does not support resume; dispatch a fresh lane with the prior result"
-                    .into(),
-            ));
-        }
-        let adapter = prior
-            .applied_route
-            .as_ref()
-            .and_then(|route| route.provider.as_deref())
-            .ok_or_else(|| unsupported("the attempt launched no provider to resume".into()))?;
-        if !REGISTRY.iter().any(|entry| entry.adapter.id() == adapter) {
-            return Err(unsupported(format!("unknown provider {adapter}")));
-        }
-        if let Some(spec) = provenant_records::AdapterSpec::get(adapter) {
-            spec.check_launch(&provenant_records::LaunchRequest {
-                model: None,
-                resume: true,
-                ..Default::default()
-            })
-            .map_err(|error| unsupported(error.to_string()))?;
-        }
-        if prior.session.is_none() {
-            return Err(unsupported(
-                "the attempt recorded no provider session handle (it predates handle capture or the provider never reported one); dispatch a new lane with the prior result as context".into(),
-            ));
-        }
-        Ok(())
     }
 }
 const CAPACITY: &str = "provider capacity";
@@ -1251,11 +1153,6 @@ fn now(clock: &dyn Clock) -> Result<WallTime, Fail> {
         .wall_now()
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Time, error.to_string()))
 }
-fn fresh<T>(make: fn([u8; 16]) -> T) -> Result<T, Fail> {
-    entropy_128()
-        .map(make)
-        .map_err(|error| Fail::new(Status::Error, ErrorKind::Entropy, error.to_string()))
-}
 
 #[cfg(test)]
 #[path = "run/tests/pipeline.rs"]
@@ -1791,31 +1688,36 @@ fn trace_inner(command: Trace, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let selected_graph = command.run.as_ref().map(graph_selector).transpose()?;
+    let selected = command
+        .target
+        .as_ref()
+        .map(|target| key::resolve_target(edge, target, crate::Want::Work))
+        .transpose()?;
+    let keep = |context: Option<&provenant_records::run::WorkContext>| {
+        selected
+            .as_ref()
+            .is_none_or(|resolved| key::context_matches(context, resolved))
+    };
     let (_, store) = open_read_only(edge, &call)?;
-    let mut facts = store
-        .map(|store| {
-            let mut facts = store
-                .attempts(run::AttemptFilter::default(), &call)?
-                .collect::<Result<Vec<_>, _>>()?;
-            if let Some(target) = selected_graph.as_ref() {
-                let mut matched = Vec::with_capacity(facts.len());
-                for fact in facts {
-                    let key = store.work_key(fact.attempt_id, &call)?;
-                    if work_key_matches(&key, target) {
-                        matched.push(fact);
-                    }
-                }
-                facts = matched;
+    let mut facts = Vec::new();
+    if let Some(store) = store {
+        for fact in store.attempts(
+            run::AttemptFilter {
+                run_id: None,
+                task_id: None,
+            },
+            &call,
+        )? {
+            let fact = fact?;
+            if keep(fact.context.as_ref()) {
+                facts.push(fact);
             }
-            Ok::<_, run::RunError>(facts)
-        })
-        .transpose()?
-        .unwrap_or_default();
+        }
+    }
     let mut hosts = provenant_telemetry::Hosts::default();
     let mut peers = Vec::new();
     if command.peers
-        && let Some(found) = remote::peer_facts(edge, selected_graph.as_ref())?
+        && let Some(found) = remote::peer_facts(edge, &keep)?
     {
         facts.extend(found.facts);
         hosts.local = Some(found.local);

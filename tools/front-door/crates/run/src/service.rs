@@ -780,6 +780,7 @@ error_kinds! {
     WorktreeUnregistered => "WORKTREE_UNREGISTERED", "The worktree is not registered with Provenant.";
     OperationConflict => "OPERATION_CONFLICT", "The operation ID was already used for a different request.";
     NotFound => "NOT_FOUND", "No run record matches in this scope.";
+    AmbiguousTarget => "AMBIGUOUS_TARGET", "The target names more than one node; name one of the listed nodes.";
     Nonterminal => "NONTERMINAL", "The attempt has not finished.";
     ProviderStateExpired => "PROVIDER_STATE_EXPIRED", "Retention removed the provider state this attempt needs to resume.";
     Conflict => "CONFLICT", "The run record changed concurrently or is immutable.";
@@ -870,6 +871,7 @@ impl ErrorKind {
             Self::Invalid
             | Self::OperationConflict
             | Self::NotFound
+            | Self::AmbiguousTarget
             | Self::WorktreeMissing
             | Self::UnknownAccount
             | Self::SharedSettingsNeverSynced

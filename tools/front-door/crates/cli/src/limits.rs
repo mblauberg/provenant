@@ -9,6 +9,12 @@ pub const SUMMARY_ROWS: usize = 12;
 /// Longest summary row; longer rows end in an ellipsis.
 pub const SUMMARY_ROW_BYTES: usize = 200;
 
+/// Rows the graph listing and a graph's node lines show before an omission
+/// count; unsettled graphs are always listed.
+pub const LISTING_ROWS: usize = 20;
+/// How long a settled graph stays in the default listing.
+pub const LISTING_SETTLED_SECONDS: i64 = 24 * 60 * 60;
+
 /// The fallback truncator, for owners without a summary: text up to this size
 /// is shown whole, larger text keeps its first lines.
 pub const FALLBACK_BYTES: usize = 2048;

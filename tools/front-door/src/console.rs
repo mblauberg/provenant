@@ -43,10 +43,15 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
             None
         };
         let local = provenant_cli::console::read(&resolved.roots, selected, &command)?;
-        if let Console::Detail { id } = &command
+        if matches!(command, Console::Detail { .. })
             && local["reason"] == "remote_detail_requires_host_read"
         {
-            let (host, attempt) = id.split_once('/').ok_or("invalid remote detail ID")?;
+            let host = local["lane_id"]["host"]
+                .as_str()
+                .ok_or("invalid remote detail ID")?;
+            let attempt = local["lane_id"]["attempt_id"]
+                .as_str()
+                .ok_or("invalid remote detail ID")?;
             let context = provenant_cli::fabric::Context::open_read_only(
                 resolved.roots,
                 &resolved.home,

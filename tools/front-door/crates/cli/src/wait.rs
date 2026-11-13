@@ -1,4 +1,4 @@
-//! Settings for the mixed-target status wait. Source cadence remains overridable.
+//! Settings for the `wait` verb. Source cadence remains overridable.
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
 use serde::{Deserialize, Serialize};
 
@@ -8,9 +8,7 @@ pub struct Settings {
     pub timeout_seconds: u64,
     pub local_interval_ms: u64,
     pub pr_interval_ms: u64,
-    #[serde(alias = "target_cap")]
     pub max_targets: u64,
-    #[serde(alias = "pr_timeout_seconds")]
     pub pr_read_timeout_seconds: u64,
 }
 impl Default for Settings {

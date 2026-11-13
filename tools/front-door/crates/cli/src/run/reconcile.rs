@@ -42,7 +42,7 @@ pub(super) fn reconcile_reply(outcome: Result<(Value, String), Fail>, fenced: bo
             code: "RECONCILE_INCOMPLETE".into(),
             message: out.human.trim().to_owned(),
             cause: None,
-            repair: Some("Inspect the reported custody or settlement reason, then retry `provenant reconcile --id <run>`.".into()),
+            repair: Some("Inspect the reported custody or settlement reason, then rerun `provenant reconcile NAME`.".into()),
         });
     }
     out
@@ -84,9 +84,13 @@ pub(super) fn reconcile_inner(
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     if let Some(target) = command.abandon {
-        let (session, selected) =
-            targets::open(edge, &target.0, false, &request(&clock, &cancel)?)?;
-        let id = selected.attempt.ok_or(run::RunError::NotFound)?;
+        let call = request(&clock, &cancel)?;
+        let (session, id) = key::open_attempt(
+            edge,
+            &target,
+            crate::Want::Attempt { settled: false },
+            &call,
+        )?;
         let reason = command
             .reason
             .ok_or(run::RunError::Validation("abandonment requires a reason"))?;
@@ -95,54 +99,48 @@ pub(super) fn reconcile_inner(
                 .service()
                 .abandon_settlement(id, &reason, &request(&clock, &cancel)?)?;
         return Ok((
-            json!({"run_id": selected.run, "attempt_id": id, "found": state}),
-            format!("{id} {}\n", reconcile_summary(&state)),
+            json!({"target": target.to_string(), "attempt_id": id, "found": state}),
+            format!("{target} {}\n", reconcile_summary(&state)),
         ));
     }
     let mut visited = BTreeMap::new();
     let mut cutover_issues = Vec::new();
-    let (runs, truncated) = if command.id.is_empty() {
-        let session = open(edge, &request(&clock, &cancel)?)?;
+    let session = open(edge, &request(&clock, &cancel)?)?;
+    let (runs, truncated) = if command.targets.is_empty() {
         let call = request(&clock, &cancel)?;
         prepare_reservations(&session, &call, &mut visited, &mut cutover_issues);
         let mut runs = session.store.open_runs_readonly(SCAN + 1, &call)?;
         let truncated = runs.len() as u64 > SCAN;
         runs.truncate(SCAN as usize);
-        (
-            runs.into_iter()
-                .map(|run| Target {
-                    selection: None,
-                    run: Some(run),
-                    task: None,
-                    attempt: None,
-                })
-                .collect(),
-            truncated,
-        )
+        (runs, truncated)
     } else {
-        (command.id, false)
+        let mut runs = Vec::new();
+        for target in &command.targets {
+            let resolved = key::resolve_target(edge, target, crate::Want::Work)?;
+            runs.extend(key::local_runs(
+                &session,
+                &resolved,
+                &request(&clock, &cancel)?,
+            )?);
+        }
+        runs.sort();
+        runs.dedup();
+        (runs, false)
     };
     let mut rows = Vec::new();
     let mut human = String::new();
-    for target in runs {
-        let (session, selected) = targets::open(edge, &target, true, &request(&clock, &cancel)?)?;
+    for run in runs {
         prepare_reservations(
             &session,
             &request(&clock, &cancel)?,
             &mut visited,
             &mut cutover_issues,
         );
-        let run = selected.run.ok_or(run::RunError::NotFound)?;
-        let scoped_cwd = targets::cwd(edge, session.context.project_id)?;
-        let scoped_edge = Edge {
-            cwd: &scoped_cwd,
-            ..*edge
-        };
         let registry = Registry {
             roots: Some(edge.roots),
             home: Some(edge.home),
             assets: Some(edge.assets),
-            cwd: Some(&scoped_cwd),
+            cwd: Some(edge.cwd),
             state_root: Some(session.context.state_root.as_path()),
             project_id: Some(session.context.project_id),
             host: None,
@@ -162,7 +160,7 @@ pub(super) fn reconcile_inner(
             }
         };
         let started = if found.iter().any(|(_, r)| *r == run::Reconciled::Queued) {
-            request(&clock, &cancel).and_then(|call| launch(&session, run, &scoped_edge, &call))
+            request(&clock, &cancel).and_then(|call| launch(&session, run, edge, &call))
         } else {
             Ok(Vec::new())
         };
@@ -212,7 +210,7 @@ pub(super) fn reconcile_inner(
     }
     if truncated {
         human.push_str(&format!(
-            "more than {SCAN} open runs; name the rest with --id\n"
+            "more than {SCAN} open runs; name the rest as targets\n"
         ));
     }
     let session = open(edge, &request(&clock, &cancel)?)?;

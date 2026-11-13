@@ -1,21 +1,5 @@
 use super::*;
 
-pub(super) fn operation_reply(reply: &mut Reply, id: &OperationId) {
-    if reply.result.data.is_null() {
-        reply.result.data = json!({});
-    }
-    reply.result.data["operation_id"] = json!(id);
-    if let Some(error) = &mut reply.result.error {
-        error.message.push_str(&format!("; operation {id}"));
-        // The same operation replays its request, so a retry cannot admit twice.
-        if error.code == ErrorKind::Contention.code() {
-            error.repair = Some(format!("retry the same command with --operation-id {id}"));
-        }
-    } else {
-        reply.human = format!("operation {id}\n{}", reply.human);
-    }
-}
-
 pub fn preview_project_id(roots: &Roots, cwd: &Path) -> Option<provenant_core::ProjectId> {
     if crate::fabric::in_lane() {
         let gitdir = std::env::var_os("PROVENANT_WORKTREE_GITDIR").map(PathBuf::from)?;

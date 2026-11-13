@@ -230,12 +230,11 @@ fn invoke(
             let budget = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
             return Ok(factory.relay_document(&input, budget, &CancelToken::new())?);
         }
-        let factory =
-            if input["explain"] == true || matches!(command, "templates" | "status" | "stats") {
-                fabric::read_factory(globals, workers)?
-            } else {
-                fabric::factory(globals, workers)?
-            };
+        let factory = if input["explain"] == true || command == "templates" {
+            fabric::read_factory(globals, workers)?
+        } else {
+            fabric::factory(globals, workers)?
+        };
         let wait_seconds = input["wait_seconds"].as_u64().unwrap_or(55);
         let budget = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
         let local_branch = (command == "run" && input["host"].is_null())
@@ -315,12 +314,7 @@ fn invoke(
                     repair: None,
                 });
             }
-            crate::emit(
-                &result,
-                globals,
-                &human,
-                matches!(command, "templates" | "status" | "stats"),
-            )
+            crate::emit(&result, globals, &human, command == "templates")
         }
         Err(error) => {
             let facade =
@@ -606,7 +600,7 @@ fn validate_set_value_path(
 pub(crate) fn edit(request: Edit, globals: &Globals, workers: &'static dyn WorkerObserver) -> u8 {
     invoke(
         "edit",
-        document(&request.file).map(|patch| json!({"op":"edit","id":request.id,"patch":patch})),
+        document(&request.file).map(|patch| json!({"op":"edit","id":request.name,"patch":patch})),
         globals,
         workers,
     )
@@ -629,21 +623,6 @@ pub(crate) fn templates(
     })();
     invoke("templates", input, globals, workers)
 }
-pub(crate) fn stats(
-    command: &str,
-    id: Option<String>,
-    by: String,
-    globals: &Globals,
-    workers: &'static dyn WorkerObserver,
-) -> u8 {
-    invoke(
-        command,
-        Ok(json!({"op":"status","id":id,"stats":true,"by":by})),
-        globals,
-        workers,
-    )
-}
-
 #[cfg(test)]
 #[allow(
     unused_imports,

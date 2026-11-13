@@ -3,7 +3,6 @@ use crate::metadata::CatalogueArg;
 mod context;
 pub mod graph_relay;
 
-pub(crate) use context::private_dir;
 /// Shared identity/config setup for CLI leaves and the binary MCP transport.
 pub use context::{Context, PeerFailure, current_session, facade_outcome, in_lane, publish};
 

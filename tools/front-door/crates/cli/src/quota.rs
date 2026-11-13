@@ -60,14 +60,6 @@ pub enum Power {
 pub enum Quota {
     /// Show recorded provider quota
     Show(Filter),
-    /// Show recorded use by account and project, with chair sessions and lane tokens
-    Usage {
-        #[command(flatten)]
-        adapter: Filter,
-        /// Days to include, as a rolling window back from now
-        #[arg(long, default_value_t = 7, catalog_u32_range = 1..=365)]
-        days: u32,
-    },
     /// List recorded quota readings with resets, plan changes and the plan price in force
     ///
     /// Readings are kept by `quota tick` and refreshes, one per distinct
@@ -1512,10 +1504,7 @@ pub(crate) fn execute(
 ) -> Result<QuotaReport, EdgeError> {
     let all = Filter { adapter: None };
     let (filter, tick) = match command {
-        Quota::Show(filter)
-        | Quota::Usage {
-            adapter: filter, ..
-        } => (filter, None),
+        Quota::Show(filter) => (filter, None),
         // Dispatched by `run` before execute; reads the cache like `show`.
         Quota::History { .. } => (&all, None),
         Quota::Display { headline, icon } => {
@@ -1877,142 +1866,6 @@ pub(crate) fn chair_sessions_with_usage(
         }
     }
     Ok(chairs)
-}
-
-fn usage_report(
-    roots: &Roots,
-    filter: &Filter,
-    days: u32,
-) -> Result<(serde_json::Value, String), EdgeError> {
-    use provenant_run::{AttemptFilter, AttemptReader, ExecutionContext, Request, RunStore};
-    use provenant_telemetry::{MAX_ATTEMPTS, Window};
-    let clock = SystemClock::new();
-    let until = clock.wall_now().map_err(|_| EdgeError::Time)?;
-    let since = provenant_core::WallTime::from_micros(
-        until.as_timestamp().as_microsecond() - i64::from(days) * 86_400_000_000,
-    )
-    .map_err(|_| EdgeError::Time)?;
-    let window = Window {
-        since: Some(since),
-        until: Some(until),
-        ..Window::default()
-    };
-    let cancel = CancelToken::new();
-    let call = Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
-    let projects = provenant_config::registered_projects(roots)?;
-    let mut facts = Vec::new();
-    for project in &projects {
-        let context = ExecutionContext {
-            state_root: roots.state.clone(),
-            project_id: project.project_id(),
-            // Read-only facts do not use actor authority; prompts are never read.
-            actor_id: provenant_core::ActorId::from_bytes([0; 16]),
-            read_prompts: false,
-        };
-        if let Some(store) = RunStore::open_read_only(&context, &call)? {
-            for fact in store.attempts(AttemptFilter::default(), &call)? {
-                let fact = fact?;
-                if fact.finished_at < since || fact.finished_at >= until {
-                    continue;
-                }
-                if facts.len() as u64 >= MAX_ATTEMPTS {
-                    return Err(provenant_telemetry::TelemetryError::TooLarge(
-                        "100,000 selected attempts",
-                    )
-                    .into());
-                }
-                facts.push(fact);
-            }
-        }
-    }
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let chairs = chair_sessions_with_usage(
-        roots,
-        home.as_deref(),
-        since.as_timestamp(),
-        until.as_timestamp(),
-    )?;
-    let mut rows = provenant_telemetry::quota_usage(facts, chairs, &window)?;
-    if let Some(adapter) = &filter.adapter {
-        rows.retain(|row| row.adapter.as_ref() == Some(adapter));
-    }
-    let note = "Chair tokens are read from each recorded chair session's own transcript when this report runs, so they cover sessions the SessionStart hook recorded in this window, sub-agents included. A session on a config directory that is not a registered account is reported under the account `unattributed`; launch the chair with CLAUDE_CONFIG_DIR set to a registered account's directory to attribute it. Sessions whose transcript cannot be read are counted as unread, not as zero. Chair project attribution requires usage.project_attribution=true; otherwise the project is unknown. Usage logs are bounded and rotated. Lane tokens cover terminal attempts in registered projects only, not transient workspaces, and are not provider quota percentages.";
-    let mut human = format!("Recorded use: {since} to {until}\n{note}\n");
-    for row in &rows {
-        let project = projects
-            .iter()
-            .find(|p| Some(p.project_id()) == row.project)
-            .map_or_else(
-                || {
-                    row.project
-                        .map_or_else(|| "unknown project".into(), |p| p.to_string())
-                },
-                |p| p.common_dir().display().to_string(),
-            );
-        human.push_str(&format!(
-            "{} [{}] project={} ({})\n  chair: {} sessions ({} unread)\n  lanes: {} attempts\n",
-            row.account
-                .as_deref()
-                .unwrap_or("unknown account")
-                .escape_debug(),
-            row.adapter
-                .as_deref()
-                .unwrap_or("unknown adapter")
-                .escape_debug(),
-            project.escape_debug(),
-            row.project
-                .map_or_else(|| "unattributed".into(), |p| p.to_string()),
-            row.chair_sessions,
-            row.chair_sessions_unread,
-            row.lane_attempts
-        ));
-        for (source, attempts, usage, cache) in [
-            ("lanes", row.lane_attempts, &row.lane_usage, &row.lane_cache),
-            (
-                "chair",
-                row.chair_sessions.saturating_sub(row.chair_sessions_unread),
-                &row.chair_usage,
-                &row.chair_cache,
-            ),
-        ] {
-            if attempts == 0 {
-                continue;
-            }
-            for (label, total) in [
-                ("uncached input", &usage.uncached_input),
-                ("cache read", &usage.cache_read),
-                ("cache write", &usage.cache_write),
-                (
-                    "output excluding reasoning",
-                    &usage.output_excluding_reasoning,
-                ),
-                ("reasoning", &usage.reasoning),
-            ] {
-                human.push_str(&format!(
-                    "    {source} {label}: {} tokens; {} records missing this category\n",
-                    total.known, total.missing
-                ));
-            }
-            human.push_str(&format!(
-                "    {source} cache-read share: {}\n",
-                cache_share(cache)
-            ));
-        }
-    }
-    if rows.is_empty() {
-        human.push_str("No recorded use in this window.\n");
-    }
-    let data = serde_json::json!({
-        "since": since, "until": until, "rows": rows, "chair_usage_note": note,
-        "projects": projects.iter().map(|p| serde_json::json!({"project":p.project_id(), "common_dir":p.common_dir()})).collect::<Vec<_>>(),
-    });
-    if serde_json::to_vec(&data)?.len() as u64 > MAX_RECORD_BYTES {
-        return Err(EdgeError::TooLarge);
-    }
-    Ok((data, human))
 }
 
 /// Schema of `quota history --json`.
@@ -2548,14 +2401,12 @@ pub fn run(
 ) -> u8 {
     let name = match command {
         Quota::Show(_) => "quota show",
-        Quota::Usage { .. } => "quota usage",
         Quota::History { .. } => "quota history",
         Quota::Display { .. } => "quota display",
         Quota::Tick { .. } => "quota tick",
     };
     let mut summary = None;
     let result = match &command {
-        Quota::Usage { adapter, days } => usage_report(roots, adapter, *days),
         Quota::History {
             account,
             since,
@@ -2606,10 +2457,7 @@ pub fn run(
     };
     let mode = globals.render_mode(
         &human,
-        matches!(
-            command,
-            Quota::Show(_) | Quota::Usage { .. } | Quota::History { .. }
-        ),
+        matches!(command, Quota::Show(_) | Quota::History { .. }),
         summary.as_ref(),
     );
     let outcome = crate::render_or_publish(

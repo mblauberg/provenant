@@ -803,37 +803,6 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
                     }
                 )
             ));
-            let error = continuation_available(&prior, &nested, host).unwrap_err();
-            assert!(error.to_string().contains("continuation_copy_entries is 1"));
-            let fail =
-                crate::run::resume::no_fallback_refusal(&error.to_string(), error.resource_fact());
-            assert_eq!(fail.status, provenant_records::Outcome::Refused);
-            let projected = crate::run::command_error(&fail);
-            assert_eq!(
-                projected.code,
-                crate::run::ErrorKind::ContinuationUnsupported.code()
-            );
-            assert!(
-                projected
-                    .cause
-                    .as_deref()
-                    .unwrap()
-                    .contains("continuation_copy_entries is 1")
-            );
-            assert!(
-                projected
-                    .cause
-                    .as_deref()
-                    .unwrap()
-                    .contains("host configuration")
-            );
-            assert!(
-                projected
-                    .repair
-                    .as_deref()
-                    .unwrap()
-                    .contains("continuation_copy_entries")
-            );
             std::fs::write(
                 host.join("config.toml"),
                 "schema_version=1\n[domains.run]\ncontinuation_copy_entries=100000\n",
@@ -842,7 +811,6 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
                 nested.join("config.toml"),
                 "schema_version=1\n[domains.run]\ncontinuation_copy_entries=1\n",
             )?;
-            continuation_available(&prior, &nested, host)?;
             continuation_for(&prior, &route, "fixture", &nested, host, &nested_copy)?;
             assert_eq!(
                 std::fs::read_to_string(nested_copy.join(&rollout))?,
@@ -852,9 +820,6 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
             let error = result.unwrap_err().to_string();
             assert!(error.contains("retained provider continuation is missing or expired"));
             assert!(error.contains("attempt-private state"));
-            assert!(error.contains("start a new lane"));
-            let error = continuation_available(&prior, state, state).unwrap_err().to_string();
-            assert!(error.contains("host-backed sessions from before this release cannot resume"));
             assert!(error.contains("start a new lane"));
             if adapter == "opencode" {
                 let temp = tempfile::tempdir()?;
@@ -868,7 +833,6 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
                 db.execute("INSERT INTO session_message VALUES (?1, 'assistant', ?2)", ("fixture-session", r#"{"model":{"providerID":"fixture","id":"model"}}"#))?;
                 drop(db);
                 let copied = root.join("copy");
-                continuation_available(&prior, &root, &root)?;
                 let resumed = continuation_for(&prior, &route, "fixture", &root, &root, &copied)?;
                 assert_eq!(resumed.session(), "fixture-session");
                 assert_eq!(provenant_providers::opencode::observe_model(&copied.join("data/opencode"), "fixture-session")?, "opencode/fixture/model");
@@ -877,17 +841,16 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
                 for case in ["ambiguous", "absent"] {
                     if case == "absent" { db.execute("DELETE FROM session_message", [])?; }
                     assert!(provenant_providers::opencode::observe_model(&data, "fixture-session").is_err());
-                    continuation_available(&prior, &root, &root)?;
                     let target = root.join(format!("copy-{case}"));
                     assert_eq!(continuation_for(&prior, &route, "fixture", &root, &root, &target)?.session(), "fixture-session");
                 }
                 let other = state.join("candidate-1/data/opencode");
                 std::fs::create_dir_all(&other)?;
                 std::fs::copy(data.join("opencode.db"), other.join("opencode.db"))?;
-                assert!(continuation_available(&prior, &root, &root).is_err());
+                assert!(super::observation::find_opencode_session(&state, "fixture-session").is_err());
                 std::fs::remove_dir_all(state.join("candidate-1"))?;
                 db.execute("DELETE FROM session", [])?;
-                assert!(continuation_available(&prior, &root, &root).is_err());
+                assert!(super::observation::find_opencode_session(&state, "fixture-session").is_err());
             }
             prior.session = None;
             assert!(continuation_for(&prior, &route, "fixture", state, state, state).is_err());

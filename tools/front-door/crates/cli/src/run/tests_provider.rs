@@ -830,46 +830,6 @@ fn claude_absent_usage_names_its_reason() {
     assert_eq!(decoded_unknown.usage.source, None);
 }
 #[test]
-fn wait_any_follows_a_superseded_failure() -> Result<(), Box<dyn std::error::Error>> {
-    let now = WallTime::from_micros(100)?;
-    let mut failed = lane_fixture(
-        1,
-        1,
-        run::AttemptState::Terminal {
-            extra: Default::default(),
-            outcome: run::Outcome::Failed,
-            exit_code: Some(1),
-            finished_at: now,
-            reason: None,
-        },
-    )?;
-    let mut retry = lane_fixture(
-        2,
-        1,
-        run::AttemptState::Queued {
-            extra: Default::default(),
-        },
-    )?;
-    failed.superseded_by = Some(retry.attempt_id);
-    assert!(!condition_met(
-        &[failed.clone(), retry.clone()],
-        Condition::Any
-    ));
-    assert!(!condition_met(
-        std::slice::from_ref(&failed),
-        Condition::Any
-    ));
-    retry.state = run::AttemptState::Terminal {
-        extra: Default::default(),
-        outcome: run::Outcome::Succeeded,
-        exit_code: Some(0),
-        finished_at: now,
-        reason: None,
-    };
-    assert!(condition_met(&[failed, retry], Condition::Any));
-    Ok(())
-}
-#[test]
 fn every_adapter_sign_in_failure_settles_auth_required() -> Result<(), Box<dyn std::error::Error>> {
     use run::Providers;
     let fixtures: &[(&str, &[u8])] = &[

@@ -337,8 +337,7 @@ pub fn peer(
                 }
             }
             PeerAction::ConsoleDetail { id, .. } => {
-                let command = provenant_cli::console::Console::Detail { id: id.clone() };
-                match provenant_cli::console::read(&context.roots, None, &command) {
+                match provenant_cli::console::read_detail(&context.roots, id) {
                     Ok(value) => PeerResult::Console {
                         data: value,
                         extra: Default::default(),

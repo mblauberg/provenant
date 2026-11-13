@@ -1,240 +1,155 @@
-//! One event receiver for mixed status sources. Adapters retain the existing
-//! sampled store/GitHub observations; only semantic changes enter the channel.
+//! `provenant wait`: block until graph targets or pull requests settle. A wait
+//! is a reader: neither expiry nor cancellation stops the work. Every target
+//! resolves before the wait starts, and each source polls on its own thread so
+//! a slow read never delays another target.
 // This edge owns the real deadline for channel receives and source I/O.
 #![allow(clippy::disallowed_methods)]
-use provenant_cli::{Condition, Globals};
+use provenant_cli::Globals;
 use provenant_core::CancelToken;
+use provenant_records::Outcome;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
     sync::{Condvar, Mutex, mpsc},
     time::{Duration, Instant},
 };
 
-type Result<T> = std::result::Result<T, String>;
-
 #[derive(Clone, Debug)]
-enum Target {
-    Auto(String),
-    Lane(provenant_cli::Target),
-    Graph(String),
-    Operation(String),
+enum Source {
+    Graph(provenant_cli::Target),
     Pr(u64),
 }
-impl Target {
-    fn parse(value: &str) -> Result<Self> {
-        let Some((kind, id)) = value.split_once(':') else {
-            return Ok(Self::Auto(value.into()));
-        };
-        match kind {
-            "operation" => provenant_core::OperationId::parse(id)
-                .map(|id| Self::Operation(id.to_string()))
-                .map_err(|error| error.to_string()),
-            "lane" => id.parse().map(Self::Lane).map_err(str::to_owned),
-            "graph"
-                if !id.is_empty()
-                    && id.len() <= 64
-                    && id
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)) =>
-            {
-                Ok(Self::Graph(id.into()))
-            }
-            "pr" | "land" => id
-                .parse::<u64>()
-                .ok()
-                .filter(|n| *n > 0)
-                .map(Self::Pr)
-                .ok_or_else(|| "PR and land targets require a positive PR number".into()),
-            _ => Err(
-                "target must be lane:ID, graph:ID, operation:ID, pr:NUMBER or land:NUMBER".into(),
-            ),
+impl Source {
+    fn label(&self) -> String {
+        match self {
+            Self::Graph(target) => target.to_string(),
+            Self::Pr(number) => format!("#{number}"),
         }
     }
 }
 
-struct ReadFailure {
-    message: String,
-    retry: bool,
-}
-impl From<String> for ReadFailure {
-    fn from(message: String) -> Self {
-        Self {
-            message,
-            retry: false,
-        }
-    }
-}
-impl From<&str> for ReadFailure {
-    fn from(message: &str) -> Self {
-        message.to_owned().into()
-    }
+/// Where one target stands for a waiter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Settle {
+    Pending,
+    NeedsInput,
+    Succeeded,
+    Unsuccessful,
 }
 
-impl From<provenant_fabric_runtime::coordination::facade::FacadeError> for ReadFailure {
-    fn from(error: provenant_fabric_runtime::coordination::facade::FacadeError) -> Self {
-        Self {
-            retry: matches!(
-                error,
-                provenant_fabric_runtime::coordination::facade::FacadeError::Busy
-            ),
-            message: error.to_string(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub(crate) struct Snapshot {
-    terminal: bool,
-    notable: bool,
+#[derive(Clone, Debug, PartialEq)]
+struct Reading {
+    settle: Settle,
+    /// `TARGET STATE [cause]`, bounded; equal lines are one observation.
+    line: String,
     data: Value,
 }
-impl Snapshot {
-    fn read(
-        target: &Target,
-        edge: &provenant_cli::run::Edge<'_>,
-        left: Duration,
-        pr_read_timeout: Duration,
-        cancel: &CancelToken,
-    ) -> std::result::Result<Self, ReadFailure> {
-        match target {
-            Target::Operation(id) => {
-                let reply = provenant_cli::run::status(
-                    provenant_cli::Status {
-                        session_stream: false,
-                        stats: false,
-                        by: "template".into(),
-                        id: Some(format!("operation:{id}")),
-                        wait: None,
-                        target: Vec::new(),
-                        until: Condition::All,
-                        follow: false,
-                        limit: 100,
-                        cursor: None,
-                        all: false,
-                    },
-                    true,
-                    edge,
-                );
-                if let Some(error) = reply.result.error {
-                    return Err(ReadFailure {
-                        retry: error.code == provenant_run::ErrorKind::Contention.code(),
-                        message: error.message,
-                    });
-                }
-                Ok(Self {
-                    terminal: true,
-                    notable: true,
-                    data: reply.result.data,
-                })
-            }
-            Target::Lane(target) => {
-                let rows = provenant_cli::run::status_wait_lanes(target, edge).map_err(|e| {
-                    ReadFailure {
-                        retry: matches!(
-                            e.kind,
-                            provenant_run::ErrorKind::Contention
-                                | provenant_run::ErrorKind::PeerUnavailable
-                        ),
-                        message: e.message,
-                    }
-                })?;
-                if rows.is_empty() {
-                    return Err("named lane selection is empty".into());
-                }
-                let terminal = rows
-                    .iter()
-                    .all(|row| matches!(row.state, provenant_run::AttemptState::Terminal { .. }));
-                let notable = terminal;
-                let mut lanes: Vec<_> = rows
-                    .iter()
-                    .map(|row| {
-                        let lane = provenant_cli::run::project_lane(row, &[], edge.roots.state.as_path(), None, false);
-                        let value = json!({"id": lane.attempt_id, "kind": "attempt", "graph_id": null, "node_id": lane.task_id, "attempt_id": lane.attempt_id, "state": lane.state, "reason": lane.reason});
-                        value
-                    })
-                    .collect();
-                lanes.sort_by_key(|v| v["attempt_id"].to_string());
-                let detail = provenant_cli::run::status_wait_details(target, &rows, edge).map_err(
-                    |error| ReadFailure {
-                        retry: matches!(
-                            error.kind,
-                            provenant_run::ErrorKind::Contention
-                                | provenant_run::ErrorKind::PeerUnavailable
-                        ),
-                        message: error.message,
-                    },
-                )?;
-                let mut data = json!({"rows": lanes});
-                if let Some(detail) = detail {
-                    data["detail"] = json!(detail);
-                }
-                Ok(Self {
-                    terminal,
-                    notable,
-                    data,
-                })
-            }
-            Target::Graph(id) | Target::Auto(id) => {
-                let rows = crate::fabric::read_status_rows(id, edge).map_err(ReadFailure::from)?;
-                let Some(rows) = rows else {
-                    if matches!(target, Target::Auto(_)) {
-                        return Self::read(
-                            &Target::Lane(id.parse().map_err(str::to_owned)?),
-                            edge,
-                            left,
-                            pr_read_timeout,
-                            cancel,
-                        );
-                    }
-                    return Err("graph checkpoint not found".into());
-                };
-                if rows.is_empty() {
-                    return Err("named graph selection is empty".into());
-                }
-                let terminal = graph_rows_terminal(&rows);
-                let notable = terminal || rows.iter().any(|row| row["state"] == "paused");
-                Ok(Self {
-                    terminal,
-                    notable,
-                    data: json!({"rows":rows}),
-                })
-            }
-            Target::Pr(number) => {
-                let row = crate::pr::status::wait_line(
-                    edge.cwd,
-                    edge.roots.state.as_path(),
-                    *number,
-                    left.min(pr_read_timeout),
-                    crate::pr::observer::POLL,
-                    Some(cancel),
-                )
-                .map_err(|e| {
-                    let message = e.to_string();
-                    let retry = provenant_core::retry::is_transient(
-                        provenant_core::retry::RetryCause::CommandOutput {
-                            stderr: &message,
-                            stdout: "",
-                        },
-                    );
-                    ReadFailure { message, retry }
-                })?;
-                let class = row.class();
-                Ok(Self {
-                    terminal: matches!(class, "merged" | "closed"),
-                    notable: matches!(
-                        class,
-                        "merged" | "closed" | "ready" | "failing" | "review_required"
-                    ),
-                    data: json!({"class": class, "pr": row}),
-                })
-            }
+impl Reading {
+    fn done(&self) -> bool {
+        self.settle != Settle::Pending
+    }
+    fn unavailable(label: &str, error: &str) -> Self {
+        Self {
+            settle: Settle::Pending,
+            line: provenant_cli::bounded_text(
+                &format!("{label} unavailable: {error}"),
+                provenant_cli::limits::SUMMARY_ROW_BYTES,
+            ),
+            data: Value::Null,
         }
     }
 }
 
-/// Cancellation wakes adapter pauses and interrupts in-flight GitHub reads.
+/// A graph target settles by its own row: the graph, else its node, else its
+/// newest attempt. A complete graph or a settled attempt succeeds only with a
+/// succeeded outcome; a paused graph needs input.
+fn classify_rows(label: &str, rows: &[Value]) -> Reading {
+    let pick = |kind: &str| rows.iter().rfind(|row| row["kind"] == kind);
+    let data = json!({ "rows": rows });
+    let Some(row) = pick("graph")
+        .or_else(|| pick("node"))
+        .or_else(|| pick("attempt"))
+    else {
+        return Reading {
+            settle: Settle::Pending,
+            line: format!("{label} pending"),
+            data,
+        };
+    };
+    let state = row["state"].as_str().unwrap_or("");
+    let succeeded = row["outcome"] == "succeeded" || state == "succeeded";
+    let settle = match row["kind"].as_str() {
+        Some("graph") => match state {
+            "complete" if succeeded => Settle::Succeeded,
+            "complete" | "cancelled" | "unreadable" => Settle::Unsuccessful,
+            "paused" => Settle::NeedsInput,
+            _ => Settle::Pending,
+        },
+        Some("node") => match state {
+            "succeeded" => Settle::Succeeded,
+            "failed" | "blocked" | "skipped" => Settle::Unsuccessful,
+            _ => Settle::Pending,
+        },
+        _ if state == "terminal" || !row["finished_at"].is_null() => {
+            if succeeded {
+                Settle::Succeeded
+            } else {
+                Settle::Unsuccessful
+            }
+        }
+        _ if state == "unreadable" => Settle::Unsuccessful,
+        _ => Settle::Pending,
+    };
+    Reading {
+        settle,
+        line: crate::fabric::status_line(label, row, None)
+            .trim_end()
+            .to_owned(),
+        data,
+    }
+}
+
+fn read(
+    source: &Source,
+    edge: &provenant_cli::run::Edge<'_>,
+    left: Duration,
+    pr_read_timeout: Duration,
+    cancel: &CancelToken,
+) -> Reading {
+    let label = source.label();
+    match source {
+        Source::Graph(target) => {
+            match provenant_sqlite::with_busy_timeout(Duration::ZERO, || {
+                crate::fabric::read_status_rows(target, edge)
+            }) {
+                Ok(rows) => classify_rows(&label, &rows),
+                Err(error) => Reading::unavailable(&label, &error.to_string()),
+            }
+        }
+        Source::Pr(number) => match crate::pr::status::wait_line(
+            edge.cwd,
+            edge.roots.state.as_path(),
+            *number,
+            left.min(pr_read_timeout),
+            crate::pr::observer::POLL,
+            Some(cancel),
+        ) {
+            Ok(line) => Reading {
+                settle: match line.verdict() {
+                    Some(true) => Settle::Succeeded,
+                    Some(false) => Settle::Unsuccessful,
+                    None => Settle::Pending,
+                },
+                line: format!("{label} {}", line.class()),
+                data: json!(line),
+            },
+            Err(error) => Reading::unavailable(&label, &error.to_string()),
+        },
+    }
+}
+
+/// Cancellation wakes source pauses and interrupts in-flight GitHub reads.
 #[derive(Default)]
 struct Stop {
     stopped: Mutex<bool>,
@@ -259,457 +174,347 @@ impl Stop {
     }
 }
 
-/// A settled graph or node row already proves its attempts drained, and attempt
-/// rows use a wider vocabulary (`timed_out`, `quota_limited`, ...), so an attempt
-/// decides only when no owner row was selected. A collected attempt keeps the
-/// checkpoint's `terminal` row, which has no `finished_at`.
-fn graph_rows_terminal(rows: &[Value]) -> bool {
-    if let Some(graph) = rows.iter().find(|row| row["kind"] == "graph") {
-        return matches!(
-            graph["state"].as_str(),
-            Some("complete" | "cancelled" | "paused" | "review_required" | "needs_owner_decision")
-        );
-    }
-    let mut owners = rows
-        .iter()
-        .filter(|row| row["kind"] != "attempt")
-        .peekable();
-    if owners.peek().is_none() {
-        return rows
-            .iter()
-            .all(|row| !row["finished_at"].is_null() || row["state"] == "terminal");
-    }
-    owners.all(|row| {
-        matches!(
-            row["state"].as_str(),
-            Some(
-                "complete"
-                    | "cancelled"
-                    | "succeeded"
-                    | "failed"
-                    | "blocked"
-                    | "skipped"
-                    | "terminal"
-                    | "paused"
-                    | "review_required"
-                    | "needs_owner_decision"
-            )
-        )
-    })
-}
-
 struct Update {
-    target: String,
-    snapshot: Result<Snapshot>,
+    target: usize,
+    reading: Reading,
 }
 
-/// The receiver owns completion; source latency never serialises other targets.
+/// Fold source readings until the wait is done: under `any`, the first target
+/// that settles or needs input; otherwise every target. Returns false when the
+/// deadline passes first. `settled` records the order targets finished in, and
+/// `changed` sees each distinct reading once.
 fn collect(
     receiver: &mpsc::Receiver<Update>,
-    count: usize,
+    latest: &mut [Option<Reading>],
+    settled: &mut Vec<usize>,
     deadline: Instant,
-    until: Condition,
-    follow: bool,
-    once: bool,
-    out: &mut impl FnMut(Value) -> Result<()>,
-) -> Result<bool> {
-    let mut latest = BTreeMap::<String, Snapshot>::new();
+    any: bool,
+    changed: &mut impl FnMut(usize, &Reading),
+) -> bool {
     loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Ok(false);
-        }
-        let update = match receiver.recv_timeout(left) {
-            Ok(update) => update,
-            Err(mpsc::RecvTimeoutError::Timeout) => return Ok(false),
-            Err(mpsc::RecvTimeoutError::Disconnected) if Instant::now() >= deadline => {
-                return Ok(false);
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err("status sources disconnected before completion".into());
-            }
+        let finished = |index: &usize| latest[*index].as_ref().is_some_and(Reading::done);
+        let done = if any {
+            !settled.is_empty()
+        } else {
+            (0..latest.len()).all(|index| finished(&index))
         };
-        let snapshot = update
-            .snapshot
-            .map_err(|e| format!("{}: {e}", update.target))?;
-        let previous = latest.insert(update.target.clone(), snapshot.clone());
-        let changed = previous.as_ref().is_some_and(|old| old != &snapshot);
-        let initial = previous.is_none();
-        if (follow && initial) || changed || (initial && snapshot.terminal) {
-            out(
-                json!({"event": if initial { "snapshot" } else { "transition" }, "target": update.target,
-                "terminal": snapshot.terminal, "data": snapshot.data}),
-            )?;
+        if done {
+            return true;
         }
-        let all = latest.len() == count && (once || latest.values().all(|row| row.terminal));
-        if all || (!follow && matches!(until, Condition::Any) && (changed || snapshot.terminal)) {
-            return Ok(true);
+        let left = deadline.saturating_duration_since(Instant::now());
+        let Ok(update) = receiver.recv_timeout(left) else {
+            return false;
+        };
+        let index = update.target;
+        if latest[index].as_ref() == Some(&update.reading) {
+            continue;
         }
+        changed(index, &update.reading);
+        if update.reading.done() && !settled.contains(&index) {
+            settled.push(index);
+        }
+        latest[index] = Some(update.reading);
     }
 }
 
-pub(crate) fn run(command: provenant_cli::Status, globals: &Globals) -> u8 {
+/// How the wait ended: a timeout, else the worst of the targets that decided
+/// it. Under `any` only the first target to finish decides.
+fn outcome(latest: &[Option<Reading>], settled: &[usize], done: bool, any: bool) -> Outcome {
+    if !done {
+        return Outcome::Timeout;
+    }
+    let deciding = if any {
+        &settled[..settled.len().min(1)]
+    } else {
+        settled
+    };
+    let settles: Vec<_> = deciding
+        .iter()
+        .filter_map(|index| latest[*index].as_ref().map(|reading| reading.settle))
+        .collect();
+    if settles.contains(&Settle::Unsuccessful) {
+        Outcome::Failed
+    } else if settles.contains(&Settle::NeedsInput) {
+        Outcome::Pending
+    } else {
+        Outcome::Ok
+    }
+}
+
+pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     use crate::roots::{Product, Workspace};
-    let run = || -> Result<(bool, bool, bool)> {
-        let resolved = crate::roots::resolve(globals, Workspace::Project, Product::Required)
-            .map_err(|e| e.to_string())?;
-        let settings =
-            provenant_config::read_with_domains(&resolved.roots, &provenant_cli::domains::SECTIONS)
-                .map_err(|e| e.to_string())?
-                .domains
-                .wait;
-        // Targets without `--wait` report their current status once.
-        let once = command.wait.is_none();
-        let seconds = settings.timeout(command.wait);
-        let deadline = Instant::now() + Duration::from_secs(seconds);
-        let mut names = command.target;
-        if let Some(id) = command.id {
-            names.push(id);
+    let resolved = match crate::roots::resolve(globals, Workspace::Project, Product::Required) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            return crate::fail("wait", Outcome::Error, "ROOT", &error.to_string(), globals);
         }
-        names.sort();
-        names.dedup();
-        if names.is_empty() || names.len() > settings.max_targets as usize {
-            return Err(format!(
-                "status --wait requires 1 to {} targets",
-                settings.max_targets
-            ));
-        }
-        let targets = names
-            .into_iter()
-            .map(|name| Target::parse(&name).map(|target| (name, target)))
-            .collect::<Result<Vec<_>>>()?;
-        let stop = Stop::default();
-        let (sender, receiver) = mpsc::sync_channel(128);
-        let edge = provenant_cli::run::Edge {
-            roots: &resolved.roots,
-            home: &resolved.home,
-            assets: &resolved.assets,
-            cwd: &resolved.project,
-        };
-        let pr_read_timeout = Duration::from_secs(settings.pr_read_timeout_seconds);
-        let mut refused = false;
-        let met = std::thread::scope(|scope| {
-            for (name, target) in &targets {
-                let sender = sender.clone();
-                let edge = &edge;
-                let stop = &stop;
-                let interval = Duration::from_millis(if matches!(target, Target::Pr(_)) {
-                    settings.pr_interval_ms
-                } else {
-                    settings.local_interval_ms
-                });
-                scope.spawn(move || {
-                    let mut last = None;
-                    loop {
-                        let left = deadline.saturating_duration_since(Instant::now());
-                        if left.is_zero() || stop.cancel.is_cancelled() {
-                            break;
-                        }
-                        let snapshot = provenant_sqlite::with_busy_timeout(Duration::ZERO, || {
-                            Snapshot::read(target, edge, left, pr_read_timeout, &stop.cancel)
-                        });
-                        // Keep the last good row across read failures, as pr status does.
-                        if snapshot
-                            .as_ref()
-                            .is_err_and(|error| error.retry || last.is_some())
-                        {
-                            if !stop.pause(
-                                interval.min(deadline.saturating_duration_since(Instant::now())),
-                            ) {
-                                break;
-                            }
-                            continue;
-                        }
-                        let terminal = once || snapshot.as_ref().is_ok_and(|row| row.terminal);
-                        let failed = snapshot.is_err();
-                        if snapshot.as_ref().ok() != last.as_ref() || failed {
-                            last = snapshot.as_ref().ok().cloned();
-                            if sender
-                                .send(Update {
-                                    target: name.clone(),
-                                    snapshot: snapshot.map_err(|error| error.message),
-                                })
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                        if terminal
-                            || failed
-                            || !stop.pause(
-                                interval.min(deadline.saturating_duration_since(Instant::now())),
-                            )
-                        {
-                            break;
-                        }
-                    }
-                });
-            }
-            drop(sender);
-            let result = collect(
-                &receiver,
-                targets.len(),
-                deadline,
-                command.until,
-                command.follow || once,
-                once,
-                &mut |event| {
-                    refused |= event["data"]["operation"]["state"] == "refused";
-                    write_event(&event, globals.json)
-                },
+    };
+    let settings = match provenant_config::read_with_domains(
+        &resolved.roots,
+        &provenant_cli::domains::SECTIONS,
+    ) {
+        Ok(config) => config.domains.wait,
+        Err(error) => {
+            return crate::fail(
+                "wait",
+                Outcome::Error,
+                "CONFIG",
+                &error.to_string(),
+                globals,
             );
-            stop.stop();
-            drop(receiver);
-            result
-        })?;
-        Ok((met, refused, once))
-    };
-    match run() {
-        Ok((met, refused, true)) => wait_exit(met, refused),
-        Ok((met, refused, false)) => {
-            let event = json!({"event": "end", "condition_met": met, "timed_out": !met});
-            if let Err(error) = write_event(&event, globals.json) {
-                return crate::fail(
-                    "status",
-                    provenant_records::Outcome::Error,
-                    "IO",
-                    &error,
-                    globals,
-                );
-            }
-            wait_exit(met, refused)
         }
-        Err(error) => crate::fail(
-            "status",
-            provenant_records::Outcome::Error,
-            "WAIT",
-            &error,
+    };
+    let edge = provenant_cli::run::Edge {
+        roots: &resolved.roots,
+        home: &resolved.home,
+        assets: &resolved.assets,
+        cwd: &resolved.project,
+    };
+    let mut sources: Vec<Source> = command.targets.iter().cloned().map(Source::Graph).collect();
+    if let Err(error) = crate::fabric::check_targets(&command.targets, &edge) {
+        return crate::fabric::command_fail("wait", error.as_ref(), globals);
+    }
+    if command.targets.is_empty() && command.prs.is_empty() {
+        if provenant_cli::fabric::in_lane() {
+            return crate::fail(
+                "wait",
+                Outcome::Invalid,
+                "TARGET_REQUIRED",
+                "inside a lane, wait names its targets: NAME[/NODE[#N]] or --pr NUMBER",
+                globals,
+            );
+        }
+        match crate::fabric::unsettled_graphs(&edge) {
+            Ok(graphs) => sources.extend(graphs.into_iter().map(Source::Graph)),
+            Err(error) => return crate::fabric::command_fail("wait", error.as_ref(), globals),
+        }
+    }
+    let mut prs = command.prs.clone();
+    prs.sort_unstable();
+    prs.dedup();
+    sources.extend(prs.into_iter().map(Source::Pr));
+    if sources.len() > settings.max_targets as usize {
+        return crate::fail(
+            "wait",
+            Outcome::Invalid,
+            "TOO_MANY_TARGETS",
+            &format!("wait takes at most {} targets", settings.max_targets),
             globals,
-        ),
+        );
     }
-}
-fn wait_exit(met: bool, refused: bool) -> u8 {
-    if !met {
-        124
-    } else if refused {
-        1
-    } else {
-        0
-    }
-}
-fn write_event(event: &Value, json: bool) -> Result<()> {
-    use std::io::Write;
-    let line = if json {
-        event.to_string()
-    } else if event["event"] == "end" {
-        if event["timed_out"] == true {
-            "wait timed out; targets remain running".into()
-        } else {
-            "wait condition met".into()
+    let deadline = Instant::now() + Duration::from_secs(settings.timeout(command.timeout));
+    let pr_read_timeout = Duration::from_secs(settings.pr_read_timeout_seconds);
+    let mut latest: Vec<Option<Reading>> = vec![None; sources.len()];
+    let mut settled = Vec::new();
+    let mut write_error = None;
+    let stop = Stop::default();
+    let (sender, receiver) = mpsc::sync_channel(128);
+    let done = std::thread::scope(|scope| {
+        for (index, source) in sources.iter().enumerate() {
+            let sender = sender.clone();
+            let edge = &edge;
+            let stop = &stop;
+            let interval = Duration::from_millis(match source {
+                Source::Pr(_) => settings.pr_interval_ms,
+                Source::Graph(_) => settings.local_interval_ms,
+            });
+            scope.spawn(move || {
+                loop {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if stop.cancel.is_cancelled() {
+                        break;
+                    }
+                    let reading = read(source, edge, left, pr_read_timeout, &stop.cancel);
+                    let finished = reading.done();
+                    if sender
+                        .send(Update {
+                            target: index,
+                            reading,
+                        })
+                        .is_err()
+                        || finished
+                        || left.is_zero()
+                        || !stop
+                            .pause(interval.min(deadline.saturating_duration_since(Instant::now())))
+                    {
+                        break;
+                    }
+                }
+            });
         }
-    } else {
-        format!(
-            "{} {} {}",
-            event["target"].as_str().unwrap_or(""),
-            event["event"].as_str().unwrap_or(""),
-            event["data"]
-        )
-    };
+        drop(sender);
+        let done = collect(
+            &receiver,
+            &mut latest,
+            &mut settled,
+            deadline,
+            command.any,
+            &mut |index, reading| {
+                if command.follow && write_error.is_none() {
+                    let line = if globals.json {
+                        json!({"event":"transition","target":sources[index].label(),
+                            "settle":reading.settle,"line":reading.line})
+                        .to_string()
+                    } else {
+                        reading.line.clone()
+                    };
+                    write_error = write_line(&line).err();
+                }
+            },
+        );
+        stop.stop();
+        drop(receiver);
+        done
+    });
+    if let Some(error) = write_error {
+        return crate::fail("wait", Outcome::Error, "IO", &error.to_string(), globals);
+    }
+    let outcome = outcome(&latest, &settled, done, command.any);
+    let mut human = String::new();
+    let rows: Vec<_> = sources
+        .iter()
+        .zip(&latest)
+        .map(|(source, reading)| {
+            let label = source.label();
+            let line = reading.as_ref().map_or_else(
+                || format!("{label} pending"),
+                |reading| reading.line.clone(),
+            );
+            human.push_str(&line);
+            human.push('\n');
+            json!({
+                "target":label,
+                "settle":reading.as_ref().map_or(Settle::Pending, |reading| reading.settle),
+                "line":line,
+                "data":reading.as_ref().map(|reading| &reading.data),
+            })
+        })
+        .collect();
+    if sources.is_empty() {
+        human.push_str("nothing to wait for: no unsettled graphs\n");
+    }
+    if !done {
+        human.push_str("wait timed out; the work continues\n");
+    }
+    crate::emit(
+        &provenant_records::CommandResult::new(
+            "wait",
+            outcome,
+            json!({"targets":rows,"timed_out":!done}),
+        ),
+        globals,
+        &human,
+        true,
+    )
+}
+
+fn write_line(line: &str) -> std::io::Result<()> {
+    use std::io::Write;
     let mut stdout = std::io::stdout().lock();
-    writeln!(stdout, "{line}")
-        .and_then(|_| stdout.flush())
-        .map_err(|e| e.to_string())
+    writeln!(stdout, "{line}")?;
+    stdout.flush()
 }
 
 #[cfg(test)]
 #[allow(dead_code)] // Also included by the worktree driver without libtest.
 mod tests {
     use super::*;
-    #[test]
-    fn busy_graph_read_is_retried_while_other_targets_run() {
-        use provenant_fabric_runtime::coordination::facade::FacadeError;
-        let busy = ReadFailure::from(FacadeError::Busy);
-        assert!(busy.retry);
-        assert!(!ReadFailure::from(FacadeError::NotFound).retry);
-        assert_ne!(wait_exit(false, false), 0);
+
+    fn reading(settle: Settle) -> Reading {
+        Reading {
+            settle,
+            line: format!("{settle:?}"),
+            data: Value::Null,
+        }
+    }
+
+    fn wait_on(updates: &[(usize, Settle)], count: usize, any: bool) -> (Outcome, Vec<usize>) {
+        let (sender, receiver) = mpsc::channel();
+        for (target, settle) in updates {
+            assert!(
+                sender
+                    .send(Update {
+                        target: *target,
+                        reading: reading(*settle),
+                    })
+                    .is_ok()
+            );
+        }
+        let mut latest = vec![None; count];
+        let mut settled = Vec::new();
+        let done = collect(
+            &receiver,
+            &mut latest,
+            &mut settled,
+            Instant::now() + Duration::from_millis(20),
+            any,
+            &mut |_, _| {},
+        );
+        (outcome(&latest, &settled, done, any), settled)
     }
 
     #[test]
-    fn refusal_targets_are_terminal_failures_when_observed() {
-        assert!(
-            matches!(Target::parse("operation:fixture-op"), Ok(Target::Operation(id)) if id == "fixture-op")
+    fn any_returns_at_the_first_settlement_and_takes_its_verdict() {
+        use Settle::*;
+        let (outcome, settled) = wait_on(
+            &[
+                (0, Pending),
+                (1, Pending),
+                (1, Unsuccessful),
+                (0, Succeeded),
+            ],
+            2,
+            true,
         );
-        assert!(Target::parse("operation:bad/id").is_err());
-        assert_eq!(wait_exit(true, true), 1);
-        assert_eq!(wait_exit(true, false), 0);
-        assert_eq!(wait_exit(false, true), 124);
-    }
-    #[test]
-    fn a_settled_graph_is_terminal_whatever_its_attempt_state() {
-        let graph = |state: &str| json!({"kind": "graph", "state": state});
-        let attempt = |state: &str, finished: Value| json!({"kind": "attempt", "state": state, "finished_at": finished});
-        let done = json!("2026-11-07T00:00:00Z");
-        assert!(graph_rows_terminal(&[
-            graph("complete"),
-            attempt("timed_out", done.clone())
-        ]));
-        assert!(graph_rows_terminal(&[
-            graph("paused"),
-            json!({"kind":"node", "state":"pending"}),
-            attempt("running", Value::Null)
-        ]));
-        assert!(!graph_rows_terminal(&[
-            graph("pending"),
-            attempt("timed_out", done.clone())
-        ]));
-        assert!(graph_rows_terminal(&[attempt("quota_limited", done)]));
-        assert!(!graph_rows_terminal(&[attempt("running", Value::Null)]));
-        assert!(graph_rows_terminal(&[attempt("terminal", Value::Null)]));
+        assert_eq!(settled, [1], "the later settlement was never read");
+        assert_eq!(outcome, Outcome::Failed);
+        assert_eq!(
+            wait_on(&[(0, Pending), (1, NeedsInput)], 2, true).0,
+            Outcome::Pending
+        );
     }
 
-    fn update(target: &str, state: &str, terminal: bool) -> Update {
-        Update {
-            target: target.into(),
-            snapshot: Ok(Snapshot {
-                terminal,
-                notable: terminal,
-                data: json!({"state": state}),
-            }),
-        }
-    }
     #[test]
-    fn mixed_receiver_returns_on_first_transition_without_waiting_for_other_sources() {
-        let (tx, rx) = mpsc::channel();
-        for event in [
-            update("lane:a", "running", false),
-            update("graph:b", "pending", false),
-            update("pr:1", "pending", false),
-            update("lane:a", "succeeded", true),
-        ] {
-            assert!(tx.send(event).is_ok());
-        }
-        let mut events = Vec::new();
-        assert_eq!(
-            collect(
-                &rx,
-                3,
-                Instant::now() + Duration::from_secs(1),
-                Condition::Any,
-                false,
-                false,
-                &mut |e| {
-                    events.push(e);
-                    Ok(())
-                }
-            ),
-            Ok(true)
-        );
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["target"], "lane:a");
-        assert_eq!(events[0]["event"], "transition");
+    fn all_waits_for_every_target_and_a_timeout_is_124() {
+        use Settle::*;
+        let (outcome, _) = wait_on(&[(0, Succeeded), (1, Pending)], 2, false);
+        assert_eq!(provenant_cli::exit_status(&outcome), 124);
+        let (outcome, _) = wait_on(&[(0, Succeeded), (1, Pending), (1, Succeeded)], 2, false);
+        assert_eq!(provenant_cli::exit_status(&outcome), 0);
+        let (outcome, _) = wait_on(&[(0, NeedsInput), (1, Unsuccessful)], 2, false);
+        assert_eq!(provenant_cli::exit_status(&outcome), 1);
+        assert_eq!(provenant_cli::exit_status(&wait_on(&[], 1, true).0), 124);
     }
-    #[test]
-    fn follow_deduplicates_and_waits_for_every_terminal_target() {
-        let (tx, rx) = mpsc::channel();
-        for event in [
-            update("lane:a", "running", false),
-            update("pr:1", "pending", false),
-            update("lane:a", "succeeded", true),
-            update("lane:a", "succeeded", true),
-            update("pr:1", "merged", true),
-        ] {
-            assert!(tx.send(event).is_ok());
-        }
-        let mut events = Vec::new();
-        assert_eq!(
-            collect(
-                &rx,
-                2,
-                Instant::now() + Duration::from_secs(1),
-                Condition::Any,
-                true,
-                false,
-                &mut |e| {
-                    events.push(e);
-                    Ok(())
-                }
-            ),
-            Ok(true)
-        );
-        assert_eq!(events.len(), 4);
-        assert_eq!(events[3]["target"], "pr:1");
-        assert_eq!(events[3]["terminal"], true);
-    }
-    #[test]
-    fn all_finishes_when_every_target_is_settled() {
-        let (tx, rx) = mpsc::channel();
-        assert!(tx.send(update("lane:a", "succeeded", true)).is_ok());
-        let paused = update("graph:b", "paused", true);
-        assert!(tx.send(paused).is_ok());
-        assert_eq!(
-            collect(
-                &rx,
-                2,
-                Instant::now() + Duration::from_millis(10),
-                Condition::All,
-                false,
-                false,
-                &mut |_| Ok(())
-            ),
-            Ok(true)
-        );
-    }
-    #[test]
-    fn initial_notable_snapshot_does_not_return_early_and_later_transition_does() {
-        let (tx, rx) = mpsc::channel();
-        let mut paused = update("graph:b", "paused", false);
-        if let Ok(snapshot) = &mut paused.snapshot {
-            snapshot.notable = true;
-        }
-        assert!(tx.send(paused).is_ok());
-        let mut events = Vec::new();
-        assert_eq!(
-            collect(
-                &rx,
-                1,
-                Instant::now() + Duration::from_millis(20),
-                Condition::Any,
-                false,
-                false,
-                &mut |e| {
-                    events.push(e);
-                    Ok(())
-                }
-            ),
-            Ok(false)
-        );
-        assert!(events.is_empty());
 
-        let (tx2, rx2) = mpsc::channel();
-        let mut paused2 = update("graph:b", "paused", false);
-        if let Ok(snapshot) = &mut paused2.snapshot {
-            snapshot.notable = true;
-        }
-        assert!(tx2.send(paused2).is_ok());
-        assert!(tx2.send(update("graph:b", "running", false)).is_ok());
-        let mut events2 = Vec::new();
+    #[test]
+    fn a_target_settles_by_its_own_row() {
+        let graph =
+            |state: &str, outcome: &str| json!({"kind":"graph","state":state,"outcome":outcome});
+        let node = |state: &str| json!({"kind":"node","state":state});
+        let attempt =
+            |state: &str, outcome: Value| json!({"kind":"attempt","state":state,"outcome":outcome});
+        let settle = |rows: &[Value]| classify_rows("fix", rows).settle;
         assert_eq!(
-            collect(
-                &rx2,
-                1,
-                Instant::now() + Duration::from_secs(1),
-                Condition::Any,
-                false,
-                false,
-                &mut |e| {
-                    events2.push(e);
-                    Ok(())
-                }
-            ),
-            Ok(true)
+            settle(&[graph("complete", "succeeded"), node("succeeded")]),
+            Settle::Succeeded
         );
-        assert_eq!(events2.len(), 1);
-        assert_eq!(events2[0]["target"], "graph:b");
-        assert_eq!(events2[0]["event"], "transition");
+        assert_eq!(
+            settle(&[graph("complete", "partial")]),
+            Settle::Unsuccessful
+        );
+        assert_eq!(
+            settle(&[graph("paused", ""), node("pending")]),
+            Settle::NeedsInput
+        );
+        // A settled older attempt never decides a node that is running again.
+        assert_eq!(
+            settle(&[node("running"), attempt("terminal", json!("failed"))]),
+            Settle::Pending
+        );
+        assert_eq!(
+            settle(&[attempt("terminal", json!("succeeded"))]),
+            Settle::Succeeded
+        );
+        assert_eq!(settle(&[attempt("running", Value::Null)]), Settle::Pending);
     }
 }
