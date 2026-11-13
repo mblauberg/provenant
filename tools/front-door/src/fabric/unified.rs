@@ -1779,12 +1779,13 @@ fn read_context(edge: &provenant_cli::run::Edge<'_>) -> Result<Option<Context>, 
 }
 
 /// Resolve every target before a wait starts. Inside a lane the host performs
-/// one status read for validation, then wait reads each target again.
+/// one status read for validation and the wait's initial snapshot.
 pub(crate) fn check_targets(
     targets: &[provenant_cli::Target],
     edge: &provenant_cli::run::Edge<'_>,
     deadline: std::time::Instant,
     cancel: &CancelToken,
+    mut observed: impl FnMut(&provenant_cli::Target, Vec<Value>),
 ) -> Result<(), Box<dyn std::error::Error>> {
     if targets.is_empty() {
         return Ok(());
@@ -1796,17 +1797,26 @@ pub(crate) fn check_targets(
             let operation = provenant_fabric_runtime::graph::relay::RelayOp::Read {
                 input: json!({"op":"status","id":target.to_string()}),
             };
-            if let Err(error) =
-                provenant_cli::fabric::graph_relay::from_lane(&operation, cancel, left)
-            {
-                let error = super::interface::relay_error(error);
-                if is_target_not_found(&error) {
-                    return Err(Box::new(target_fault(ResolveError::NotFound(
-                        target.to_string(),
-                    ))));
-                }
-                return Err(Box::new(error));
-            }
+            let value =
+                match provenant_cli::fabric::graph_relay::from_lane(&operation, cancel, left) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let error = super::interface::relay_error(error);
+                        if is_target_not_found(&error) {
+                            return Err(Box::new(target_fault(ResolveError::NotFound(
+                                target.to_string(),
+                            ))));
+                        }
+                        return Err(Box::new(error));
+                    }
+                };
+            observed(
+                target,
+                value["rows"]
+                    .as_array()
+                    .ok_or(FacadeError::StateCorrupt)?
+                    .clone(),
+            );
         }
         return Ok(());
     }
