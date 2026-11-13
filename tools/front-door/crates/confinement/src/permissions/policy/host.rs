@@ -125,6 +125,7 @@ impl InventorySummary {
     }
 
     fn report(&self, warnings: &mut impl Write) {
+        let mut details = Vec::new();
         for (label, counts) in [
             ("cannot resolve credential symlink", &self.unresolved),
             (
@@ -173,7 +174,14 @@ impl InventorySummary {
                 .map(|(path, count)| format!("{} ({count})", path.display()))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let _ = writeln!(warnings, "warning: {label}: {total}; top roots: {top}");
+            details.push(format!("{label}: {total}; top roots: {top}"));
+        }
+        if !details.is_empty() {
+            let _ = writeln!(
+                warnings,
+                "warning: credential symlink inventory incomplete: {}; repair the reported links or move credentials into their configured home stores",
+                details.join(" | ")
+            );
         }
     }
 }
@@ -335,6 +343,31 @@ impl MandatoryRoots {
         github: &[PathGrant],
         protected: &[PathGrant],
     ) -> Result<Self, PermissionError> {
+        Self::for_host_with_scratch_mode(
+            roots,
+            home,
+            source,
+            scratch,
+            credentials,
+            github,
+            protected,
+            true,
+        )
+    }
+
+    /// Keep structural integrity roots for native lanes without inspecting
+    /// credentials that only an enforcing sandbox needs to deny.
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_host_with_scratch_mode(
+        roots: &Roots,
+        home: &Path,
+        source: &Path,
+        scratch: &Path,
+        credentials: &[PathGrant],
+        github: &[PathGrant],
+        protected: &[PathGrant],
+        sandboxed: bool,
+    ) -> Result<Self, PermissionError> {
         let subtree = |path: &Path| PathGrant {
             path: path.to_owned(),
             scope: PathScope::Subtree,
@@ -353,107 +386,122 @@ impl MandatoryRoots {
                 scope: PathScope::Exact,
             })?;
         }
-        let entries = match std::fs::read_dir(home) {
-            Ok(entries) => Some(entries),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(_) => return Err(inventory_error(home, "credential name inventory")),
-        };
-        for entry in entries.into_iter().flatten() {
-            let entry = entry.map_err(|_| inventory_error(home, "credential name inventory"))?;
-            if entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.starts_with(".agy-"))
-            {
-                mandatory.add_credentials(subtree(&entry.path()))?;
+        if sandboxed {
+            let entries = match std::fs::read_dir(home) {
+                Ok(entries) => Some(entries),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(_) => return Err(inventory_error(home, "credential name inventory")),
+            };
+            for entry in entries.into_iter().flatten() {
+                let entry =
+                    entry.map_err(|_| inventory_error(home, "credential name inventory"))?;
+                if entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(".agy-"))
+                {
+                    mandatory.add_credentials(subtree(&entry.path()))?;
+                }
             }
         }
         for root in github {
             mandatory.add_github(root.clone())?;
         }
-        let endpoints: std::collections::BTreeSet<_> = provenant_records::ADAPTER_SPECS
-            .iter()
-            .flat_map(|spec| spec.credential_files.iter().copied())
-            .chain(HOST_CREDENTIAL_ENDPOINTS.iter().copied())
-            .collect();
         let resolved_source = resolve_boundary_path(source)?;
-        let resolved_scratch = resolve_boundary_path(scratch)?;
-        let resolved_home = resolve_boundary_path(home)?;
-        let mut summary = InventorySummary::default();
-        for root in mandatory.credentials().to_vec() {
-            let alias = resolve_boundary_path(&root.path)?;
-            if alias != root.path {
-                mandatory.add_credentials_alias(
-                    &root,
-                    PathGrant {
-                        path: alias,
-                        scope: root.scope,
-                    },
-                )?;
-            }
-            if root.scope == PathScope::Subtree {
-                inventory_links(
-                    &mut mandatory,
-                    &root,
-                    &resolved_home,
-                    &resolved_source,
-                    &resolved_scratch,
-                    &mut summary,
-                )?;
-                for endpoint in &endpoints {
-                    let path = root.path.join(endpoint);
-                    let Ok(target) = resolve_boundary_path(&path) else {
-                        summary.record_unresolved(&root.path, &path);
-                        continue;
-                    };
-                    if target != path && target.is_dir() && !target.starts_with(&resolved_home) {
-                        InventorySummary::record(&mut summary.endpoint_outside_home, &root.path);
-                        continue;
-                    }
-                    if target != path
-                        && target.is_dir()
-                        && (resolved_source.starts_with(&target)
-                            || resolved_scratch.starts_with(&target))
-                    {
-                        InventorySummary::record(&mut summary.endpoint_covering_work, &root.path);
-                        continue;
-                    }
-                    if target != path
-                        && (!profile_path_representable(&path)
-                            || !profile_path_representable(&target)
-                            || (PathGrant {
-                                path: target.clone(),
-                                scope: PathScope::Exact,
-                            })
-                            .validate()
-                            .is_err())
-                    {
-                        InventorySummary::record(&mut summary.endpoint_unrepresentable, &root.path);
-                        continue;
-                    }
-                    // Also retain regular and missing endpoints for the final
-                    // metadata recheck, without rendering redundant denials
-                    // for files already covered by the store subtree.
-                    mandatory
-                        .credential_endpoints
-                        .push((path.clone(), target.clone()));
-                    if target != path {
-                        // Keep the public endpoint too: compilation must catch
-                        // retargeting after inventory, even inside a real store.
-                        for path in [path, target] {
-                            mandatory.add_credentials_alias(
-                                &root,
-                                PathGrant {
-                                    path,
+        if sandboxed {
+            let endpoints: std::collections::BTreeSet<_> = provenant_records::ADAPTER_SPECS
+                .iter()
+                .flat_map(|spec| spec.credential_files.iter().copied())
+                .chain(HOST_CREDENTIAL_ENDPOINTS.iter().copied())
+                .collect();
+            let resolved_scratch = resolve_boundary_path(scratch)?;
+            let resolved_home = resolve_boundary_path(home)?;
+            let mut summary = InventorySummary::default();
+            for root in mandatory.credentials().to_vec() {
+                let alias = resolve_boundary_path(&root.path)?;
+                if alias != root.path {
+                    mandatory.add_credentials_alias(
+                        &root,
+                        PathGrant {
+                            path: alias,
+                            scope: root.scope,
+                        },
+                    )?;
+                }
+                if root.scope == PathScope::Subtree {
+                    inventory_links(
+                        &mut mandatory,
+                        &root,
+                        &resolved_home,
+                        &resolved_source,
+                        &resolved_scratch,
+                        &mut summary,
+                    )?;
+                    for endpoint in &endpoints {
+                        let path = root.path.join(endpoint);
+                        let Ok(target) = resolve_boundary_path(&path) else {
+                            summary.record_unresolved(&root.path, &path);
+                            continue;
+                        };
+                        if target != path && target.is_dir() && !target.starts_with(&resolved_home)
+                        {
+                            InventorySummary::record(
+                                &mut summary.endpoint_outside_home,
+                                &root.path,
+                            );
+                            continue;
+                        }
+                        if target != path
+                            && target.is_dir()
+                            && (resolved_source.starts_with(&target)
+                                || resolved_scratch.starts_with(&target))
+                        {
+                            InventorySummary::record(
+                                &mut summary.endpoint_covering_work,
+                                &root.path,
+                            );
+                            continue;
+                        }
+                        if target != path
+                            && (!profile_path_representable(&path)
+                                || !profile_path_representable(&target)
+                                || (PathGrant {
+                                    path: target.clone(),
                                     scope: PathScope::Exact,
-                                },
-                            )?;
+                                })
+                                .validate()
+                                .is_err())
+                        {
+                            InventorySummary::record(
+                                &mut summary.endpoint_unrepresentable,
+                                &root.path,
+                            );
+                            continue;
+                        }
+                        // Also retain regular and missing endpoints for the final
+                        // metadata recheck, without rendering redundant denials
+                        // for files already covered by the store subtree.
+                        mandatory
+                            .credential_endpoints
+                            .push((path.clone(), target.clone()));
+                        if target != path {
+                            // Keep the public endpoint too: compilation must catch
+                            // retargeting after inventory, even inside a real store.
+                            for path in [path, target] {
+                                mandatory.add_credentials_alias(
+                                    &root,
+                                    PathGrant {
+                                        path,
+                                        scope: PathScope::Exact,
+                                    },
+                                )?;
+                            }
                         }
                     }
                 }
             }
+            summary.report(&mut std::io::stderr().lock());
         }
-        summary.report(&mut std::io::stderr().lock());
         let state = resolve_boundary_path(roots.state.as_path())?;
         if state != roots.state.as_path() {
             mandatory.add_state_alias(subtree(&state))?;
@@ -562,6 +610,38 @@ mod tests {
         let mut input = provenant_core::RootInputs::new(root.join("home"), root.join("source"));
         input.state_dir = Some(root.join("state"));
         Ok(input.resolve(&provenant_os::fs::SystemPathResolver)?)
+    }
+
+    #[test]
+    fn credential_alias_inventory_runs_only_for_sandboxed_lanes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let roots = fixture_roots(&root)?;
+        let home = root.join("home");
+        let store = home.join(".ssh");
+        std::fs::create_dir(&store)?;
+        let key = home.join("private-key");
+        std::fs::write(&key, b"synthetic credential")?;
+        std::os::unix::fs::symlink(&key, store.join("identity"))?;
+        let alias = PathGrant {
+            path: key,
+            scope: PathScope::Exact,
+        };
+        for sandboxed in [false, true] {
+            let inventory = MandatoryRoots::for_host_with_scratch_mode(
+                &roots,
+                &home,
+                &root.join("source"),
+                &root.join("scratch"),
+                &[],
+                &[],
+                &[],
+                sandboxed,
+            )?;
+            assert_eq!(inventory.credentials().contains(&alias), sandboxed);
+        }
+        Ok(())
     }
 
     #[test]
@@ -701,12 +781,12 @@ mod tests {
         summary.report(&mut warnings);
         let output = String::from_utf8(warnings)?;
         let lines: Vec<_> = output.lines().collect();
-        assert_eq!(lines.len(), 2, "{output}");
+        assert_eq!(lines.len(), 1, "inventory warnings must stay on one line");
         assert!(
             lines[0].contains("cannot resolve credential symlink: 4;"),
             "{output}"
         );
-        assert!(lines[1].contains("depth limit reached: 2;"), "{output}");
+        assert!(output.contains("depth limit reached: 2;"), "{output}");
         assert!(output.contains("first (2)"));
         assert!(output.contains("second (2)"));
         assert!(mandatory.credentials().contains(&PathGrant {
@@ -826,7 +906,11 @@ mod tests {
         let mut warnings = Vec::new();
         summary.report(&mut warnings);
         let output = String::from_utf8(warnings).unwrap();
-        assert_eq!(output.lines().count(), 5);
+        assert_eq!(
+            output.lines().count(),
+            1,
+            "inventory warnings must stay on one line"
+        );
         assert!(output.contains("cannot resolve credential symlink: 5;"));
         assert!(output.contains("entry limit reached: 5;"));
         assert!(output.contains("endpoint directory outside home: 5;"));

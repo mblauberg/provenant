@@ -687,6 +687,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
                 &Default::default(),
                 "codex",
                 true,
+                InventoryContext::Sandboxed,
             )?)?;
             use provenant_providers::{Adapter, ProviderEvent, codex::Codex};
             let prompt = Prompt::new("continue".into());

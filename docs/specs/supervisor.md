@@ -136,12 +136,25 @@ compare-and-swap.
 - Test: `crates/confinement/src/permissions/tests/grants.rs::linked_worktree_grants_derive_from_verified_git_paths_and_ref`;
   `crates/confinement/tests/lane_git_conformance.rs::lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only`
 
-### No writes to stores the host runs later
+### Native environment and sandbox tool stores
 
-No lane writes the Cargo registry, Git, pnpm, npm or Node caches the host later
-runs unconfined; writers get a private per-worktree cache.
-- Why: a poisoned `build.rs` or package would run on the host's next build.
-- Test: `crates/providers/src/tests_lane_toolchains.rs::no_lane_can_write_shared_toolchain_stores`;
+Unsandboxed lanes inherit the host environment, PATH, tool caches and
+credentials in place. Provider account selectors still choose the registered
+account; agy uses that account's HOME when its keychain requires it. Environment
+values stay in the live launch, never in prompts or receipts. Native launches
+skip skill copies, tool dependency discovery, credential symlink inventory and
+the private Cargo home, target directory and build-slot shim.
+
+Sandboxed lanes use the minimal environment and staged skills, discover tool
+dependencies and credential aliases, and report inventory omissions in one
+actionable warning. They cannot write the Cargo registry, Git, pnpm, npm or
+Node caches the host later runs unconfined; writers get a private per-worktree
+cache.
+- Why: native lanes use ordinary tools and login state; sandboxed lanes keep
+  packages they can change out of the host's later builds.
+- Test: `crates/providers/src/tests_launch_access.rs::native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation`;
+  `crates/confinement/src/permissions/policy/host.rs::credential_alias_inventory_runs_only_for_sandboxed_lanes`;
+  `crates/providers/src/tests_lane_toolchains.rs::no_lane_can_write_shared_toolchain_stores`;
   `crates/confinement/src/permissions/tests/grants.rs::writer_cache_is_private_and_bound_to_repository_and_worktree_identity`
 
 ### Network, IPC and process information

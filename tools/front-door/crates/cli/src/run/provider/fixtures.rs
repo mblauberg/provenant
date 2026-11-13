@@ -45,6 +45,7 @@ pub fn writer_fixture_plan(
         &Default::default(),
         "codex",
         true,
+        InventoryContext::Sandboxed,
     )
     .map_err(|error| error.to_string())?;
     ConfinedPlan::new(request).map_err(|error| error.to_string())

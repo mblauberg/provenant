@@ -1348,3 +1348,80 @@ fn read_only_handoff_native_permissions_match_private_state() -> Result<(), Prov
     }
     Ok(())
 }
+
+#[test]
+fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
+-> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture".into());
+    let token = fixture_token();
+    let host: Vec<_> = std::env::vars_os().collect();
+    for id in ["codex", "claude", "agy", "cursor"] {
+        let mut route = route(id, "fixture-model");
+        route.account_key = None;
+        let auth = match id {
+            "codex" | "cursor" => Some("login"),
+            "agy" => Some("keychain"),
+            _ => None,
+        };
+        let plan = fixture_access_plan(Access::WorktreeWrite, auth, false);
+        let adapter = REGISTRY
+            .iter()
+            .find(|entry| entry.adapter.id() == id)
+            .unwrap()
+            .adapter;
+        let mut input = fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            Some(&token),
+        );
+        input.host_var =
+            &|name| (name == provenant_confinement::run_config::SANDBOX_ENV).then(|| "off".into());
+        let native = adapter.prepare(input)?;
+        for (key, value) in &host {
+            // These selectors bind the child to its provider and Fabric context.
+            if key.to_str().is_some_and(|key| {
+                key.starts_with("PROVENANT_")
+                    || matches!(
+                        key,
+                        "PATH"
+                            | "CODEX_HOME"
+                            | "CLAUDE_CONFIG_DIR"
+                            | "CLAUDE_CODE_TMPDIR"
+                            | "DISABLE_AUTOUPDATER"
+                            | "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+                    )
+            }) {
+                continue;
+            }
+            assert!(
+                native
+                    .env
+                    .iter()
+                    .any(|entry| &entry.0 == key && &entry.1 == value),
+                "native adapter dropped a host environment binding"
+            );
+        }
+        if let Some((_, host_path)) = host.iter().find(|(key, _)| key == "PATH") {
+            let child_path = &native.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
+            let child_paths: Vec<_> = std::env::split_paths(child_path).collect();
+            assert!(std::env::split_paths(host_path).all(|path| child_paths.contains(&path)));
+        }
+        assert!(native.user_skills.root.is_none());
+        assert!(native.tool_requirements.reads.is_empty());
+        assert!(native.tool_requirements.exec.is_empty());
+        if matches!(id, "codex" | "claude" | "agy") {
+            let confined = adapter.prepare(fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                Some(&token),
+            ))?;
+            assert!(confined.env.iter().any(|(key, _)| key == "CARGO_HOME"));
+            assert!(confined.setup.iter().any(|step| matches!(step, crate::launch::SetupStep::Symlink { link, .. } if link.ends_with("cargo-home/registry"))));
+        }
+    }
+    Ok(())
+}

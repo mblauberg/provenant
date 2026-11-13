@@ -2212,6 +2212,7 @@ pub(super) fn prepare_candidates(
             &host_writes,
             adapter,
             publishing_gh.is_some(),
+            InventoryContext::Preflight,
         )
         .map_err(PlanCheckError::from)
         .and_then(|request| ConfinedPlan::new(request).map_err(PlanCheckError::from))
@@ -2923,6 +2924,7 @@ pub(super) fn prepare_candidates(
             &host_writes,
             adapter.id(),
             publishing_gh.is_some(),
+            InventoryContext::Launch(task, &format!("{}/{}", route.adapter, route.model)),
         )
         .map_err(PlanCheckError::from)
         {
@@ -3107,6 +3109,12 @@ pub(super) fn prepare_candidates(
         provider_route.set_user_skills(user_skills_mode.is_discover());
         let nonce = entropy_128().map_err(|error| error.to_string())?;
         let grant_digest = task.authority_digest.to_string();
+        let sandbox = sandbox_mode(
+            &host_writes,
+            &format!("{}/{}", route.adapter, route.model),
+            task,
+            &plan,
+        );
         let prepare = |provider_route: &provenant_records::ResolvedRoute| {
             adapter.prepare(PrepareInput {
                 images: &task.access.attachments,
@@ -3119,7 +3127,13 @@ pub(super) fn prepare_candidates(
                 executable: &executable,
                 home: &home,
                 user: &user,
-                host_var: &|key| host_provider_var(registry, key),
+                host_var: &|key| {
+                    if key == provenant_confinement::run_config::SANDBOX_ENV {
+                        Some(sandbox.env_value().into())
+                    } else {
+                        host_provider_var(registry, key)
+                    }
+                },
                 skill_stage_max_bytes: config.domains.lanes.skill_stage_max_bytes,
                 account: account.as_ref(),
                 token,
@@ -3245,27 +3259,31 @@ pub(super) fn prepare_candidates(
                 spec.env.push(("PROVENANT_LANE_BASE".into(), base.into()));
             }
         }
-        set_cargo_profile(&mut spec.env, &build_settings);
+        if sandbox.sandboxed {
+            set_cargo_profile(&mut spec.env, &build_settings);
+        }
         spec.env.extend(
             model_policy
                 .launch_env(adapter.id())
                 .into_iter()
                 .map(|(key, value)| (key.into(), value.into())),
         );
-        set_cargo_jobs(
-            &mut spec.env,
-            registry
-                .host
-                .and_then(|host| host.cargo_build_jobs.as_deref()),
-            build_settings.jobs(),
-        );
+        if sandbox.sandboxed {
+            set_cargo_jobs(
+                &mut spec.env,
+                registry
+                    .host
+                    .and_then(|host| host.cargo_build_jobs.as_deref()),
+                build_settings.jobs(),
+            );
+        }
         if let Some(adapter_spec) = adapter_spec {
             spec.configure_shell(scratch, adapter_spec);
         }
         let mut gh_attempted = false;
         if let Some(gh) = publishing_gh
             .as_ref()
-            .filter(|_| github_auth_permitted(&plan, &spec.profile.spec))
+            .filter(|_| sandbox.sandboxed && github_auth_permitted(&plan, &spec.profile.spec))
         {
             // Resolve the login before composing gh's wrapper: token launches
             // use a private empty config directory, independent of host links.
@@ -3488,7 +3506,8 @@ pub(super) fn prepare_candidates(
         };
         // Resolve gh credentials on the host, where a keychain login is
         // available. The token travels only in the live launch environment.
-        let reader_gh = github_auth_permitted(&plan, &spec.profile.spec)
+        let reader_gh = sandbox.sandboxed
+            && github_auth_permitted(&plan, &spec.profile.spec)
             && adapter_spec.is_some_and(|spec| spec.github_auth.is_some());
         if let Some(gh) = publishing_gh
             .clone()
@@ -3508,12 +3527,12 @@ pub(super) fn prepare_candidates(
             {
                 let _ = writeln!(std::io::stderr().lock(), "warning: {label}: {warning}");
             }
-            if adapter_spec.is_some_and(|spec| {
-                spec.github_auth == Some(provenant_records::GithubAuth::ShellEnvironment)
-            }) && spec.env.iter().any(|(key, _)| key == "GH_TOKEN")
-            {
-                super::gh_auth::codex_shell_environment(&spec.env, &mut spec.argv);
-            }
+        }
+        if adapter_spec.is_some_and(|spec| {
+            spec.github_auth == Some(provenant_records::GithubAuth::ShellEnvironment)
+        }) && (!sandbox.sandboxed || spec.env.iter().any(|(key, _)| key == "GH_TOKEN"))
+        {
+            super::gh_auth::codex_shell_environment(&spec.env, &mut spec.argv);
         }
         attach_candidate_guard_facts(&mut reasons, &reason_boundaries, &reason_resources)?;
         if let Some(policy) = plan.policy_mut() {
@@ -3531,12 +3550,6 @@ pub(super) fn prepare_candidates(
                 }
             }
         }
-        let sandbox = sandbox_mode(
-            &host_writes,
-            &format!("{}/{}", route.adapter, route.model),
-            task,
-            &plan,
-        );
         apply_sandbox_mode(sandbox, &mut spec.env, &mut provider);
         return Ok(run::PreparedLaunch {
             skipped_routes: reasons,

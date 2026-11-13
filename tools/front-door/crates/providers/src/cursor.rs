@@ -73,7 +73,7 @@ fn prepare(
     let staged_skills = input.stage_user_skills();
     let skill_reads = staged_skills.root.iter().map(subtree).collect::<Vec<_>>();
     let mut omitted_discovery = package_omissions;
-    let mut optional_reads = if access == Access::WorktreeWrite {
+    let mut optional_reads = if input.sandboxed() && access == Access::WorktreeWrite {
         crate::launch::git_global_files(&input.home.join(".config"))
     } else {
         Vec::new()
@@ -86,10 +86,12 @@ fn prepare(
         &mut omitted_discovery,
     );
     let mut env = base_env(input, &plan.scratch.path, "/usr/bin:/bin");
-    env.extend([
-        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-    ]);
+    if input.sandboxed() {
+        env.extend([
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ]);
+    }
     let private = &plan
         .private_state
         .as_ref()
@@ -120,7 +122,7 @@ fn prepare(
         });
     }
     for (key, value) in &mut env {
-        if key == "HOME" {
+        if input.sandboxed() && key == "HOME" {
             *value = private.into();
         }
     }

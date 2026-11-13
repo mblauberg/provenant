@@ -142,6 +142,7 @@ pub(super) fn prepare_command(
         &config.domains.run,
         provider,
         false,
+        InventoryContext::Launch(task, &format!("{provider}/{name}")),
     )?;
     let (mut plan, mut observed_head, repository, mut worktree_gitdir) = read_only_plan(
         roots,
@@ -188,6 +189,12 @@ pub(super) fn prepare_command(
         },
         pool_selection: None,
     };
+    let sandbox = sandbox_mode(
+        &config.domains.run,
+        &format!("{provider}/{name}"),
+        task,
+        &plan,
+    );
     let prompt = Prompt::new(String::new());
     let mut spec = adapter
         .prepare(PrepareInput {
@@ -205,7 +212,13 @@ pub(super) fn prepare_command(
             executable: &executable,
             home: &home,
             user: &user,
-            host_var: &|key| host_provider_var(registry, key),
+            host_var: &|key| {
+                if key == provenant_confinement::run_config::SANDBOX_ENV {
+                    Some(sandbox.env_value().into())
+                } else {
+                    host_provider_var(registry, key)
+                }
+            },
             skill_stage_max_bytes: config.domains.lanes.skill_stage_max_bytes,
             account: None,
             token: None,
@@ -270,14 +283,16 @@ pub(super) fn prepare_command(
             policy.mandatory_mut().add_state_read(root)?;
         }
     }
-    set_cargo_profile(&mut spec.env, &settings);
-    set_cargo_jobs(
-        &mut spec.env,
-        registry
-            .host
-            .and_then(|host| host.cargo_build_jobs.as_deref()),
-        settings.jobs(),
-    );
+    if sandbox.sandboxed {
+        set_cargo_profile(&mut spec.env, &settings);
+        set_cargo_jobs(
+            &mut spec.env,
+            registry
+                .host
+                .and_then(|host| host.cargo_build_jobs.as_deref()),
+            settings.jobs(),
+        );
+    }
     spec.complete_tool_requirements(&plan, &home, &cwd);
     if isolated {
         super::source_tree::ensure_profile_isolated(&source, &spec.profile.spec)?;
@@ -298,12 +313,6 @@ pub(super) fn prepare_command(
             .iter()
             .map(|tool| tool.receipt())
             .collect(),
-    );
-    let sandbox = sandbox_mode(
-        &config.domains.run,
-        &format!("{provider}/{name}"),
-        task,
-        &plan,
     );
     let mut route = RouteRecord {
         provider: Some(provider.into()),
@@ -403,6 +412,11 @@ pub(super) fn configure_build_slots(
     state: &Path,
     knobs: &std::collections::BTreeMap<String, serde_json::Value>,
 ) -> Vec<PathGrant> {
+    if spec.env.iter().any(|(name, value)| {
+        name == provenant_confinement::run_config::SANDBOX_ENV && value == "off"
+    }) {
+        return Vec::new();
+    }
     // Builds, not lanes, share the host's build slots: a `cargo` shim takes
     // one around each compiling command. The host (this process, outside
     // the sandbox) creates the slot files; the lane may only read and lock
