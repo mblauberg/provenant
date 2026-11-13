@@ -309,12 +309,19 @@ fn remove_aliases(state: &Path, attempts: &[(PathBuf, Directory)]) -> io::Result
         return Ok(());
     }
     let tmp = fs(Directory::open_anchor(Path::new("/private/tmp")))?;
+    remove_aliases_in(&tmp, state, attempts)
+}
+fn remove_aliases_in(
+    tmp: &Directory,
+    state: &Path,
+    attempts: &[(PathBuf, Directory)],
+) -> io::Result<()> {
     for name in fs(tmp.entries())? {
         let name = fs(name)?;
         if !name.to_string_lossy().starts_with("pv-") {
             continue;
         }
-        let Some(before) = metadata(&tmp, &name)? else {
+        let Some(before) = metadata(tmp, &name)? else {
             continue;
         };
         if before.kind != FileKind::Symlink || before.uid != provenant_os::fs::effective_uid() {
@@ -324,7 +331,7 @@ fn remove_aliases(state: &Path, attempts: &[(PathBuf, Directory)]) -> io::Result
         if attempts
             .iter()
             .any(|(path, _)| target == state.join(path).join("tmp"))
-            && recheck(&tmp, &name, before)?
+            && recheck(tmp, &name, before)?
         {
             fs(tmp.unlink(&name))?;
         }
@@ -426,6 +433,31 @@ mod tests {
             std::fs::write(temp.path().join("admission.sqlite3"), "recreated")
         })?;
         assert!(!temp.path().join("admission.sqlite3").exists());
+        Ok(())
+    }
+    #[test]
+    fn temporary_alias_cleanup_never_follows_or_removes_foreign_targets() -> Result {
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        let attempt = state.join("attempts/a1");
+        std::fs::create_dir_all(attempt.join("tmp"))?;
+        let tmp = temp.path().join("aliases");
+        std::fs::create_dir(&tmp)?;
+        std::os::unix::fs::symlink(attempt.join("tmp"), tmp.join("pv-owned"))?;
+        std::os::unix::fs::symlink(temp.path(), tmp.join("pv-foreign"))?;
+        std::fs::write(tmp.join("pv-file"), "keep")?;
+        remove_aliases_in(
+            &Directory::open_anchor(&tmp)?,
+            &state,
+            &[(
+                PathBuf::from("attempts/a1"),
+                Directory::open_anchor(&attempt)?,
+            )],
+        )?;
+        assert!(std::fs::symlink_metadata(tmp.join("pv-owned")).is_err());
+        assert!(std::fs::symlink_metadata(tmp.join("pv-foreign")).is_ok());
+        assert_eq!(std::fs::read_to_string(tmp.join("pv-file"))?, "keep");
+        assert!(attempt.join("tmp").is_dir());
         Ok(())
     }
 }

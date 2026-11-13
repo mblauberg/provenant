@@ -3196,10 +3196,7 @@ fn reset_preview_conflict_preserves_old_state() -> Result {
         account.join("skills/example/SKILL.md"),
         "user-owned conflict",
     )?;
-    fs::write(
-        rig.state.join("config.toml"),
-        "schema_version=1\n[domains.accounts.claude.work]\n",
-    )?;
+    support::register_account(&rig, "claude", "work", "work-key", &account)?;
     let before = snapshot(&rig.state)?;
     let failed = reset_install(&rig, &stage, &["--reset-state"])?;
     assert_ne!(code(&failed), 0, "{failed:?}");
@@ -3469,5 +3466,17 @@ cp '{}' "$2/bin/provenant"
     assert_eq!(code(&captured), 6);
     assert!(!rig.home.join("installed").exists());
     assert!(!String::from_utf8_lossy(&captured.stderr.bytes).contains("Type reset"));
+    Ok(())
+}
+
+#[test]
+fn reset_receipt_read_error_refuses_without_deletion() -> Result {
+    let (rig, stage) = reset_fixture()?;
+    let receipt = rig.state.join("install/receipt.json");
+    fs::remove_file(&receipt)?;
+    fs::create_dir(&receipt)?;
+    let before = snapshot(&rig.state)?;
+    assert_ne!(code(&reset_install(&rig, &stage, &["--reset-state"])?), 0);
+    assert_eq!(snapshot(&rig.state)?, before);
     Ok(())
 }
