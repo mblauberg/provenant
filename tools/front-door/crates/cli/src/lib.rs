@@ -2209,12 +2209,23 @@ mod tests {
         for text in refused {
             assert!(text.parse::<Target>().is_err(), "{text}");
         }
+        // The full Cartesian table above checks the target grammar directly.
+        // At the CLI boundary, cover every component boundary and target shape
+        // once per verb, without rebuilding the entire command tree for every
+        // redundant combination of already-validated components.
+        let mut cli_table = Vec::new();
+        for (i, name) in names.iter().enumerate() {
+            cli_table.push((*name).to_owned());
+            let node = nodes[i];
+            cli_table.push(format!("{name}/{node}"));
+            cli_table.push(format!("{name}/{node}#{}", [1, 2, 10, u32::MAX][i]));
+        }
         let commands = target_commands();
         assert!(commands.len() >= 12, "{commands:?}");
         for (words, flag) in &commands {
             let extras = required_extras(words, flag);
             let mut accepted = Vec::new();
-            for text in table.iter().map(String::as_str).chain(refused) {
+            for text in cli_table.iter().map(String::as_str).chain(refused) {
                 let mut argv: Vec<&str> = words.iter().map(String::as_str).collect();
                 if !flag.is_empty() {
                     argv.push(flag);
@@ -2223,7 +2234,7 @@ mod tests {
                 argv.extend(&extras);
                 accepted.push(matches!(parsed(&argv), ParseOutcome::Invocation(_)));
             }
-            let reference = table
+            let reference = cli_table
                 .iter()
                 .map(|text| {
                     // `edit` takes a graph name only.
