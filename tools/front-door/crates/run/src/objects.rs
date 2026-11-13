@@ -19,8 +19,8 @@ use view::object_binding;
 #[cfg(test)]
 pub(crate) use view::{bind, prepare_refs};
 pub(crate) use view::{
-    bound_source, merge_head, merge_objects, prepare_bound, prepare_read_only, private_tip,
-    restore_index, set_private_tip,
+    bound_source, copy_index, merge_head, merge_objects, prepare_bound, prepare_read_only,
+    private_tip, restore_index, set_private_tip,
 };
 
 fn invalid() -> RunError {
@@ -305,7 +305,8 @@ pub(crate) fn publish_branch(
     head: GitOid,
 ) -> Result<()> {
     let current = resolve_ref(git, repo, branch)?;
-    if current != base && current != head && !is_ancestor(git, repo, head, current) {
+    let advances_current = current == base || is_ancestor(git, repo, current, head);
+    if !advances_current && !is_ancestor(git, repo, head, current) {
         return Err(invalid());
     }
     let descends = |ancestor| is_ancestor(git, repo, ancestor, head);
@@ -317,7 +318,7 @@ pub(crate) fn publish_branch(
     // receive-pack has checked the graph. Git's CAS protects concurrent host
     // updates, including when a lane rebases or merges its private branch.
     {
-        let target = if current == base { head } else { current };
+        let target = if advances_current { head } else { current };
         command(
             git,
             repo.common_git_dir(),
