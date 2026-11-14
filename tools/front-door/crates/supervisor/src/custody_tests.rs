@@ -1154,7 +1154,7 @@ fn observation_gates_try_once_and_preserve_unknown_errors() -> TestResult {
 }
 
 #[test]
-fn writer_exclusion_gate_contention_honours_the_caller_deadline() -> TestResult {
+fn writer_exclusion_gate_contention_is_busy_independent_of_writer_budget() -> TestResult {
     let root = tempfile::tempdir()?;
     // The directory reports its canonical path (`/private/var/...` on macOS).
     let base = std::fs::canonicalize(root.path())?;
@@ -1164,7 +1164,6 @@ fn writer_exclusion_gate_contention_honours_the_caller_deadline() -> TestResult 
         provenant_core::WallTime::from_micros(0)?,
         provenant_core::MonoTime::from_micros(0),
     );
-    let timeout = Duration::from_millis(10);
     let error = lock_writer_exclusion(
         &directory,
         WaitBudget::up_to(
@@ -1174,11 +1173,8 @@ fn writer_exclusion_gate_contention_honours_the_caller_deadline() -> TestResult 
         &CancelToken::new(),
         &clock,
     )
-    .expect_err("the observer remains locked through the writer deadline");
-    assert!(
-        matches!(error, CustodyError::Filesystem(FsError::LockTimeout { path, timeout: actual })
-        if path == base.join("writer.lock") && actual == timeout)
-    );
+    .expect_err("an observer yields busy without consuming the writer budget");
+    assert!(matches!(error, CustodyError::Busy));
 
     let cancel = CancelToken::new();
     cancel.cancel();

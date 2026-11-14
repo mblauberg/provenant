@@ -1668,7 +1668,7 @@ thread_local! {
 
 /// Acquire writer exclusion without keeping the observation gate while another
 /// writer owns the lease. Every attempt revalidates both stable lock inodes.
-/// A nonblocking writer budget still allows the separate brief observer wait.
+/// Observation gates always try once; only actual writer custody may use the caller budget.
 #[allow(clippy::disallowed_methods)] // The bounded wait must expire even with a stopped caller clock.
 pub fn lock_writer_exclusion(
     directory: &Directory,
@@ -1685,43 +1685,9 @@ pub fn lock_writer_exclusion(
         if cancel.is_cancelled() {
             return Err(FsError::Cancelled { path }.into());
         }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let gate_wait = if timeout.is_zero() {
-            Duration::from_secs(5)
-        } else {
-            remaining.min(Duration::from_secs(5))
-        };
-        let observation = match directory.lock(
-            OsStr::new("writer-probe.lock"),
-            LockMode::Exclusive,
-            WaitBudget::up_to(
-                clock.mono_now(),
-                provenant_core::DurationMicros::from_micros(
-                    u64::try_from(gate_wait.as_micros())
-                        .map_err(|_| CustodyError::InvalidRecord)?,
-                ),
-            ),
-            cancel,
-            clock,
-        ) {
-            Ok(observation) => observation,
-            Err(FsError::LockTimeout { .. })
-                if !timeout.is_zero() && (Instant::now() >= deadline || gate_wait == remaining) =>
-            {
-                if cancel.is_cancelled() {
-                    return Err(FsError::Cancelled { path }.into());
-                }
-                if Instant::now() >= deadline {
-                    return Err(FsError::LockTimeout { path, timeout }.into());
-                }
-                // The gate budget is rounded down to microseconds. Retry any
-                // fraction left before the caller's deadline rather than
-                // reporting a distinct observation failure for budget expiry.
-                continue;
-            }
-            Err(error @ FsError::Cancelled { .. }) => return Err(error.into()),
-            Err(error) => return Err(CustodyError::ObservationGate(error.to_string())),
-        };
+        // An observation is not writer custody: contention here is busy,
+        // regardless of the caller's permitted wait for the actual writer.
+        let observation = writer_admission_guard(directory)?;
         let attempt = directory.lock(
             OsStr::new("writer.lock"),
             LockMode::Exclusive,
