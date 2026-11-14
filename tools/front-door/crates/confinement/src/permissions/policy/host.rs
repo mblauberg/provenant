@@ -408,6 +408,20 @@ impl MandatoryRoots {
             mandatory.add_github(root.clone())?;
         }
         let resolved_source = resolve_boundary_path(source)?;
+        // Freeze each declared credential root in both launch modes. Sandbox
+        // mode controls recursive inventory, not mandatory alias validation.
+        for root in mandatory.credentials().to_vec() {
+            let alias = resolve_boundary_path(&root.path)?;
+            if alias != root.path {
+                mandatory.add_credentials_alias(
+                    &root,
+                    PathGrant {
+                        path: alias,
+                        scope: root.scope,
+                    },
+                )?;
+            }
+        }
         if sandboxed {
             let endpoints: std::collections::BTreeSet<_> = provenant_records::ADAPTER_SPECS
                 .iter()
@@ -418,16 +432,6 @@ impl MandatoryRoots {
             let resolved_home = resolve_boundary_path(home)?;
             let mut summary = InventorySummary::default();
             for root in mandatory.credentials().to_vec() {
-                let alias = resolve_boundary_path(&root.path)?;
-                if alias != root.path {
-                    mandatory.add_credentials_alias(
-                        &root,
-                        PathGrant {
-                            path: alias,
-                            scope: root.scope,
-                        },
-                    )?;
-                }
                 if root.scope == PathScope::Subtree {
                     inventory_links(
                         &mut mandatory,
