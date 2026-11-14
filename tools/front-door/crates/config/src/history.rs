@@ -1,5 +1,5 @@
 //! Bounded, append-only configuration history: one JSON line per applied
-//! edit in `<state>/config-history.jsonl`, written under the config lock.
+//! edit in `<state>/config-history.jsonl`, published by atomic replacement.
 //! Values that look like secrets are never recorded.
 use crate::ConfigError;
 use jiff::Timestamp;
@@ -203,8 +203,7 @@ fn read_lines(state: &Directory) -> Result<Vec<String>, ConfigError> {
     }
 }
 
-/// Append one entry and prune, rewriting the bounded file atomically. Called
-/// with the config lock held.
+/// Append one entry and prune, rewriting the bounded file atomically.
 pub(crate) fn append(
     state: &Directory,
     entry: &HistoryEntry,

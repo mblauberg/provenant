@@ -5,6 +5,131 @@ use std::{
     path::{Component, Path},
 };
 
+/// Retention policy routing. Owners alone interpret custody and delete bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetentionKind {
+    GitWorktrees,
+    ObservationLedgers,
+    Staging,
+    LaneCargoCaches,
+    ProviderState,
+    ChairLogs,
+    TargetSeeds,
+    BuildDirectories,
+    QuotaHistory,
+    Usage,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetentionTrigger {
+    Custody,
+    Gc,
+    FullGc,
+    Admission,
+    GcAndAdmission,
+    Append,
+    Never,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RetentionClass {
+    pub class: RetentionKind,
+    pub owner: &'static str,
+    pub custody_proof: &'static str,
+    /// Effective config keys, interpreted by the owner; None forbids ageing.
+    pub age_rule: Option<&'static str>,
+    pub trigger: RetentionTrigger,
+}
+
+pub const RETENTION_CLASSES: &[RetentionClass] = &[
+    RetentionClass {
+        class: RetentionKind::LaneCargoCaches,
+        owner: "confinement/cache",
+        custody_proof: "verified cache owner; free writer custody; atomic detachment",
+        age_rule: Some("gc.idle_days"),
+        trigger: RetentionTrigger::Gc,
+    },
+    RetentionClass {
+        class: RetentionKind::GitWorktrees,
+        owner: "confinement/worktrees",
+        custody_proof: "terminal writer; clean Git; landed unchanged tip",
+        age_rule: None,
+        trigger: RetentionTrigger::Custody,
+    },
+    RetentionClass {
+        class: RetentionKind::ObservationLedgers,
+        owner: "telemetry/ledger",
+        custody_proof: "permanent attempt evidence",
+        age_rule: None,
+        trigger: RetentionTrigger::Never,
+    },
+    RetentionClass {
+        class: RetentionKind::Staging,
+        owner: "staging_gc",
+        custody_proof: "free ingest/install item lock",
+        age_rule: Some("gc.idle_days"),
+        trigger: RetentionTrigger::Gc,
+    },
+    RetentionClass {
+        class: RetentionKind::ProviderState,
+        owner: "run/retention",
+        custody_proof: "terminal; free publication/writer custody; no retained private Git",
+        age_rule: Some("retention.provider_state_days, retention.logs_days"),
+        trigger: RetentionTrigger::Gc,
+    },
+    RetentionClass {
+        class: RetentionKind::ChairLogs,
+        owner: "workflow/log",
+        custody_proof: "owner transaction; replay horizon",
+        age_rule: Some("retention.chair_log_days"),
+        trigger: RetentionTrigger::FullGc,
+    },
+    RetentionClass {
+        class: RetentionKind::TargetSeeds,
+        owner: "run/target_seed_gc",
+        custody_proof: "free store/clone and staging build locks",
+        age_rule: None,
+        trigger: RetentionTrigger::Gc,
+    },
+    RetentionClass {
+        class: RetentionKind::BuildDirectories,
+        owner: "run/build_dir_gc",
+        custody_proof: "admission boundary; free Cargo profile locks",
+        age_rule: Some("domains.fabric.lanes.build_dir_grace_seconds"),
+        trigger: RetentionTrigger::GcAndAdmission,
+    },
+    RetentionClass {
+        class: RetentionKind::QuotaHistory,
+        owner: "cli/quota_history",
+        custody_proof: "whole-line append and rename",
+        age_rule: None,
+        trigger: RetentionTrigger::Append,
+    },
+    RetentionClass {
+        class: RetentionKind::Usage,
+        owner: "telemetry/usage",
+        custody_proof: "whole-line append and rename",
+        age_rule: None,
+        trigger: RetentionTrigger::Append,
+    },
+];
+
+/// One scheduler for retention adapters. Full GC includes regular GC classes;
+/// pressure GC excludes the full-only history pass. Never ages custody fences.
+pub fn retention_schedule(
+    trigger: RetentionTrigger,
+) -> impl Iterator<Item = &'static RetentionClass> {
+    RETENTION_CLASSES.iter().filter(move |class| {
+        class.trigger == trigger
+            || (trigger == RetentionTrigger::FullGc && class.trigger == RetentionTrigger::Gc)
+            || (class.trigger == RetentionTrigger::GcAndAdmission
+                && matches!(
+                    trigger,
+                    RetentionTrigger::Gc | RetentionTrigger::FullGc | RetentionTrigger::Admission
+                ))
+    })
+}
+
 /// Kernel pressure level at which new lanes wait. The memory floor is advisory.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -520,6 +645,29 @@ pub fn parse_cache_size(text: &str) -> Result<u64, &'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retention_never_ages_git_fences_or_observation_evidence() {
+        use super::*;
+        for kind in [
+            RetentionKind::GitWorktrees,
+            RetentionKind::ObservationLedgers,
+        ] {
+            let class = RETENTION_CLASSES
+                .iter()
+                .find(|class| class.class == kind)
+                .unwrap();
+            assert!(class.age_rule.is_none());
+            assert!(!retention_schedule(RetentionTrigger::FullGc).any(|entry| entry.class == kind));
+        }
+        for class in retention_schedule(RetentionTrigger::Gc) {
+            assert!(
+                retention_schedule(RetentionTrigger::FullGc)
+                    .any(|entry| entry.class == class.class)
+            );
+            assert!(!class.owner.is_empty() && !class.custody_proof.is_empty());
+        }
+    }
+
     #[test]
     fn start_spacing_above_the_ceiling_is_invalid() {
         let spacing = |ms| super::LaneBuildSettings {

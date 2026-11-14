@@ -89,9 +89,37 @@ results, captures, exit evidence and digests; resume then fails
 reservations and pending continuations, deletes through identity-checked
 tombstones, never follows links and writes nothing on a dry run
 ([ADR 0031](../adr/0031-retain-provider-history-and-expire-resume-state.md)).
+The `RetentionClass` table in `config/gc.rs` records each class's owner,
+custody proof, effective age keys and trigger. One scheduler routes regular
+and full GC to lane caches, staging, provider state/history, chair logs, target seeds and
+build-directory adapters. Admission uses the same table to trigger build-directory
+reclamation. Each owner retains its deletion and identity checks.
+Git worktree fences and permanent observation ledgers have no age rule;
+retained, unimported Git work is never made deletable by age or disk pressure.
+There is no collection-wide lock. Each adapter tries its item custody, reports
+busy items in GC output and leaves them for a later pass. Admission and Git
+integrity boundaries remain in force. Alert and cadence contention also skip
+the busy item rather than wait.
+
+Quota history and usage rotation share `os::fs::ledger::Ledger`: each JSONL
+record is one O_APPEND write, and rotation renames whole files into the
+configured tail. Neither append nor rotation takes a ledger lock. Terminal
+usage evidence has no age limit. Concurrent terminal retries may append the
+same attempt; readers reduce duplicates by project and attempt and report
+conflicting rows, so retry races never inflate spend. Quota cache updates
+try-lock and skip when busy. Config writes publish a temporary file by atomic
+rename; concurrent config edits use last publication wins. Advisory config
+history rewrites can likewise omit a concurrent entry. First project bindings
+converge on a canonical-path-derived identity and publish one record with
+no-replace atomic publication; a competing publisher validates the winner.
+Host identity uses the same no-replace publication and reads the winning ID.
 - Why: freeing space must not destroy evidence or a session in use.
 - Test: `crates/run/src/retention.rs::gc_spares_nonterminal_attempts_and_contention_and_reservations`;
   `crates/run/src/retention.rs::gc_retries_only_authorised_tombstones_and_never_follows_links`
+- Test: `crates/os/src/fs/ledger.rs::tests`;
+  `crates/telemetry/src/ledger/tests.rs::concurrent_retries_count_an_attempt_once`;
+  `crates/run/src/retention.rs::age_collection_keeps_unimported_git_until_custody_is_proven`;
+  `crates/run/src/target_seed_gc.rs::tests::active_clone_lock_prevents_collection`
 - Owner: `crates/run/src/retention.rs`
 
 ### A format break needs acknowledgement

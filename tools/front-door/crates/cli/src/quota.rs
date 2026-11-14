@@ -3,7 +3,7 @@
 mod notice;
 use crate::metadata::CatalogueArg;
 use clap::{Args, Subcommand, ValueEnum};
-use provenant_core::{CancelToken, Clock, Roots, WaitBudget};
+use provenant_core::{Clock, Roots};
 use provenant_os::{
     clock::SystemClock,
     fs::{Directory, FsError, LockMode, Publication, PublishMode},
@@ -267,6 +267,16 @@ fn read_records(dir: &Directory) -> Result<Vec<AccountRecord>, EdgeError> {
     Ok(records)
 }
 
+/// Quota publications are short. If another writer is publishing, leave this
+/// observation for the next refresh instead of waiting on the quota ledger.
+fn try_quota_lock(dir: &Directory) -> Result<Option<provenant_os::fs::LockGuard>, EdgeError> {
+    match dir.try_lock(OsStr::new("quota.lock"), LockMode::Exclusive) {
+        Ok(lock) => Ok(Some(lock)),
+        Err(FsError::LockTimeout { .. }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Read validated quota state without creating directories or refreshing providers.
 pub(crate) fn read_cache(roots: &Roots) -> Result<Vec<AccountRecord>, EdgeError> {
     read_cache_at(roots.state.as_path())
@@ -338,16 +348,9 @@ pub(crate) fn persist_provider_refusal_once(
 
     let root = private(state_root)?;
     let directory = child(&root, OsStr::new("quota"))?;
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let budget = WaitBudget::cli(clock.mono_now(), 1).map_err(|_| EdgeError::Time)?;
-    let _lock = directory.lock(
-        OsStr::new("quota.lock"),
-        LockMode::Exclusive,
-        budget,
-        &cancel,
-        &clock,
-    )?;
+    let Some(_lock) = try_quota_lock(&directory)? else {
+        return Ok(());
+    };
     let mut records = read_records(&directory)?;
     let current = records
         .iter()
@@ -411,16 +414,9 @@ pub(crate) fn persist_capacity_cooldown(
 
     let root = private(state_root)?;
     let directory = child(&root, OsStr::new("quota"))?;
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let budget = WaitBudget::cli(clock.mono_now(), 1).map_err(|_| EdgeError::Time)?;
-    let _lock = directory.lock(
-        OsStr::new("quota.lock"),
-        LockMode::Exclusive,
-        budget,
-        &cancel,
-        &clock,
-    )?;
+    let Some(_lock) = try_quota_lock(&directory)? else {
+        return Ok(());
+    };
     let mut records = read_records(&directory)?;
     let current = records
         .iter()
@@ -464,16 +460,9 @@ pub(crate) fn persist_provider_success(
         Err(error) => return Err(error.into()),
     };
     check_private(&root)?;
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let budget = WaitBudget::cli(clock.mono_now(), 1).map_err(|_| EdgeError::Time)?;
-    let _lock = directory.lock(
-        OsStr::new("quota.lock"),
-        LockMode::Exclusive,
-        budget,
-        &cancel,
-        &clock,
-    )?;
+    let Some(_lock) = try_quota_lock(&directory)? else {
+        return Ok(());
+    };
     let mut records = read_records(&directory)?;
     let current = records
         .iter()
@@ -1441,16 +1430,16 @@ fn probe_account(
     {
         let root = private(roots.state.as_path())?;
         let dir = child(&root, OsStr::new("quota"))?;
-        let clock = SystemClock::new();
-        let cancel = CancelToken::new();
-        let budget = WaitBudget::cli(clock.mono_now(), 1).map_err(|_| EdgeError::Time)?;
-        let _lock = dir.lock(
-            OsStr::new("quota.lock"),
-            LockMode::Exclusive,
-            budget,
-            &cancel,
-            &clock,
-        )?;
+        let Some(_lock) = try_quota_lock(&dir)? else {
+            return execute(
+                &Quota::Show(Filter {
+                    adapter: Some(account.adapter.clone()),
+                }),
+                roots,
+                registry,
+                effects,
+            );
+        };
         let mut records = read_records(&dir)?;
         let current = records
             .iter()
@@ -1566,19 +1555,18 @@ pub(crate) fn execute(
     };
     let root = private(roots.state.as_path())?;
     let dir = child(&root, OsStr::new("quota"))?;
-    let cancel = CancelToken::new();
-    let lock = || -> Result<_, EdgeError> {
-        let budget = WaitBudget::cli(clock.mono_now(), 1).map_err(|_| EdgeError::Time)?;
-        Ok(dir.lock(
-            OsStr::new("quota.lock"),
-            LockMode::Exclusive,
-            budget,
-            &cancel,
-            &clock,
-        )?)
-    };
+    let lock = || try_quota_lock(&dir);
     let plan = {
-        let _lock = lock()?;
+        let Some(_lock) = lock()? else {
+            return execute(
+                &Quota::Show(Filter {
+                    adapter: filter.adapter.clone(),
+                }),
+                roots,
+                registry,
+                effects,
+            );
+        };
         let mut records = read_records(&dir)?;
         let home = std::env::var_os("HOME").map(PathBuf::from);
         refresh_auth_metadata(
@@ -1630,7 +1618,7 @@ pub(crate) fn execute(
         }
         let token = format!("quota-{}-{at}", std::process::id());
         let current = {
-            let _lock = lock()?;
+            let Some(_lock) = lock()? else { continue };
             let mut records = read_records(&dir)?;
             let current = records
                 .iter()
@@ -1718,7 +1706,7 @@ pub(crate) fn execute(
             .map_err(|_| EdgeError::Time)?
             .as_timestamp()
             .as_second();
-        let _lock = lock()?;
+        let Some(_lock) = lock()? else { continue };
         let mut records = read_records(&dir)?;
         if finished <= schedule::probe_deadline(plan.deadline_unix_seconds, at)?
             && let Some(reserved) = records.iter().find(|r| {
@@ -1776,7 +1764,16 @@ pub(crate) fn execute(
             }
         }
     }
-    let _lock = lock()?;
+    let Some(_lock) = lock()? else {
+        return execute(
+            &Quota::Show(Filter {
+                adapter: filter.adapter.clone(),
+            }),
+            roots,
+            registry,
+            effects,
+        );
+    };
     let mut records = read_records(&dir)?;
     add_configured(&mut records, &configured);
     let now = clock
@@ -2499,6 +2496,22 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_busy_quota_ledger_is_skipped_without_waiting() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("quota");
+        std::fs::create_dir(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+        let directory = Directory::open_anchor(&path)?;
+        let held = directory.try_lock(OsStr::new("quota.lock"), LockMode::Exclusive)?;
+        assert!(try_quota_lock(&directory)?.is_none());
+        drop(held);
+        assert!(try_quota_lock(&directory)?.is_some());
+        Ok(())
+    }
 
     #[test]
     fn recorded_doctor_rows_use_the_same_login_observation()

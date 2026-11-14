@@ -25,6 +25,8 @@ pub fn durable_sync_file(file: &File) -> io::Result<()> {
 
 pub use os::{DURABILITY_ENV, durability_relaxed};
 
+pub mod ledger;
+
 #[derive(Debug, Error)]
 pub enum FsError {
     #[error("expected one normal relative path component: {name:?}")]

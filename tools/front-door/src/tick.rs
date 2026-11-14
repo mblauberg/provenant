@@ -554,17 +554,13 @@ fn tick(
                 true,
             )
             .map_err(|error| error.to_string())?;
-            let cancel = CancelToken::new();
-            let budget = WaitBudget::cli(clock.mono_now(), 1).map_err(|error| error.to_string())?;
-            let _lock = directory
-                .lock(
-                    "cadence.lock".as_ref(),
-                    LockMode::Exclusive,
-                    budget,
-                    &cancel,
-                    &clock,
-                )
-                .map_err(|error| error.to_string())?;
+            let _lock = match directory.try_lock("cadence.lock".as_ref(), LockMode::Exclusive) {
+                Ok(lock) => lock,
+                Err(provenant_os::fs::FsError::LockTimeout { .. }) => {
+                    return Ok("busy; next tick retries");
+                }
+                Err(error) => return Err(error.to_string()),
+            };
             queue_gc(&directory, now, || {
                 let executable = std::env::current_exe().map_err(|error| error.to_string())?;
                 let argv = [

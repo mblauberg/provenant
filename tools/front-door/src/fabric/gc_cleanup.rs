@@ -68,21 +68,10 @@ pub(crate) fn run(
     collect_owned_worktree(&settled, &roots, workers, delivery.as_ref())
 }
 
-// Keep lock-contention regression tests deterministic without a two-minute sleep.
-#[cfg(test)]
-thread_local! {
-    pub(crate) static COLLECTION_WAIT_SECONDS: std::cell::Cell<u64> = const { std::cell::Cell::new(120) };
-}
-
-/// How an owner-bound collection gets the GC collection lock.
-pub(crate) enum Collection<'a> {
-    /// Settlement's detached worker takes the lock, waiting a bounded time.
-    Acquire,
-    /// The `provenant gc` sweep already holds the lock. `upstream` is the
-    /// default-branch tip that sweep fetched; with no delivery receipt, the
-    /// lane lands against it or falls back to the owner's base when upstream is None.
-    Held {
-        _lock: &'a provenant_os::fs::LockGuard,
+/// Upstream proof supplied by an applied GC sweep, or the owner's base at settlement.
+pub(crate) enum Collection {
+    Settlement,
+    Sweep {
         upstream: Option<provenant_core::GitOid>,
     },
 }
@@ -98,15 +87,14 @@ pub(crate) fn collect_owned_worktree(
         roots,
         workers,
         delivery_override,
-        Collection::Acquire,
+        Collection::Settlement,
     )
 }
 
 /// The sweep's half of completion cleanup. Settlement makes one detached
 /// attempt and leaves a receipt that is not final until it succeeds. For each
 /// settled lane whose receipt is still deferred, retryable or mid-prune and
-/// whose worktree still exists, run the same owner-bound collection under the
-/// lock the sweep holds, landing against the fetched default branch or falling
+/// whose worktree still exists, run the same owner-bound collection using item custody, landing against the fetched default branch or falling
 /// back to the owner's base when upstream is None. That receipt is the only
 /// marker: nothing else is recorded. Returns the worktrees this removed.
 pub(crate) fn collect_unsettled(
@@ -114,7 +102,6 @@ pub(crate) fn collect_unsettled(
     home: &Path,
     checkout: &Path,
     project_id: provenant_core::ProjectId,
-    lock: &provenant_os::fs::LockGuard,
     upstream: Option<provenant_core::GitOid>,
     workers: &dyn WorkerObserver,
 ) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
@@ -197,10 +184,7 @@ pub(crate) fn collect_unsettled(
             roots,
             workers,
             None,
-            Collection::Held {
-                _lock: lock,
-                upstream,
-            },
+            Collection::Sweep { upstream },
         );
         if let Err(error) = collected {
             use std::io::Write;
@@ -221,7 +205,7 @@ fn collect_owned_worktree_with(
     roots: &provenant_core::Roots,
     workers: &dyn WorkerObserver,
     delivery_override: Option<&provenant_run::WriterDeliveryReceipt>,
-    collection: Collection<'_>,
+    collection: Collection,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{self, WorktreeGcPolicy, WorktreeOrigin};
     let clock = SystemClock;
@@ -305,7 +289,7 @@ fn collect_owned_worktree_with(
         }
     }
     let facts = store.repo_facts();
-    // Refresh before taking the collection lock and before the prune budget starts.
+    // Refresh before item custody and before the prune budget starts.
     // Explicit worktrees have no owner record, so use their verified HEAD.
     let mut tracking_ref_warning = None;
     let mut lane_owned = false;
@@ -354,33 +338,9 @@ fn collect_owned_worktree_with(
     if !lane_owned {
         tracking_ref_warning = None;
     }
-    #[cfg(test)]
-    let collection_wait = COLLECTION_WAIT_SECONDS.get();
-    #[cfg(not(test))]
-    let collection_wait = 120;
     let sweep_upstream = match collection {
-        Collection::Held { upstream, .. } => upstream,
-        Collection::Acquire => None,
-    };
-    let _collection = match matches!(collection, Collection::Acquire)
-        .then(|| crate::worktrees::collection_lock_for(roots, Some(collection_wait)))
-        .transpose()
-    {
-        Ok(lock) => lock,
-        // A long-running collector still owns the pass. Leave a visible
-        // receipt rather than skipping silently; replay ignores retained ones.
-        Err(crate::worktrees::Error::Fs(provenant_os::fs::FsError::LockTimeout { .. })) => {
-            let receipt = serde_json::json!({"schema_version":1, "state":"retained", "worktree":writer.worktree, "reason":crate::worktrees::COLLECTION_BUSY, "retryable":true});
-            // Never replace a receipt that already settled or began pruning.
-            store.record_worktree_settlement_if(
-                record.attempt_id,
-                &receipt,
-                |current| current.is_none_or(|receipt| receipt["cleanup_deferred"] == true),
-                &call,
-            )?;
-            return Ok(());
-        }
-        Err(error) => return Err(error.into()),
+        Collection::Sweep { upstream } => upstream,
+        Collection::Settlement => None,
     };
     let replayed = replay_worktree_settlement(
         store

@@ -515,9 +515,7 @@ pub(crate) mod peer_tests {
             provenant_run::PARENT_ATTEMPT_ENV,
         ];
         let fixture_home = tempfile::tempdir()?;
-        let isolate_home = name
-            .ends_with("explicit_writer_defers_tracking_ref_refresh_while_collection_is_busy")
-            || name.ends_with("settlement_defers_adopted_writer_cleanup");
+        let isolate_home = name.ends_with("settlement_defers_adopted_writer_cleanup");
         let mut environment: Vec<_> = std::env::vars_os()
             .filter(|(key, _)| {
                 !removed.iter().any(|name| key == name) && !(isolate_home && key == "HOME")

@@ -154,6 +154,10 @@ pub fn collect(
 /// admission walks, because reclaiming is the point. A try-lock keeps concurrent events from
 /// walking twice: the loser skips and returns `None`.
 pub fn reclaim(host: &Path, home: &Path) -> Option<Report> {
+    // Admission and explicit GC share the class's trigger policy. The owner
+    // still applies its cheap pressure/recency signals before any walk.
+    provenant_config::retention_schedule(provenant_config::RetentionTrigger::Admission)
+        .find(|class| class.class == provenant_config::RetentionKind::BuildDirectories)?;
     let settings = provenant_config::LaneBuildSettings::read(host).ok()?;
     let floor = provenant_config::GcSettings::read(host)
         .and_then(|gc| gc.free_floor_bytes(host))

@@ -161,15 +161,12 @@ fn attributed_events_are_reported_under_their_project_id() -> Result {
 }
 
 #[test]
-fn rotation_preserves_appends_and_reports_while_the_rotation_lock_is_busy() -> Result {
+fn rotation_preserves_the_tail_and_reports_without_a_lock() -> Result {
     let (_temp, base) = tempdir()?;
     let roots = roots(&base)?;
     provenant_os::fixture::private_state_dir(roots.state.as_path())?;
     record_cli(&roots, CLOCK, "root", 0, 4, None);
     let log = roots.state.as_path().join(LOG);
-    assert!(!roots.state.as_path().join(LOCK).exists());
-    let directory = Directory::open_anchor(roots.state.as_path())?;
-    let lock = directory.try_lock(OsStr::new(LOCK), LockMode::Exclusive)?;
     let before = std::fs::read(&log)?;
     record_cli(&roots, CLOCK, "root", 0, 1, None);
     assert!(std::fs::read(&log)?.len() > before.len());
@@ -185,19 +182,13 @@ fn rotation_preserves_appends_and_reports_while_the_rotation_lock_is_busy() -> R
         .open(&log)?
         .set_len(CAP)?;
     record_cli(&roots, CLOCK, "root", 0, 1, None);
-    assert!(std::fs::metadata(&log)?.len() > CAP);
-    // The report reads the newest CAP bytes. The first event, which lies before
-    // that window, is not counted; the second one starts it and is counted. The
-    // newest event follows zero-filled space and is counted too.
-    assert_eq!(count(report(&roots, inventory(), None, None)?), Some(2));
-    drop(lock);
-    assert!(!roots.state.as_path().join(BACKUP).exists());
-    // Rotation is permitted again; the old log is retained as the backup.
-    record_cli(&roots, CLOCK, "root", 0, 1, None);
-    assert!(std::fs::metadata(roots.state.as_path().join(BACKUP))?.len() >= CAP);
+    assert_eq!(
+        std::fs::metadata(roots.state.as_path().join(BACKUP))?.len(),
+        CAP
+    );
     assert!(std::fs::metadata(&log)?.len() < LINE_CAP as u64);
-    // Only the newest backup event is in the window, plus the one in the new log.
-    assert_eq!(count(report(&roots, inventory(), None, None)?), Some(2));
+    assert_eq!(count(report(&roots, inventory(), None, None)?), Some(3));
+    assert!(!roots.state.as_path().join("usage.lock").exists());
     // A torn line is ignored, including an event appended to that line.
     std::fs::write(&log, b"{partial")?;
     record_cli(&roots, CLOCK, "root", 0, 1, None);

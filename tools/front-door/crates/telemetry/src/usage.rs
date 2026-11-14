@@ -1,13 +1,13 @@
 //! Local demand counters: a bounded, rotated JSON-lines log in the state root.
 //! The command edge decides what to count; this module owns the log.
 use provenant_core::{Clock, ProjectId, Roots};
-use provenant_os::fs::{Directory, FsError, LockMode};
+use provenant_os::fs::{Directory, FsError, ledger::Ledger};
 use provenant_records::Trace;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     ffi::OsStr,
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, Read, Seek, SeekFrom},
 };
 use thiserror::Error;
 
@@ -15,7 +15,6 @@ pub const EVENT_KINDS: &[&str] = &["cli.verb"];
 const CAP: u64 = 5_000_000;
 const LOG: &str = "usage.jsonl";
 const BACKUP: &str = "usage.jsonl.1";
-const LOCK: &str = "usage.lock";
 const LINE_CAP: usize = 512;
 
 #[derive(Debug, Error)]
@@ -69,30 +68,6 @@ fn project_trace(project_id: Option<ProjectId>) -> Option<Trace> {
     })
 }
 
-fn rotate(directory: &Directory, incoming: u64) -> Option<()> {
-    let size = || {
-        directory
-            .open_read(OsStr::new(LOG))
-            .ok()?
-            .metadata()
-            .ok()
-            .map(|m| m.size)
-    };
-    if size()?.saturating_add(incoming) <= CAP {
-        return Some(());
-    }
-    // Only rotation locks. Contending appenders keep their single write.
-    let _lock = directory
-        .try_lock(OsStr::new(LOCK), LockMode::Exclusive)
-        .ok()?;
-    if size()?.saturating_add(incoming) > CAP {
-        directory
-            .replace(OsStr::new(LOG), directory, OsStr::new(BACKUP))
-            .ok()?;
-    }
-    Some(())
-}
-
 fn append(roots: &Roots, event: Event, rotate_log: bool) -> Option<()> {
     let mut line = serde_json::to_vec(&event).ok()?;
     line.push(b'\n');
@@ -101,12 +76,11 @@ fn append(roots: &Roots, event: Event, rotate_log: bool) -> Option<()> {
     }
     // Counting never creates the state root: reads and help create no state.
     let directory = Directory::open_anchor(roots.state.as_path()).ok()?;
+    let ledger = Ledger::new(&directory, OsStr::new(LOG));
     if rotate_log {
-        let _ = rotate(&directory, line.len() as u64);
+        let _ = ledger.rotate(CAP, line.len() as u64, &[OsStr::new(BACKUP)]);
     }
-    let mut file = directory.open_append(OsStr::new(LOG)).ok()?;
-    // O_APPEND and one small write; readers skip torn/malformed lines.
-    (file.write(&line).ok()? == line.len()).then_some(())
+    ledger.append(&line).ok()
 }
 
 pub fn record_cli(
