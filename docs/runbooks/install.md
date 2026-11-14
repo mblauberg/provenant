@@ -67,8 +67,18 @@ To cut over from 1.x to 2.0.0, on **each host, peers included**:
 5. Run `provenant check install` using the new binary.
 
 The installer validates all account previews and release smoke checks before
-resetting, boots out the old tick and peer agents, then restarts them after
-successful installation. If installation fails after shutdown, the output names
+resetting. It stops and re-queries each eligible old peer/tick service, including
+retired labels, before any deletion or archive move. A loaded job is Running,
+including an idle scheduled job; only an explicit missing-service response is
+Absent. Query timeouts, launchctl errors and parse failures are Indeterminate.
+The initial shutdown check precedes install writes. Running or Indeterminate
+refuses reset and prints one line naming the service and the exact command to
+stop it by hand. Run that command and retry the same installer. Absence is
+checked again immediately before removal. A failed final check leaves reset
+sources unmoved; preparatory install writes may already have completed. On
+Linux, the installer stops and confirms inactivity of both the tick timer and
+any tick service it already dispatched. Agents restart after successful
+installation. If installation fails after shutdown, the output names
 stopped agents and agents whose shutdown failed as "may still be running",
 prints the quoted state directory and asks you to rerun your original install
 command, preserving `--source`, `--state-dir`, `--bin-dir` and other options.

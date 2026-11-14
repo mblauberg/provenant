@@ -80,6 +80,12 @@ pub enum AgentError {
     Path(PathBuf),
     #[error("launchctl {0} failed: {1}")]
     Launchctl(&'static str, String),
+    #[error("service {service} is {state:?}; stop it by hand: {command}")]
+    Quiescence {
+        service: String,
+        state: ServiceState,
+        command: String,
+    },
     #[error("systemctl {0} failed: {1}")]
     Systemctl(&'static str, String),
     #[error(transparent)]
@@ -99,6 +105,7 @@ impl AgentError {
             Self::Path(_) => "path",
             Self::Launchctl(..) => "launchctl",
             Self::Systemctl(..) => "systemctl",
+            Self::Quiescence { .. } => "quiescence",
             Self::Exec(_) => "exec",
             Self::Io(_) => "io",
         }
@@ -865,15 +872,82 @@ fn stop_with(
     home: &Path,
     mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
 ) -> Result<bool, AgentError> {
-    let service = format!("gui/{}/{LABEL}", provenant_os::fs::effective_uid());
-    let present = run(&["print".as_ref(), service.as_ref()], home)?.0;
-    if present {
-        let (ok, error) = run(&["bootout".as_ref(), service.as_ref()], home)?;
-        if !ok {
-            return Err(AgentError::Launchctl("bootout", error));
+    stop_service_with(home, LABEL, &mut run)
+}
+
+/// Loaded jobs count as running even between scheduled invocations: launchd can
+/// start them again. Only an explicit missing-service response proves absence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServiceState {
+    Running,
+    Absent,
+    Indeterminate,
+}
+
+pub fn service_state_with(
+    home: &Path,
+    service: &str,
+    mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
+) -> ServiceState {
+    match run(&["print".as_ref(), service.as_ref()], home) {
+        Ok((true, output))
+            if output.lines().any(|line| {
+                line.trim().strip_prefix("state = ").is_some_and(|state| {
+                    matches!(
+                        state,
+                        "running" | "waiting" | "not running" | "spawn scheduled" | "exited"
+                    )
+                })
+            }) =>
+        {
+            ServiceState::Running
         }
+        Ok((false, error))
+            if error.starts_with("exit 113:")
+                && error.lines().any(|line| {
+                    let label = service.rsplit('/').next().unwrap_or(service);
+                    line.trim()
+                        .starts_with(&format!("Could not find service \"{label}\" in domain "))
+                        || line.trim().starts_with(&format!(
+                            "exit 113: Could not find service \"{label}\" in domain "
+                        ))
+                }) =>
+        {
+            ServiceState::Absent
+        }
+        _ => ServiceState::Indeterminate,
     }
-    Ok(present)
+}
+
+/// Shared launchctl stop boundary for current and retired agents. A successful
+/// bootout is not proof of quiescence; query again before allowing reset/unlink.
+pub fn stop_service_with(
+    home: &Path,
+    label: &str,
+    mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
+) -> Result<bool, AgentError> {
+    let service = format!("gui/{}/{label}", provenant_os::fs::effective_uid());
+    let state = service_state_with(home, &service, &mut run);
+    if state == ServiceState::Absent {
+        return Ok(false);
+    }
+    let state = if state == ServiceState::Running {
+        // Even a failed bootout may have unloaded the job. The query is the
+        // authority, including when the process edge returns an error.
+        let _ = run(&["bootout".as_ref(), service.as_ref()], home);
+        service_state_with(home, &service, &mut run)
+    } else {
+        state
+    };
+    if state == ServiceState::Absent {
+        Ok(true)
+    } else {
+        Err(AgentError::Quiescence {
+            command: format!("launchctl bootout {service}"),
+            service,
+            state,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -1446,43 +1520,87 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_boots_out_a_loaded_agent_and_reports_failure() {
+    fn uninstall_boots_out_a_loaded_agent_and_requires_confirmed_absence() {
         use super::*;
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
-        assert!(!plist(home).exists());
-        let mut calls = Vec::new();
-        stop_with(home, |args, cwd| {
+        let mut unloaded = false;
+        assert!(stop_with(home, |args, cwd| {
             assert_eq!(cwd, home);
-            calls.push(
-                args.iter()
-                    .map(|arg| arg.to_os_string())
-                    .collect::<Vec<_>>(),
-            );
-            Ok((true, String::new()))
-        })
-        .unwrap();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0][0], "print");
-        assert_eq!(calls[1][0], "bootout");
-        assert!(
-            calls[1][1]
-                .to_string_lossy()
-                .ends_with("/dev.provenant.peer")
-        );
-        let mut calls = 0;
-        stop_with(home, |_, _| {
-            calls += 1;
-            Ok((false, String::new()))
-        })
-        .unwrap();
-        assert_eq!(calls, 1);
+            if args[0] == "bootout" {
+                unloaded = true;
+                return Ok((true, String::new()));
+            }
+            Ok(if unloaded {
+                (false, "exit 113: Could not find service \"dev.provenant.peer\" in domain for user gui: 501".into())
+            } else {
+                (true, "state = running".into())
+            })
+        }).unwrap());
+        assert!(unloaded);
         assert!(matches!(
-            stop_with(home, |args, _| {
-                Ok((args[0] == OsStr::new("print"), "denied".into()))
-            }),
-            Err(AgentError::Launchctl("bootout", _))
+            stop_with(home, |_, _| Ok((true, "state = running".into()))),
+            Err(AgentError::Quiescence {
+                state: ServiceState::Running,
+                ..
+            })
         ));
+    }
+
+    #[test]
+    fn service_query_distinguishes_absence_from_failed_or_malformed_queries() {
+        use super::*;
+        let service = "gui/501/dev.provenant.peer";
+        for (ok, output, expected) in [
+            (true, "state = running", ServiceState::Running),
+            (true, "state = not running", ServiceState::Running),
+            (true, "state = waiting", ServiceState::Running),
+            (true, "state = malformed", ServiceState::Indeterminate),
+            (true, "", ServiceState::Indeterminate),
+            (true, "state = ", ServiceState::Indeterminate),
+            (false, "timed out after 10s", ServiceState::Indeterminate),
+            (
+                false,
+                "exit 5: permission denied",
+                ServiceState::Indeterminate,
+            ),
+            (false, "exit 113: Bad request.", ServiceState::Indeterminate),
+            (
+                false,
+                "exit 113: Could not find service \"other\" in domain for user gui: 501",
+                ServiceState::Indeterminate,
+            ),
+            (
+                false,
+                "exit 113: Bad request.\nCould not find service \"dev.provenant.peer\" in domain for user gui: 501",
+                ServiceState::Absent,
+            ),
+        ] {
+            assert_eq!(
+                service_state_with(Path::new("/"), service, |_, _| Ok((ok, output.into()))),
+                expected
+            );
+        }
+        assert_eq!(
+            service_state_with(Path::new("/"), service, |_, _| Err(io::Error::other(
+                "spawn failed"
+            )
+            .into())),
+            ServiceState::Indeterminate
+        );
+        // A timed-out process can carry an otherwise valid missing-service diagnostic.
+        let runner = LaunchctlRunner {
+            termination: Termination::Exit(113),
+            timed_out: true,
+            stdout: "",
+            stderr: "Could not find service \"dev.provenant.peer\" in domain for user gui: 501",
+        };
+        assert_eq!(
+            service_state_with(Path::new("/"), service, |args, home| launchctl_with(
+                args, home, &runner
+            )),
+            ServiceState::Indeterminate
+        );
     }
 
     #[test]

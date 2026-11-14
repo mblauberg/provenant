@@ -364,6 +364,65 @@ pub fn stop(home: &Path) -> Result<bool, AgentError> {
     }
 }
 
+/// Reset needs the executing oneshot service stopped as well as its timer.
+/// Disabling a systemd timer alone does not stop an already dispatched tick.
+pub fn stop_for_reset(home: &Path) -> Result<bool, AgentError> {
+    if cfg!(target_os = "linux") {
+        stop_timer_for_reset_with(|args| systemctl(args, home))
+    } else {
+        stop(home)
+    }
+}
+
+fn stop_timer_for_reset_with(
+    mut run: impl FnMut(&[&OsStr]) -> Result<(bool, String), AgentError>,
+) -> Result<bool, AgentError> {
+    use peer_agent::ServiceState;
+    let units = [TIMER, "provenant-tick.service"];
+    // The follow-up queries decide quiescence even if a stop reports failure.
+    let _ = run(&["disable".as_ref(), "--now".as_ref(), TIMER.as_ref()]);
+    let _ = run(&["stop".as_ref(), units[1].as_ref()]);
+    for unit in units {
+        let state = match run(&[
+            "show".as_ref(),
+            unit.as_ref(),
+            "--property=LoadState".as_ref(),
+            "--property=ActiveState".as_ref(),
+        ]) {
+            Ok((true, output)) => {
+                let load = output
+                    .lines()
+                    .find_map(|line| line.strip_prefix("LoadState="));
+                let active = output
+                    .lines()
+                    .find_map(|line| line.strip_prefix("ActiveState="));
+                match (load, active) {
+                    (Some("loaded" | "not-found"), Some("inactive" | "failed")) => {
+                        ServiceState::Absent
+                    }
+                    (
+                        Some("loaded"),
+                        Some("active" | "activating" | "deactivating" | "reloading"),
+                    ) => ServiceState::Running,
+                    _ => ServiceState::Indeterminate,
+                }
+            }
+            _ => ServiceState::Indeterminate,
+        };
+        if state != ServiceState::Absent {
+            return Err(AgentError::Quiescence {
+                service: unit.into(),
+                state,
+                command: format!(
+                    "systemctl --user disable --now {TIMER} && systemctl --user stop {}",
+                    units[1]
+                ),
+            });
+        }
+    }
+    Ok(true)
+}
+
 /// Retire the former scheduler even when its plist has already disappeared.
 pub fn retire_gc(home: &Path) -> Result<(), AgentError> {
     stop_with(home, "dev.provenant.gc", launchctl).map(|_| ())
@@ -374,15 +433,7 @@ fn stop_with(
     label: &str,
     mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
 ) -> Result<bool, AgentError> {
-    let service = format!("gui/{}/{label}", provenant_os::fs::effective_uid());
-    let present = run(&["print".as_ref(), service.as_ref()], home)?.0;
-    if present {
-        let (ok, error) = run(&["bootout".as_ref(), service.as_ref()], home)?;
-        if !ok {
-            return Err(AgentError::Launchctl("bootout", error));
-        }
-    }
-    Ok(present)
+    peer_agent::stop_service_with(home, label, &mut run)
 }
 
 #[cfg(test)]
@@ -454,22 +505,69 @@ mod tests {
     }
 
     #[test]
-    fn retiring_gc_unloads_the_old_label_and_propagates_bootout_failure() {
-        let mut calls = Vec::new();
-        stop_with(Path::new("/home"), "dev.provenant.gc", |args, _| {
-            calls.push((args[0].to_owned(), args[1].to_owned()));
-            Ok((true, String::new()))
-        })
-        .unwrap();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].0, "print");
-        assert_eq!(calls[1].0, "bootout");
-        assert!(calls[1].1.to_string_lossy().ends_with("/dev.provenant.gc"));
-        let error = stop_with(Path::new("/home"), "dev.provenant.gc", |args, _| {
-            Ok((args[0] == "print", "busy".into()))
-        })
-        .unwrap_err();
-        assert!(matches!(error, AgentError::Launchctl("bootout", _)));
+    fn retiring_gc_requires_absence_after_unloading_the_old_label() {
+        let mut unloaded = false;
+        assert!(stop_with(Path::new("/home"), "dev.provenant.gc", |args, _| {
+            if args[0] == "bootout" {
+                assert!(args[1].to_string_lossy().ends_with("/dev.provenant.gc"));
+                unloaded = true;
+                return Ok((true, String::new()));
+            }
+            Ok(if unloaded {
+                (false, "exit 113: Could not find service \"dev.provenant.gc\" in domain for user gui: 501".into())
+            } else {
+                (true, "state = running".into())
+            })
+        }).unwrap());
+        assert!(matches!(
+            stop_with(Path::new("/home"), "dev.provenant.gc", |_, _| Ok((
+                true,
+                "state = running".into()
+            ))),
+            Err(AgentError::Quiescence {
+                state: peer_agent::ServiceState::Running,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn timer_reset_requires_both_timer_and_dispatched_service_to_be_quiescent() {
+        use peer_agent::ServiceState;
+        for (output, expected) in [
+            ((true, "LoadState=loaded\nActiveState=inactive"), None),
+            (
+                (true, "LoadState=loaded\nActiveState=active"),
+                Some(ServiceState::Running),
+            ),
+            ((true, ""), Some(ServiceState::Indeterminate)),
+            (
+                (false, "timed out after 10s"),
+                Some(ServiceState::Indeterminate),
+            ),
+        ] {
+            let mut service_stopped = false;
+            let result = stop_timer_for_reset_with(|args| {
+                if args[0] == "stop" && args[1] == "provenant-tick.service" {
+                    service_stopped = true;
+                }
+                if args[0] == "show" {
+                    assert!(service_stopped);
+                    return if args[1] == "provenant-tick.service" {
+                        Ok((output.0, output.1.into()))
+                    } else {
+                        Ok((true, "LoadState=loaded\nActiveState=inactive".into()))
+                    };
+                }
+                Ok((true, String::new()))
+            });
+            match expected {
+                None => assert!(result.unwrap()),
+                Some(expected) => assert!(
+                    matches!(result, Err(AgentError::Quiescence {state, ..}) if state == expected)
+                ),
+            }
+        }
     }
 
     #[test]

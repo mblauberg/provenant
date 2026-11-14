@@ -634,6 +634,27 @@ fn remove_aliases_in(
     }
     fs(tmp.sync())
 }
+/// Process-edge seam shared by install preflight and the final removal gate.
+/// No file retirement belongs here: a later service may still refuse shutdown.
+pub(crate) fn quiesce_launch_agents(
+    home: &Path,
+    labels: &[&'static str],
+    mut run: impl FnMut(
+        &[&OsStr],
+        &Path,
+    ) -> Result<(bool, String), provenant_fabric_runtime::peer_agent::AgentError>,
+    mut record: impl FnMut(&'static str, io::Result<bool>) -> io::Result<()>,
+) -> io::Result<()> {
+    for &label in labels {
+        record(
+            label,
+            provenant_fabric_runtime::peer_agent::stop_service_with(home, label, &mut run)
+                .map_err(io::Error::other),
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn remove(plan: &Plan, quiesce: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
     quiesce()?;
     // Agents may have created another dropped store since preflight. Replan

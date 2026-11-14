@@ -3,6 +3,11 @@ mod support;
 #[path = "../src/tick_agent.rs"]
 #[allow(dead_code)]
 mod tick_agent;
+// Exercise the same reset/launchctl gate used by the install reporter, with
+// only the process edge substituted; the state and receipt owners remain real.
+#[path = "../src/state_reset.rs"]
+#[allow(dead_code)]
+mod state_reset;
 use provenant_config::{Release, ReleaseSmoke};
 use provenant_core::CancelToken;
 use provenant_records::{CommandResult, Outcome, SourceInput, VersionInfo, source_digest};
@@ -3401,6 +3406,181 @@ fn reset_selects_only_identified_stores_and_their_payloads() -> Result {
     assert!(!rig.state.join("admission.sqlite3").exists());
     assert!(!rig.state.join("children/old/run.sqlite3").exists());
     assert!(!rig.state.join("children/old/attempts").exists());
+    Ok(())
+}
+
+// Medium: real install receipts and filesystem archives, scripted launchctl only.
+#[test]
+fn reset_requires_confirmed_service_absence_before_any_state_moves() -> Result {
+    use provenant_config::{InstallError, InstallReporter};
+    use provenant_core::{Clock, WaitBudget};
+    use provenant_fabric_runtime::peer_agent::{AgentError, ServiceState};
+    use std::ffi::OsStr;
+
+    struct ResetReporter<F> {
+        plan: state_reset::Plan,
+        home: PathBuf,
+        run: F,
+    }
+    impl<F> InstallReporter for ResetReporter<F>
+    where
+        F: FnMut(&[&OsStr], &Path) -> std::result::Result<(bool, String), AgentError>,
+    {
+        fn preview(&mut self, _: &[provenant_config::Action]) -> io::Result<()> {
+            Ok(())
+        }
+        fn before_receipt(&mut self) -> io::Result<()> {
+            state_reset::remove(&self.plan, || {
+                state_reset::quiesce_launch_agents(
+                    &self.home,
+                    &[
+                        "dev.provenant.peer",
+                        "dev.provenant.disk-guard",
+                        "dev.provenant.gc",
+                        "dev.provenant.tick",
+                    ],
+                    &mut self.run,
+                    |_, result| result.map(|_| ()),
+                )
+            })
+        }
+    }
+    // Exercise every label, including a late failure after earlier agents stop.
+    for label in [
+        "dev.provenant.peer",
+        "dev.provenant.disk-guard",
+        "dev.provenant.gc",
+        "dev.provenant.tick",
+    ] {
+        for failure in [
+            Some(ServiceState::Indeterminate),
+            Some(ServiceState::Running),
+            None,
+        ] {
+            let rig = TestRig::new()?;
+            let stage = staged(&rig)?;
+            let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+            inputs.environment_state_dir = Some(rig.state.clone());
+            let targets = provenant_config::Targets::new(
+                inputs.resolve(&provenant_os::fs::SystemPathResolver)?,
+                &rig.home,
+                &[provenant_records::Harness::Claude],
+            );
+            let release = Release::read(&stage, env!("PROVENANT_TARGET_TRIPLE"))?;
+            let manifest = release.manifest();
+            let smoke = FixtureSmoke(VersionInfo {
+                extra: Default::default(),
+                source_digest: manifest.source_digest,
+                asset_digest: manifest.asset_digest,
+                target: manifest.target.clone(),
+                toolchain: manifest.toolchain.clone(),
+                record_schema_version: 1,
+                config_schema_version: 1,
+            });
+            let clock = provenant_os::clock::SystemClock::new();
+            let cancel = CancelToken::new();
+            let context = provenant_config::InstallContext {
+                clock: &clock,
+                cancel: &cancel,
+                budget: WaitBudget::cli(clock.mono_now(), 30)?,
+            };
+            struct Initial;
+            impl InstallReporter for Initial {
+                fn preview(&mut self, _: &[provenant_config::Action]) -> io::Result<()> {
+                    Ok(())
+                }
+            }
+            provenant_config::plan_and_install(
+                &release,
+                &targets,
+                &context,
+                &mut Initial,
+                &smoke,
+                false,
+            )?;
+            set_receipt_format(&rig, 1)?;
+            old_sqlite_header(&rig.state.join("run.sqlite3"), 10)?;
+            let history = rig
+                .state
+                .join("attempts/old/provider-history/transcript.json");
+            fs::create_dir_all(history.parent().ok_or("history parent")?)?;
+            fs::write(&history, b"keep transcript")?;
+            fs::create_dir_all(rig.state.join("usage-ledger"))?;
+            fs::write(
+                rig.state.join("usage-ledger/segment.jsonl"),
+                b"keep telemetry",
+            )?;
+            let before = snapshot(&rig.state)?;
+            let mut stopped = std::collections::BTreeSet::new();
+            let run = |args: &[&OsStr], _: &Path| {
+                let service = args[1].to_string_lossy();
+                let current = service.rsplit('/').next().unwrap();
+                if args[0] == "bootout" {
+                    stopped.insert(current.to_owned());
+                    return Ok((true, String::new()));
+                }
+                if current == label && failure == Some(ServiceState::Indeterminate) {
+                    return Ok((false, "timed out after 10s".into()));
+                }
+                if stopped.contains(current)
+                    && !(current == label && failure == Some(ServiceState::Running))
+                {
+                    Ok((
+                        false,
+                        format!(
+                            "exit 113: Bad request.\nCould not find service \"{current}\" in domain for user gui: 501"
+                        ),
+                    ))
+                } else {
+                    Ok((true, "state = running\n pid = 41".into()))
+                }
+            };
+            let mut reporter = ResetReporter {
+                plan: state_reset::plan(&rig.state, Some(1))?.ok_or("reset plan")?,
+                home: rig.home.clone(),
+                run,
+            };
+            let result = provenant_config::plan_and_install(
+                &release,
+                &targets,
+                &context,
+                &mut reporter,
+                &smoke,
+                false,
+            );
+            if let Some(expected) = failure {
+                let mut error = result.expect_err("unconfirmed shutdown must refuse installation");
+                while let InstallError::Partial { source, .. } = error {
+                    error = *source;
+                }
+                let InstallError::Preview(error) = error else {
+                    panic!("expected typed reset refusal: {error:?}");
+                };
+                assert!(
+                    matches!(error.get_ref().and_then(|e| e.downcast_ref::<AgentError>()),
+                    Some(AgentError::Quiescence { state, .. }) if *state == expected)
+                );
+                assert_eq!(snapshot(&rig.state)?, before);
+            } else {
+                result?;
+                assert!(!rig.state.join("run.sqlite3").exists());
+                assert!(!history.exists());
+                assert_eq!(
+                    fs::read(rig.state.join(
+                        "provider-history/format-1/attempts/old/provider-history/transcript.json"
+                    ))?,
+                    b"keep transcript"
+                );
+                assert_eq!(
+                    fs::read(rig.state.join("usage-history/format-1/segment.jsonl"))?,
+                    b"keep telemetry"
+                );
+                let receipt: serde_json::Value =
+                    serde_json::from_slice(&fs::read(rig.state.join("install/receipt.json"))?)?;
+                assert_eq!(receipt["state_format_version"], 2);
+            }
+        }
+    }
     Ok(())
 }
 

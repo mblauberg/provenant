@@ -320,6 +320,37 @@ impl PreviewReporter {
         Some(report)
     }
 
+    fn quiesce_reset_agents(&mut self, state: &Path, home: &Path) -> io::Result<()> {
+        if provenant_fabric_runtime::peer_agent::eligible(state, home) {
+            crate::state_reset::quiesce_launch_agents(
+                home,
+                &[
+                    "dev.provenant.peer",
+                    "dev.provenant.disk-guard",
+                    "dev.provenant.gc",
+                    "dev.provenant.tick",
+                ],
+                launchctl,
+                |label, result| {
+                    // Retired labels must stay absent. Only current agents
+                    // need restart/recovery guidance after a successful stop.
+                    self.record_stop(
+                        label,
+                        result.map(|stopped| {
+                            stopped && matches!(label, "dev.provenant.peer" | "dev.provenant.tick")
+                        }),
+                    )
+                },
+            )?;
+        } else if super::tick_agent::eligible(state, home) {
+            self.record_stop(
+                "dev.provenant.tick",
+                super::tick_agent::stop_for_reset(home).map_err(io::Error::other),
+            )?;
+        }
+        Ok(())
+    }
+
     fn before_remove_with(
         &mut self,
         action: &Action,
@@ -375,34 +406,8 @@ impl InstallReporter for PreviewReporter {
             .home
             .clone()
             .ok_or_else(|| io::Error::other("missing agent home"))?;
-        crate::state_reset::remove(&plan, || {
-            if provenant_fabric_runtime::peer_agent::eligible(&state, &home) {
-                self.record_stop(
-                    "dev.provenant.peer",
-                    provenant_fabric_runtime::peer_agent::stop(&home).map_err(io::Error::other),
-                )?;
-                self.record_stop(
-                    "dev.provenant.disk-guard",
-                    retire_disk_guard(&home)
-                        .map(|_| false)
-                        .map_err(io::Error::other),
-                )?;
-                self.record_stop(
-                    "dev.provenant.gc",
-                    super::tick_agent::retire_gc(&home)
-                        .map(|_| false)
-                        .map_err(io::Error::other),
-                )?;
-            }
-            if super::tick_agent::eligible(&state, &home) {
-                self.record_stop(
-                    "dev.provenant.tick",
-                    super::tick_agent::stop(&home).map_err(io::Error::other),
-                )?;
-            }
-            Ok(())
-        })
-        .map_err(|error| io::Error::other(format!("STATE_RESET_FAILED: {error}")))?;
+        crate::state_reset::remove(&plan, || self.quiesce_reset_agents(&state, &home))
+            .map_err(|error| io::Error::other(format!("STATE_RESET_FAILED: {error}")))?;
         Ok(())
     }
     fn before_remove(&mut self, action: &Action) -> io::Result<()> {
@@ -1162,6 +1167,14 @@ fn apply_install(
         } else {
             reset_gate(globals, args.reset_state)?
         };
+        reporter.reset_planned = reset.is_some();
+        if reset.is_some() {
+            // Refuse uncertain shutdown before any real install batch or agent
+            // retirement can change files. Recheck again at the removal gate.
+            reporter
+                .quiesce_reset_agents(&state, &home)
+                .map_err(InstallError::Preview)?;
+        }
         if agents && !args.dry_run && provenant_fabric_runtime::peer_agent::eligible(&state, &home)
         {
             retire_disk_guard(&home)
@@ -1169,7 +1182,6 @@ fn apply_install(
             super::tick_agent::retire_gc(&home)
                 .map_err(|error| InstallError::AgentRetirement(error.to_string()))?;
         }
-        reporter.reset_planned = reset.is_some();
         // Intermediate receipts must not claim the state transition finished:
         // a later batch can fail while only old artifacts (no DB header) remain.
         reporter.receipt_state_format = reset.as_ref().map(|_| 1);
