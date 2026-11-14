@@ -2081,6 +2081,12 @@ fn remove_with_owner(
                     Policy::Named { discard },
                     cancel,
                 );
+                // An explicit discard settles under its own authority and archive
+                // proof, even when the branch has also landed.
+                let disposition = match disposition {
+                    Disposition::Merged if discard => Disposition::Discard,
+                    other => other,
+                };
                 // A dirty or live worktree fails here, before any branch changes.
                 let plan = if retirement.is_none() {
                     None
