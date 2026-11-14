@@ -823,38 +823,6 @@ pub(super) fn review_family_excluded(family: Option<&str>, families: &[String]) 
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-pub(super) fn resolve_dispatch_excluding(
-    request: &provenant_routing::RouteRequest,
-    roots: &Roots,
-    registry: &[provenant_providers::Registration],
-    account: Option<&str>,
-    seed: (&str, u64),
-    availability: &[AvailabilityRecord],
-    access: &[AccessContext<'_>],
-    host: &str,
-    initial_exclusions: &[ModelId],
-    rules: &[provenant_routing::ExclusionRule],
-    choice_context: Option<(&str, &str)>,
-) -> Result<provenant_records::ResolvedRoute, EdgeError> {
-    resolve_dispatch_excluding_family(
-        request,
-        roots,
-        registry,
-        account,
-        seed,
-        availability,
-        access,
-        host,
-        initial_exclusions,
-        rules,
-        choice_context,
-        None,
-        None,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_dispatch_excluding_family(
     request: &provenant_routing::RouteRequest,
     roots: &Roots,

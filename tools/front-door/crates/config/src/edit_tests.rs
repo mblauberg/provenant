@@ -125,7 +125,7 @@ fn concurrent_applies_leave_a_complete_valid_config() {
             .filter_map(|r| r.as_ref().err())
             .all(|e| matches!(e, ConfigError::StaleRevision { .. }))
     );
-    let final_text = text(temp.path()).unwrap().unwrap();
+    let final_text = text(temp.path()).unwrap();
     assert!(final_text.contains("schema_version = 1"));
     assert!(
         [50, 60, 70, 80]

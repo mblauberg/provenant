@@ -205,7 +205,7 @@ mod tests {
     use super::*;
     use crate::quota::private;
     use provenant_quota::{AccountScope, MarkerKind, QuotaDetails, QuotaStatus, QuotaWindow};
-    use std::os::unix::fs::PermissionsExt;
+    use std::{io::Write as _, os::unix::fs::PermissionsExt};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
