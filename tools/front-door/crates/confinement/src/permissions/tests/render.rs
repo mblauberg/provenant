@@ -20,7 +20,7 @@ fn writer_programs_keep_filesystem_and_credential_boundaries() -> Result<(), Per
     plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
         git_grants_digest: [0; 32],
         publishing: false,
-        common_git_dir: Some("/fixture/repo/.git".into()),
+        common_git_dir: "/fixture/repo/.git".into(),
         cargo_cache: PathGrant {
             path: "/fixture/cache".into(),
             scope: PathScope::Subtree,
@@ -1316,7 +1316,7 @@ fn host_writer_roots_inside_protected_checkouts_render_as_exceptions() -> Result
     plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
         git_grants_digest: [0; 32],
         publishing: false,
-        common_git_dir: Some("/fixture/primary/.git".into()),
+        common_git_dir: "/fixture/primary/.git".into(),
         cargo_cache: subtree("/fixture/cache"),
     }));
     plan.write_roots = vec![locks, target];

@@ -322,6 +322,15 @@ fn mutation_record_reads_sync_the_checkpoint_while_views_do_not() -> TestResult 
     Ok(())
 }
 
+/// Explicit custody for requests in the standard execution-context fixture.
+pub(super) fn writer_extra() -> provenant_records::ExtraFields {
+    [(
+        "custody_project".into(),
+        serde_json::json!(ProjectId::from_bytes([1; 16])),
+    )]
+    .into()
+}
+
 pub(super) fn context(
     base: &Path,
 ) -> std::result::Result<ExecutionContext, Box<dyn std::error::Error>> {
@@ -850,7 +859,7 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
     let store = RunStore::open(&context, &call)?;
     let mut input = input();
     input.request.task.writer = Some(WriterRequest {
-        extra: Default::default(),
+        extra: crate::tests::writer_extra(),
         project: temp.path().to_path_buf(),
         worktree: temp.path().join("lane"),
     });
@@ -960,7 +969,7 @@ fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let mut input = input();
     input.request.task.writer = Some(WriterRequest {
-        extra: Default::default(),
+        extra: crate::tests::writer_extra(),
         project: temp.path().to_path_buf(),
         worktree: temp.path().join("lane"),
     });
@@ -1131,54 +1140,6 @@ fn read_only_store_reports_whether_it_holds_a_run() -> TestResult {
     assert!(!reader.has_runs(&call)?);
     writer.create(&input(), &call)?;
     assert!(reader.has_runs(&call)?);
-    Ok(())
-}
-
-// Sealed task_class members remain part of historical request digests.
-#[test]
-fn historical_task_class_preserves_request_verification_and_lane_listing() -> TestResult {
-    for task_class in [serde_json::Value::Null, serde_json::json!("mechanical")] {
-        let temp = tempfile::tempdir()?;
-        let context = context(temp.path())?;
-        let (clock, cancel) = (clock(), CancelToken::new());
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&context, &call)?;
-        let mut input = input();
-        let mut sealed = serde_json::to_value(&input.request)?;
-        sealed["task"]["profile"] = serde_json::json!({
-            "name": "", "knobs": {}, "overrides": [], "task_class": task_class
-        });
-        let digest = CanonicalV1::record_digest("run-request", 1, &sealed)?;
-        input.request = serde_json::from_value(sealed.clone())?;
-        store.create(&input, &call)?;
-        assert_eq!(
-            store
-                .attempt_operation(input.attempt_id, &call)?
-                .request_digest,
-            digest
-        );
-        assert_eq!(
-            serde_json::to_value(store.request(input.attempt_id, &call)?)?,
-            sealed
-        );
-        let page = store.lanes(
-            &LaneQuery {
-                targets: Vec::new(),
-                all: true,
-                limit: 10,
-                after: 0,
-                newest_first: false,
-                owner: None,
-                unseen_after: None,
-            },
-            &call,
-        )?;
-        assert_eq!(page.lanes.len(), 1);
-        assert_eq!(
-            serde_json::to_value(&page.lanes[0].profile)?,
-            sealed["task"]["profile"]
-        );
-    }
     Ok(())
 }
 
@@ -2469,7 +2430,7 @@ fn publication_postcommit_effect_failure_still_cleans_temporary() -> TestResult 
     let store = RunStore::open(&context, &call)?;
     let mut input = input();
     input.request.task.writer = Some(WriterRequest {
-        extra: Default::default(),
+        extra: crate::tests::writer_extra(),
         project: temp.path().into(),
         worktree: temp.path().into(),
     });

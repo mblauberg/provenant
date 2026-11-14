@@ -1,7 +1,7 @@
 use super::*;
-use provenant_os::fs::{Directory, PublishMode};
+#[cfg(test)]
+use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
-use std::{collections::BTreeMap, ffi::OsStr};
 
 // No Debug/Serialize: an identity can carry an access token only in memory.
 struct Identity {
@@ -26,18 +26,14 @@ fn no_usable_identity(fixed: &Identity, now: i64) -> ProbeFailure {
 fn is_fingerprint(key: &str) -> bool {
     key.len() == 16 && key.bytes().all(|b| b.is_ascii_hexdigit())
 }
-fn expected_fingerprint<'a>(
-    expected: &str,
-    live: Option<&'a str>,
-) -> Result<&'a str, ProbeFailure> {
-    let live = live.ok_or(ProbeFailure::Network)?;
-    // Older hand-keyed registrations do not encode an identity. Adopt the
-    // observed fingerprint for this probe and bracket every credential read.
-    let fingerprint_key = is_fingerprint(expected);
-    if fingerprint_key && live != expected {
+fn expected_fingerprint(expected: &str, live: &str) -> Result<(), ProbeFailure> {
+    if !is_fingerprint(expected) {
+        return Err(ProbeFailure::Malformed);
+    }
+    if live != expected {
         return Err(ProbeFailure::AccountMismatch);
     }
-    Ok(live)
+    Ok(())
 }
 fn claude_executable() -> Option<std::path::PathBuf> {
     let path = std::env::var_os("PATH")?;
@@ -186,56 +182,6 @@ fn refresh(
 }
 
 impl LiveQuota {
-    fn pin_first_fingerprint(
-        &self,
-        key: &str,
-        live: &str,
-        confirmed: bool,
-    ) -> Result<(), ProbeFailure> {
-        if is_fingerprint(key) {
-            return expected_fingerprint(key, Some(live)).map(|_| ());
-        }
-        // Quota ticks hold the quota lock. Check an existing binding before
-        // opening the credential; save a first binding after both status probes agree.
-        let dir = Directory::open_anchor(&self.state).map_err(|_| ProbeFailure::Network)?;
-        let mut pins: BTreeMap<String, String> =
-            match dir.open_read(OsStr::new("quota-claude-identities.json")) {
-                Ok(file) => {
-                    let mut bytes = Vec::new();
-                    file.take(LIMIT as u64 + 1)
-                        .read_to_end(&mut bytes)
-                        .map_err(|_| ProbeFailure::Network)?;
-                    if bytes.len() > LIMIT {
-                        return Err(ProbeFailure::Malformed);
-                    }
-                    serde_json::from_slice(&bytes).map_err(|_| ProbeFailure::Malformed)?
-                }
-                Err(error) if error.is_not_found() => BTreeMap::new(),
-                Err(_) => return Err(ProbeFailure::Network),
-            };
-        if let Some(expected) = pins.get(key) {
-            if !is_fingerprint(expected) {
-                return Err(ProbeFailure::Malformed);
-            }
-            return expected_fingerprint(expected, Some(live)).map(|_| ());
-        }
-        if !confirmed {
-            return Ok(());
-        }
-        pins.insert(key.to_owned(), live.to_owned());
-        let bytes = serde_json::to_vec(&pins).map_err(|_| ProbeFailure::Malformed)?;
-        dir.atomic_write_with_permissions(
-            OsStr::new("quota-claude-identities.json"),
-            ".quota-identities",
-            &bytes,
-            0o600,
-            PublishMode::Replace,
-        )
-        .map_err(|_| ProbeFailure::Network)?
-        .require_durable()
-        .map_err(|_| ProbeFailure::Network)?;
-        Ok(())
-    }
     fn claude_selector<'a>(&self, dir: &'a Path) -> Option<(&'static str, &'a Path)> {
         (dir != self.home.join(".claude")).then_some(("CLAUDE_CONFIG_DIR", dir))
     }
@@ -256,7 +202,7 @@ impl LiveQuota {
         // Verify the registered identity before opening its credential. A
         // directory can have been signed in as another account since the last
         // observation; its secret must not be attributed to this registration.
-        self.pin_first_fingerprint(expected, &fingerprint, false)?;
+        expected_fingerprint(expected, &fingerprint)?;
         let credential = optional_probe(self.claude_token(dir, deadline))?;
         let missing = credential.is_none();
         let (token, expires) = credential.map_or((None, None), |(t, e)| (Some(t), Some(e)));
@@ -272,7 +218,6 @@ impl LiveQuota {
         if confirmed != fingerprint {
             return Err(ProbeFailure::Network);
         }
-        self.pin_first_fingerprint(expected, &fingerprint, true)?;
         Ok(Identity {
             token,
             expires,
@@ -818,53 +763,19 @@ mod tests {
     }
 
     #[test]
-    fn fixed_directory_rejects_changed_account_fingerprint() {
+    fn current_registration_requires_its_matching_account_fingerprint() {
         use super::{ProbeFailure, expected_fingerprint};
-        assert!(matches!(
-            expected_fingerprint("0123456789abcdef", Some("fedcba9876543210")),
+        assert_eq!(
+            expected_fingerprint("0123456789abcdef", "0123456789abcdef"),
+            Ok(())
+        );
+        assert_eq!(
+            expected_fingerprint("0123456789abcdef", "fedcba9876543210"),
             Err(ProbeFailure::AccountMismatch)
-        ));
-        assert_eq!(
-            expected_fingerprint("hand-keyed", Some("0123456789abcdef")).unwrap(),
-            "0123456789abcdef"
         );
         assert_eq!(
-            expected_fingerprint("pinned", None),
-            Err(ProbeFailure::Network)
-        );
-    }
-    #[test]
-    fn hand_keyed_registration_pins_its_first_observed_login() {
-        use super::*;
-        let temp = tempfile::tempdir().unwrap();
-        let quota = LiveQuota {
-            home: temp.path().to_owned(),
-            state: temp.path().to_owned(),
-            roots: None,
-            accounts: RefCell::new(Vec::new()),
-            refresh_expired: false,
-            login_expiry: RefCell::new(None),
-            readiness_failure: RefCell::new(None),
-            last_reconcile_error: RefCell::new(None),
-            clock: SystemClock::new(),
-            executor: None,
-        };
-        assert_eq!(
-            quota.pin_first_fingerprint("manual", "0123456789abcdef", false),
-            Ok(())
-        );
-        assert!(!temp.path().join("quota-claude-identities.json").exists());
-        assert_eq!(
-            quota.pin_first_fingerprint("manual", "0123456789abcdef", true),
-            Ok(())
-        );
-        assert_eq!(
-            quota.pin_first_fingerprint("manual", "0123456789abcdef", true),
-            Ok(())
-        );
-        assert_eq!(
-            quota.pin_first_fingerprint("manual", "fedcba9876543210", true),
-            Err(ProbeFailure::AccountMismatch)
+            expected_fingerprint("hand-keyed", "0123456789abcdef"),
+            Err(ProbeFailure::Malformed)
         );
     }
     #[test]

@@ -153,12 +153,12 @@ mod tests {
         let attempt = AttemptId::from_bytes([7; 16]);
         let key = WorkKey::new(project, "graph", "node", 1).unwrap();
         let node = |host| json!({"lane_id":{"host":host,"project_id":project,"key":key,"attempt_id":attempt}});
-        let mut legacy_node = node(remote);
-        legacy_node["lane_id"]
+        let mut missing_key_node = node(remote);
+        missing_key_node["lane_id"]
             .as_object_mut()
             .unwrap()
             .remove("key");
-        assert!(identity(&legacy_node).is_none());
+        assert!(identity(&missing_key_node).is_none());
         let tree = |host, truncated| {
             json!({"nodes":[node(host)],"edges":[],"truncated":truncated,
             "coverage":{"host":host,"runs":"complete","nested_runs":"complete"},"totals":{"attempts":1}})

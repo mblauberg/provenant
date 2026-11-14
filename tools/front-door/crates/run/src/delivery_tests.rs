@@ -1,7 +1,7 @@
 //! Host Git conformance with a linked worktree and a local bare remote.
 use super::delivery::*;
 use super::*;
-use provenant_core::{CancelToken, GitOid};
+use provenant_core::{CancelToken, GitOid, ProjectId};
 use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
 use provenant_os::fs::Directory;
 use std::{ffi::OsString, path::Path, time::Duration};
@@ -12,6 +12,60 @@ pub(super) struct PrepareFixture {
     environment: Vec<(OsString, OsString)>,
     pub(super) writer: WriterRequest,
     request: WriterDeliveryRequest,
+}
+
+pub(super) fn registered_writer_project_id(
+    project: &Path,
+    home: &Path,
+    checkout: &Path,
+    state: &Path,
+) -> std::result::Result<ProjectId, Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(home)?;
+    std::fs::create_dir_all(checkout)?;
+    let mut inputs = provenant_core::RootInputs::new(home.to_path_buf(), checkout.to_path_buf());
+    inputs.state_dir = Some(state.to_path_buf());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    std::fs::create_dir_all(roots.state.as_path())?;
+    std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::set_permissions(
+        roots.state.as_path(),
+        std::fs::Permissions::from_mode(0o700),
+    )?;
+    struct Free;
+    impl provenant_confinement::worktrees::WorkerObserver for Free {
+        fn observe_roots(
+            &self,
+            roots: &[std::path::PathBuf],
+        ) -> std::collections::BTreeMap<
+            std::path::PathBuf,
+            provenant_confinement::worktrees::Occupancy,
+        > {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
+                .collect()
+        }
+    }
+    let clock = provenant_os::clock::SystemClock;
+    let cancel = CancelToken::new();
+    let workers = Free;
+    Ok(
+        provenant_confinement::worktrees::with_context_using_workers(
+            &roots,
+            home,
+            project,
+            &clock,
+            &cancel,
+            &workers,
+            |context| Ok(context.binding.project_id()),
+        )?,
+    )
+}
+
+pub(super) fn writer_custody_extra(project_id: ProjectId) -> provenant_records::ExtraFields {
+    [("custody_project".into(), serde_json::json!(project_id))].into()
 }
 
 // Medium: real filesystem locking with the remote process edge supplied as a callback.
@@ -125,10 +179,17 @@ impl OriginFixture {
         if let Some(git) = git {
             environment.push(("PROVENANT_GIT".into(), git.as_os_str().to_owned()));
         }
+        let custody_project = registered_writer_project_id(
+            &self.project,
+            &self.home,
+            &self.root.join("checkout"),
+            &self.root.join("state"),
+        )
+        .map_err(|error| crate::RunError::Io(std::io::Error::other(error.to_string())))?;
         let writer = WriterRequest {
+            extra: writer_custody_extra(custody_project),
             project: self.project.clone(),
             worktree: self.project.clone(),
-            extra: Default::default(),
         };
         HostDeliveryContext::new(environment)
             .refresh_origin_with(&writer, &self.project.join(".git"))?;
@@ -144,7 +205,7 @@ impl PrepareFixture {
         let home = root.join("home");
         std::fs::create_dir(&project)?;
         std::fs::create_dir(&home)?;
-        let fixture = Self {
+        let mut fixture = Self {
             _temp: temp,
             root: root.clone(),
             environment: vec![
@@ -180,6 +241,13 @@ impl PrepareFixture {
             "lane",
             fixture.writer.worktree.to_str().ok_or("lane")?,
         ])?;
+        let custody_project = registered_writer_project_id(
+            &fixture.writer.project,
+            &root.join("home"),
+            &root.join("checkout"),
+            &root.join("state"),
+        )?;
+        fixture.writer.extra = writer_custody_extra(custody_project);
         Ok(fixture)
     }
     pub(super) fn git(&self, args: &[&str]) -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -964,6 +1032,10 @@ pub(super) fn registered_landed_writer_fixture(
             Ok(context.binding.project_id())
         },
     )?;
+    assert_eq!(
+        fixture.writer.extra.get("custody_project"),
+        Some(&serde_json::json!(execution.project_id))
+    );
     Ok(execution)
 }
 

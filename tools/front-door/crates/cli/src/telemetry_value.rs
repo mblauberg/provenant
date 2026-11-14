@@ -97,11 +97,8 @@ fn coverage(totals: &report::Totals) -> String {
 /// Whether `row` lies under the target: a graph, a node, or the one attempt
 /// whose id `attempt` names.
 fn selects(target: &Target, attempt: Option<&str>, row: &Row) -> bool {
-    row.graph.as_deref() == Some(target.name.as_str())
-        && target
-            .node
-            .as_deref()
-            .is_none_or(|node| row.node.as_deref() == Some(node))
+    row.graph == target.name
+        && target.node.as_deref().is_none_or(|node| row.node == node)
         && attempt.is_none_or(|attempt| row.attempt == attempt)
 }
 
@@ -111,7 +108,7 @@ pub fn cost(command: TelemetryCost, edge: &Edge<'_>) -> Reply {
 
 fn cost_inner(command: &TelemetryCost, edge: &Edge<'_>) -> Output {
     // Only `#N` needs the checkpoint: a graph or node matches the ledger's
-    // own labels, so its cost stays readable after the graph is collected.
+    // own identities, so its cost stays readable after the graph is collected.
     let attempt = match &command.target {
         Some(target) if target.attempt.is_some() => {
             let resolved = crate::run::resolve_target(edge, target, crate::target::Want::Work)

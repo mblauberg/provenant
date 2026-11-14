@@ -997,7 +997,7 @@ fn package_root_never_grants_a_hidden_home_tool_tree() {
 }
 
 #[test]
-fn registration_org_refuses_a_different_org_and_upgrades_legacy_records() {
+fn registration_org_fingerprint_pins_on_first_available_probe() {
     let mut entry = accounts::Registration {
         adapter: "claude".into(),
         label: "pro".into(),

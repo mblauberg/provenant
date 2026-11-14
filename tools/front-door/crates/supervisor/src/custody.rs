@@ -1187,8 +1187,7 @@ pub struct ProcessExit {
     pub termination: Option<Termination>,
     pub never_spawned: bool,
     pub stop_reason: Option<StopReason>,
-    /// Whether cancellation was delivered to the provider before its exit was observed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Whether cancellation was delivered before exit; null means ordering was not observed.
     pub cancel_delivered_before_exit: Option<bool>,
     pub delivered_signals: Vec<i64>,
     pub reaped: Vec<ProcessIdentity>,
@@ -1324,14 +1323,14 @@ impl From<&CapturedStream> for CaptureTotals {
         }
     }
 }
-// Read-only storage DTO permits added fields within v1.
+// Current storage DTO permits future additive fields.
 #[derive(Deserialize)]
 struct StoredExit {
     scope: Scope,
     termination: Option<Termination>,
     never_spawned: bool,
     stop_reason: Option<StopReason>,
-    #[serde(default)]
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
     cancel_delivered_before_exit: Option<bool>,
     delivered_signals: Vec<i64>,
     reaped: Vec<ProcessIdentity>,
@@ -1344,9 +1343,7 @@ struct StoredExit {
     omitted_warnings: u64,
     terminal_observed: bool,
     unresolved_cleanup: bool,
-    #[serde(default)]
     unresolved_pids: Vec<i64>,
-    #[serde(default)]
     settlement_evidence: SettlementEvidence,
     stdout: CaptureTotals,
     stderr: CaptureTotals,
@@ -1358,7 +1355,7 @@ pub struct ExitObservation {
     pub termination: Option<Termination>,
     pub never_spawned: bool,
     pub stop_reason: Option<StopReason>,
-    /// None means an older exit record did not capture delivery ordering.
+    /// None means this current observation could not establish delivery ordering.
     pub cancel_delivered_before_exit: Option<bool>,
     pub delivered_signals: Vec<i64>,
     pub reaped: Vec<ProcessIdentity>,
@@ -1391,7 +1388,6 @@ struct StoredObservation {
     guardian: Option<ProcessIdentity>,
     #[serde(default)]
     provider: Option<ProcessIdentity>,
-    #[serde(default)]
     publication_pending: bool,
 }
 
@@ -1657,7 +1653,7 @@ pub fn writer_admission_guard(directory: &Directory) -> Result<LockGuard> {
 }
 
 /// A read-only observer holds this only until its writer-lock probe is dropped.
-/// Missing legacy gates remain uncertainty until registry mutation upgrades them.
+/// A missing gate leaves observation unresolved; readers never create it.
 pub fn writer_observation_guard(directory: &Directory) -> Result<LockGuard> {
     let clock = provenant_os::clock::SystemClock::new();
     directory
@@ -2534,4 +2530,58 @@ pub fn fixture_key(seed: u8) -> provenant_records::WorkKey {
         1,
     )
     .expect("fixture key is valid")
+}
+
+#[cfg(test)]
+mod exit_shape_tests {
+    use super::{ProcessExit, Scope, StoredExit};
+    use provenant_core::AttemptId;
+
+    #[test]
+    fn current_exit_requires_cancellation_ordering_member_but_allows_unobserved() {
+        let mut exit = ProcessExit::never_spawned(
+            Scope {
+                attempt: AttemptId::from_bytes([7; 16]),
+                generation: 1,
+            },
+            None,
+            vec![],
+        );
+        exit.cancel_delivered_before_exit = None;
+        let mut value = serde_json::to_value(exit).unwrap();
+        assert!(value["cancel_delivered_before_exit"].is_null());
+        let parsed: StoredExit = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(parsed.cancel_delivered_before_exit, None);
+
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("cancel_delivered_before_exit");
+        assert!(serde_json::from_value::<StoredExit>(value).is_err());
+    }
+
+    #[test]
+    fn current_pending_checkpoint_requires_publication_state_member() {
+        let current_pending = serde_json::json!({
+            "schema_version": 1,
+            "scope": Scope {
+                attempt: AttemptId::from_bytes([8; 16]),
+                generation: 2,
+            },
+            "publication_pending": true,
+            "priority": null,
+        });
+        let parsed: super::StoredObservation =
+            serde_json::from_value(current_pending.clone()).unwrap();
+        assert!(parsed.publication_pending);
+        assert!(parsed.guardian.is_none());
+        assert!(parsed.provider.is_none());
+
+        let mut missing = current_pending;
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("publication_pending");
+        assert!(serde_json::from_value::<super::StoredObservation>(missing).is_err());
+    }
 }

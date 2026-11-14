@@ -30,9 +30,6 @@ fn prepare_agents(targets: &mut Targets) -> Result<(), EdgeError> {
     let state = targets.roots.state.as_path();
     if provenant_fabric_runtime::peer_agent::eligible(state, &targets.home) {
         let program = targets.bin_dir.join("provenant");
-        let previous = provenant_config::installed_binary(targets)
-            .map_err(EdgeError::Install)?
-            .unwrap_or_else(|| program.clone());
         targets.peer_agent = Some(
             provenant_fabric_runtime::peer_agent::install_plist(
                 &program,
@@ -41,9 +38,6 @@ fn prepare_agents(targets: &mut Targets) -> Result<(), EdgeError> {
             )
             .map_err(EdgeError::Peer)?,
         );
-        targets.peer_agent_previous =
-            provenant_fabric_runtime::peer_agent::previous_plist(&previous, state, &targets.home)
-                .map_err(EdgeError::Peer)?;
     }
     if super::tick_agent::eligible(state, &targets.home) {
         let program = targets.bin_dir.join("provenant");

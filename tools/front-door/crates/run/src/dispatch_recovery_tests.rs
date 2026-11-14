@@ -17,7 +17,7 @@ fn reconcile_rebooted_handoff_after_device_numbers_change() -> TestResult {
     std::fs::create_dir(&worktree)?;
     std::fs::write(worktree.join("unfinished.rs"), "keep my work")?;
     run.request.task.writer = Some(WriterRequest {
-        extra: Default::default(),
+        extra: crate::tests::writer_extra(),
         project: temp.path().to_path_buf(),
         worktree: worktree.clone(),
     });
@@ -432,7 +432,7 @@ fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult
     let store = RunStore::open(&context, &call)?;
     let mut run = input();
     run.request.task.writer = Some(WriterRequest {
-        extra: Default::default(),
+        extra: crate::tests::writer_extra(),
         project: temp.path().join("checkout"),
         worktree: temp.path().join("removed-lane"),
     });

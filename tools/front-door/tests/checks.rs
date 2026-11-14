@@ -312,64 +312,31 @@ fn cursors_recheck_all_inputs_and_later_pages_keep_findings_exit() -> Result {
     rig.assert_legacy_unchanged()
 }
 #[test]
-fn release_scans_added_then_deleted_blobs_and_commit_identity_bytes() -> Result {
-    use std::fs;
+fn release_checks_the_running_binary_as_an_artifact() -> Result {
     let rig = check_rig()?;
     legal(&rig)?;
-    let base = commit(&rig, "base")?;
-    let clean = rig.command(&["check", "release", "--json"])?;
-    assert_eq!(
-        code(&clean),
-        0,
-        "{}",
-        String::from_utf8_lossy(&clean.stdout.bytes)
-    );
-    fs::write(
-        rig.project.join("temporary.txt"),
-        format!("{}{}\n", "ghp_", "a".repeat(30)),
-    )?;
-    commit(&rig, "add temporary content")?;
-    fs::remove_file(rig.project.join("temporary.txt"))?;
-    let head = commit(&rig, "delete temporary content")?;
-    assert_eq!(code(&rig.command(&["check", "release", "--json"])?), 0);
-    let range = rig.command(&[
+    let base = commit(&rig, "public baseline")?;
+    let token = format!("{}{}", "ghp_", "a".repeat(30));
+    std::fs::write(rig.project.join("tracked-data"), token)?;
+    let head = commit(&rig, "data retained in current and historical tree")?;
+    let output = rig.command(&[
         "check", "release", "--base", &base, "--head", &head, "--json",
     ])?;
-    assert_eq!(code(&range), 1);
+    let page = json(&output)?;
+    let findings = page["data"]["findings"]
+        .as_array()
+        .ok_or("release findings")?;
     assert!(
-        json(&range)?["data"]["findings"]
-            .as_array()
-            .ok_or("release findings")?
-            .iter()
-            .any(|f| f["rule"] == "release.github-token")
+        findings.iter().all(|finding| {
+            finding["path"]["path"] == "@artifact/provenant"
+                && finding["rule"] == "release.home-path"
+        }),
+        "Git source and history bytes are outside the executable scan"
     );
-    assert_eq!(
-        code(&rig.command(&[
-            "check", "release", "--base", &head, "--head", &base, "--json"
-        ])?),
-        2
-    );
-    assert_eq!(
-        code(&rig.command(&[
-            "check", "release", "--base", &head, "--head", &head, "--json"
-        ])?),
-        2
-    );
-    let message = format!("{}{}", "/Users/", "fixture/private-path/");
-    commit(&rig, &message)?;
-    let raw = rig.command(&["check", "release", "--json"])?;
-    assert_eq!(code(&raw), 1);
-    assert!(
-        json(&raw)?["data"]["findings"]
-            .as_array()
-            .ok_or("commit findings")?
-            .iter()
-            .any(|f| f["path"]["path"]
-                .as_str()
-                .is_some_and(|p| p.starts_with("@commit/")))
-    );
+    assert_eq!(code(&output), if findings.is_empty() { 0 } else { 1 });
     rig.assert_legacy_unchanged()
 }
+
 #[test]
 fn release_flags_personal_email_in_commit_author_and_committer() -> Result {
     let rig = check_rig()?;
@@ -422,45 +389,6 @@ fn release_flags_personal_email_in_commit_author_and_committer() -> Result {
     rig.assert_legacy_unchanged()
 }
 #[test]
-fn release_ranges_read_history_behind_a_shallow_boundary() -> Result {
-    use std::fs;
-    let rig = check_rig()?;
-    legal(&rig)?;
-    let base = commit(&rig, "public baseline")?;
-    fs::write(
-        rig.project.join("temporary.txt"),
-        format!("{}\\n", "/Users/fixture/private-path/"),
-    )?;
-    commit(&rig, "private history /Users/fixture/private-path/")?;
-    fs::write(rig.project.join("middle.txt"), "middle")?;
-    let middle = commit(&rig, "middle")?;
-    fs::remove_file(rig.project.join("temporary.txt"))?;
-    fs::write(rig.project.join("tip.txt"), "tip")?;
-    let tip = commit(&rig, "tip")?;
-    fs::write(rig.project.join(".git/shallow"), format!("{middle}\\n"))?;
-
-    let output = rig.command(&[
-        "check", "release", "--base", &base, "--head", &tip, "--json",
-    ])?;
-    assert_eq!(
-        code(&output),
-        1,
-        "{}",
-        String::from_utf8_lossy(&output.stdout.bytes)
-    );
-    let result = json(&output)?;
-    let findings = result["data"]["findings"]
-        .as_array()
-        .ok_or("release findings")?;
-    assert!(findings.iter().any(|finding| {
-        finding["rule"] == "release.home-path"
-            && finding["path"]["path"]
-                .as_str()
-                .is_some_and(|path| path.starts_with("@commit/"))
-    }));
-    rig.assert_legacy_unchanged()
-}
-#[test]
 fn release_requires_tracked_public_files() -> Result {
     let rig = check_rig()?;
     legal(&rig)?;
@@ -481,12 +409,66 @@ fn release_requires_tracked_public_files() -> Result {
     rig.assert_legacy_unchanged()
 }
 #[test]
-fn release_checks_legal_private_symlink_binary_and_bounded_evidence() -> Result {
+fn release_ranges_check_commit_identity_across_a_shallow_boundary() -> Result {
+    let rig = check_rig()?;
+    legal(&rig)?;
+    let base = commit(&rig, "public baseline")?;
+    git(
+        &rig,
+        &[
+            "-c",
+            "user.email=person@gmail.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "identity before shallow boundary",
+        ],
+    )?;
+    let identity_commit = git(&rig, &["rev-parse", "HEAD"])?;
+    let middle = commit(&rig, "middle")?;
+    let tip = commit(&rig, "tip")?;
+    std::fs::write(rig.project.join(".git/shallow"), format!("{middle}\n"))?;
+
+    let output = rig.command(&[
+        "check", "release", "--base", &base, "--head", &tip, "--json",
+    ])?;
+    let page = json(&output)?;
+    let findings = page["data"]["findings"]
+        .as_array()
+        .ok_or("release findings")?;
+    assert!(findings.iter().any(|finding| {
+        finding["rule"] == "release.personal-email"
+            && finding["path"]["path"] == format!("@commit/{identity_commit}")
+    }));
+    assert!(findings.iter().all(|finding| {
+        finding["path"]["path"] == format!("@commit/{identity_commit}")
+            || finding["path"]["path"] == "@artifact/provenant"
+    }));
+    assert_eq!(code(&output), 1);
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn release_checks_legal_private_symlink_and_bounded_evidence() -> Result {
     use std::fs;
     let rig = check_rig()?;
     legal(&rig)?;
     commit(&rig, "base")?;
-    assert_eq!(code(&rig.command(&["check", "release", "--json"])?), 0);
+    let artifact = rig.command(&["check", "release", "--json"])?;
+    let artifact_result = json(&artifact)?;
+    let artifact_findings = artifact_result["data"]["findings"]
+        .as_array()
+        .ok_or("release findings")?;
+    assert!(
+        artifact_findings
+            .iter()
+            .all(|finding| { finding["path"]["path"] == "@artifact/provenant" })
+    );
+    assert_eq!(
+        code(&artifact),
+        if artifact_findings.is_empty() { 0 } else { 1 }
+    );
     fs::remove_file(rig.project.join("LICENSE"))?;
     let missing = rig.command(&["check", "release", "--json"])?;
     assert_eq!(code(&missing), 1);
@@ -519,8 +501,6 @@ fn release_checks_legal_private_symlink_binary_and_bounded_evidence() -> Result 
         code(&rig.command(&["check", "release", "--cursor", cursor, "--json"])?),
         2
     );
-    fs::write(rig.project.join("LICENSE"), [0xff])?;
-    assert_eq!(code(&rig.command(&["check", "release", "--json"])?), 1);
     fs::write(rig.project.join("LICENSE"), vec![b'a'; 5 * 1024 * 1024 + 1])?;
     assert_eq!(code(&rig.command(&["check", "release", "--json"])?), 3);
     rig.assert_legacy_unchanged()
@@ -550,12 +530,16 @@ fn release_reads_packed_objects_native_alternates_and_linked_worktrees() -> Resu
         "release",
         "--json",
     ])?;
-    assert_eq!(
-        code(&output),
-        0,
-        "{}",
-        String::from_utf8_lossy(&output.stdout.bytes)
+    let page = json(&output)?;
+    let findings = page["data"]["findings"]
+        .as_array()
+        .ok_or("release findings")?;
+    assert!(
+        findings
+            .iter()
+            .all(|finding| { finding["path"]["path"] == "@artifact/provenant" })
     );
+    assert_eq!(code(&output), if findings.is_empty() { 0 } else { 1 });
     let linked = rig.root.join("linked");
     git(
         &rig,
@@ -567,15 +551,25 @@ fn release_reads_packed_objects_native_alternates_and_linked_worktrees() -> Resu
             linked.to_str().ok_or("linked path")?,
         ],
     )?;
+    let linked_output = rig.command(&[
+        "--project",
+        linked.to_str().ok_or("linked path")?,
+        "check",
+        "release",
+        "--json",
+    ])?;
+    let linked_page = json(&linked_output)?;
+    let linked_findings = linked_page["data"]["findings"]
+        .as_array()
+        .ok_or("release findings")?;
+    assert!(
+        linked_findings
+            .iter()
+            .all(|finding| { finding["path"]["path"] == "@artifact/provenant" })
+    );
     assert_eq!(
-        code(&rig.command(&[
-            "--project",
-            linked.to_str().ok_or("linked path")?,
-            "check",
-            "release",
-            "--json"
-        ])?),
-        0
+        code(&linked_output),
+        if linked_findings.is_empty() { 0 } else { 1 }
     );
     rig.assert_legacy_unchanged()
 }
@@ -584,11 +578,8 @@ fn release_ignores_grafts_and_rejects_missing_ancestry_evidence() -> Result {
     let rig = check_rig()?;
     legal(&rig)?;
     let base = commit(&rig, "base")?;
-    std::fs::write(
-        rig.project.join("transient"),
-        format!("{}{}", "sk-", "x".repeat(30)),
-    )?;
-    commit(&rig, "transient secret")?;
+    std::fs::write(rig.project.join("transient"), "ordinary history data")?;
+    commit(&rig, "transient content")?;
     std::fs::remove_file(rig.project.join("transient"))?;
     let head = commit(&rig, "head")?;
     std::fs::write(
@@ -598,7 +589,15 @@ fn release_ignores_grafts_and_rejects_missing_ancestry_evidence() -> Result {
     let found = rig.command(&[
         "check", "release", "--base", &base, "--head", &head, "--json",
     ])?;
-    assert_eq!(code(&found), 1);
+    let page = json(&found)?;
+    let findings = page["data"]["findings"]
+        .as_array()
+        .ok_or("release findings")?;
+    assert!(
+        findings
+            .iter()
+            .all(|finding| { finding["path"]["path"] == "@artifact/provenant" })
+    );
     // A missing required HEAD object must never produce a clean scan.
     std::fs::remove_file(
         rig.project

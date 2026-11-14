@@ -996,7 +996,7 @@ fn unknown_work_context_fields_are_refused_at_the_request_edge() -> TestResult {
 }
 
 #[test]
-fn legacy_writer_replay_preserves_sealed_request_and_authority() -> TestResult {
+fn writer_replay_preserves_current_request_and_authority() -> TestResult {
     let temp = tempfile::tempdir()?;
     let root = std::fs::canonicalize(temp.path())?;
     for args in [
@@ -1045,7 +1045,7 @@ fn legacy_writer_replay_preserves_sealed_request_and_authority() -> TestResult {
         input.task.source_head = Some(head.clone());
         input.task.base = Some(head.clone());
         input.task.context = Some(WorkContext {
-            graph_id: Some("legacy-graph".into()),
+            graph_id: Some("current-graph".into()),
             node_id: Some(node.into()),
             attempt: Some(attempt),
             ..Default::default()
@@ -1053,14 +1053,10 @@ fn legacy_writer_replay_preserves_sealed_request_and_authority() -> TestResult {
         input
     };
     let run = Service::new(&store).dispatch(make("seed", 1), &root, &call)?;
-    let mut legacy = store.request(run.attempt_id, &call)?;
-    let task = &mut legacy.task;
+    let mut current = store.request(run.attempt_id, &call)?;
+    let task = &mut current.task;
     task.context.as_mut().ok_or("context")?.node_id = Some("writer".into());
     let writer = task.writer.as_mut().ok_or("writer")?;
-    assert_eq!(
-        writer.extra.remove("custody_project"),
-        Some(serde_json::json!(context.project_id))
-    );
     task.authority_digest = provenant_records::CanonicalV1::record_digest(
         "run-authority",
         2,
@@ -1068,8 +1064,8 @@ fn legacy_writer_replay_preserves_sealed_request_and_authority() -> TestResult {
     )?;
     let prepared = PreparedRun {
         attempt_id: provenant_core::AttemptId::from_bytes([92; 16]),
-        operation_id: OperationId::parse("legacy-writer")?,
-        request: legacy.clone(),
+        operation_id: OperationId::parse("current-writer")?,
+        request: current.clone(),
         prompt: "writer task".into(),
         created_at: clock.wall_now()?,
     };
@@ -1087,10 +1083,10 @@ fn legacy_writer_replay_preserves_sealed_request_and_authority() -> TestResult {
             .attempt_operation(saved.attempt_id, &call)?
             .request_digest
     );
-    assert_eq!(store.request(saved.attempt_id, &call)?, legacy);
+    assert_eq!(store.request(saved.attempt_id, &call)?, current);
     store.refuse_queued(saved.attempt_id, "fixture terminal predecessor", &call)?;
     let mut retry = make("writer", 2);
-    retry.operation_id = OperationId::parse("legacy-graph-retry")?;
+    retry.operation_id = OperationId::parse("current-graph-retry")?;
     retry
         .task
         .context
@@ -1107,39 +1103,23 @@ fn legacy_writer_replay_preserves_sealed_request_and_authority() -> TestResult {
     )?;
     let pending = store.record(retried.attempt_id, &call)?;
     store.check_launch_writer_lineage(&pending, retry_task, &launch.worktree, &call)?;
-    assert_eq!(store.request(saved.attempt_id, &call)?, legacy);
-    // Legacy predecessor identity defaults only custody to attribution. Paths,
-    // other extension fields and a foreign custody namespace remain fenced.
-    let saved_writer = legacy.task.writer.as_ref().ok_or("legacy writer")?;
+    assert_eq!(store.request(saved.attempt_id, &call)?, current);
+    // Replay preserves the complete current writer identity; any changed path,
+    // extension field or custody namespace remains fenced.
+    let saved_writer = current.task.writer.as_ref().ok_or("current writer")?;
     let mut resolved = resolve_writer(context.state_root.as_path(), &root, &saved_writer.worktree)?;
-    assert!(equivalent_writer(
-        saved_writer,
-        &resolved,
-        context.project_id
-    ));
+    assert!(equivalent_writer(saved_writer, &resolved));
     resolved.extra.insert(
         "custody_project".into(),
         serde_json::json!(provenant_core::ProjectId::from_bytes([99; 16])),
     );
-    assert!(!equivalent_writer(
-        saved_writer,
-        &resolved,
-        context.project_id
-    ));
+    assert!(!equivalent_writer(saved_writer, &resolved));
     resolved = saved_writer.clone();
     resolved.extra.insert("unknown".into(), true.into());
-    assert!(!equivalent_writer(
-        saved_writer,
-        &resolved,
-        context.project_id
-    ));
+    assert!(!equivalent_writer(saved_writer, &resolved));
     resolved = saved_writer.clone();
     resolved.worktree = root.join("other");
-    assert!(!equivalent_writer(
-        saved_writer,
-        &resolved,
-        context.project_id
-    ));
+    assert!(!equivalent_writer(saved_writer, &resolved));
     Ok(())
 }
 

@@ -322,17 +322,20 @@ mod tests {
         request.parent = None;
         request.parent_attempt = None;
         other_store.create(&prepared(4, request)?, &call)?;
-        // Simulate a pre-fix Codex row containing only a running session total.
-        let mut legacy = store.record(AttemptId::from_bytes([1; 16]), &call)?;
-        legacy.applied_route = Some(provenant_records::run::RouteRecord {
+        // Historical provider data is stored in the current record shape.
+        let mut observed = store.record(AttemptId::from_bytes([1; 16]), &call)?;
+        observed.applied_route = Some(provenant_records::run::RouteRecord {
             provider: Some("codex".into()),
             ..Default::default()
         });
-        legacy.usage.uncached_input = Some(42);
+        observed.usage.uncached_input = Some(42);
         let db = rusqlite::Connection::open(roots.state.as_path().join("run.sqlite3"))?;
         db.execute(
             "UPDATE attempts SET record=?1 WHERE id=?2",
-            rusqlite::params![serde_json::to_vec(&legacy)?, legacy.attempt_id.to_string()],
+            rusqlite::params![
+                serde_json::to_vec(&observed)?,
+                observed.attempt_id.to_string()
+            ],
         )?;
         let tree = read(&roots, None, 3, 100, false)?;
         assert!(tree["nodes"][0]["lane_id"]["key"].is_object());

@@ -42,9 +42,8 @@ struct BoundDelivery {
     lane_branch: String,
     pull_request_repo: Option<String>,
     git_dir: PathBuf,
-    /// Host repository authority, independent of lane-writable `commondir`.
-    #[serde(default)]
-    common_git_dir: Option<PathBuf>,
+    /// Host repository authority, independent of lane-writable commondir.
+    common_git_dir: PathBuf,
     host_cwd: PathBuf,
     /// Destination sealed at launch; a later request edit cannot redirect it.
     destination: WriterDeliveryRequest,
@@ -641,7 +640,7 @@ impl HostDeliveryContext {
                 pull_request_repo: None,
                 git_dir: std::fs::canonicalize(git_dir)
                     .map_err(|error| prepare_error("git dir", error))?,
-                common_git_dir: Some(common_git_dir),
+                common_git_dir,
                 host_cwd: writer.project.clone(),
                 destination: request.clone(),
             });
@@ -720,7 +719,7 @@ impl HostDeliveryContext {
                 .map_err(|error| prepare_error("remote URL", error))?,
             git_dir: std::fs::canonicalize(git_dir)
                 .map_err(|error| prepare_error("git dir", error))?,
-            common_git_dir: Some(common_git_dir),
+            common_git_dir,
             host_cwd: writer.project.clone(),
             destination: request.clone(),
         });
@@ -1471,12 +1470,8 @@ impl HostDeliveryContext {
     }
 
     pub(super) fn common_git_dir(&self, project: &Path, stage: Stage) -> Result<PathBuf> {
-        match self
-            .bound
-            .as_ref()
-            .and_then(|bound| bound.common_git_dir.clone())
-        {
-            Some(common) => Ok(common),
+        match self.bound.as_ref() {
+            Some(bound) => Ok(bound.common_git_dir.clone()),
             None => self.discover_common_git_dir(project, stage),
         }
     }
@@ -2360,7 +2355,7 @@ pub(super) fn stdout_limit(commit_log: bool, args: &[&str]) -> usize {
 
 /// The failed receipt state for a delivery error. A staged error keeps its
 /// stage; a host limit or prepare refusal also keeps its redacted reason under
-/// `reason`, which older readers retain as an extra field. Any other error is
+/// `reason`. Any other error is
 /// a failed push.
 pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
     let (stage, reason) = match error {
@@ -2787,17 +2782,16 @@ impl crate::RunStore {
             )
             .bytes(),
         );
-        // New successful receipts never collide with a legacy failed seal.
         let receipt_name = format!("delivery-complete-{key}.json");
-        for name in [&receipt_name, &format!("delivery-{key}.json")] {
-            if let Some(raw) = crate::artifacts::read_sealed(&attempt, name, crate::RECORD_LIMIT)? {
-                let receipt: WriterDeliveryReceipt = crate::db::decode(&raw)?;
-                if matches!(receipt.state, WriterDeliveryState::Delivered { .. }) {
-                    // Recover a crash between sealing success and publishing
-                    // the mutable pickup pointer used by graph observation.
-                    publish_pickup(&attempt, &request, &receipt)?;
-                    return Ok(receipt);
-                }
+        if let Some(raw) =
+            crate::artifacts::read_sealed(&attempt, &receipt_name, crate::RECORD_LIMIT)?
+        {
+            let receipt: WriterDeliveryReceipt = crate::db::decode(&raw)?;
+            if matches!(receipt.state, WriterDeliveryState::Delivered { .. }) {
+                // Recover a crash between sealing success and publishing
+                // the mutable pickup pointer used by graph observation.
+                publish_pickup(&attempt, &request, &receipt)?;
+                return Ok(receipt);
             }
         }
         if let Some(receipt) = record.delivery.as_ref()

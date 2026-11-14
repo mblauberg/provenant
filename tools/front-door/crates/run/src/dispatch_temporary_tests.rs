@@ -408,7 +408,7 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let mut run = input();
     run.request.task.writer = Some(WriterRequest {
-        extra: Default::default(),
+        extra: crate::tests::writer_extra(),
         project: temp.path().join("checkout"),
         worktree: temp.path().join("checkout/.worktrees/lane"),
     });

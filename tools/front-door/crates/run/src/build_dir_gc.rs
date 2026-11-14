@@ -15,7 +15,7 @@
 //! probe covers that case. A write dated more than a few minutes in the future
 //! is clock skew, not recent activity, and does not earn the grace.
 //!
-//! Sizes are allocated bytes (`st_blocks * 512`) throughout. A settlement does
+//! Sizes are allocated bytes (`st_blocks * 512`) throughout. An admission does
 //! not walk every lane cache: see `reclaim`.
 use provenant_confinement::cache::is_cache_digest;
 use provenant_os::fs::{
@@ -143,7 +143,7 @@ pub fn collect(
     )?
 }
 
-/// Collect for an event (admission below the floor, a settled lane) using the
+/// Collect on admission using the
 /// host's configured cap, floor and grace. Best effort: a busy ledger,
 /// unreadable settings or a failed sweep leave the caches as they were.
 ///
@@ -151,7 +151,7 @@ pub fn collect(
 /// floor, when the last walk is older than `build_dir_survey_interval_seconds`,
 /// or when it found the total within a tenth of the cap. The last walk's time
 /// and total live in the state root. While the floor stays breached every
-/// settlement walks, because reclaiming is the point. A try-lock keeps concurrent events from
+/// admission walks, because reclaiming is the point. A try-lock keeps concurrent events from
 /// walking twice: the loser skips and returns `None`.
 pub fn reclaim(host: &Path, home: &Path) -> Option<Report> {
     let settings = provenant_config::LaneBuildSettings::read(host).ok()?;
@@ -188,7 +188,7 @@ fn reclaim_with(
 }
 
 /// `between` runs after the cheap check and before the walk lock is taken: the
-/// window in which a concurrent settlement can finish a walk.
+/// window in which a concurrent admission can finish a walk.
 fn reclaim_gated(
     host: &Path,
     home: &Path,
@@ -1149,7 +1149,7 @@ mod tests {
     }
 
     #[test]
-    fn settlements_within_the_interval_walk_at_most_once() {
+    fn admissions_within_the_interval_walk_at_most_once() {
         let state = state_root();
         let fixture = Fixture::new();
         fixture.profile('a', "debug", 4096, 2000);
@@ -1266,7 +1266,7 @@ mod tests {
     }
 
     #[test]
-    fn a_concurrent_walk_makes_a_settlement_skip() {
+    fn a_concurrent_walk_makes_an_admission_skip() {
         let state = state_root();
         let fixture = Fixture::new();
         fixture.profile('a', "debug", 4096, 2000);
@@ -1313,7 +1313,7 @@ mod tests {
                 at,
             );
             assert!(report.is_some(), "{bad:?} must force a walk");
-            // The walk replaces the bad record, so the next settlement skips.
+            // The walk replaces the bad record, so the next admission skips.
             let next = reclaim_with(
                 state.path(),
                 fixture.home.path(),
@@ -1339,7 +1339,7 @@ mod tests {
     }
 
     #[test]
-    fn a_settlement_that_wins_the_lock_after_a_fresh_record_skips_the_walk() {
+    fn an_admission_that_wins_the_lock_after_a_fresh_record_skips_the_walk() {
         let state = state_root();
         let fixture = Fixture::new();
         fixture.profile('a', "debug", 4096, 2000);
@@ -1347,9 +1347,9 @@ mod tests {
         let at = now();
         let record = state.path().join(SURVEY_STATE);
         let mut plenty_free = plenty;
-        // No record: the cheap check says walk. Meanwhile another settlement
+        // No record: the cheap check says walk. Meanwhile another admission
         // finishes its walk and records it, so the re-read under the lock skips.
-        let mut other_settlement = || fs::write(&record, format!("{at} 4096\n")).unwrap();
+        let mut other_admission = || fs::write(&record, format!("{at} 4096\n")).unwrap();
         let report = reclaim_gated(
             state.path(),
             fixture.home.path(),
@@ -1357,7 +1357,7 @@ mod tests {
             300,
             &mut plenty_free,
             at,
-            &mut other_settlement,
+            &mut other_admission,
         );
         assert!(report.is_none(), "the record is fresh once the lock is won");
         // With a breached floor the record is not consulted: walk regardless.

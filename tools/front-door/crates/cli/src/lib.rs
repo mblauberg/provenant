@@ -33,6 +33,7 @@ pub mod telemetry_args;
 pub mod telemetry_value;
 use clap::{Arg, ArgAction, ArgGroup, CommandFactory, FromArgMatches};
 pub use grammar::*;
+pub use provenant_config::removed::{REMOVED, Removed};
 use provenant_records::{HelpArgument, HelpCatalogue, HelpCommand, HelpErrorCode, HelpGroup};
 pub use render::*;
 use std::ffi::OsString;
@@ -230,147 +231,6 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         },
     }
 }
-/// One spelling a released version accepted and this one removes, with what
-/// replaces it. `words` is the command path; `flag`, when set, is the removed
-/// option on that path.
-#[derive(Clone, Copy, Debug)]
-pub struct Removed {
-    pub words: &'static [&'static str],
-    pub flag: Option<&'static str>,
-    pub replacement: &'static str,
-}
-
-const fn verb(words: &'static [&'static str], replacement: &'static str) -> Removed {
-    Removed {
-        words,
-        flag: None,
-        replacement,
-    }
-}
-
-const fn flag(
-    words: &'static [&'static str],
-    flag: &'static str,
-    replacement: &'static str,
-) -> Removed {
-    Removed {
-        words,
-        flag: Some(flag),
-        replacement,
-    }
-}
-
-/// Every removed spelling. A removed spelling exits 2 with one line naming its
-/// replacement; there are no aliases. Target spellings (IDs and the `lane:`,
-/// `graph:`, `operation:` and `land:` prefixes) are refused by the target
-/// parser instead.
-pub const REMOVED: &[Removed] = &[
-    flag(
-        &["dispatch"],
-        "prompt-file",
-        "provenant run TEMPLATE --brief-file PATH",
-    ),
-    flag(
-        &["dispatch"],
-        "prompt-stdin",
-        "provenant run TEMPLATE --brief-file -",
-    ),
-    flag(&["resume"], "no-fallback", "provenant retry NAME/NODE#N"),
-    flag(
-        &["run"],
-        "prompt-file",
-        "provenant run TEMPLATE --brief-file PATH",
-    ),
-    flag(
-        &["run"],
-        "prompt-stdin",
-        "provenant run TEMPLATE --brief-file -",
-    ),
-    flag(&["retry"], "no-fallback", "provenant retry NAME/NODE#N"),
-    verb(&["dispatch"], "provenant run TEMPLATE BRIEF"),
-    verb(&["lanes"], "provenant status"),
-    verb(&["resume"], "provenant retry NAME/NODE"),
-    verb(&["cancel"], "provenant stop NAME"),
-    verb(&["continue"], "provenant retry NAME/NODE#N"),
-    verb(&["redo"], "provenant retry NAME/NODE"),
-    verb(&["preset"], "provenant templates"),
-    verb(&["review"], "provenant run review BRIEF"),
-    verb(&["stats"], "provenant telemetry cost --by node"),
-    verb(&["pr", "land"], "provenant land NUMBER --wait"),
-    verb(&["fabric", "graph"], "provenant status NAME"),
-    verb(&["fabric_graph"], "provenant run TEMPLATE BRIEF"),
-    verb(&["quota", "usage"], "provenant telemetry cost --by account"),
-    verb(&["config", "migrate"], "provenant config check"),
-    verb(
-        &["telemetry", "backfill"],
-        "nothing; this binary reads no format-1 store",
-    ),
-    flag(&["run"], "use", "provenant run TEMPLATE BRIEF"),
-    flag(
-        &["run"],
-        "tier",
-        "provenant run TEMPLATE BRIEF --route ROUTE",
-    ),
-    flag(
-        &["run"],
-        "operation-id",
-        "provenant run TEMPLATE BRIEF --name NAME",
-    ),
-    flag(&["run"], "wait", "provenant wait NAME"),
-    flag(&["status"], "wait", "provenant wait NAME"),
-    flag(
-        &["status"],
-        "target",
-        "provenant status NAME or provenant wait --pr NUMBER",
-    ),
-    flag(&["status"], "until", "provenant wait NAME --any"),
-    flag(&["status"], "follow", "provenant wait NAME --follow"),
-    flag(
-        &["status"],
-        "stats",
-        "provenant telemetry cost NAME --by node",
-    ),
-    flag(&["status"], "by", "provenant telemetry cost NAME --by node"),
-    flag(&["status"], "id", "provenant status NAME"),
-    flag(&["stop"], "operation-id", "provenant stop NAME"),
-    flag(&["stop"], "wait", "provenant wait NAME"),
-    flag(&["retry"], "node", "provenant retry NAME/NODE"),
-    flag(&["retry"], "wait", "provenant wait NAME"),
-    flag(&["output"], "trace", "provenant trace NAME"),
-    flag(&["reconcile"], "id", "provenant reconcile NAME"),
-    flag(
-        &["telemetry", "stats"],
-        "run-id",
-        "provenant telemetry cost NAME",
-    ),
-    flag(
-        &["telemetry", "stats"],
-        "by",
-        "provenant telemetry cost --by route",
-    ),
-    flag(
-        &["telemetry", "stats"],
-        "detail",
-        "provenant telemetry cost NAME",
-    ),
-    flag(
-        &["telemetry", "trace"],
-        "run",
-        "provenant telemetry trace NAME",
-    ),
-    flag(&["pr", "status"], "wait", "provenant pr watch NUMBER"),
-];
-
-impl Removed {
-    /// The one line a removed spelling prints.
-    pub fn message(&self) -> String {
-        let path = self.words.join(" ");
-        match self.flag {
-            Some(flag) => format!("`{path} --{flag}` is removed; use `{}`", self.replacement),
-            None => format!("`{path}` is removed; use `{}`", self.replacement),
-        }
-    }
-}
 
 /// The removed spelling `argv` uses, read from its command words and options.
 fn removed_spelling(argv: &[OsString]) -> Option<&'static Removed> {
@@ -404,14 +264,17 @@ fn removed_spelling(argv: &[OsString]) -> Option<&'static Removed> {
             words.push(word);
         }
     }
-    REMOVED.iter().find(|removed| {
-        words.len() >= removed.words.len()
-            && words
-                .iter()
-                .zip(removed.words)
-                .all(|(word, path)| word == path)
-            && removed.flag.is_none_or(|flag| flags.contains(&flag))
-    })
+    REMOVED
+        .iter()
+        .filter(|removed| removed.config_key.is_none() && removed.diagnostic_code.is_none())
+        .find(|removed| {
+            words.len() >= removed.words.len()
+                && words
+                    .iter()
+                    .zip(removed.words)
+                    .all(|(word, path)| word == path)
+                && removed.flag.is_none_or(|flag| flags.contains(&flag))
+        })
 }
 
 fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
@@ -1720,10 +1583,6 @@ mod tests {
         valid(&["run", "explore", "--brief-file", "-"]);
         invalid(&["run", "explore", "--name", "Not_A_Name"]);
         valid(&["run", "explore", "--route", "writer=junior,review=senior"]);
-        for removed in ["--use", "--tier", "--operation-id", "--wait"] {
-            invalid(&["run", "explore", removed, "x"]);
-        }
-        invalid(&["run", "--preset", "task"]);
         valid(&["config", "schema", "--all"]);
         valid(&[
             "run",
@@ -2150,7 +2009,10 @@ mod tests {
 
     #[test]
     fn each_removed_spelling_exits_2_with_one_line_naming_its_replacement() {
-        for removed in REMOVED {
+        for removed in REMOVED
+            .iter()
+            .filter(|removed| removed.config_key.is_none() && removed.diagnostic_code.is_none())
+        {
             let words = removed_words(removed);
             let ParseOutcome::Invalid { error, .. } = parse(words.iter().map(OsString::from))
             else {
@@ -2163,6 +2025,114 @@ mod tests {
             assert!(text.contains(removed.replacement), "{words:?}: {text}");
             assert_eq!(error.repair(), None, "{words:?}");
         }
+    }
+
+    #[test]
+    fn every_absent_v1_11_1_clap_member_has_a_refusal_row() {
+        fn command_at<'a>(command: &'a clap::Command, path: &[&str]) -> Option<&'a clap::Command> {
+            let (head, tail) = path.split_first()?;
+            let next = command.get_subcommands().find(|child| {
+                child.get_name() == *head || child.get_all_aliases().any(|alias| alias == *head)
+            })?;
+            if tail.is_empty() {
+                Some(next)
+            } else {
+                command_at(next, tail)
+            }
+        }
+        fn retired_command(path: &[&str]) -> bool {
+            REMOVED.iter().any(|removed| {
+                removed.config_key.is_none()
+                    && removed.diagnostic_code.is_none()
+                    && removed.flag.is_none()
+                    && removed.words.len() <= path.len()
+                    && path
+                        .iter()
+                        .zip(removed.words)
+                        .all(|(word, removed)| *word == *removed)
+            })
+        }
+        fn has_option(command: &clap::Command, root: &clap::Command, name: &str) -> bool {
+            command.get_arguments().any(|argument| {
+                argument.get_long() == Some(name)
+                    || argument
+                        .get_all_aliases()
+                        .is_some_and(|aliases| aliases.contains(&name))
+            }) || root.get_arguments().any(|argument| {
+                argument.get_long() == Some(name)
+                    || argument
+                        .get_all_aliases()
+                        .is_some_and(|aliases| aliases.contains(&name))
+            })
+        }
+
+        let model = expanded_model();
+        let fixture = include_str!("removed-cli-1.11.1.txt");
+        let mut rows = 0;
+        for line in fixture
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            rows += 1;
+            let columns: Vec<_> = line.splitn(3, '\t').collect();
+            assert_eq!(columns.len(), 3, "malformed historical clap row: {line}");
+            let path: Vec<_> = if columns[0] == "." {
+                Vec::new()
+            } else {
+                columns[0].split_whitespace().collect()
+            };
+            let current = if path.is_empty() {
+                Some(&model)
+            } else {
+                command_at(&model, &path)
+            };
+            if !path.is_empty() && current.is_none() {
+                assert!(
+                    retired_command(&path),
+                    "unrefused historical command: {line}"
+                );
+                continue;
+            }
+            let current = current.expect("root command exists");
+            for child in columns[1].split_whitespace() {
+                let mut child_path = path.clone();
+                child_path.push(child);
+                if !current.get_subcommands().any(|command| {
+                    command.get_name() == child
+                        || command.get_all_aliases().any(|alias| alias == child)
+                }) {
+                    assert!(
+                        retired_command(&child_path),
+                        "unrefused historical command: {}",
+                        child_path.join(" ")
+                    );
+                }
+            }
+            for option in columns[2].split_whitespace() {
+                let name = option
+                    .strip_prefix("--")
+                    .expect("fixture options use long spellings");
+                let exact = REMOVED.iter().any(|removed| {
+                    removed.config_key.is_none()
+                        && removed.diagnostic_code.is_none()
+                        && removed.flag == Some(name)
+                        && removed.words == path
+                });
+                if !has_option(current, &model, name) {
+                    assert!(
+                        exact || retired_command(&path),
+                        "unrefused historical option {option} at {}",
+                        if path.is_empty() {
+                            "provenant".into()
+                        } else {
+                            path.join(" ")
+                        }
+                    );
+                }
+            }
+        }
+        assert!(rows > 0, "the 1.11.1 clap fixture must not be empty");
     }
 
     /// Every public command, from the model the help catalogue renders, with
@@ -2288,14 +2258,6 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(accepted, reference, "{words:?} {flag}");
         }
-    }
-
-    #[test]
-    fn config_migrate_is_removed_from_the_command_surface() {
-        assert!(matches!(
-            parsed(&["config", "migrate"]),
-            ParseOutcome::Invalid { .. }
-        ));
     }
 
     #[test]

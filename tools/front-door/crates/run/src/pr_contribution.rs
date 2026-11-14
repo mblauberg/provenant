@@ -576,7 +576,7 @@ impl Contributions {
         })
     }
 
-    /// A binding can have no attempts; retained legacy links also establish coverage.
+    /// A binding can have no attempts; current branch links also establish coverage.
     pub fn is_bound(&self, pr: &PullRequest, call: &Request<'_>) -> Result<bool> {
         call.check()?;
         pr.validate()?;
@@ -1204,7 +1204,4 @@ mod tests {
         assert!(rows[1..].iter().all(|row| row.weight_millionths.is_none()));
         Ok(())
     }
-
-    // These persisted versions remain accepted by both readers and migrations.
-    // Keep their data-preservation coverage while those production paths live.
 }

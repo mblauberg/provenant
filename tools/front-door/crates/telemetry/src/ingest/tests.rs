@@ -118,75 +118,6 @@ fn segment_files(f: &Fixture) -> Result<Vec<String>> {
 }
 
 #[test]
-fn a_single_file_store_over_the_old_cap_is_split_on_first_open() -> Result {
-    use std::io::Write;
-    let f = Fixture::new()?;
-    let legacy = f.base.join("state/ingest.jsonl");
-    let mut out = std::io::BufWriter::new(std::fs::File::create(&legacy)?);
-    let padding = "x".repeat(64 << 10);
-    let days = ["2026-10-01", "2026-10-02", "2026-10-03"];
-    let total = 2_199usize;
-    for index in 0..total {
-        let row = Row {
-            schema_version: ROW_SCHEMA_VERSION,
-            account: "a".into(),
-            provider: PROVIDER.into(),
-            model: padding.clone(),
-            effort: None,
-            uncached_input: 1,
-            cache_read: 0,
-            cache_write: 0,
-            cache_write_1h: 0,
-            output: 1,
-            timestamp: format!("{}T00:00:00Z", days[index % days.len()]),
-            session: "s".into(),
-            message: format!("m{index}"),
-            source: Source::Lane,
-            agent_id: None,
-            native_config: None,
-            native_attempt: None,
-            reasoning_tokens: None,
-            reply: None,
-        };
-        serde_json::to_writer(&mut out, &row)?;
-        out.write_all(b"\n")?;
-    }
-    out.flush()?;
-    drop(out);
-    assert!(std::fs::metadata(&legacy)?.len() > 128 << 20);
-    // A reader gets the rows, split by day, and the single file is gone.
-    let rows = read_rows(&f.roots, &RowFilter::default())?;
-    assert_eq!(rows.len(), total);
-    assert!(!legacy.exists());
-    assert_eq!(segment_files(&f)?.len(), days.len());
-    // A window reads only its own days.
-    let window = RowFilter {
-        since: Some(
-            "2026-10-02T00:00:00Z"
-                .parse::<jiff::Timestamp>()?
-                .as_second(),
-        ),
-        until: Some(
-            "2026-10-02T23:59:59Z"
-                .parse::<jiff::Timestamp>()?
-                .as_second(),
-        ),
-        ..RowFilter::default()
-    };
-    assert_eq!(read_rows(&f.roots, &window)?.len(), total / days.len());
-    // Ingest then adds to the split store.
-    f.write(
-        "claude",
-        "projects/p/s1.jsonl",
-        &message("new", "2026-10-04T00:00:00Z", 1, 0, 0, 1),
-    )?;
-    let report = f.run(&DIRS, &[], None)?;
-    assert_eq!((report.added, report.store_full), (1, false));
-    assert_eq!(read_rows(&f.roots, &RowFilter::default())?.len(), total + 1);
-    Ok(())
-}
-
-#[test]
 fn a_message_seen_on_both_sides_of_midnight_is_counted_once() -> Result {
     let f = Fixture::new()?;
     f.write(
@@ -207,24 +138,6 @@ fn a_message_seen_on_both_sides_of_midnight_is_counted_once() -> Result {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].output, 9);
     assert_eq!(segment_files(&f)?, ["2026-10-01.jsonl"]);
-    Ok(())
-}
-
-#[test]
-fn legacy_lines_too_long_to_migrate_keep_the_old_file() -> Result {
-    let f = Fixture::new()?;
-    let legacy = f.base.join("state/ingest.jsonl");
-    let kept = serde_json::json!({"timestamp": "2026-10-01T00:00:00Z", "message": "m1"});
-    let huge = "x".repeat(MAX_ROW_LINE + 10);
-    std::fs::write(&legacy, format!("{kept}\n{huge}\n"))?;
-    read_rows(&f.roots, &RowFilter::default())?;
-    let aside = f.base.join("state/ingest.jsonl.unmigrated");
-    assert!(!legacy.exists());
-    assert!(std::fs::read_to_string(&aside)?.contains(&huge));
-    assert!(stored(&f)?.contains("\"m1\""));
-    // A later open does not migrate again.
-    read_rows(&f.roots, &RowFilter::default())?;
-    assert!(aside.exists());
     Ok(())
 }
 
@@ -456,8 +369,8 @@ fn lines_this_build_cannot_read_survive_a_rewrite() -> Result {
     let day = f.base.join("state/ingest/2026-10-01.jsonl");
     // A row another schema version wrote, then a torn line from a crash.
     let current = std::fs::read_to_string(&day)?;
-    let foreign = current.replacen("{\"schema_version\":1,", "{\"schema_version\":2,", 1);
-    let torn = "{\"schema_version\":1,\"account\":\"half";
+    let foreign = current.replacen("{\"schema_version\":2,", "{\"schema_version\":3,", 1);
+    let torn = "{\"schema_version\":2,\"account\":\"half";
     std::fs::write(&day, format!("{foreign}{torn}\n"))?;
     f.write(
         "claude",
@@ -988,18 +901,6 @@ fn enrichment_preserves_existing_token_buckets_and_excludes_text() -> Result {
     fixture.run(&[("fixture-account", "native")], &[], None)?;
     let before = read_rows(&fixture.roots, &RowFilter::default())?;
     assert_eq!(before[0].buckets(), [10, 7, 60, 40, 3]);
-    // Simulate the stored version-1 row written by the preceding release.
-    let mut legacy = serde_json::to_value(&before[0])?;
-    legacy.as_object_mut().unwrap().remove("reply");
-    legacy.as_object_mut().unwrap().remove("reasoning_tokens");
-    std::fs::write(
-        fixture
-            .roots
-            .state
-            .as_path()
-            .join("ingest/2026-10-01.jsonl"),
-        format!("{legacy}\n"),
-    )?;
     fixture.run(&[("fixture-account", "native")], &[], None)?;
     let after = read_rows(&fixture.roots, &RowFilter::default())?;
     assert_eq!(before[0].buckets(), after[0].buckets());
@@ -1010,60 +911,5 @@ fn enrichment_preserves_existing_token_buckets_and_excludes_text() -> Result {
     assert!(row.get("prompt").is_none());
     assert!(row.get("response").is_none());
     assert_eq!(row["reply"]["inferred"], "unknown");
-    // An old cursor cannot recover pending events; upgrade replays the native
-    // file, preserving token deduplication and the next reply's compaction.
-    let path = fixture
-        .dir("native")
-        .join("projects/p/fixture-session.jsonl");
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new().append(true).open(&path)?;
-    file.write_all(b"{\"type\":\"system\",\"subtype\":\"compact_boundary\"}\n")?;
-    let dirs = [ConfigDir {
-        account: "fixture-account".into(),
-        path: fixture.dir("native"),
-    }];
-    let chairs = BTreeSet::new();
-    let request = Request {
-        dirs: &dirs,
-        chair_sessions: &chairs,
-        provider: None,
-        since: None,
-        deadline: None,
-        incremental: true,
-    };
-    ingest(&fixture.roots, &request)?;
-    let cursor_path = fixture.roots.state.as_path().join(CURSORS);
-    let mut cursors: serde_json::Value = serde_json::from_slice(&std::fs::read(&cursor_path)?)?;
-    cursors["schema_version"] = serde_json::json!(1);
-    for cursor in cursors["files"].as_object_mut().unwrap().values_mut() {
-        cursor.as_object_mut().unwrap().remove("reply");
-        cursor.as_object_mut().unwrap().remove("last_reply");
-    }
-    std::fs::write(&cursor_path, serde_json::to_vec(&cursors)?)?;
-    file.write_all(
-        message("fixture-after-upgrade", "2026-10-01T00:00:02Z", 1, 0, 0, 1).as_bytes(),
-    )?;
-    ingest(&fixture.roots, &request)?;
-    let upgraded = read_rows(&fixture.roots, &RowFilter::default())?;
-    assert_eq!(upgraded.len(), 2);
-    assert_eq!(
-        upgraded
-            .iter()
-            .find(|row| row.message == "fixture-reply")
-            .unwrap()
-            .buckets(),
-        before[0].buckets()
-    );
-    assert_eq!(
-        upgraded
-            .iter()
-            .find(|row| row.message == "fixture-after-upgrade")
-            .unwrap()
-            .reply
-            .as_ref()
-            .unwrap()
-            .compactions,
-        1
-    );
     Ok(())
 }

@@ -38,7 +38,7 @@ pub struct Registration {
     pub adapter: String,
     pub label: String,
     pub key: String,
-    /// Organisation recorded at first validation; absent on legacy records.
+    /// Organisation observed at validation; absent when the provider does not expose it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_fingerprint: Option<String>,
     pub directory: PathBuf,
@@ -215,8 +215,8 @@ impl Settings {
 }
 impl Registration {
     /// Compares the probed organisation with the recorded one. Both present and
-    /// different refuses; an absent probe never refuses. `Ok(Some(org))` is a
-    /// legacy record to upgrade with the probed organisation (trust on first use).
+    /// different refuses; when registration could not observe an organisation,
+    /// the first available probe supplies it.
     pub fn check_org(&self, probed: Option<&str>) -> Result<Option<String>, ProviderError> {
         match (&self.org_fingerprint, probed) {
             (Some(stored), Some(probed)) if stored != probed => {

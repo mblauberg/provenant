@@ -316,7 +316,7 @@ fn two_lanes_contend_for_integration_without_losing_either_head()
             .ok_or("destination")?;
     let first = fixture.prepare()?;
     let second_writer = WriterRequest {
-        extra: Default::default(),
+        extra: fixture.writer.extra.clone(),
         project: fixture.writer.project.clone(),
         worktree: fixture.root.join("second-lane"),
     };

@@ -1545,8 +1545,8 @@ impl RunStore {
         let mut deferred: Vec<(SettlementEffect, EffectDisposition)> = Vec::new();
         let mut import_failed = false;
         let mut import_stopped = false;
-        // A late request alone cannot invalidate a verified clean exit, even
-        // with a legacy guardian. Its cancellation receipt retains uncertainty.
+        // A late request alone cannot invalidate a verified clean exit. If the
+        // current guardian could not establish ordering, its receipt stays unknown.
         let mut cancelled = if exit.never_spawned {
             exit.stop_reason == Some(StopReason::ExplicitCancellation)
         } else {
@@ -2213,7 +2213,7 @@ impl RunStore {
         if cancelled {
             decoded.outcome = Outcome::Cancelled;
             // A typed runtime deadline stays the reason when cancellation also
-            // applies, and a legacy scope-only record adds no invented cause.
+            // applies; a scope-only cancellation marker carries no user cause.
             if let Some(reason) = cancellation_reason(cancellation.as_deref())
                 && !typed_deadline
                 && !crate::store::import_cancelled(

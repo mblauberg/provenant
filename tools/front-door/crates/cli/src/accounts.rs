@@ -500,8 +500,8 @@ fn apply_settings(doc: &mut toml_edit::DocumentMut, settings: &Settings) -> Resu
     Ok(())
 }
 
-/// Records the organisation first seen for a legacy registration (trust on
-/// first use). Best effort: the next validation retries on any failure.
+/// Records the organisation first seen when a provider exposes it (trust on
+/// first use). Best effort: a later validation retries the pin after failures.
 pub fn record_org(roots: &Roots, adapter: &str, label: &str, org: &str) -> Result<(), String> {
     edit_accounts(roots, |mut settings| {
         let entry = settings

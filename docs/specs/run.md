@@ -201,7 +201,7 @@ titles in manifests and Fabric submissions. The title is sealed in the request
 and copied to each attempt; it participates in operation replay identity.
 Titles are nonempty, contain no control characters and are limited to 256 UTF-8
 bytes. `status` displays titles when present and includes them in JSON output;
-absent titles remain absent in older records. Titles are never inferred from
+absent titles remain absent. Titles are never inferred from
 prompts.
 - Test: `crates/run/src/service_tests.rs::task_title_roundtrip`
 - Owner: `crates/run/src/service.rs`, `crates/records/src/run.rs`
@@ -483,8 +483,8 @@ Each driver holds a kernel lease for its lifetime. A concurrently live driver
 excludes a second claimant even in the same process. A claimant holding the
 lease can disregard an abandoned same-process journal owner after the existing
 retry deadline, including when Drop could not lock, read or write the journal.
-Legacy foreign owners retain boot/PID/start checks and the ten-minute bound on
-unknown process observations. Refusal observations distinguish journal contention,
+An unknown process observation keeps the recorded owner active until the ten-minute
+uncertainty bound expires. Refusal observations distinguish journal contention,
 live ownership and the retry deadline. The replacement continues the recorded
 phase without restarting the provider or decoding its output again. Journal
 locks cover only short reads and durable updates; they never span an external
@@ -533,8 +533,8 @@ A retry can complete the import receipt or reach explicit refusal, but cannot
 upgrade or replace that sealed outcome. When reconcile proves the guardian is
 absent, it finalises a failed import receipt without retrying publication,
 releases custody while preserving the private Git and lane evidence, and clears
-its cleanup debt. This also applies to already sealed unsettled decisions from
-older installs. Status and output project the final import receipt as failed,
+its cleanup debt. This also applies to already sealed unsettled decisions. Status
+and output project the final import receipt as failed,
 keep the import error as its cause, and report the pinned head and retained
 object directory when available. The sealed decision stays unchanged.
 Rejected objects and failed publication
@@ -571,11 +571,12 @@ An attempt record version 2 carries the terminal evidence and distinguishes
 immutable decision. A terminal wait view includes `custody_pending`; a pending
 fence still prevents unsafe writer admission. A cancellation determines the
 execution outcome only when delivery to the provider was recorded before its
-exit was observed. A later request is acknowledged as ineffective. Older exit
-records without delivery ordering retain uncertainty.
+exit was observed. A later request is acknowledged as ineffective. A current exit
+record can explicitly mark delivery ordering unobserved, which retains uncertainty;
+a missing ordering member is invalid and keeps custody unresolved.
 
-A verified clean provider success is preserved for legacy guardians with unknown
-cancellation ordering; the cancellation receipt remains `unknown`. A host-observed
+A verified clean provider success is preserved when the current guardian explicitly
+marks cancellation ordering unobserved; the cancellation receipt remains `unknown`. A host-observed
 cancellation during Git import has separate `import_cancellation` evidence and
 an `import_effective` receipt: it does not invent delivery to the provider before
 exit. Cancellation during delivery leaves the terminal decision unchanged and
@@ -1133,10 +1134,10 @@ delta objects through `cat-file --batch` to refuse corrupt reachable payloads.
 They do not rescan unrelated shared history.
 
 [Drain writers before upgrading](../runbooks/install.md#bootstrap-and-upgrade).
-An older interrupted settlement with its bound private object directory can
+A format-2 interrupted settlement with its bound private object directory can
 resume through this import path. An attempt without that source is refused
 with instructions to recover its commits on the host and start a fresh run.
-There is no legacy verifier or separate settlement path. Terminal refusals
+There is no alternate verifier or separate settlement path. Terminal refusals
 release live custody and the reservation while preserving private Git evidence
 for host recovery.
 - Why (default): Git already owns the receive boundary; private Git state removes the
@@ -1359,8 +1360,9 @@ that project's registered worktree. The graph retains parent attribution while
 writer locks, retained import fences and recovery use the selected project's
 custody namespace. A host-owned `writer-projects/<parent>/<source>/` reference
 lets recovery inspect those exact namespaces without scanning unrelated projects.
-Legacy records retain their original custody namespace. Changing provider cwd
-never changes which graph its attempt-bound relay serves.
+Every writer request records its selected custody namespace, and recovery uses that
+exact registered project. Changing provider cwd never changes which graph its
+attempt-bound relay serves.
 
 The host preserves typed admission causes in refusals so the caller can repair
 its launch request. Credential roots, state roots and overlapping worktree

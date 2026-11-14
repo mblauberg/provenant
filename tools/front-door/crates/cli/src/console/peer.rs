@@ -121,9 +121,12 @@ mod tests {
             json!({"lane_id":{"host":host,"key":work_key,"attempt_id":attempt},
             "metadata":{"attempt":{"project_id":project}}})
         };
-        let mut legacy_row = row(remote);
-        legacy_row["lane_id"].as_object_mut().unwrap().remove("key");
-        assert!(identity(&legacy_row).is_none());
+        let mut missing_key_row = row(remote);
+        missing_key_row["lane_id"]
+            .as_object_mut()
+            .unwrap()
+            .remove("key");
+        assert!(identity(&missing_key_row).is_none());
         let page_coverage = |host| json!({"host":host,"runs":"complete","chairs":"complete","observations":"complete"});
         let local = json!({"lanes":[row(local_host)],"next_cursor":"local-cursor",
             "coverage":{"scope":"local"}});

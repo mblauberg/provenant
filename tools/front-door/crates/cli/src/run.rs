@@ -538,7 +538,7 @@ impl Registry<'_> {
             result: String::new(),
             complete: false,
             observed_route: None,
-            // `source` names why usage is absent; records stay readable by older builds.
+            // `source` names why the current observation has no usage.
             usage: run::UsageRecord {
                 source: result_event_usage.then(|| "absent: no result event".into()),
                 ..run::UsageRecord::default()

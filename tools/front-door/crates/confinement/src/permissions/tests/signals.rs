@@ -127,7 +127,7 @@ test "$notified" = yes
             plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
                 git_grants_digest: [7; 32],
                 publishing: false,
-                common_git_dir: Some("/fixture/git".into()),
+                common_git_dir: "/fixture/git".into(),
                 cargo_cache: PathGrant {
                     path: "/fixture/cache".into(),
                     scope: PathScope::Subtree,

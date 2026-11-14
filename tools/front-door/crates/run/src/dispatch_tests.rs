@@ -408,7 +408,7 @@ fn lane(seed: u8, writer: bool) -> PreparedRun {
     crate::tests::rekey(&mut run);
     if writer {
         run.request.task.writer = Some(WriterRequest {
-            extra: Default::default(),
+            extra: crate::tests::writer_extra(),
             project: "/project".into(),
             worktree: format!("/project/.worktrees/lane-{seed}").into(),
         });
@@ -905,7 +905,7 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
     let worktree = temp.path().join("lane");
     std::fs::create_dir(&worktree)?;
     run.request.task.writer = Some(WriterRequest {
-        extra: Default::default(),
+        extra: crate::tests::writer_extra(),
         project: temp.path().to_path_buf(),
         worktree: worktree.clone(),
     });
@@ -992,7 +992,7 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
             std::ffi::OsStr::new("process.json"),
             ".checkpoint-",
             &serde_json::to_vec(
-                &serde_json::json!({"schema_version": 1, "scope": scope, "guardian": guardian, "provider": provider}),
+                &serde_json::json!({"schema_version": 1, "scope": scope, "publication_pending": false, "guardian": guardian, "provider": provider}),
             )?,
             provenant_os::fs::PublishMode::Replace,
         )?;
@@ -1142,7 +1142,7 @@ fn recover_rebooted_writer_inner(
     std::fs::create_dir(&worktree)?;
     std::fs::write(worktree.join("unfinished.rs"), "keep my work")?;
     run.request.task.writer = writer.then(|| WriterRequest {
-        extra: Default::default(),
+        extra: crate::tests::writer_extra(),
         project: temp.path().to_path_buf(),
         worktree: worktree.clone(),
     });
@@ -1219,7 +1219,7 @@ fn recover_rebooted_writer_inner(
         RECORD_LIMIT,
     )?;
     let checkpoint = serde_json::to_vec(&serde_json::json!({
-        "schema_version": 1, "scope": scope, "guardian": guardian,
+        "schema_version": 1, "scope": scope, "publication_pending": false, "guardian": guardian,
         "provider": value["provider"],
     }))?;
     artifacts::seal(&attempt, "process.json", &checkpoint, RECORD_LIMIT)?;

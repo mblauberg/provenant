@@ -303,9 +303,8 @@ Peer reads run concurrently, with at most eight in flight and one shared
 `limits.peer_seconds` deadline. Hosts still waiting at that deadline, including
 those not yet started, are unreachable; later replies are ignored. Peer output
 follows configured host label order regardless of completion order.
-An older relay that closes without a protocol refusal is reported as
-`unreachable`, since that response cannot distinguish an unsupported action
-from a lost reply without another potentially state-creating request.
+A peer that closes without a protocol refusal is reported as `unreachable`: a
+closed connection cannot distinguish an unsupported action from a lost reply.
 
 Board composition retains the local page and cursor. It qualifies deduplication
 by host, project and attempt, validates the host on each peer row, and reports
@@ -396,8 +395,7 @@ retained attempts. That full-board target has not been verified on a real host.
 
 `console projects` lists existing Git-common-directory bindings; linked
 worktrees share one project. Session catalogues list only explicitly registered
-chairs and report checkpoint consistency. Legacy checkpoints remain readable
-without being inferred as registrations. Reads allocate no identity, repair
+chairs and report format-2 checkpoint consistency. Reads allocate no identity, repair
 nothing and report unreadable records and scan exhaustion explicitly.
 Session cursors bind the selection and observed records; changed snapshots
 require a fresh walk. Tagged paths preserve native bytes.
@@ -784,26 +782,27 @@ a bounded stderr cause on refusal.
 ### Checks report, never repair
 
 `check` exits 1 on findings, 2 on malformed input and 3 on unreadable
-evidence. `check release` reads Git with redirects, replacements,
-fsmonitor, textconv and lazy fetch off, and a missing object never yields a
-clean result. No check fetches or rewrites. Each line in
-`crates/cli/src/check/release-fixtures.txt` has the form
-`<path> <rule> <digest>`, where `digest` is the first 16 lowercase hex characters of
-SHA-256 over the exact matched line bytes, excluding its newline. A finding
-is suppressed only when all three fields match, in both the working tree and
-history blobs. Every suppression is counted in scan evidence. An entry whose
-path is tracked but matches no finding in the current tree is reported as a
-stale fixture finding and must be removed or updated. After reviewing such a change, list any new
-path and rerun the fixture unit test with `PROVENANT_BLESS_RELEASE_FIXTURES=1`; it rewrites
-the digests for listed paths. Path and symlink checks remain active for
-listed paths, and commit metadata checks are unaffected. Changes to this
-allowlist require review.
-- Why (default): a release scan that passes on missing evidence would publish secrets.
-- Test: `tests/checks.rs::release_ignores_grafts_and_rejects_missing_ancestry_evidence`;
-  `tests/checks.rs::release_scans_added_then_deleted_blobs_and_commit_identity_bytes`;
-  `crates/cli/src/check/release.rs::reviewed_literal_is_suppressed_but_other_line_at_same_path_is_reported`;
-  `crates/cli/src/check/release.rs::different_history_token_at_a_listed_path_is_reported`;
-  `crates/cli/src/check/release.rs::stale_fixture_entry_is_reported_and_suppression_count_is_noted`
+evidence. `check release` validates Git with redirects, replacements,
+fsmonitor, textconv and lazy fetch off; a missing object never yields a clean
+result. It requires the legal and public files, checks tracked and historical
+paths for private names and symlinks, verifies selected commit and tree
+evidence, and checks commit author and committer addresses. Its byte rules for
+personal home paths, private keys and provider keys scan the running
+`provenant` executable as the built artifact. The artifact bytes and all Git
+evidence contribute to the input digest used by pagination. Source and history
+file contents are not scanned for those byte patterns. A debug executable can
+report its embedded build path; inspect the stripped release executable before
+distribution. Key and token findings remain actionable in every build profile.
+
+- Why (default): the executable that will be distributed must not contain
+  private paths or credentials, while Git checks retain legal, path and
+  ancestry integrity.
+- Test: `tests/checks.rs::release_checks_the_running_binary_as_an_artifact`;
+  `tests/checks.rs::release_checks_legal_private_symlink_and_bounded_evidence`;
+  `tests/checks.rs::release_ignores_grafts_and_rejects_missing_ancestry_evidence`;
+  `tests/checks.rs::release_ranges_check_commit_identity_across_a_shallow_boundary`;
+  `tests/checks.rs::release_flags_personal_email_in_commit_author_and_committer`;
+  `crates/cli/src/check/release.rs::byte_rules_match_sensitive_values_in_binary_data`
 - Owner: `crates/cli/src/check/`, `src/checks.rs`
 
 ## Not provided

@@ -315,9 +315,11 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
         ))?)
         .bytes(),
     );
+    // Simulate a crash after the current completion seal but before the
+    // mutable pickup pointer was published. Delivery should replay this seal.
     artifacts::seal(
         &attempt,
-        &format!("delivery-{key}.json"),
+        &format!("delivery-complete-{key}.json"),
         &db::bytes(&WriterDeliveryReceipt {
             extra: Default::default(),
             schema_version: 1,
@@ -325,9 +327,9 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
             branch: fixture.request.branch.clone(),
             head: Some(head),
             review_acceptance: None,
-            state: WriterDeliveryState::Failed {
+            state: WriterDeliveryState::Delivered {
                 extra: Default::default(),
-                stage: WriterDeliveryStage::Interrupted,
+                pull_request: None,
             },
             integration: None,
         })?,

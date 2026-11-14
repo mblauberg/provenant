@@ -30,7 +30,8 @@ an unknown cause, the refactor rules below for restructuring.
 - Update the owned docs in the same pull request; a settled decision moves to
   its durable home (`engineering-docs`).
 - Keep compatibility only for published contracts. Otherwise change the
-  callers and delete the old path; persisted state changes ship a migration.
+  callers and delete the old path; follow the owning repository's format policy
+  for persisted state changes.
 - Report checks that did not run as unverified, never as passing.
 - When the spec is wrong, cite the evidence in the handoff `decisions` and take
   the smallest option inside write scope that serves the outcome. If none

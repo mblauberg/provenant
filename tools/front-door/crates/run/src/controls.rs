@@ -472,7 +472,7 @@ mod reboot_tests {
         let attempt = store.attempt_dir(id, false)?;
         let scope = RunStore::scope(&record);
         attempt.atomic_write(std::ffi::OsStr::new("process.json"), ".checkpoint-", &serde_json::to_vec(&serde_json::json!({
-            "schema_version": 1, "scope": scope,
+            "schema_version": 1, "scope": scope, "publication_pending": false,
             "guardian": { "boot": "darwin:00000000-0000-0000-0000-000000000000", "pid": 100, "native_start": 1, "group_id": 100, "session_id": 100 },
             "provider": { "boot": "darwin:00000000-0000-0000-0000-000000000000", "pid": 101, "native_start": 2, "group_id": 101, "session_id": 100 }
         }))?, provenant_os::fs::PublishMode::Replace)?;
@@ -882,7 +882,8 @@ mod reboot_tests {
             "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
             "queued_at": deadline,
             "state": {"state":"running"},
-            "usage": {},
+            "usage": {}, "trace": {},
+            "read_only_writable": [], "protected_paths": [],
             "prompt": {"path":{"encoding":"utf8", "path":"prompt.txt"},
                 "digest": provenant_records::CanonicalV1::file_digest(b""), "bytes":0, "complete":true, "redacted":false}
         }))?;
@@ -1066,7 +1067,7 @@ mod lineage_tests {
             };
             let store = RunStore::open(&execution, &call)?;
             let writer = WriterRequest {
-                extra: Default::default(),
+                extra: [("custody_project".into(), serde_json::json!(project_id))].into(),
                 project: project.clone(),
                 worktree: info.path.clone(),
             };
@@ -1151,11 +1152,18 @@ mod lineage_tests {
             if origin == Some(WorktreeOrigin::Lane) {
                 let attempt = store.attempt_dir(prior, false)?;
                 let snapshot = attempt.current_path()?.join("writer-owned.json");
-                let legacy = br#"{"schema_version":1,"lane_owned":true}"#;
-                std::fs::write(&snapshot, legacy)?;
+                let unobserved = crate::db::bytes(&crate::writer::WriterOwnership {
+                    schema_version: 1,
+                    lane_owned: true,
+                    owner: None,
+                })?;
+                std::fs::write(&snapshot, &unobserved)?;
                 let launch = crate::prepare_writer(&writer, &store.writer_registry, project_id)?;
-                crate::writer::seal_writer_ownership(&attempt, &launch.worktree)?;
-                assert_eq!(std::fs::read(&snapshot)?, legacy);
+                assert!(matches!(
+                    crate::writer::seal_writer_ownership(&attempt, &launch.worktree),
+                    Err(RunError::Conflict)
+                ));
+                assert_eq!(std::fs::read(&snapshot)?, unobserved);
                 assert!(matches!(
                     store.check_writer_lineage(&record, &launch.worktree, &call),
                     Err(RunError::WriterLineage(
@@ -1365,7 +1373,7 @@ mod lineage_tests {
         };
         let store = RunStore::open(&execution, &call)?;
         original.request.task.writer = Some(WriterRequest {
-            extra: Default::default(),
+            extra: [("custody_project".into(), serde_json::json!(project_id))].into(),
             project: project.clone(),
             worktree: info.path.clone(),
         });
@@ -1583,7 +1591,7 @@ mod lineage_tests {
                 Ok(replacement)
             })?;
         let writer = WriterRequest {
-            extra: Default::default(),
+            extra: [("custody_project".into(), serde_json::json!(project_id))].into(),
             project: project.clone(),
             worktree: replacement.path,
         };
@@ -1741,7 +1749,7 @@ impl RunStore {
             let writer = request.task.writer.as_ref();
             let (directory, expected_slot) = match writer {
                 Some(writer) => {
-                    let expected = self.writer_slot(writer, record.project_id)?;
+                    let expected = self.writer_slot(writer)?;
                     let readable = self
                         .writer_fences()?
                         .into_iter()
@@ -1952,7 +1960,7 @@ impl RunStore {
         let writer = request.task.writer.as_ref();
         let directory = match writer {
             Some(writer) => {
-                let slot = self.writer_slot(writer, record.project_id)?;
+                let slot = self.writer_slot(writer)?;
                 match provenant_os::fs::Directory::open_anchor(&slot) {
                     Ok(directory) => directory,
                     Err(error) if error.is_not_found() => return Ok(None),
@@ -2006,9 +2014,7 @@ impl RunStore {
             // The slot is named from the worktree path, so it needs no Git access.
             let request = self.request(record.attempt_id, call)?;
             let writer = request.task.writer.as_ref();
-            let slot = writer
-                .map(|writer| self.writer_slot(writer, record.project_id))
-                .transpose()?;
+            let slot = writer.map(|writer| self.writer_slot(writer)).transpose()?;
             let custody = match &slot {
                 Some(slot) => match provenant_os::fs::Directory::open_anchor(slot) {
                     Ok(directory) => directory,
@@ -2388,9 +2394,7 @@ impl RunStore {
             .writer
             .as_ref()
             .zip(previous_task.writer.as_ref())
-            .is_some_and(|(writer, previous)| {
-                equivalent_writer(previous, writer, self.context.project_id)
-            })
+            .is_some_and(|(writer, previous)| equivalent_writer(previous, writer))
             || task.source_head.is_none()
             || task.source_head.as_ref() != source
             || task.head.is_none()
@@ -3607,7 +3611,7 @@ mod tests {
         let store = RunStore::open(&context, &call)?;
         let mut run = crate::tests::input();
         run.request.task.writer = Some(WriterRequest {
-            extra: Default::default(),
+            extra: crate::tests::writer_extra(),
             project: temp.path().join("checkout"),
             worktree: temp.path().join("checkout/.worktrees/interrupted"),
         });

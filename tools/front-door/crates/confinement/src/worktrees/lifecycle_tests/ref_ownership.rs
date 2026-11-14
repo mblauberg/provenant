@@ -197,12 +197,12 @@ fn lane_owners_link_the_created_generation() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn owner_records_without_a_ref_link_still_load() -> Result<(), Box<dyn Error>> {
-    // No backward compatibility shim: an old record is simply unobserved.
+fn adopted_owner_without_a_ref_link_stays_unobserved() -> Result<(), Box<dyn Error>> {
+    // An adopted checkout can lack observed branch ownership.
     let owner: WorktreeOwner = serde_json::from_value(serde_json::json!({
         "attempt_id": null,
         "operation_id": null,
-        "branch": "human/old",
+        "branch": "human/adopted",
         "base": "1111111111111111111111111111111111111111",
         "host": provenant_core::HostId::from_bytes([1; 16]),
         "created_at": SystemClock.wall_now()?,

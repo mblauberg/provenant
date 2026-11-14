@@ -274,12 +274,12 @@ fn default_base_fetch_is_outside_registry_lock_and_failed_fetch_ignores_cached_t
 }
 
 #[test]
-fn gc_legacy_observer_gate_preview_is_read_only_and_apply_initialises_it()
--> Result<(), Box<dyn Error>> {
+fn gc_missing_observer_gate_remains_unknown_during_preview_and_apply() -> Result<(), Box<dyn Error>>
+{
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
-    let lane = gc_merged_worktree(&fixture, &context, "gc-legacy-gate")?;
+    let lane = gc_merged_worktree(&fixture, &context, "gc-missing-gate")?;
     let slot = writer_directory(context.project_state, &lane.path)?;
     drop(slot.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?);
     let gate = slot.current_path()?.join("writer-probe.lock");
@@ -299,7 +299,7 @@ fn gc_legacy_observer_gate_preview_is_read_only_and_apply_initialises_it()
     assert_eq!(
         preview.worktrees.retained,
         vec![RetainedBranch {
-            branch: "gc-legacy-gate".into(),
+            branch: "gc-missing-gate".into(),
             reason: RetainReason::UnknownWriter,
             detail: None,
         }]
@@ -323,9 +323,20 @@ fn gc_legacy_observer_gate_preview_is_read_only_and_apply_initialises_it()
         },
         &cancel(),
     )?;
-    assert_eq!(applied.worktrees.removed.len(), 1, "{applied:?}");
-    assert!(gate.is_file(), "mutation upgrades legacy observation gates");
-    assert!(!lane.path.exists());
+    assert!(applied.worktrees.removed.is_empty(), "{applied:?}");
+    assert_eq!(
+        applied.worktrees.retained,
+        vec![RetainedBranch {
+            branch: "gc-missing-gate".into(),
+            reason: RetainReason::UnknownWriter,
+            detail: None,
+        }]
+    );
+    assert!(
+        !gate.exists(),
+        "mutation cannot repair a missing observer gate"
+    );
+    assert!(lane.path.exists());
     Ok(())
 }
 

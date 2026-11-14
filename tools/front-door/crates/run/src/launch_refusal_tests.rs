@@ -87,7 +87,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             std::fs::create_dir(&project)?;
             std::fs::create_dir(&worktree)?;
             run.request.task.writer = Some(WriterRequest {
-                extra: Default::default(),
+                extra: crate::tests::writer_extra(),
                 project,
                 worktree,
             });

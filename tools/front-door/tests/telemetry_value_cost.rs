@@ -2,7 +2,7 @@
 #![allow(clippy::disallowed_methods)]
 mod support;
 use provenant_core::{ProjectId, WallTime};
-use provenant_telemetry::ledger::{self, Cost, Labels, Row, Source, Tokens};
+use provenant_telemetry::ledger::{self, Cost, Row, Source, Tokens};
 use serde_json::{Value, json};
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -46,10 +46,9 @@ fn row(
         project: ProjectId::from_bytes([3; 16]),
         // Each attempt is the only one of its own one-node graph, so a cost
         // target names it as `graph-X` (its first id letter).
-        graph: Some(format!("graph-{}", &attempt[..1])),
-        node: Some("task".into()),
+        graph: format!("graph-{}", &attempt[..1]),
+        node: "task".into(),
         attempt: attempt.into(),
-        labels: Labels::default(),
         provider: Some(provider.into()),
         model: Some("m".into()),
         effort: None,

@@ -1519,9 +1519,8 @@ fn lane_context_fixture_joins_existing_chair_and_graph() -> Result<(), Box<dyn s
     assert_eq!(report.coverage["harness_version"].known, 1);
     assert_eq!(report.coverage["system_prompt"].unknown, 1);
     assert_eq!(lane.usage.uncached_input, Some(42));
-    // A pre-enrichment pending trace still decodes, without backfilling history.
-    let legacy: provenant_records::Trace = serde_json::from_str("{}")?;
-    lane.trace = legacy;
+    // Unobserved trace context cannot invent cost or provenance.
+    lane.trace = provenant_records::Trace::default();
     lane.context = None;
     let historical = crate::context::report(&[&lane], &chairs, &prices(None))?;
     assert!(historical.attempts[0].lane.cost.complete.is_none());

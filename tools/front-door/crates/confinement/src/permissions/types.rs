@@ -347,15 +347,14 @@ pub struct WorktreeWriteAuthority {
     pub git_grants_digest: [u8; 32],
     pub(super) cargo_cache: PathGrant,
     pub(super) publishing: bool,
-    /// Older records remain readable, but cannot launch without a verified binding.
-    #[serde(default)]
-    pub(super) common_git_dir: Option<PathBuf>,
+    /// Common Git directory from the verified repository binding.
+    pub(super) common_git_dir: PathBuf,
 }
 
 impl WorktreeWriteAuthority {
     /// Repository selected by the host, for the lane-private object alternate.
-    pub fn common_git_dir(&self) -> Option<&Path> {
-        self.common_git_dir.as_deref()
+    pub fn common_git_dir(&self) -> &Path {
+        &self.common_git_dir
     }
 
     pub fn set_publishing(&mut self, enabled: bool) {
@@ -380,7 +379,7 @@ impl WorktreeWriteAuthority {
             git_grants_digest: grants.digest(&cargo_cache),
             cargo_cache,
             publishing: true,
-            common_git_dir: Some(worktree.repo().common_git_dir().to_path_buf()),
+            common_git_dir: worktree.repo().common_git_dir().to_path_buf(),
         })
     }
 }

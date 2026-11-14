@@ -170,7 +170,7 @@ fn unreadable_reservation_in_the_writers_directory_holds_custody() -> TestResult
     let mut input = input();
     let worktree = temp.path().join("lane");
     input.request.task.writer = Some(WriterRequest {
-        extra: Default::default(),
+        extra: crate::tests::writer_extra(),
         project: temp.path().to_path_buf(),
         worktree: worktree.clone(),
     });

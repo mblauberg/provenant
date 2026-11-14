@@ -275,21 +275,9 @@ impl crate::RunStore {
         }
         // Only this attempt's own slot can hold its guardian; sibling slots are
         // not inventoried for each displayed row.
-        self.db
-            .query_row(
-                "SELECT project FROM attempts WHERE id=?1",
-                [scope.attempt.to_string()],
-                |row| row.get::<_, String>(0),
-            )
+        self.attempt_writer_slot(scope.attempt, call)
             .ok()
-            .and_then(|project| {
-                self.attempt_writer_slot(
-                    scope.attempt,
-                    provenant_core::ProjectId::parse(&project).ok()?,
-                    call,
-                )
-                .ok()?
-            })
+            .flatten()
             .and_then(|slot| Directory::open_anchor(&slot).ok())
             .is_some_and(|slot| check(&slot))
     }
@@ -832,7 +820,7 @@ mod tests {
             &attempt,
             "process.json",
             &serde_json::to_vec(
-                &serde_json::json!({"schema_version":1, "scope":scope, "guardian":identity}),
+                &serde_json::json!({"schema_version":1, "scope":scope, "publication_pending":false, "guardian":identity}),
             )?,
             RECORD_LIMIT,
         )?;
@@ -1593,7 +1581,7 @@ mod tests {
             &attempt,
             "process.json",
             &serde_json::to_vec(&serde_json::json!({
-                "schema_version":1, "scope":scope, "guardian":current.identity
+                "schema_version":1, "scope":scope, "publication_pending":false, "guardian":current.identity
             }))?,
             RECORD_LIMIT,
         )?;
@@ -2016,7 +2004,7 @@ impl crate::RunStore {
                 ));
             }
         }
-        if let Some(slot) = self.attempt_writer_slot(record.attempt_id, record.project_id, call)? {
+        if let Some(slot) = self.attempt_writer_slot(record.attempt_id, call)? {
             match Directory::open_anchor(&slot) {
                 Ok(slot) => {
                     if provenant_supervisor::custody::reservation_present(

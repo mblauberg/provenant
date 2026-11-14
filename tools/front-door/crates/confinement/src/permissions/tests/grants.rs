@@ -98,7 +98,7 @@ fn write_grants_list_every_write_source() {
     plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
         git_grants_digest: [7; 32],
         publishing: true,
-        common_git_dir: Some("/fixture/git".into()),
+        common_git_dir: "/fixture/git".into(),
         cargo_cache: PathGrant {
             path: "/fixture/cache".into(),
             scope: PathScope::Subtree,
@@ -186,7 +186,7 @@ fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn s
             plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
                 git_grants_digest: [7; 32],
                 publishing: true,
-                common_git_dir: Some("/fixture/git".into()),
+                common_git_dir: "/fixture/git".into(),
                 cargo_cache: PathGrant {
                     path: "/fixture/cache".into(),
                     scope: PathScope::Subtree,
@@ -201,7 +201,7 @@ fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn s
             writer.then_some(&git),
             Path::new("/fixture/home"),
         )?)?;
-        // Ordinary database IPC is ambient; legacy grant flags add no denial.
+        // Ordinary database IPC is ambient and has no grant flags.
         assert!(rendered.contains("(allow default)"));
         assert!(!rendered.contains("(deny ipc-sysv-"));
         let mut database = ProviderProfile {
@@ -266,7 +266,7 @@ fn write_grants_cover_every_rendered_file_write() -> Result<(), Box<dyn std::err
             plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
                 git_grants_digest: [7; 32],
                 publishing: true,
-                common_git_dir: Some("/fixture/git".into()),
+                common_git_dir: "/fixture/git".into(),
                 cargo_cache: subtree("/fixture/cache"),
             }));
         }
@@ -335,7 +335,7 @@ fn serialised_digest_cannot_authorise_without_a_verified_worktree() {
     let authority = WorktreeWriteAuthority {
         git_grants_digest: [0; 32],
         publishing: true,
-        common_git_dir: Some("/fixture/git".into()),
+        common_git_dir: "/fixture/git".into(),
         cargo_cache: PathGrant {
             path: "/fixture/home/Library/Caches/provenant-lane-cargo/fixture".into(),
             scope: PathScope::Subtree,
@@ -660,14 +660,18 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
         Err(PermissionError::GitWriteAuthorityMissing)
     ));
 
-    for common_git_dir in [None, Some(fixture._temp.path().join("other-git"))] {
-        let mut tampered = authority.clone();
-        tampered.common_git_dir = common_git_dir;
-        assert!(matches!(
-            verify_worktree_authority(&tampered, &anchors),
-            Err(PermissionError::GitWriteAuthorityMissing)
-        ));
-    }
+    let mut tampered = authority.clone();
+    tampered.common_git_dir = fixture._temp.path().join("other-git");
+    assert!(matches!(
+        verify_worktree_authority(&tampered, &anchors),
+        Err(PermissionError::GitWriteAuthorityMissing)
+    ));
+    let mut missing = serde_json::to_value(&authority)?;
+    missing
+        .as_object_mut()
+        .ok_or("authority fields")?
+        .remove("common_git_dir");
+    assert!(serde_json::from_value::<WorktreeWriteAuthority>(missing).is_err());
 
     let original_head = std::fs::read(private.join("HEAD"))?;
     std::fs::write(private.join("HEAD"), b"ref: refs/heads/s3/other\n")?;

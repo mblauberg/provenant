@@ -106,12 +106,8 @@ fn key(row: &Row, by: By) -> String {
     match by {
         By::Account => some(&row.account),
         By::Model => some(&row.model),
-        By::Graph => some(&row.graph),
-        By::Node => match (&row.graph, &row.node) {
-            (Some(graph), Some(node)) => format!("{graph}/{node}"),
-            (None, Some(node)) => node.clone(),
-            _ => GAP.to_owned(),
-        },
+        By::Graph => row.graph.clone(),
+        By::Node => format!("{}/{}", row.graph, row.node),
         By::Route => match (&row.provider, &row.model) {
             (Some(provider), Some(model)) => match &row.effort {
                 Some(effort) => format!("{provider}/{model}/{effort}"),
@@ -145,7 +141,7 @@ pub fn group<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ledger::{Cost, FORMAT, Labels, Source, Tokens};
+    use crate::ledger::{Cost, FORMAT, Source, Tokens};
     use provenant_core::{ProjectId, WallTime};
 
     fn row(attempt: &str, account: Option<&str>, cost: Option<(u64, bool)>) -> Row {
@@ -154,10 +150,9 @@ mod tests {
             format: FORMAT.into(),
             source: Source::Settlement,
             project: ProjectId::from_bytes([1; 16]),
-            graph: None,
-            node: None,
+            graph: "graph".into(),
+            node: "node".into(),
             attempt: attempt.into(),
-            labels: Labels::default(),
             provider: Some("claude".into()),
             model: Some("m".into()),
             effort: None,
