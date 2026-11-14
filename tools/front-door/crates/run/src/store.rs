@@ -1137,11 +1137,8 @@ impl RunStore {
             };
         old.preparation_failure = preparation_failure;
         let publication = TerminalPublication {
-            stop: terminal_cause.and_then(|cause| {
-                provenant_records::Stop::sealed(Some(cause), None)
-                    .ok()
-                    .flatten()
-            }),
+            stop: terminal_cause
+                .and_then(|cause| provenant_records::Stop::new(cause.into(), None).ok()),
             terminal_cause,
             terminal_note,
             outcome,

@@ -2566,14 +2566,11 @@ impl RunStore {
             decoded.terminal_cause = None;
         }
         let decoded_reason = decoded.reason.take().map(bounded_reason);
-        let cause = decoded
-            .terminal_cause
-            .map(Into::into)
-            .or_else(|| provenant_records::StopCause::of_outcome(decoded.outcome));
-        let stop = match cause {
-            Some(cause) => provenant_records::Stop::new(cause, handoff.clone()).map(Some),
-            None => provenant_records::Stop::sealed(None, handoff.clone()),
-        }
+        let stop = provenant_records::Stop::sealed(
+            decoded.terminal_cause,
+            decoded.outcome,
+            handoff.clone(),
+        )
         .map_err(|_| RunError::Validation("stop could not be sealed"))?;
         let publication = TerminalPublication {
             stop,

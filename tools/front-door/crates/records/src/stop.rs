@@ -636,13 +636,23 @@ impl Stop {
     }
 
     /// The stop settlement seals: the recorded terminal cause if any, else the
-    /// cause the handoff declares, else none (a finished attempt).
+    /// cause the host outcome names, else the cause the handoff declares, else
+    /// none (a finished attempt). Host facts such as lost or unsettled custody
+    /// outrank the writer's account. `uncommitted` is not such a fact: it says
+    /// how the work was left, and a declared stop already covers edits left on
+    /// the worktree, so the declared cause wins over it.
     pub fn sealed(
         cause: Option<crate::run::TerminalCause>,
+        outcome: crate::run::Outcome,
         handoff: Option<Handoff>,
     ) -> Result<Option<Self>, StopError> {
-        match (cause, handoff) {
-            (Some(cause), handoff) => Self::new(cause.into(), handoff).map(Some),
+        let declared = handoff.as_ref().is_some_and(Handoff::unfinished);
+        let host = cause.map(Into::into).or_else(|| {
+            StopCause::of_outcome(outcome)
+                .filter(|cause| !(declared && *cause == StopCause::Uncommitted))
+        });
+        match (host, handoff) {
+            (Some(cause), handoff) => Self::new(cause, handoff).map(Some),
             (None, Some(handoff)) => Self::declared(handoff),
             (None, None) => Ok(None),
         }

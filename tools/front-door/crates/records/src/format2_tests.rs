@@ -335,3 +335,37 @@ fn each_record_round_trips_and_keeps_an_unknown_field() {
         true,
     );
 }
+
+/// A declared writer stop restarts with its edits whether or not it committed
+/// them, while a host custody fact still outranks the writer's account.
+#[test]
+fn a_declared_stop_survives_uncommitted_edits_but_not_uncertain_custody() {
+    use crate::run::Outcome;
+    let stopped = Handoff::from_json(
+        br#"{"schema_version":2,"status":"stopped_early","note":"n","remaining":["r"],"decisions":[],"verify":[]}"#,
+    )
+    .unwrap();
+    let cause = |outcome, handoff: Option<&Handoff>| {
+        Stop::sealed(None, outcome, handoff.cloned())
+            .unwrap()
+            .map(|stop| stop.cause())
+    };
+    for outcome in [Outcome::ReviewRequired, Outcome::Uncommitted] {
+        assert_eq!(
+            cause(outcome, Some(&stopped)),
+            Some(StopCause::StoppedEarly),
+            "{outcome:?}"
+        );
+    }
+    assert_eq!(
+        cause(Outcome::Uncommitted, None),
+        Some(StopCause::Uncommitted)
+    );
+    for (outcome, host) in [
+        (Outcome::Lost, StopCause::Lost),
+        (Outcome::Unsettled, StopCause::Unsettled),
+        (Outcome::Quarantined, StopCause::Quarantined),
+    ] {
+        assert_eq!(cause(outcome, Some(&stopped)), Some(host), "{outcome:?}");
+    }
+}
