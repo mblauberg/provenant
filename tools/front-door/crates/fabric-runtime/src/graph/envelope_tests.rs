@@ -275,6 +275,13 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 fragment: node.plan.as_ref().map(|_| "\"".repeat(plans::STORED_BLOCK_BYTES / 2 - 1)),
                 handoff: plans::writer(node).then(worst_handoff),
                 blocked: true,
+                review_settlement: template::review_node(node).then(|| ReviewSettlement {
+                    attempt_id: provenant_core::AttemptId::from_bytes([1; 16]),
+                    head: provenant_core::GitOid::parse(&"1".repeat(64)).unwrap(),
+                    base: Some(provenant_core::GitOid::parse(&"2".repeat(64)).unwrap()),
+                    verdict: provenant_records::workflow::ReviewVerdict::ApproveWithNits,
+                    independent: false,
+                }),
                 decisions: if template::review_node(node) {
                     vec![worst_decision()]
                 } else {

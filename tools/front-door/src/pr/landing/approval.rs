@@ -1,37 +1,26 @@
 //! What stands as a pull request's landing approval, decided once for single
-//! and batch landing: by tier, an approving forge review at the head or a
-//! Provenant review record whose review covers the head, a change after it
-//! that touches no production code, or a review of the delta since.
+//! and batch landing: configured independent review sources on the exact head.
 use super::{
     LandingError,
-    model::Accepted,
-    ports::{Approval, Forge, MergeTree, Repo, ReviewRecords, Reviews},
+    model::{Accepted, ApprovalEvidence},
+    ports::{Forge, MergeTree, Repo, ReviewRecords},
 };
 use provenant_cli::domains::{ApprovalSource, ApprovalTier};
 use provenant_confinement::review_exempt::ReviewExempt;
-use provenant_core::review_cover::{self, Coverage, ReviewGit, Reviewed};
+use provenant_core::review_cover::{self, ReviewGit, Reviewed};
 use std::collections::BTreeMap;
 
 /// The approval source and tier of one landing run.
 #[derive(Clone, Copy)]
 pub struct Approvals<'a> {
-    source: ApprovalSource,
+    sources: &'a [ApprovalSource],
     records: &'a dyn ReviewRecords,
     tier: ApprovalTier,
     exempt: Option<&'a ReviewExempt>,
     /// The reason the chair accepts a delta no review covers.
     accept_delta: Option<&'a str>,
-    /// Per-member review proofs a landing request carried.
-    proofs: Option<&'a BTreeMap<u64, Proof>>,
-}
-
-/// The review proof one landing member carries beyond the landing policy.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Proof {
-    /// The caller proved review coverage of the pinned head, as a graph does.
-    Proved(String),
-    /// The chair accepts a delta no review covers, for this reason.
-    Accepted(String),
+    /// Explicit per-member owner acceptances carried by a landing request.
+    acceptances: Option<&'a BTreeMap<u64, String>>,
 }
 
 /// What lets a pull request land at its head.
@@ -44,8 +33,7 @@ pub enum Decision {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Approved {
     pub reference: String,
-    /// Paths changed after the review, none of them production code.
-    pub carried: Vec<String>,
+    pub evidence: Option<ApprovalEvidence>,
     pub accepted: Option<Accepted>,
 }
 
@@ -53,7 +41,7 @@ impl Approved {
     fn by(reference: impl Into<String>) -> Self {
         Self {
             reference: reference.into(),
-            carried: Vec::new(),
+            evidence: None,
             accepted: None,
         }
     }
@@ -63,35 +51,35 @@ impl Approved {
 struct NoRecords;
 #[cfg(test)]
 impl ReviewRecords for NoRecords {
-    fn reviews(&self, _number: u64) -> Result<Reviews, LandingError> {
-        Ok(Reviews::default())
+    fn reviews(&self, _number: u64, _head: &str) -> Result<super::ports::Reviews, LandingError> {
+        Ok(super::ports::Reviews::default())
     }
 }
 
 impl<'a> Approvals<'a> {
-    pub fn new(source: ApprovalSource, records: &'a dyn ReviewRecords) -> Self {
+    pub fn new(sources: &'a [ApprovalSource], records: &'a dyn ReviewRecords) -> Self {
         Self {
-            source,
+            sources,
             records,
             tier: ApprovalTier::Auto,
             exempt: None,
             accept_delta: None,
-            proofs: None,
+            acceptances: None,
         }
     }
 
-    /// Carry each member's own review proof.
-    pub fn with_proofs<'b>(self, proofs: &'b BTreeMap<u64, Proof>) -> Approvals<'b>
+    /// Carry each member's explicit owner acceptance.
+    pub fn with_acceptances<'b>(self, acceptances: &'b BTreeMap<u64, String>) -> Approvals<'b>
     where
         'a: 'b,
     {
         Approvals {
-            source: self.source,
+            sources: self.sources,
             records: self.records,
             tier: self.tier,
             exempt: self.exempt,
             accept_delta: self.accept_delta,
-            proofs: Some(proofs),
+            acceptances: Some(acceptances),
         }
     }
 
@@ -114,18 +102,18 @@ impl<'a> Approvals<'a> {
     #[cfg(test)]
     pub fn forge() -> Approvals<'static> {
         Approvals {
-            source: ApprovalSource::Forge,
+            sources: &[ApprovalSource::Forge],
             records: &NoRecords,
             tier: ApprovalTier::Carry,
             exempt: None,
             accept_delta: None,
-            proofs: None,
+            acceptances: None,
         }
     }
 
     /// Whether the run must read the target to decide an approval.
     pub fn needs_target(&self) -> bool {
-        self.source == ApprovalSource::Receipt || self.tier == ApprovalTier::Auto
+        self.tier == ApprovalTier::Auto
     }
 
     fn production(&self, path: &str) -> bool {
@@ -138,147 +126,6 @@ impl<'a> Approvals<'a> {
     /// Whether `paths` is a change to no production code.
     fn non_production(&self, paths: &[String]) -> bool {
         !paths.is_empty() && paths.iter().all(|path| !self.production(path))
-    }
-
-    /// Approvals that stand for `head` of pull request `number`. A review
-    /// record is proved against `target`, the fetched target commit, so a
-    /// merge-in from it or a rebase with an unchanged delta keeps the review.
-    /// Under `carry` a change after the review that touches no production code
-    /// keeps it too, and under `carry` and `delta` a review of the delta since
-    /// stands in for a review of the whole. A record that cannot be proved, or
-    /// one of a retired shape, approves nothing and is named in
-    /// [`Standing::unusable`]; it never fails the run.
-    pub fn standing(
-        &self,
-        forge: &mut dyn Forge,
-        repo: &mut dyn Repo,
-        number: u64,
-        head: &str,
-        target: &str,
-        tier: ApprovalTier,
-    ) -> Result<Standing, LandingError> {
-        if self.source == ApprovalSource::Forge {
-            return Ok(Standing {
-                approvals: forge.approvals(number, head)?,
-                ..Standing::default()
-            });
-        }
-        let Reviews {
-            records,
-            mut unusable,
-        } = self.records.reviews(number)?;
-        let mut standing = Standing::default();
-        let cover = |repo: &mut dyn Repo, record: &super::ports::ReviewRecord, at: &str| {
-            let reviewed = Reviewed {
-                head: &record.head,
-                base: Some(&record.base),
-            };
-            review_cover::coverage(&mut RepoGit(repo), reviewed, at, target)
-        };
-        for record in &records {
-            let approval = Approval {
-                reference: record.reference.clone(),
-                reviewer: record.reviewer.clone(),
-            };
-            match cover(repo, record, head) {
-                Ok(Coverage::DeltaChanged) if tier == ApprovalTier::Carry => {
-                    match self.changed_after(repo, record, head, target) {
-                        Ok(paths) if self.non_production(&paths) => {
-                            standing.carried.insert(record.reference.clone(), paths);
-                            standing.approvals.push(approval);
-                        }
-                        Ok(_) => {}
-                        Err(error) => {
-                            unusable.push(format!("unprovable: {}: {error}", record.reference));
-                        }
-                    }
-                }
-                Ok(coverage) if coverage.covers() => standing.approvals.push(approval),
-                Ok(_) => {}
-                Err(error) => unusable.push(format!("unprovable: {}: {error}", record.reference)),
-            }
-        }
-        // A review of the head against the head a covering review read.
-        if tier != ApprovalTier::None {
-            for record in records.iter().filter(|record| record.head == head) {
-                for prior in records.iter().filter(|prior| prior.head == record.base) {
-                    match cover(repo, prior, &prior.head) {
-                        Ok(coverage)
-                            if coverage.covers() && !standing.includes(&record.reference) =>
-                        {
-                            standing.approvals.push(Approval {
-                                reference: record.reference.clone(),
-                                reviewer: record.reviewer.clone(),
-                            });
-                        }
-                        Ok(_) => {}
-                        Err(error) => {
-                            unusable.push(format!("unprovable: {}: {error}", prior.reference));
-                        }
-                    }
-                }
-            }
-        }
-        standing.unusable = unusable;
-        Ok(standing)
-    }
-
-    /// The paths `head` changes on top of the reviewed delta replayed on its base.
-    fn changed_after(
-        &self,
-        repo: &mut dyn Repo,
-        record: &super::ports::ReviewRecord,
-        head: &str,
-        target: &str,
-    ) -> Result<Vec<String>, LandingError> {
-        let Some(base) = repo.merge_base(head, target)? else {
-            return Ok(Vec::new());
-        };
-        let Some(replayed) = RepoGit(repo).merge_tree(&record.head, &base)? else {
-            return Ok(Vec::new());
-        };
-        let tree = repo.tree_of(head)?;
-        repo.changed_paths(&replayed, &tree)
-    }
-
-    /// Whether `approval` is independent of the pull request's `author`. A
-    /// forge review names its reviewer's login. A receipt names no login: it
-    /// was accepted only once its review coverage passed, which already
-    /// refuses a reviewer who is an author.
-    pub fn independent(&self, approval: &Approval, author: &str) -> bool {
-        match self.source {
-            ApprovalSource::Forge => {
-                !approval.reviewer.is_empty() && !approval.reviewer.eq_ignore_ascii_case(author)
-            }
-            ApprovalSource::Receipt => true,
-        }
-    }
-}
-
-/// The approvals standing for a head, and why any other record could not.
-#[derive(Debug, Default)]
-pub struct Standing {
-    pub approvals: Vec<Approval>,
-    /// Records that might have approved the head but could not be used.
-    pub unusable: Vec<String>,
-    /// For an approval carried over a change after the review, the changed paths.
-    pub carried: BTreeMap<String, Vec<String>>,
-}
-
-impl Standing {
-    pub fn includes(&self, reference: &str) -> bool {
-        self.approvals
-            .iter()
-            .any(|approval| approval.reference == reference)
-    }
-
-    /// Why no approval stands: `missing`, or the records that could not be used.
-    pub fn exclusion(&self, missing: &str) -> String {
-        if self.unusable.is_empty() {
-            missing.to_owned()
-        } else {
-            self.unusable.join("; ")
-        }
     }
 }
 
@@ -310,10 +157,6 @@ impl Approver<'_, '_> {
         author: &str,
     ) -> Result<Decision, LandingError> {
         let approvals = self.approvals;
-        let proof = approvals.proofs.and_then(|proofs| proofs.get(&number));
-        if let Some(Proof::Proved(reference)) = proof {
-            return Ok(Decision::Approved(Approved::by(reference.clone())));
-        }
         let tier = match approvals.tier {
             ApprovalTier::Auto => {
                 let paths = match self.repo.merge_base(head, self.target)? {
@@ -331,25 +174,72 @@ impl Approver<'_, '_> {
         if tier == ApprovalTier::None {
             return Ok(Decision::Approved(Approved::by("ci-only")));
         }
-        let standing =
-            approvals.standing(forge, &mut *self.repo, number, head, self.target, tier)?;
-        if let Some(approval) = standing.approvals.iter().find(|approval| {
-            !approval.reference.is_empty() && approvals.independent(approval, author)
-        }) {
-            return Ok(Decision::Approved(Approved {
-                reference: approval.reference.clone(),
-                carried: standing
-                    .carried
-                    .get(&approval.reference)
-                    .cloned()
-                    .unwrap_or_default(),
-                accepted: None,
-            }));
+        let mut unusable = Vec::new();
+        let mut failures = Vec::new();
+        for source in approvals.sources {
+            let candidates = match source {
+                ApprovalSource::ProvenantReview => match approvals.records.reviews(number, head) {
+                    Ok(reviews) => {
+                        unusable.extend(reviews.unusable);
+                        reviews
+                            .records
+                            .into_iter()
+                            .filter(|record| {
+                                record.head == head
+                                    && record.independent
+                                    && matches!(record.verdict,
+                                    provenant_records::workflow::ReviewVerdict::Approve
+                                    | provenant_records::workflow::ReviewVerdict::ApproveWithNits)
+                            })
+                            .map(|record| ApprovalEvidence {
+                                source: *source,
+                                reference: record.reference,
+                                reviewer: record.reviewer,
+                                head: record.head,
+                            })
+                            .collect::<Vec<_>>()
+                    }
+                    Err(error) => {
+                        failures.push(error.to_string());
+                        Vec::new()
+                    }
+                },
+                ApprovalSource::Forge => match forge.approvals(number, head) {
+                    Ok(records) => records
+                        .into_iter()
+                        .filter(|record| {
+                            !record.reviewer.is_empty()
+                                && !record.reviewer.eq_ignore_ascii_case(author)
+                        })
+                        .map(|record| ApprovalEvidence {
+                            source: *source,
+                            reference: record.reference,
+                            reviewer: record.reviewer,
+                            head: head.to_owned(),
+                        })
+                        .collect(),
+                    Err(error) => {
+                        failures.push(error.to_string());
+                        Vec::new()
+                    }
+                },
+            };
+            if let Some(evidence) = candidates
+                .into_iter()
+                .find(|record| !record.reference.is_empty() && !record.reviewer.is_empty())
+            {
+                return Ok(Decision::Approved(Approved {
+                    reference: evidence.reference.clone(),
+                    evidence: Some(evidence),
+                    accepted: None,
+                }));
+            }
         }
-        let accepted = match proof {
-            Some(Proof::Accepted(reason)) => Some(reason.as_str()),
-            _ => approvals.accept_delta,
-        };
+        let accepted = approvals
+            .acceptances
+            .and_then(|accepted| accepted.get(&number))
+            .map(String::as_str)
+            .or(approvals.accept_delta);
         if let Some(reason) = accepted {
             return Ok(Decision::Approved(Approved {
                 accepted: Some(Accepted {
@@ -359,9 +249,14 @@ impl Approver<'_, '_> {
                 ..Approved::by("accepted-delta")
             }));
         }
-        Ok(Decision::Refused(
-            standing.exclusion("no independent approval for the current head"),
-        ))
+        if !failures.is_empty() {
+            return Err(LandingError::Failed(failures.join("; ")));
+        }
+        Ok(Decision::Refused(if unusable.is_empty() {
+            "no independent approval for the current head".to_owned()
+        } else {
+            unusable.join("; ")
+        }))
     }
 }
 
@@ -438,174 +333,82 @@ pub(crate) fn graph_coverage(
 )]
 mod tests {
     use super::*;
-    use crate::pr::landing::{
-        candidate::select_batch_with_reasons,
-        fakes::{FakeForge, FakeRepo, FakeReviews},
-        ports::{PullRequestInfo, PullRequestState, ReviewRecord},
-    };
+    use crate::pr::landing::fakes::{FakeForge, FakeRepo, FakeReviews};
 
-    const H: &str = "1111111111111111111111111111111111111111";
-    const R: &str = "2222222222222222222222222222222222222222";
-    const B: &str = "3333333333333333333333333333333333333333";
-    const T: &str = "4444444444444444444444444444444444444444";
-    const OTHER: &str = "5555555555555555555555555555555555555555";
-    const X: &str = "6666666666666666666666666666666666666666";
-
-    fn record(reference: &str, head: &str, base: &str) -> ReviewRecord {
-        ReviewRecord {
-            reference: reference.into(),
-            reviewer: "reviewer".into(),
-            head: head.into(),
-            base: base.into(),
-        }
-    }
-
-    /// Main is `t` on `b`. The pull request was reviewed at `r` against `b`
-    /// and is now at `h`, one commit later, which changes `changed`.
-    fn repo(changed: &[&str]) -> FakeRepo {
+    #[test]
+    fn configured_source_order_selects_the_approving_evidence() -> Result<(), LandingError> {
+        use crate::pr::landing::ports::{Approval, ReviewRecord};
+        use provenant_records::workflow::ReviewVerdict;
+        let mut forge = FakeForge::default();
+        forge.approvals_at_head.insert(
+            (1, "head".into()),
+            vec![Approval {
+                reference: "forge-review".into(),
+                reviewer: "reviewer".into(),
+            }],
+        );
+        let reviews = FakeReviews::of(BTreeMap::from([(
+            1,
+            vec![ReviewRecord {
+                reference: "review-attempt".into(),
+                reviewer: "review-execution".into(),
+                head: "head".into(),
+                verdict: ReviewVerdict::Approve,
+                independent: true,
+            }],
+        )]));
         let mut repo = FakeRepo::default();
-        for (commit, parent) in [(T, B), (R, B), (H, R)] {
-            repo.parents.insert(commit.into(), vec![parent.into()]);
+        for sources in [
+            vec![ApprovalSource::ProvenantReview, ApprovalSource::Forge],
+            vec![ApprovalSource::Forge, ApprovalSource::ProvenantReview],
+            vec![ApprovalSource::Forge],
+        ] {
+            let Decision::Approved(approved) = Approvals::new(&sources, &reviews)
+                .at(&mut repo, "base")
+                .decide(&mut forge, 1, "head", "writer")?
+            else {
+                return Err(LandingError::Failed(
+                    "configured source did not approve".into(),
+                ));
+            };
+            assert_eq!(approved.evidence.map(|e| e.source), Some(sources[0]));
         }
-        repo.trees.insert(H.into(), format!("tree-{H}"));
-        repo.paths.insert(
-            (format!("tree-{R}-{B}"), format!("tree-{H}")),
-            changed.iter().map(|path| (*path).to_owned()).collect(),
-        );
-        repo
+        let disabled = Approvals::new(&[], &reviews)
+            .at(&mut repo, "base")
+            .decide(&mut forge, 1, "head", "writer")?;
+        assert!(matches!(disabled, Decision::Refused(_)));
+        Ok(())
     }
 
-    fn decide(
-        repo: &mut FakeRepo,
-        records: &[ReviewRecord],
-        tier: ApprovalTier,
-        accept: Option<&str>,
-    ) -> Decision {
-        let reviews = FakeReviews::of(BTreeMap::from([(7, records.to_vec())]));
+    #[test]
+    fn owner_override_is_explicit_and_records_actor_and_reason() -> Result<(), LandingError> {
+        let mut forge = FakeForge::default();
+        let mut repo = FakeRepo::default();
+        let reviews = FakeReviews::default();
         let exempt = ReviewExempt::none();
-        Approvals::new(ApprovalSource::Receipt, &reviews)
-            .governed(tier, &exempt, accept)
-            .at(repo, T)
-            .decide(&mut FakeForge::default(), 7, H, "author")
-            .unwrap()
-    }
-
-    fn refused(decision: &Decision) -> bool {
-        matches!(decision, Decision::Refused(_))
-    }
-
-    #[test]
-    fn a_change_to_tests_or_docs_after_review_keeps_the_approval_and_lists_its_paths() {
-        let reviewed = [record("d1", R, B)];
-        let paths = ["docs/x.md", "src/tests/a.rs"];
-        let Decision::Approved(approved) =
-            decide(&mut repo(&paths), &reviewed, ApprovalTier::Carry, None)
-        else {
-            panic!("a test and doc change should carry the review");
+        let sources = [ApprovalSource::ProvenantReview, ApprovalSource::Forge];
+        let approvals = Approvals::new(&sources, &reviews);
+        assert!(matches!(
+            approvals
+                .at(&mut repo, "base")
+                .decide(&mut forge, 1, "head", "writer")?,
+            Decision::Refused(_)
+        ));
+        let decision = approvals
+            .governed(ApprovalTier::Carry, &exempt, Some("owner accepts delta"))
+            .at(&mut repo, "base")
+            .decide(&mut forge, 1, "head", "writer")?;
+        let Decision::Approved(approved) = decision else {
+            return Err(LandingError::Failed(
+                "explicit override did not approve".into(),
+            ));
         };
-        assert_eq!(approved.reference, "d1");
-        assert_eq!(approved.carried, paths);
-        // Production code, and a tier that reviews every change, do not carry.
-        let production = ["src/a.rs", "docs/x.md"];
-        assert!(refused(&decide(
-            &mut repo(&production),
-            &reviewed,
-            ApprovalTier::Carry,
-            None
-        )));
-        assert!(refused(&decide(
-            &mut repo(&paths),
-            &reviewed,
-            ApprovalTier::Delta,
-            None
-        )));
-    }
-
-    #[test]
-    fn a_production_change_after_review_needs_a_review_of_the_delta() {
-        let (full, delta) = (record("d1", R, B), record("d2", H, R));
-        let mut repo = repo(&["src/a.rs"]);
-        assert!(refused(&decide(
-            &mut repo,
-            std::slice::from_ref(&full),
-            ApprovalTier::Carry,
-            None
-        )));
-        // A review of the new head against a head no review covers is not one.
-        let stray = record("d3", H, X);
-        assert!(refused(&decide(
-            &mut repo,
-            &[full.clone(), stray],
-            ApprovalTier::Carry,
-            None
-        )));
-        for tier in [ApprovalTier::Carry, ApprovalTier::Delta] {
-            let decision = decide(&mut repo, &[full.clone(), delta.clone()], tier, None);
-            assert!(
-                matches!(&decision, Decision::Approved(a) if a.reference == "d2"),
-                "{decision:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn accept_delta_lands_the_change_and_records_the_reason_and_actor() {
-        let reviewed = [record("d1", R, B)];
-        let mut repo = repo(&["src/a.rs"]);
-        let Decision::Approved(approved) =
-            decide(&mut repo, &reviewed, ApprovalTier::Carry, Some("typo"))
-        else {
-            panic!("the override should land the change");
-        };
-        assert_eq!(
-            approved.accepted,
-            Some(Accepted {
-                reason: "typo".into(),
-                actor: "chair".into()
-            })
-        );
-    }
-
-    #[test]
-    fn single_and_batch_landing_decide_alike() {
-        let info = |number: u64, head: &str| PullRequestInfo {
-            number,
-            head: head.into(),
-            base_branch: "main".into(),
-            author: "author".into(),
-            state: PullRequestState::Open,
-            merged_commit: None,
-            stack: None,
-        };
-        let full = record("d1", R, B);
-        for records in [vec![full.clone()], vec![full, record("d2", H, R)]] {
-            let mut forge = FakeForge::default();
-            forge.pull_requests.insert(7, info(7, H));
-            forge.pull_requests.insert(8, info(8, OTHER));
-            let mut repo = repo(&["src/a.rs"]);
-            let alone = decide(&mut repo, &records, ApprovalTier::Carry, None);
-            let reviews = FakeReviews::of(BTreeMap::from([(7, records)]));
-            let exempt = ReviewExempt::none();
-            let mut approver = Approvals::new(ApprovalSource::Receipt, &reviews)
-                .governed(ApprovalTier::Carry, &exempt, None)
-                .at(&mut repo, T);
-            let (selected, reasons) = select_batch_with_reasons(
-                &mut forge,
-                &mut approver,
-                &[8, 7],
-                &[8, 7],
-                "main",
-                2,
-                0,
-            )
-            .unwrap();
-            match alone {
-                Decision::Approved(approved) => {
-                    assert_eq!(selected.len(), 1);
-                    assert_eq!(selected[0].approval, approved.reference);
-                }
-                Decision::Refused(reason) => assert_eq!(reasons[&7], reason),
-            }
-        }
+        let accepted = approved
+            .accepted
+            .ok_or_else(|| LandingError::Failed("missing owner evidence".into()))?;
+        assert_eq!(accepted.actor, "chair");
+        assert_eq!(accepted.reason, "owner accepts delta");
+        assert!(approved.evidence.is_none());
+        Ok(())
     }
 }

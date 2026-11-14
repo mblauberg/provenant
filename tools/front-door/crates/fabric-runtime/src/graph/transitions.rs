@@ -216,6 +216,20 @@ pub(super) fn apply_attempt_observation(
     facts: ObservationFacts,
 ) -> Result<AppliedObservation, &'static str> {
     let node = &plan.nodes[node_index];
+    let writer_attempts: std::collections::BTreeSet<_> = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| plans::writer(candidate))
+        .flat_map(|(index, _)| checkpoint.nodes[index].recorded_attempts())
+        .filter_map(|attempt| {
+            attempt
+                .attempt_ref
+                .as_deref()
+                .and_then(|reference| reference.rsplit('/').next())
+                .and_then(|id| provenant_core::AttemptId::parse(id).ok())
+        })
+        .collect();
     let ObservationFacts {
         route_index,
         usage,
@@ -271,10 +285,12 @@ pub(super) fn apply_attempt_observation(
         }
         match observation {
             AttemptObservation::Pending { attempt_ref } => {
+                progress.review_settlement = None;
                 apply_pending_observation(attempt, &mut progress.state, attempt_ref);
                 false
             }
             AttemptObservation::Unknown { attempt_ref } => {
+                progress.review_settlement = None;
                 apply_unknown_observation(attempt, &mut progress.state, attempt_ref);
                 false
             }
@@ -289,6 +305,7 @@ pub(super) fn apply_attempt_observation(
                 commit,
                 stop,
             } => {
+                progress.review_settlement = None;
                 settled_result = result.clone();
                 attempt.usage = usage;
                 attempt.launched = launched;
@@ -639,6 +656,32 @@ pub(super) fn apply_attempt_observation(
                                         })
                                         .collect();
                                 }
+                                if review_result {
+                                    let verdict = progress
+                                        .outputs
+                                        .as_ref()
+                                        .and_then(|outputs| outputs.verdict.as_deref())
+                                        .and_then(
+                                            provenant_records::workflow::ReviewVerdict::from_token,
+                                        );
+                                    let attempt_id = attempt
+                                        .attempt_ref
+                                        .as_deref()
+                                        .and_then(|reference| reference.rsplit('/').next())
+                                        .and_then(|id| provenant_core::AttemptId::parse(id).ok());
+                                    if let (Some(verdict), Some(attempt_id)) = (verdict, attempt_id)
+                                    {
+                                        let independent = node.continues.is_none()
+                                            && !writer_attempts.contains(&attempt_id);
+                                        progress.review_settlement = Some(ReviewSettlement {
+                                            attempt_id,
+                                            head,
+                                            base: base_oid,
+                                            verdict,
+                                            independent,
+                                        });
+                                    }
+                                }
                             }
                         }
                         false
@@ -783,6 +826,7 @@ pub(super) fn initial_checkpoint(
                 handoff: None,
                 blocked: false,
                 decisions: Vec::new(),
+                review_settlement: None,
                 expansion_pause: None,
                 expansion_cause: None,
                 loop_pause: None,

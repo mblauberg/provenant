@@ -5,6 +5,41 @@ use std::{convert::Infallible, os::unix::fs::PermissionsExt};
 struct Owner;
 
 #[test]
+fn landing_review_query_reads_typed_settlement_on_only_the_exact_head() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base);
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let mut fixture: StoredCheckpoint =
+        serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
+    let head = provenant_core::GitOid::parse(&"a".repeat(40)).unwrap();
+    let review = ReviewSettlement {
+        attempt_id: provenant_core::AttemptId::from_bytes([7; 16]),
+        head,
+        base: None,
+        verdict: provenant_records::workflow::ReviewVerdict::Approve,
+        independent: true,
+    };
+    fixture.checkpoint.nodes[0].state = NodeState::Succeeded;
+    fixture.checkpoint.nodes[0].review_settlement = Some(review.clone());
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    journal.bind(fixture.execution).unwrap();
+    journal.save(&fixture.checkpoint).unwrap();
+    assert_eq!(landing_reviews(&root, project, head).unwrap(), vec![review]);
+    let changed = provenant_core::GitOid::parse(&"b".repeat(40)).unwrap();
+    assert!(landing_reviews(&root, project, changed).unwrap().is_empty());
+    fixture.checkpoint.nodes[0].state = NodeState::Running;
+    journal.save(&fixture.checkpoint).unwrap();
+    assert!(landing_reviews(&root, project, head).unwrap().is_empty());
+}
+
+#[test]
 fn interrupted_peer_origin_publication_never_reuses_the_launch_name() {
     use super::journal::{CRASH_POINT, CrashPoint};
     use std::panic::{AssertUnwindSafe, catch_unwind};

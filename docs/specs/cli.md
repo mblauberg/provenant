@@ -676,6 +676,20 @@ Transient `gh` failures (5xx, rate limit, network) are retried with backoff
 until the wait deadline; other failures fail closed. Progress is capped at
 eight stderr lines.
 
+Approval sources are the typed ordered list `domains.pr.land.approval_sources`,
+compiled as `["provenant_review", "forge"]`. Either source suffices; the first
+satisfied source is recorded in the receipt with its record ID or reviewer and
+covered head. A Provenant approval is a passing independent review execution
+record settled by a read-only review lane on the exact PR head, never the
+writer's own execution. Graph landing uses this same query and source policy;
+an opaque graph proof cannot bypass it. A forge approval is an approving GitHub review on that
+head from a login other than the PR author. A changed head requires fresh
+approval. The former scalar `approval` key is removed. Project and tier layers
+can override the list; `land --explain --json` shows its effective configuration
+source. `--accept-delta REASON` is the explicit owner override. Existing tier
+exemptions (`auto` for tests/docs/exempt paths, or `none`) still apply; review
+requiring tiers `carry` and `delta` now require exact-head approval.
+
 After any merge error or timeout, and after a failed post-merge read, landing
 re-reads the PR. If it is merged, the report is landed (with a `merge_note`),
 never `MERGE_FAILED`. A merge that is accepted but not yet effective (merge

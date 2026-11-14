@@ -206,7 +206,7 @@ impl FakeReviews {
     }
 }
 impl ReviewRecords for FakeReviews {
-    fn reviews(&self, number: u64) -> Result<Reviews, LandingError> {
+    fn reviews(&self, number: u64, _head: &str) -> Result<Reviews, LandingError> {
         if let Some(failure) = &self.failure {
             return Err(LandingError::Failed(failure.clone()));
         }

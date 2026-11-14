@@ -34,7 +34,7 @@ mod tests {
                 number: i as u64,
                 head: format!("head-{i}"),
                 approval: "review".into(),
-                carried_paths: Vec::new(),
+                approval_evidence: None,
                 accepted: None,
                 base_branch: "main".into(),
             })

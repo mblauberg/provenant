@@ -8,13 +8,19 @@ pub struct EligiblePr {
     pub number: u64,
     pub head: String,
     pub approval: String,
+    pub approval_evidence: Option<ApprovalEvidence>,
     pub base_branch: String,
-    /// Paths changed after the review, none of them production code.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub carried_paths: Vec<String>,
     /// Set when the chair landed the pull request without a covering review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted: Option<Accepted>,
+}
+/// The source and execution/reviewer that approved the pinned head.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalEvidence {
+    pub source: provenant_cli::domains::ApprovalSource,
+    pub reference: String,
+    pub reviewer: String,
+    pub head: String,
 }
 /// A delta landed on the chair's word, with who gave it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
