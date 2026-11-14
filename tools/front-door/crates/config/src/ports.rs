@@ -10,6 +10,7 @@ use std::{
 pub const PORTS_CONFIG: &str = ".provenant/ports.json";
 pub const PORTS_SCHEMA_VERSION: u16 = 2;
 const MAX_PORTS_BYTES: u64 = 65_536;
+const BRANCH_TOKEN: &str = "<branch>";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -192,10 +193,10 @@ impl WorktreeLayoutPort {
             ));
         }
         let template = self.default.to_string_lossy();
-        let rendered = template.replace("<branch>", &branch.replace('/', "-"));
+        let rendered = template.replace(BRANCH_TOKEN, &branch.replace('/', "-"));
         let branch_component = template
             .split('/')
-            .position(|component| component.contains("<branch>"))
+            .position(|component| component.contains(BRANCH_TOKEN))
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid worktree template"))?;
         if rendered.len() > 4096
             || rendered.split('/').enumerate().any(|(index, component)| {
@@ -226,7 +227,7 @@ impl WorktreeLayoutPort {
             .filter(|root| self.default.starts_with(root))
             .max_by_key(|root| root.components().count())?;
         let template = self.default.strip_prefix(template_root).ok()?.to_str()?;
-        let (prefix, suffix) = template.split_once("<branch>")?;
+        let (prefix, suffix) = template.split_once(BRANCH_TOKEN)?;
         self.roots.iter().find_map(|root| {
             let actual = relative.strip_prefix(root).ok()?.to_str()?;
             let branch = actual.strip_prefix(prefix)?.strip_suffix(suffix)?;
@@ -258,7 +259,7 @@ impl PortEntry for VerifyPort {
     fn backend_kind(&self) -> PortBackendKind { self.backend.kind() }
     fn valid(&self) -> bool {
         self.backend.valid()
-            && relative(&self.workspace)
+            && relative(&self.workspace, true)
             && !self.base.is_empty()
             && !self.remote.is_empty()
             && self.load_per_cpu.is_finite()
@@ -292,17 +293,17 @@ impl PortEntry for WorktreeLayoutPort {
     fn valid(&self) -> bool {
         self.backend.valid()
             && !self.roots.is_empty()
-            && self.roots.iter().all(|root| relative(root))
+            && self.roots.iter().all(|root| relative(root, false) && !root.to_string_lossy().contains(BRANCH_TOKEN))
             && self.roots.iter().collect::<std::collections::BTreeSet<_>>().len() == self.roots.len()
-            && relative(&self.default)
-            && self.default.to_string_lossy().matches("<branch>").count() == 1
+            && relative(&self.default, false)
+            && self.default.to_string_lossy().matches(BRANCH_TOKEN).count() == 1
             && self.roots.iter().any(|root| self.default.starts_with(root))
     }
 }
 
-fn relative(path: &Path) -> bool {
+fn relative(path: &Path, allow_current: bool) -> bool {
     !path.as_os_str().is_empty()
-        && path.components().all(|component| matches!(component, Component::Normal(_)))
+        && path.components().all(|component| matches!(component, Component::Normal(_)) || (allow_current && component == Component::CurDir))
 }
 
 macro_rules! declare_ports {
@@ -504,6 +505,10 @@ mod tests {
             );
         }
         assert!(table.validate().is_ok());
+        table.worktree_layout.roots = vec![PathBuf::from("trees/<branch>")];
+        table.worktree_layout.default = PathBuf::from("trees/<branch>/checkout");
+        assert!(table.validate().is_err());
+        table = PortTable::builtin();
         table.worktree_layout.default = PathBuf::from("../outside/<branch>");
         assert!(table.validate().is_err());
     }

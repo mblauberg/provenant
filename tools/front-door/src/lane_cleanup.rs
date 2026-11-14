@@ -218,7 +218,7 @@ fn local_outcome(
             out(ArtefactState::Removed)
                 .with_reason(reason(decision.verdict))
                 .with_head(tip)
-                .with_removal(ref_removal(&reference, tip, decision.removal))
+                .with_removal(ref_removal(context.binding.project_id(), &reference, tip, decision.removal))
         }
         Ok(RefDeletion::Absent) => {
             let _ = ledger.forget(record, context.clock, cancel);
@@ -308,7 +308,7 @@ fn remote_outcomes(
         return vec![out(ArtefactState::Retained)
             .with_reason(why)
             .with_head(tip)
-            .with_removal(ref_removal(&reference, tip, decision.removal))];
+            .with_removal(ref_removal(context.binding.project_id(), &reference, tip, decision.removal))];
     }
     let mut outcomes = Vec::new();
     if sweep.dry_run {
@@ -391,7 +391,7 @@ fn stale_tracking(
         Ok(RefDeletion::Removed) => out(ArtefactState::Removed)
             .with_reason("remote_branch_gone")
             .with_head(held)
-            .with_removal(ref_removal(tracking, held, decision.removal)),
+            .with_removal(ref_removal(context.binding.project_id(), tracking, held, decision.removal)),
         Ok(RefDeletion::Absent) => out(ArtefactState::Absent),
         Ok(_) => out(ArtefactState::Retained).with_reason("changed"),
         Err(error) => out(ArtefactState::Failed).with_reason(error.to_string()),

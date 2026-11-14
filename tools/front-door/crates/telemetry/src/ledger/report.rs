@@ -7,8 +7,6 @@
 //! `unattributed`, not folded into another account.
 use super::Row;
 use crate::{TelemetryError, reducer::Money};
-use provenant_records::AccountIdentity;
-use provenant_records::AccountIdentity;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -53,6 +51,10 @@ pub struct Group {
     pub key: String,
     #[serde(flatten)]
     pub totals: Totals,
+}
+
+fn some(value: &Option<String>) -> String {
+    value.clone().unwrap_or_else(|| GAP.to_owned())
 }
 
 fn unreported(row: &Row) -> bool {
@@ -144,6 +146,7 @@ mod tests {
     use super::*;
     use crate::ledger::{Cost, FORMAT, Source, Tokens};
     use provenant_core::{ProjectId, WallTime};
+    use provenant_records::AccountIdentity;
 
     fn row(attempt: &str, account: Option<&str>, cost: Option<(u64, bool)>) -> Row {
         let token = Some(1);

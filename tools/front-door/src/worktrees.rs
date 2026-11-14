@@ -417,8 +417,8 @@ fn gc_retention_bytes(data: &GcData) -> Vec<provenant_config::RetentionBytes> {
         .map(|class| {
             let measured = match class.class {
                 RetentionKind::LaneCargoCaches => Some(data.report.bytes_freed),
-                RetentionKind::TargetSeeds => Some(data.target_seeds.bytes),
-                RetentionKind::BuildDirectories => Some(data.build_dirs.bytes),
+                RetentionKind::TargetSeeds if !data.report.dry_run => Some(data.target_seeds.bytes),
+                RetentionKind::BuildDirectories if !data.report.dry_run => Some(data.build_dirs.bytes),
                 RetentionKind::PayloadCap => Some(data.provider_state.payload.reclaimed_bytes),
                 RetentionKind::AttemptScratch => Some(
                     data.provider_state
@@ -2007,6 +2007,12 @@ mod gc_preview_tests {
             ByteObservation::Unknown
         );
 
+        data.report.dry_run = true;
+        let preview = gc_retention_bytes(&data);
+        for class in [RetentionKind::TargetSeeds, RetentionKind::BuildDirectories] {
+            assert_eq!(preview.iter().find(|row| row.class == class).unwrap().observation, ByteObservation::Unknown);
+        }
+        data.report.dry_run = false;
         let summary = serde_json::to_value(gc_result_data(&data, false)).unwrap();
         let detailed = serde_json::to_value(gc_result_data(&data, true)).unwrap();
         assert_eq!(summary["retention_bytes"].as_array().unwrap().len(), rows.len());

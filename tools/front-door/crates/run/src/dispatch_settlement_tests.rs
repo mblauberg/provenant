@@ -682,6 +682,9 @@ fn a_read_only_answer_without_handoff_settles_succeeded() -> TestResult {
     // `input()` is a read-only task, so its complete answer is its proof.
     for answer in [
         "answer".to_owned(),
+        "VERDICT: PASS".to_owned(),
+        "VERDICT: FAIL".to_owned(),
+        "VERDICT: INCONCLUSIVE".to_owned(),
         "All of the brief is done.".to_owned(),
         "Work remains in the renderer, which I did not finish.".to_owned(),
         // A block quoted mid-answer is not the lane's closing statement.

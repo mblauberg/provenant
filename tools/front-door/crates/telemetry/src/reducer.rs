@@ -109,6 +109,7 @@ pub fn quota_usage(
             model: None,
             effort: None,
             account_label: None,
+            account_key: None,
         });
         let key = (route.provider, route.account_label, Some(fact.project_id));
         rows.entry(key).or_default().lane.record_usage(
@@ -791,6 +792,7 @@ fn stats_inner(
             model: None,
             effort: None,
             account_label: None,
+            account_key: None,
         });
         let cost = priced(
             &fact.usage,

@@ -151,6 +151,8 @@ pub struct GraphConfig {
 }
 
 pub const DEFAULT_DECIDE_TIMEOUT_SECONDS: u64 = 300;
+/// The largest seconds value representable by the stored microsecond duration.
+pub const MAX_DECIDE_TIMEOUT_SECONDS: u64 = u64::MAX / 1_000_000;
 
 impl Default for GraphConfig {
     fn default() -> Self {
@@ -813,7 +815,7 @@ impl DomainConfig for FabricConfig {
             (
                 "decide_timeout_seconds",
                 self.graph.decide_timeout_seconds,
-                604_800,
+                MAX_DECIDE_TIMEOUT_SECONDS,
             ),
             ("launch_wait_seconds", self.graph.launch_wait_seconds, 14_400),
             (
@@ -888,7 +890,7 @@ fn defaults(_profile: Profile) -> &'static str {
 /// boundary: recovery could raise a cap, lift a budget or swap a binary. Labels,
 /// peers' addresses and lane tuning recover to defaults.
 pub const FIELD_METADATA: &[FieldMetadata] = &[
-    FieldMetadata::int("graph.decide_timeout_seconds", 1, 604_800),
+    FieldMetadata::int("graph.decide_timeout_seconds", 1, MAX_DECIDE_TIMEOUT_SECONDS as i64),
     FieldMetadata::int("graph.launch_wait_seconds", 1, 14_400),
     FieldMetadata::int("graph.writer_provision_seconds", 1, 14_400),
     FieldMetadata::enumeration(
@@ -960,16 +962,18 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn decide_timeout_setting_is_configurable_and_bounded() {
+    fn decide_timeout_setting_must_fit_its_duration_representation() {
         let mut config = config();
-        for seconds in [0, 604_801] {
+        for seconds in [0, MAX_DECIDE_TIMEOUT_SECONDS + 1] {
             config.graph.decide_timeout_seconds = seconds;
             assert!(config.validate().iter().any(|error| {
                 error.field == "graph.decide_timeout_seconds"
             }));
         }
-        config.graph.decide_timeout_seconds = DEFAULT_DECIDE_TIMEOUT_SECONDS;
-        assert!(config.validate().is_empty());
+        for seconds in [1, MAX_DECIDE_TIMEOUT_SECONDS, DEFAULT_DECIDE_TIMEOUT_SECONDS] {
+            config.graph.decide_timeout_seconds = seconds;
+            assert!(config.validate().is_empty());
+        }
     }
 
     #[test]

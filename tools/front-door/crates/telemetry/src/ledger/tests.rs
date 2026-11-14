@@ -63,6 +63,7 @@ fn fact(number: u64, day: i64, model: &str, input: Option<u64>) -> Result<Attemp
         project_id: ProjectId::from_bytes([2; 16]),
         terminal_state: AttemptOutcome::Succeeded,
         cause_source: provenant_records::run::CauseSource::Unavailable,
+        account_identity: provenant_records::AccountIdentity::unknown(),
         exit_code: Some(0),
         queued_at: finished,
         started_at: Some(finished),
@@ -73,6 +74,7 @@ fn fact(number: u64, day: i64, model: &str, input: Option<u64>) -> Result<Attemp
             model: Some(model.into()),
             effort: Some("high".into()),
             account_label: Some("account".into()),
+            account_key: None,
         }),
         usage: Usage {
             uncached_input: input,
@@ -139,6 +141,20 @@ fn a_settled_attempt_appends_one_row_even_when_settlement_is_retried() -> Result
     assert_eq!(stored.node.as_str(), "node-1");
     assert_eq!(stored.outcome, "succeeded");
     assert_eq!(stored.tokens.reasoning, Some(9));
+    Ok(())
+}
+
+#[test]
+fn settled_attempt_row_preserves_partial_provider_identity() -> Result {
+    let fact = {
+        let mut fact = fact(1, 20_000, "m", Some(1))?;
+        fact.account_identity =
+            provenant_records::AccountIdentity::provider_observation("claude", "verified-key");
+        fact
+    };
+    let expected = fact.account_identity.clone();
+    let row = row(&fact, &key(1)?, None)?;
+    assert_eq!(row.identity, expected);
     Ok(())
 }
 

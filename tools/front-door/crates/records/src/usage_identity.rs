@@ -34,7 +34,8 @@ pub enum IdentityEvidenceSource {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnknownIdentityReason {
-    ProviderIdentityPortUnavailable,
+    ProviderIdentityUnavailable,
+    ConflictingProviderIdentity,
     NoProviderAccount,
 }
 
@@ -51,9 +52,32 @@ impl AccountIdentity {
         }
     }
 
-    /// A provider usage session with no identity adapter seam yet.
+    /// Verified provider identity when no native login epoch is available.
+    pub fn provider_observation(provider: &str, account_key: &str) -> Self {
+        Self {
+            identity: Identity::Known {
+                provider: provider.into(),
+                account_key: account_key.into(),
+            },
+            epoch: IdentityEpoch::Unknown,
+            evidence_source: IdentityEvidenceSource::Provider,
+        }
+    }
+
+    /// The provider identity could not be verified for this observation.
     pub fn unknown() -> Self {
-        Self::unknown_for(UnknownIdentityReason::ProviderIdentityPortUnavailable)
+        Self::unknown_for(UnknownIdentityReason::ProviderIdentityUnavailable)
+    }
+
+    /// Conflicting provider observations prevent attribution across a session transcript.
+    pub fn conflicting_provider_observations() -> Self {
+        Self {
+            identity: Identity::Unknown {
+                reason: UnknownIdentityReason::ConflictingProviderIdentity,
+            },
+            epoch: IdentityEpoch::Unknown,
+            evidence_source: IdentityEvidenceSource::Provider,
+        }
     }
 
     /// A usage event that is not attached to a provider account.
@@ -90,8 +114,10 @@ mod tests {
     fn every_account_identity_case_round_trips() {
         let cases = [
             AccountIdentity::known("claude", "opaque-account", "epoch-1"),
+            AccountIdentity::provider_observation("claude", "account-without-epoch"),
             AccountIdentity::unknown(),
             AccountIdentity::no_provider_account(),
+            AccountIdentity::conflicting_provider_observations(),
         ];
         for identity in cases {
             let encoded = serde_json::to_vec(&identity).unwrap();

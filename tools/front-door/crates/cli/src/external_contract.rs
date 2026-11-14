@@ -114,7 +114,7 @@ pub fn external_contract() -> ExternalContract {
                     version: u64::from(process_tree::SAMPLE_SCHEMA_VERSION),
                 },
             },
-            ExternalInterface::CommandSurface { commands: crate::usage_verbs() },
+            ExternalInterface::CommandSurface { commands: crate::command_verbs() },
             ExternalInterface::StableCommands { state: StableCommandState::NoneDeclared },
         ],
     }

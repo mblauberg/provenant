@@ -7,7 +7,10 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
-use support::{Result, TestRig, code, register_account};
+use support::{
+    Result, TestRig, code, install_fake_claude_auth, register_account,
+    set_claude_config_dir, write_fake_claude_identity,
+};
 
 fn message(id: &str, output: u64) -> String {
     let at = SystemTime::now()
@@ -19,6 +22,27 @@ fn message(id: &str, output: u64) -> String {
         jiff::Timestamp::from_second(at as i64)
             .map(|time| time.to_string())
             .unwrap_or_default()
+    )
+}
+
+fn start_chair_session(
+    rig: &TestRig,
+    session: &str,
+) -> Result<provenant_os::exec::ExecOutcome> {
+    let input = serde_json::to_vec(&json!({
+        "hook_event_name":"SessionStart", "session_id":session, "cwd":rig.project,
+        "transcript_path":rig.root.join("transcript.jsonl"), "source":"startup"
+    }))?;
+    rig.execute(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--state-dir",
+            rig.state.to_str().ok_or("state")?,
+            "hook",
+            "claude",
+            "chair-start",
+        ],
+        Some(&input),
     )
 }
 
@@ -85,25 +109,14 @@ fn stored(rig: &TestRig) -> std::result::Result<String, Box<dyn std::error::Erro
 
 #[test]
 fn chair_session_start_ingests_the_session_as_chair() -> Result {
-    let rig = TestRig::new()?;
-    let config = rig.root.join("claude");
-    register_account(&rig, "claude", "current", "current", &config)?;
+    let mut rig = TestRig::new()?;
+    install_fake_claude_auth(&mut rig)?;
+    let config = rig.home.join(".claude-current");
+    set_claude_config_dir(&mut rig, &config);
+    let identity_key = write_fake_claude_identity(&config, "current@example.test")?;
+    register_account(&rig, "claude", "current", &identity_key, &config)?;
     write_session(&config, "chair-session", "m1", 45)?;
-    let input = serde_json::to_vec(&json!({
-        "hook_event_name":"SessionStart", "session_id":"chair-session", "cwd":rig.project,
-        "transcript_path":rig.root.join("transcript.jsonl"), "source":"startup"
-    }))?;
-    let output = rig.execute(
-        Path::new(env!("CARGO_BIN_EXE_provenant")),
-        &[
-            "--state-dir",
-            rig.state.to_str().ok_or("state")?,
-            "hook",
-            "claude",
-            "chair-start",
-        ],
-        Some(&input),
-    )?;
+    let output = start_chair_session(&rig, "chair-session")?;
     assert_eq!(code(&output), 0);
     let store = stored(&rig)?;
     let rows: Vec<Value> = store
@@ -113,17 +126,54 @@ fn chair_session_start_ingests_the_session_as_chair() -> Result {
     let row = rows
         .first()
         .ok_or("the chair SessionStart did not ingest its session")?;
-    assert_eq!(row["identity"]["identity"]["state"], "unknown");
+    assert_eq!(row["identity"]["identity"]["state"], "known");
+    assert_eq!(row["identity"]["identity"]["provider"], "claude");
+    assert_eq!(row["identity"]["identity"]["account_key"], identity_key);
     assert_eq!(row["identity"]["epoch"]["state"], "unknown");
-    assert_eq!(row["identity"]["evidence_source"], "unknown");
-    assert_eq!(
-        row["identity"]["identity"]["reason"],
-        "provider_identity_port_unavailable",
-    );
+    assert_eq!(row["identity"]["evidence_source"], "provider");
     assert!(row.get("account").is_none());
     assert_eq!(row["source"], "chair");
     assert_eq!(row["session"], "chair-session");
     assert_eq!(row["output"], 45);
+    Ok(())
+}
+
+#[test]
+fn provider_identity_rotation_is_preserved_per_chair_session_in_ingest() -> Result {
+    let mut rig = TestRig::new()?;
+    install_fake_claude_auth(&mut rig)?;
+    let config = rig.home.join(".claude-rotating");
+    set_claude_config_dir(&mut rig, &config);
+
+    let first = write_fake_claude_identity(&config, "first@example.test")?;
+    let second = provenant_providers::identity::fingerprint("second@example.test")
+        .ok_or("invalid second identity")?;
+    register_account(&rig, "claude", "rotating", &first, &config)?;
+    write_session(&config, "session-a", "message-a", 3)?;
+    assert_eq!(code(&start_chair_session(&rig, "session-a")?), 0);
+
+    assert_eq!(
+        write_fake_claude_identity(&config, "second@example.test")?,
+        second
+    );
+    write_session(&config, "session-b", "message-b", 9)?;
+    assert_eq!(code(&start_chair_session(&rig, "session-b")?), 0);
+
+    let rows: Vec<Value> = stored(&rig)?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
+    assert_eq!(rows.len(), 2);
+    let row_for = |session: &str| rows.iter().find(|row| row["session"] == session).unwrap();
+    for (session, key) in [("session-a", &first), ("session-b", &second)] {
+        let identity = &row_for(session)["identity"];
+        assert_eq!(identity["identity"]["state"], "known");
+        assert_eq!(identity["identity"]["provider"], "claude");
+        assert_eq!(identity["identity"]["account_key"], key.as_str());
+        assert_eq!(identity["epoch"]["state"], "unknown");
+        assert_eq!(identity["evidence_source"], "provider");
+    }
+    assert_ne!(first, second);
     Ok(())
 }
 

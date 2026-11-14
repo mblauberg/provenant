@@ -1098,7 +1098,7 @@ fn catalog(model: &clap::Command) -> HelpCatalogue {
     }
 }
 /// Canonical installed verb paths. Never derived from raw caller arguments.
-pub fn usage_verbs() -> Vec<String> {
+pub fn command_verbs() -> Vec<String> {
     fn walk(command: &clap::Command, path: String, verbs: &mut Vec<String>) {
         let children: Vec<_> = command.get_subcommands().collect();
         if children.is_empty() && !path.is_empty() {
@@ -1122,8 +1122,15 @@ pub fn usage_verbs() -> Vec<String> {
             }
         }
     }
-    let mut verbs = vec!["parse".into(), "version".into()];
+    let mut verbs = Vec::new();
     walk(&command_model(), String::new(), &mut verbs);
+    verbs
+}
+
+/// Command paths plus the two non-command events recorded by usage telemetry.
+pub fn usage_verbs() -> Vec<String> {
+    let mut verbs = vec!["parse".into(), "version".into()];
+    verbs.extend(command_verbs());
     verbs
 }
 const WAIT_JSON_CONTRACT: &str = "With --json, wait writes JSONL: zero or more event objects followed by one terminal command-result envelope. Events have an `event` field; the terminal envelope has `command`, `status` and `data`. Settlement events are emitted without --follow; --follow also emits each observed transition.";

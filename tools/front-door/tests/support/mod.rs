@@ -2,12 +2,14 @@
 #![allow(dead_code)]
 use provenant_os::exec::{ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor};
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs,
     path::{Path, PathBuf},
     sync::Mutex,
     time::Duration,
 };
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 pub type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -27,6 +29,48 @@ pub const FIXTURE_STDOUT_LIMIT: usize = 2 * 1024 * 1024;
 pub const FIXTURE_STDERR_LIMIT: usize = 64 * 1024;
 
 static PROCESS_SPAWN_LOCK: Mutex<()> = Mutex::new(());
+
+/// Install a fake Claude auth-status executable for identity-probe fixtures.
+pub fn install_fake_claude_auth(rig: &mut TestRig) -> Result {
+    let bin = rig.root.join("fixture-bin");
+    fs::create_dir_all(&bin)?;
+    let executable = bin.join("claude");
+    rig.with_process_spawn_lock(|| {
+        fs::write(
+            &executable,
+            "#!/bin/sh\nif [ -f \"$CLAUDE_CONFIG_DIR/.fixture-email\" ]; then\n  printf '{\"loggedIn\":true,\"email\":\"%s\"}\n' \"$(cat \"$CLAUDE_CONFIG_DIR/.fixture-email\")\"\nelse\n  printf '{\"loggedIn\":false}\n'\nfi\n",
+        )?;
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
+        Ok(())
+    })?;
+    set_rig_env(rig, "PATH", format!("{}:/usr/bin:/bin", bin.display()).into());
+    set_rig_env(rig, "USER", "fixture-user".into());
+    Ok(())
+}
+
+/// Set the path used by the hook as the current Claude config directory.
+pub fn set_claude_config_dir(rig: &mut TestRig, directory: &Path) {
+    set_rig_env(rig, "CLAUDE_CONFIG_DIR", directory.as_os_str().to_owned());
+}
+
+/// Configure the fake provider's verified account identity and return its key.
+pub fn write_fake_claude_identity(directory: &Path, email: &str) -> Result<String> {
+    fs::create_dir_all(directory)?;
+    fs::write(directory.join(".fixture-email"), email)?;
+    provenant_providers::identity::fingerprint(email).ok_or_else(|| "invalid fixture identity".into())
+}
+
+fn set_rig_env(rig: &mut TestRig, name: &str, value: OsString) {
+    if let Some((_, current)) = rig
+        .env
+        .iter_mut()
+        .find(|(key, _)| key.as_os_str() == OsStr::new(name))
+    {
+        *current = value;
+    } else {
+        rig.env.push((name.into(), value));
+    }
+}
 
 pub fn tempdir() -> std::io::Result<tempfile::TempDir> {
     provenant_os::fixture::tempdir(|root| tempfile::Builder::new().prefix(".tmp").tempdir_in(root))

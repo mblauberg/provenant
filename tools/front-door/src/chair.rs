@@ -920,9 +920,40 @@ fn config_hint(context: &Context) -> Option<String> {
             .all(|part| matches!(part, std::path::Component::Normal(_))))
     .then(|| text.to_owned())
 }
-// Attribution is best effort and must not prevent consuming a handoff. The
-// provider has no identity port here, so the session keeps typed unknown
-// identity while its config hint is retained only to locate the transcript.
+// The config directory selects the provider auth interface to observe; its
+// path never supplies identity. Registration's detector bypasses stale cache.
+fn session_identity(context: &Context) -> provenant_telemetry::usage::AccountIdentity {
+    use provenant_telemetry::usage::AccountIdentity;
+
+    let identity = (|| {
+        let executable = provenant_cli::run::provider_executable("claude").ok()?;
+        let user = std::env::var_os("USER")?;
+        let executor = SystemExecutor::new(1).ok()?;
+        let probe = provenant_providers::host::HostProbeExecutor::new(
+            &executor,
+            context.roots.state.as_path(),
+        )
+        .ok()?;
+        let directory = context
+            .claude_config
+            .clone()
+            .unwrap_or_else(|| context.home.join(".claude"));
+        let (account_key, _) = provenant_providers::accounts::detect_for_registration(
+            &probe,
+            "claude",
+            &executable,
+            &context.home,
+            &user,
+            &directory,
+            context.roots.state.as_path(),
+        )
+        .ok()?;
+        Some(AccountIdentity::provider_observation("claude", &account_key))
+    })();
+    identity.unwrap_or_else(AccountIdentity::unknown)
+}
+
+// Attribution is best effort and must not prevent consuming a handoff.
 fn record_start(context: &Context, input: &Input) {
     let project = if crate::usage::attribution_enabled(&context.roots) {
         crate::hooks::with_git(|runtime, executor, budget, cancel| {
@@ -940,7 +971,7 @@ fn record_start(context: &Context, input: &Input) {
     provenant_telemetry::usage::record_chair(
         &context.roots,
         &provenant_os::clock::SystemClock::new(),
-        provenant_telemetry::usage::AccountIdentity::unknown(),
+        session_identity(context),
         input.session_id.as_str(),
         project,
         config_hint(context).as_deref(),

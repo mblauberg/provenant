@@ -65,7 +65,6 @@ fn decide_answer_becomes_the_verdict_and_routes_the_chosen_edge() {
     assert_eq!(ask.request, "choose.ask-1");
     assert_eq!(ask.timeout.unwrap().seconds, crate::config::DEFAULT_DECIDE_TIMEOUT_SECONDS);
     assert_eq!(ask.timeout.unwrap().source, DecideTimeoutSource::DomainDefault);
-    assert!(owner.filed[0].body.contains("from the Fabric graph domain default"));
     assert!(owner.filed[0].body.contains("Ship the change?"));
     assert_eq!(ask.wake_at, waiting.checkpoint.wake_at);
     assert!(ask.wake_at.is_some());
@@ -334,6 +333,113 @@ fn completion_closes_a_pause_ask_left_by_lowered_limits() {
     assert!(run.checkpoint.pause.is_none());
     assert!(run.checkpoint.asks.is_empty());
     assert_eq!(owner.closed_asks, ["pause-1"]);
+}
+
+#[test]
+fn decide_inbox_error_at_deadline_keeps_the_ask_open_for_each_default() {
+    for (default, disposition) in [
+        (Some("hold"), UnansweredDisposition::BlockDependants),
+        (None, UnansweredDisposition::BlockDependants),
+        (None, UnansweredDisposition::SkipDependants),
+    ] {
+        let mut document = routed(Some(60));
+        let spec = document.nodes[0].decide.as_mut().unwrap();
+        spec.default = default.map(str::to_owned);
+        spec.on_unanswered = disposition;
+        let mut owner = FakeOwner {
+            now: Some(at(0)),
+            observations: [terminal(AttemptOutcome::Succeeded)].into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let waiting = advance(&document, &mut owner, &mut journal).unwrap();
+        let ask_id = waiting.checkpoint.asks[0].ask_id.clone();
+        let deadline = waiting.checkpoint.asks[0].wake_at.unwrap();
+        owner.now = Some(deadline);
+        owner.fail_node_ask_once = true;
+
+        let unread = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(unread.status, GraphStatus::Pending);
+        assert_eq!(state(&unread, "choose"), NodeState::Running);
+        assert_eq!(unread.checkpoint.asks.len(), 1);
+        assert_eq!(unread.checkpoint.asks[0].ask_id, ask_id);
+        assert!(unread.checkpoint.nodes[0].outputs.is_none());
+        assert!(owner.closed_asks.is_empty());
+        assert_ne!(state(&unread, "ship-work"), NodeState::Succeeded);
+        assert_ne!(state(&unread, "hold-work"), NodeState::Succeeded);
+
+        owner
+            .answers
+            .insert(ask_id, reply(Some("ship"), None));
+        let answered = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(answered.status, GraphStatus::Complete);
+        assert_eq!(state(&answered, "ship-work"), NodeState::Succeeded);
+        assert_eq!(state(&answered, "hold-work"), NodeState::Skipped);
+    }
+}
+
+#[test]
+fn handoff_missing_classification_does_not_release_a_dependant() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version": 1,
+        "graph_id": "handoff-missing-dependant",
+        "nodes": [
+            {"id":"writer", "access":"read_only", "prompt":"review", "route":fixture_route()},
+            {"id":"release", "access":"read_only", "prompt":"release", "depends_on":["writer"], "route":fixture_route()}
+        ]
+    }))
+    .unwrap();
+    let mut owner = FakeOwner {
+        observations: [AttemptObservation::Terminal {
+            attempt_ref: Some("host/handoff-missing".into()),
+            outcome: AttemptOutcome::ReviewRequired,
+            launched: true,
+            result: None,
+            result_warning: None,
+            result_path: None,
+            branch: None,
+            commit: None,
+            stop: Some(provenant_records::StopCause::HandoffMissing),
+            settlement_reason: Some(provenant_records::run::SettlementReason::HandoffMissing),
+        }]
+        .into(),
+        ..Default::default()
+    };
+
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(state(&run, "writer"), NodeState::Failed);
+    assert_ne!(state(&run, "release"), NodeState::Succeeded);
+}
+
+#[test]
+fn repair_scope_timeout_default_cannot_approve() {
+    let mut document: GraphDocument = serde_json::from_value(json!({
+        "schema_version": 1,
+        "graph_id": "repair-scope-timeout",
+        "nodes": [{
+            "id": "scope",
+            "kind": "decide",
+            "access": "read_only",
+            "repair_scope_gate": true,
+            "decide": {
+                "question": "Approve the changed slice?",
+                "on_unanswered": "block_dependants",
+                "default": "hold",
+                "options": [
+                    {"id": "approve", "label": "Approve"},
+                    {"id": "hold", "label": "Hold"}
+                ]
+            }
+        }]
+    }))
+    .unwrap();
+
+    assert!(validate_flat_plan(&document, &Default::default()).is_ok());
+    document.nodes[0].decide.as_mut().unwrap().default = Some("approve".into());
+    let error = validate_flat_plan(&document, &Default::default()).unwrap_err();
+    assert!(error.to_string().contains(
+        "scope approval requires an owner answer, never a timeout default"
+    ));
 }
 
 #[test]

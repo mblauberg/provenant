@@ -51,6 +51,7 @@ fn fact(number: u64, input: Option<u64>) -> AttemptFact {
         project_id: ProjectId::from_bytes([2; 16]),
         terminal_state: AttemptOutcome::Succeeded,
         cause_source: provenant_records::run::CauseSource::Provider,
+        account_identity: provenant_records::AccountIdentity::unknown(),
         exit_code: Some(0),
         queued_at: WallTime::from_micros(0).unwrap(),
         started_at: Some(WallTime::from_micros(0).unwrap()),
@@ -61,6 +62,7 @@ fn fact(number: u64, input: Option<u64>) -> AttemptFact {
             model: Some("m".into()),
             effort: Some("high".into()),
             account_label: Some("account".into()),
+            account_key: None,
         }),
         usage: Usage {
             uncached_input: input,
@@ -480,6 +482,7 @@ fn retained_key_byte_limit_counts_route_and_daily_keys() {
         model: Some("x".repeat(MAX_KEY_BYTES)),
         effort: None,
         account_label: None,
+        account_key: None,
     });
     let too_large = TelemetryError::TooLarge("1 MiB of group keys");
     assert!(reduce([input.clone()], None).is_ok());
@@ -524,6 +527,7 @@ fn bundled_toml_uses_exact_rates_and_unknowns_without_aliases() {
         model: Some(model.model.clone()),
         effort: None,
         account_label: None,
+        account_key: None,
     });
     let report = stats([input.clone()], &table, Window::default()).unwrap();
     assert_eq!(report.prices.reviewed_at, config.reviewed_at);
@@ -728,6 +732,7 @@ fn claude_attempt_with_cache_usage_reports_all_four_categories() {
         model: Some("claude-sonnet-5".into()),
         effort: None,
         account_label: Some("default".into()),
+        account_key: None,
     });
     attempt.usage = Usage {
         uncached_input: Some(10),
@@ -1032,6 +1037,7 @@ fn route_context_group_counts_toward_shared_one_mib_key_budget() {
             model: Some("m".repeat(bytes)),
             effort: None,
             account_label: None,
+            account_key: None,
         });
         input
     };

@@ -113,9 +113,7 @@ pub fn ingest_native(
     for chair in usage::chair_sessions(roots, jiff::Timestamp::MIN, jiff::Timestamp::MAX)
         .map_err(|error| error.to_string())?
     {
-        chairs
-            .entry(chair.session)
-            .or_insert(chair.account_identity);
+        merge_chair_identity(&mut chairs, chair.session, chair.account_identity);
     }
     {
         use std::os::unix::fs::DirBuilderExt;
@@ -137,6 +135,45 @@ pub fn ingest_native(
         },
     )
     .map_err(|error| error.to_string())
+}
+
+fn merge_chair_identity(
+    chairs: &mut std::collections::BTreeMap<String, provenant_telemetry::usage::AccountIdentity>,
+    session: String,
+    incoming: provenant_telemetry::usage::AccountIdentity,
+) {
+    use provenant_records::Identity;
+    use std::collections::btree_map::Entry;
+
+    match chairs.entry(session) {
+        Entry::Vacant(entry) => {
+            entry.insert(incoming);
+        }
+        Entry::Occupied(mut entry) => {
+            let current = entry.get().clone();
+            if matches!(
+                &current.identity,
+                Identity::Unknown {
+                    reason: provenant_records::UnknownIdentityReason::ConflictingProviderIdentity,
+                }
+            ) {
+                return;
+            }
+            match (
+                matches!(&current.identity, Identity::Known { .. }),
+                matches!(&incoming.identity, Identity::Known { .. }),
+            ) {
+                (true, true) if current != incoming => {
+                    *entry.get_mut() =
+                        provenant_telemetry::usage::AccountIdentity::conflicting_provider_observations();
+                }
+                (false, true) => {
+                    *entry.get_mut() = incoming;
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Wall budget for the SessionStart ingest, inside the hook's five-second host
@@ -311,6 +348,29 @@ mod tests {
         fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<PathBuf> {
             Ok(path.to_owned())
         }
+    }
+
+    #[test]
+    fn conflicting_session_identities_become_unknown_without_losing_unambiguous_enrichment() {
+        use provenant_telemetry::usage::AccountIdentity;
+
+        let first = AccountIdentity::provider_observation("claude", "account-a");
+        let second = AccountIdentity::provider_observation("claude", "account-b");
+        let mut chairs = std::collections::BTreeMap::new();
+        merge_chair_identity(&mut chairs, "session".into(), AccountIdentity::unknown());
+        merge_chair_identity(&mut chairs, "session".into(), first.clone());
+        assert_eq!(chairs["session"], first);
+
+        merge_chair_identity(&mut chairs, "session".into(), second);
+        assert_eq!(
+            chairs["session"],
+            AccountIdentity::conflicting_provider_observations()
+        );
+        merge_chair_identity(&mut chairs, "session".into(), first);
+        assert_eq!(
+            chairs["session"],
+            AccountIdentity::conflicting_provider_observations()
+        );
     }
 
     #[test]

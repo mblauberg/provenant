@@ -174,7 +174,7 @@ pub fn row(
         provider,
         model,
         effort: field(|r| &r.effort),
-        identity: AccountIdentity::unknown(),
+        identity: fact.account_identity.clone(),
         outcome,
         started: fact.started_at,
         finished: fact.finished_at,

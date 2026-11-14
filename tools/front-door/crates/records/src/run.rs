@@ -510,6 +510,7 @@ impl RequestedRoute {
                 model: None,
                 effort: None,
                 account_label: None,
+                account_key: None,
             },
             Self::Model {
                 provider,
@@ -521,12 +522,14 @@ impl RequestedRoute {
                 model: Some(model),
                 effort,
                 account_label: None,
+                account_key: None,
             },
             Self::Named { effort, .. } | Self::Review { effort, .. } => crate::RouteFact {
                 provider: None,
                 model: None,
                 effort,
                 account_label: None,
+                account_key: None,
             },
         }
     }
@@ -572,6 +575,7 @@ impl From<RouteRecord> for crate::RouteFact {
             model: r.model,
             effort: r.effort,
             account_label: r.account_label,
+            account_key: r.account_key,
         }
     }
 }

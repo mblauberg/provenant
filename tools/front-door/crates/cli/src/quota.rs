@@ -1865,7 +1865,17 @@ pub(crate) fn chair_sessions_with_usage(
         accounts
             .entries
             .values()
-            .find(|entry| entry.adapter == chair.adapter && entry.key == chair.account_identity.account_key())
+            .find(|entry| match &chair.account_identity.identity {
+                provenant_records::Identity::Known {
+                    provider,
+                    account_key,
+                } => {
+                    entry.adapter == chair.adapter
+                        && entry.adapter.as_str() == provider.as_str()
+                        && entry.key.as_str() == account_key.as_str()
+                }
+                provenant_records::Identity::Unknown { .. } => false,
+            })
             .map(|entry| entry.directory.clone())
             .or_else(|| {
                 // The hook records only a plain relative path under home.

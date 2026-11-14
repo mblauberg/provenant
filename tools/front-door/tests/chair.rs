@@ -8,10 +8,14 @@ use std::{
     os::unix::fs::PermissionsExt,
     time::{SystemTime, UNIX_EPOCH},
 };
-use support::{Result, TestRig, code, register_account};
+use support::{
+    Result, TestRig, code, install_fake_claude_auth, register_account,
+    set_claude_config_dir, write_fake_claude_identity,
+};
 
 fn configured() -> Result<TestRig> {
-    let rig = TestRig::new()?;
+    let mut rig = TestRig::new()?;
+    install_fake_claude_auth(&mut rig)?;
     let spare = rig.root.join("spare's account");
     fs::create_dir(&spare)?;
     fs::create_dir_all(&rig.state)?;
@@ -20,13 +24,9 @@ fn configured() -> Result<TestRig> {
         rig.state.join("config.toml"),
         "schema_version = 1\n[knobs]\n\"chair.auto_switch\" = true\n\"chair.switch_accounts\" = ['spare']\n",
     )?;
-    register_account(
-        &rig,
-        "claude",
-        "current",
-        "current",
-        &rig.root.join("claude"),
-    )?;
+    let current = rig.root.join("claude");
+    register_account(&rig, "claude", "current", "current", &current)?;
+    set_claude_config_dir(&mut rig, &current);
     register_account(&rig, "claude", "spare", "spare", &spare)?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     for (key, used) in [("current", 9200), ("spare", 100)] {
@@ -215,15 +215,18 @@ fn hook(rig: &TestRig, start: bool, session: &str) -> Result<provenant_os::exec:
     }))?))
 }
 #[test]
-fn chair_start_records_unknown_identity_without_a_pending_handoff() -> Result {
-    let rig = configured()?;
+fn chair_start_records_verified_identity_without_a_pending_handoff() -> Result {
+    let mut rig = configured()?;
+    let identity_key =
+        write_fake_claude_identity(&rig.root.join("claude"), "primary@example.test")?;
     assert_eq!(code(&rig.command(&["fabric", "identity", "--json"])?), 0);
     let config = rig.state.join("config.toml");
     let text = fs::read_to_string(&config)?;
     fs::write(
         config,
         text.replace("[knobs]", "[knobs]\n\"usage.project_attribution\" = true")
-            .replace("label = \"current\"", "label = \"primary\""),
+            .replace("label = \"current\"", "label = \"primary\"")
+            .replace("key = \"current\"", &format!("key = \"{identity_key}\"")),
     )?;
     write_transcript(&rig.root.join("claude"), "ordinary-session")?;
     for _ in 0..2 {
@@ -241,13 +244,11 @@ fn chair_start_records_unknown_identity_without_a_pending_handoff() -> Result {
         .find(|e| e["kind"] == "chair.session")
         .ok_or("SessionStart did not record the serving account without a handoff")?;
     assert_eq!(event["unit"], "claude");
-    assert_eq!(event["account_identity"]["identity"]["state"], "unknown");
+    assert_eq!(event["account_identity"]["identity"]["state"], "known");
+    assert_eq!(event["account_identity"]["identity"]["provider"], "claude");
+    assert_eq!(event["account_identity"]["identity"]["account_key"], identity_key);
     assert_eq!(event["account_identity"]["epoch"]["state"], "unknown");
-    assert_eq!(event["account_identity"]["evidence_source"], "unknown");
-    assert_eq!(
-        event["account_identity"]["identity"]["reason"],
-        "provider_identity_port_unavailable",
-    );
+    assert_eq!(event["account_identity"]["evidence_source"], "provider");
     assert!(event.get("account").is_none());
     assert_eq!(event["session"], "ordinary-session");
     assert!(event["trace"]["project"].is_string());
@@ -269,7 +270,10 @@ fn chair_start_records_unknown_identity_without_a_pending_handoff() -> Result {
     let stats: serde_json::Value = serde_json::from_slice(&stats.stdout.bytes)?;
     let chair = &stats["data"]["chair"];
     assert_eq!(chair["sessions"], 1);
-    assert_eq!(chair["groups"][0]["account"], "unattributed");
+    assert_eq!(
+        chair["groups"][0]["account"],
+        format!("claude/{identity_key}")
+    );
     assert_eq!(chair["groups"][0]["model"], "claude/claude-opus-5-5");
     assert_eq!(chair["groups"][0]["usage"]["cache_read"]["known"], 400);
     Ok(())
@@ -314,7 +318,7 @@ fn chair_on_an_unregistered_config_directory_is_recorded_as_unattributed() -> Re
     assert_eq!(event["account_identity"]["evidence_source"], "unknown");
     assert_eq!(
         event["account_identity"]["identity"]["reason"],
-        "provider_identity_port_unavailable",
+        "provider_identity_unavailable",
     );
     assert!(event.get("account").is_none());
     assert_eq!(event["config"], ".claude");
@@ -339,7 +343,7 @@ fn chair_start_obeys_project_attribution_opt_in() -> Result {
     assert_eq!(event["account_identity"]["evidence_source"], "unknown");
     assert_eq!(
         event["account_identity"]["identity"]["reason"],
-        "provider_identity_port_unavailable",
+        "provider_identity_unavailable",
     );
     assert!(event.get("account").is_none());
     assert!(

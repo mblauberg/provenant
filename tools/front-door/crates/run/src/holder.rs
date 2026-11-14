@@ -2395,7 +2395,6 @@ impl RunStore {
         ) && task.writer.is_some()
             && !matches!(&task.route, RequestedRoute::Adapter { .. })
             && decoded.handoff().ok().flatten().is_none()
-            && !reports_verdict(&decoded.result)
         {
             partial.push(PartialSignal::HandoffMissing);
             // A lane that reports nothing has not passed. It needs review,
@@ -2761,12 +2760,6 @@ pub const EMPTY_WRITER_REASON: &str =
     "the provider ended with an empty final message; its commit is kept for review";
 pub const NO_HANDOFF_REASON: &str = "no handoff: the lane ended without reporting results";
 
-/// A final verdict reports a result even without a handoff.
-fn reports_verdict(result: &str) -> bool {
-    let mut capture = provenant_records::result_capture::ResultCapture::new(None);
-    capture.push(result.as_bytes());
-    capture.finish().verdict.is_some()
-}
 /// Stored instead of the provider's answer when settlement cannot filter it.
 const UNREDACTABLE_RESULT: &str = "[result withheld: redaction failed]";
 const REDACTION_FAILED_REASON: &str = "redaction failed; result withheld";
@@ -3014,26 +3007,6 @@ mod host_clock_tests {
             assert!(cause.diagnostic().contains(phrase));
             assert!(!cause.diagnostic().contains("/fixture"));
         }
-    }
-
-    #[test]
-    fn only_a_reportable_verdict_counts_as_a_lane_reporting() {
-        assert!(reports_verdict("Reviewed the change.\n\nVERDICT: PASS"));
-        assert!(reports_verdict(
-            "Reviewed the change.\nVERDICT: FAIL\n```handoff\n{\"schema_version\":2,\"status\":\"done\"}\n```"
-        ));
-        // Exactly one verdict line outside fenced blocks counts, wherever it sits.
-        assert!(reports_verdict(
-            "Reviewed the change.\nVERDICT: PASS\nOne more note."
-        ));
-        assert!(reports_verdict(
-            "```text\nVERDICT: FAIL\n```\nVERDICT: INCONCLUSIVE"
-        ));
-        // Several verdict lines, a malformed token or none do not.
-        assert!(!reports_verdict("VERDICT: PASS\nVERDICT: FAIL"));
-        assert!(!reports_verdict("Reviewed.\nVERDICT: MAYBE soon"));
-        assert!(!reports_verdict("Reviewed.\nVERDICT: maybe"));
-        assert!(!reports_verdict("Reviewed the change with no verdict."));
     }
 
     #[test]
@@ -3863,10 +3836,13 @@ mod writer_recovery_tests {
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
         use provenant_records::wire::lane::{LaneProjectionFacts, LaneRow};
-        for (writer, outcome) in [
-            (true, Outcome::Succeeded),
-            (false, Outcome::Succeeded),
-            (true, Outcome::Failed),
+        for (writer, outcome, answer) in [
+            (true, Outcome::Succeeded, ""),
+            (false, Outcome::Succeeded, ""),
+            (true, Outcome::Failed, ""),
+            (true, Outcome::Succeeded, "VERDICT: PASS"),
+            (true, Outcome::Succeeded, "VERDICT: FAIL"),
+            (true, Outcome::Succeeded, "VERDICT: INCONCLUSIVE"),
         ] {
             let fixture = PrepareFixture::new()?;
             let execution = registered_landed_writer_fixture(&fixture)?;
@@ -3962,7 +3938,7 @@ mod writer_recovery_tests {
             observed.scope = scope;
             crate::dispatch_tests::seal_exit(&store, &observed)?;
             let mut fake = crate::dispatch_tests::Fake::with_observed(Some(route()), Some(outcome));
-            fake.answer = Some(String::new());
+            fake.answer = Some(answer.to_owned());
             let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
             let AttemptState::Terminal {
                 outcome: actual,
@@ -3974,13 +3950,49 @@ mod writer_recovery_tests {
             };
             if writer && outcome == Outcome::Succeeded {
                 assert_eq!(*actual, Outcome::ReviewRequired, "{reason:?}");
-                assert!(reason.as_deref().unwrap().contains(EMPTY_WRITER_REASON));
-                let row = LaneRow::project(&finished, LaneProjectionFacts::default());
-                assert!(row.reason.as_deref().unwrap().contains(EMPTY_WRITER_REASON));
-                assert_eq!(
-                    read_sealed(&attempt, "result.md", RESULT_LIMIT)?.as_deref(),
-                    Some(EMPTY_WRITER_RESULT.as_bytes())
-                );
+                if answer.is_empty() {
+                    assert!(reason.as_deref().unwrap().contains(EMPTY_WRITER_REASON));
+                    let row = LaneRow::project(&finished, LaneProjectionFacts::default());
+                    assert!(row.reason.as_deref().unwrap().contains(EMPTY_WRITER_REASON));
+                    assert_eq!(
+                        read_sealed(&attempt, "result.md", RESULT_LIMIT)?.as_deref(),
+                        Some(EMPTY_WRITER_RESULT.as_bytes())
+                    );
+                } else {
+                    assert!(reason.as_deref().unwrap().contains(NO_HANDOFF_REASON));
+                    assert_eq!(
+                        finished.settlement_reason,
+                        Some(provenant_records::run::SettlementReason::HandoffMissing)
+                    );
+                    assert_eq!(
+                        finished.partial_signals,
+                        [provenant_records::run::PartialSignal::HandoffMissing]
+                    );
+                    let AttemptState::Terminal { extra, .. } = &finished.state else {
+                        panic!("attempt must be terminal");
+                    };
+                    let stop: provenant_records::Stop =
+                        serde_json::from_value(extra.get("stop").cloned().ok_or("stop")?)?;
+                    assert_eq!(stop.cause(), provenant_records::StopCause::HandoffMissing);
+                    assert_eq!(
+                        stop.next_step(
+                            &Default::default(),
+                            provenant_records::StopFacts {
+                                custody_released: true,
+                                ..Default::default()
+                            }
+                        ),
+                        provenant_records::NextStep::Chair
+                    );
+                    assert_eq!(
+                        finished.settlement_reason.unwrap().node_outcome(Some(stop.cause())),
+                        provenant_records::run::SettlementNodeOutcome::Failed
+                    );
+                    assert_eq!(
+                        read_sealed(&attempt, "result.md", RESULT_LIMIT)?.as_deref(),
+                        Some(answer.as_bytes())
+                    );
+                }
                 fixture.git(&[
                     "merge-base",
                     "--is-ancestor",

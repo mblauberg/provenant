@@ -42,7 +42,9 @@ pub use holder::HostHolder;
 pub use key::{resolve_fail, resolve_target};
 pub use launch::*;
 pub use output::*;
-pub(crate) use provider::find_executable as provider_executable;
+pub fn provider_executable(name: &str) -> Result<PathBuf, String> {
+    provider::find_executable(name)
+}
 #[cfg(feature = "fixture")]
 pub use provider::{apply_fixture_setup, prepare_fixture, writer_fixture_plan};
 pub use provider::{graph_inputs_directory, graph_node_inputs_directory};
@@ -603,6 +605,20 @@ impl Registry<'_> {
             Ok(events) => (events, None),
             Err(error) => (Vec::new(), Some(error.to_string())),
         };
+        // The prepared route key was checked against the provider identity port.
+        // Keep it as observed usage identity only while the adapter still sees an authenticated stream.
+        let account_key = match adapter.account(&state) {
+            Ok(provenant_providers::AccountDetection::Unknown) => route
+                .account_key
+                .as_deref()
+                .filter(|key| {
+                    provenant_records::AdapterSpec::get(adapter.id()).is_some_and(|spec| {
+                        spec.registered_account && !spec.is_unregistered_local(key)
+                    })
+                })
+                .map(str::to_owned),
+            Ok(provenant_providers::AccountDetection::AuthRequired) | Err(_) => None,
+        };
         let code = match exit.termination {
             Some(provenant_os::exec::Termination::Exit(code)) => Some(code),
             _ => None,
@@ -715,7 +731,7 @@ impl Registry<'_> {
                     .as_ref()
                     .map_or_else(|| route.effort.clone(), |turn| turn.effort.clone()),
                 account_label: route.account_label.clone(),
-                account_key: route.account_key.clone(),
+                account_key: account_key.clone(),
                 source: Some(
                     if rollout.is_some() {
                         "codex_rollout"
@@ -797,6 +813,7 @@ impl Registry<'_> {
         if provenant_records::AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.exit_route) {
             decoded.observed_route = Some(run::RouteRecord {
                 source: Some("command_exit".into()),
+                account_key: account_key.clone(),
                 ..route.clone()
             });
             if exit.stdout.bytes > stdout.len() as u64 {

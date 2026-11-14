@@ -428,6 +428,11 @@ pub(super) fn validate_decide(
     {
         return Err("decide needs a question and 2 to 16 options with inbox-safe IDs and labels");
     }
+    if repair_scope_gate(node.extra.get("repair_scope_gate"))
+        && spec.default.as_deref() == Some("approve")
+    {
+        return Err("scope approval requires an owner answer, never a timeout default");
+    }
     if spec
         .default
         .as_ref()
@@ -448,7 +453,7 @@ pub(super) fn validate_decide(
     }
     let timeout = spec.timeout_seconds.map_or(
         DecideTimeout {
-            seconds: 604_800,
+            seconds: crate::config::MAX_DECIDE_TIMEOUT_SECONDS,
             source: DecideTimeoutSource::Configured,
         },
         |seconds| DecideTimeout {
@@ -786,7 +791,7 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
     let link = &checkpoint.asks[position];
     let answer = match reply {
         Ok(Some(reply)) => Some(answered(reply)),
-        _ if due(link, now) => Some(Answer {
+        Ok(None) if due(link, now) => Some(Answer {
             source: AnswerSource::Default,
             option: decide_default(spec),
             text: None,

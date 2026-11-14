@@ -34,6 +34,9 @@ pub struct RouteFact {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub account_label: Option<String>,
+    /// The selected account key; identity is attributed only after applied and observed routes agree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_key: Option<String>,
 }
 
 /// Disjoint provider usage counts. Unknown categories remain absent.
@@ -98,6 +101,8 @@ pub struct AttemptFact {
     pub terminal_state: AttemptOutcome,
     /// Source of the settlement cause, or an explicit unavailable state.
     pub cause_source: crate::run::CauseSource,
+    /// Verified account identity for this attempt, or explicit unknown evidence.
+    pub account_identity: crate::AccountIdentity,
     pub exit_code: Option<i64>,
     pub queued_at: WallTime,
     pub started_at: Option<WallTime>,

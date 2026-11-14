@@ -163,7 +163,7 @@ class Selection(unittest.TestCase):
     def test_dispatched_ci_receipt_is_bound_to_commit(self):
         ci = load_script("verify_ci", "verify-ci-runner")
         run = {"databaseId": 5, "displayTitle": "verify-unique", "headSha": "abc", "status": "completed", "conclusion": "success"}
-        with mock.patch.object(ci.sys, "argv", ["verify-ci-runner", "upstream", "abc", "2"]), \
+        with mock.patch.object(ci.sys, "argv", ["verify-ci-runner", "upstream", "abc", "assurance/linux"]), \
              mock.patch.object(ci.uuid, "uuid4", return_value=mock.Mock(hex="unique")), \
              mock.patch.object(ci.subprocess, "check_output", side_effect=["abc\trefs/heads/test\n", "https://example.com/owner/repo.git\n", "https://github.com/owner/repo\n", json.dumps([run])]), \
              mock.patch.object(ci.subprocess, "run") as dispatch, \
@@ -172,7 +172,7 @@ class Selection(unittest.TestCase):
             with self.assertRaises(SystemExit) as result:
                 ci.main()
         self.assertEqual(result.exception.code, 0)
-        self.assertEqual(json.loads(out.getvalue()), {"commit": "abc", "tier": "2", "exit_status": 0})
+        self.assertEqual(json.loads(out.getvalue()), {"commit": "abc", "tier": "assurance/linux", "exit_status": 0})
         self.assertIn("commit=abc", dispatch.call_args.args[0])
         self.assertEqual(dispatch.call_args.args[0][dispatch.call_args.args[0].index("--repo") + 1], "github.com/owner/repo")
 

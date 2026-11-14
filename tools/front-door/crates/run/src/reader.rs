@@ -142,6 +142,11 @@ fn slot_wait_ms(queued_at: WallTime, started_at: Option<WallTime>) -> Option<u64
 /// The published fact for a terminal record. A record read from a peer takes the
 /// same path as one read here.
 pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
+    let account_identity = usage_identity(
+        r.resolved_route.as_ref(),
+        r.applied_route.as_ref(),
+        r.observed_route.as_ref(),
+    );
     let usage = r.effective_usage().into();
     let AttemptState::Terminal {
         extra: terminal_extra,
@@ -190,6 +195,7 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         project_id: r.project_id,
         terminal_state: outcome.into(),
         cause_source,
+        account_identity,
         exit_code,
         queued_at: r.queued_at,
         started_at: r.started_at,
@@ -1493,9 +1499,79 @@ pub(crate) fn route_identity(
     }
 }
 
+fn usage_identity(
+    resolved: Option<&RouteRecord>,
+    applied: Option<&RouteRecord>,
+    observed: Option<&RouteRecord>,
+) -> provenant_records::AccountIdentity {
+    use provenant_records::AccountIdentity;
+
+    if route_identity(resolved, applied, observed) != RouteIdentity::Observed {
+        return AccountIdentity::unknown();
+    }
+    let Some(applied) = applied else {
+        return AccountIdentity::unknown();
+    };
+    let Some(observed) = observed else {
+        return AccountIdentity::unknown();
+    };
+    let (Some(provider), Some(account_key)) =
+        (applied.provider.as_deref(), applied.account_key.as_deref())
+    else {
+        return AccountIdentity::unknown();
+    };
+    if observed.account_key.as_deref() != Some(account_key) {
+        return AccountIdentity::unknown();
+    }
+    let Some(spec) = provenant_records::AdapterSpec::get(provider) else {
+        return AccountIdentity::unknown();
+    };
+    if !spec.registered_account || spec.is_unregistered_local(account_key) {
+        return AccountIdentity::unknown();
+    }
+    AccountIdentity::provider_observation(provider, account_key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_identity_requires_a_verified_registered_applied_and_observed_key() {
+        use provenant_records::{AccountIdentity, run::RouteRecord};
+
+        let route = RouteRecord {
+            provider: Some("claude".into()),
+            model: Some("claude/sonnet".into()),
+            account_key: Some("verified-key".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            usage_identity(Some(&route), Some(&route), Some(&route)),
+            AccountIdentity::provider_observation("claude", "verified-key")
+        );
+
+        let requested_only = usage_identity(Some(&route), None, Some(&route));
+        assert_eq!(requested_only, AccountIdentity::unknown());
+
+        let mut mismatch = route.clone();
+        mismatch.account_key = Some("other-key".into());
+        assert_eq!(
+            usage_identity(Some(&route), Some(&route), Some(&mismatch)),
+            AccountIdentity::unknown()
+        );
+
+        let local = RouteRecord {
+            provider: Some("agy".into()),
+            model: Some("agy/gemini".into()),
+            account_key: Some("local".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            usage_identity(Some(&local), Some(&local), Some(&local)),
+            AccountIdentity::unknown()
+        );
+    }
 
     #[test]
     fn slot_wait_is_queue_to_start_and_absent_until_started() {

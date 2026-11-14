@@ -22,6 +22,7 @@ fn graph_quality_reports_missing_checkpoint_without_failing()
         project_id: project,
         terminal_state: AttemptOutcome::Succeeded,
         cause_source: provenant_records::run::CauseSource::Unavailable,
+        account_identity: provenant_records::AccountIdentity::unknown(),
         exit_code: Some(0),
         queued_at: WallTime::from_micros(0)?,
         started_at: None,

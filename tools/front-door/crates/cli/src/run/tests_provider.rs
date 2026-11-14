@@ -424,6 +424,7 @@ fn claude_session_reaches_the_decoded_attempt() {
     let route = run::RouteRecord {
         provider: Some("claude".into()),
         model: Some("claude/claude-sonnet-5".into()),
+        account_key: Some("verified-key".into()),
         ..Default::default()
     };
     let stream = include_str!("../../../../tests/fixtures/providers/claude/fresh.jsonl");
@@ -438,6 +439,13 @@ fn claude_session_reaches_the_decoded_attempt() {
     assert_eq!(
         decoded.session.as_deref(),
         Some("FIXTURE_SESSION_IDENTIFIER_003")
+    );
+    assert_eq!(
+        decoded
+            .observed_route
+            .as_ref()
+            .and_then(|route| route.account_key.as_deref()),
+        Some("verified-key")
     );
 }
 #[test]
@@ -958,6 +966,13 @@ fn claude_lane_auth_failure_reports_a_lost_lane_token_for_its_account()
         None,
     )?;
     assert_eq!(decoded.outcome, run::Outcome::AuthRequired);
+    assert_eq!(
+        decoded
+            .observed_route
+            .as_ref()
+            .and_then(|route| route.account_key.as_deref()),
+        None
+    );
     assert_eq!(
         decoded.terminal_cause,
         Some(run::TerminalCause::LaneTokenLost)

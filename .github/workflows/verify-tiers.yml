@@ -12,8 +12,8 @@ on:
         type: string
       tier:
         required: true
-        type: choice
-        options: ['lane', '2', '3']
+        type: string
+        default: '2'
 
 permissions:
   contents: read

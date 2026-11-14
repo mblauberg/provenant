@@ -99,6 +99,7 @@ struct FakeOwner {
     deadlines: Vec<Option<u64>>,
     families: std::collections::BTreeMap<String, String>,
     answers: std::collections::BTreeMap<String, AskReply>,
+    fail_node_ask_once: bool,
     now: Option<provenant_core::WallTime>,
     asked: Vec<String>,
     /// Every request filed, in order; a repeat files nothing.
@@ -294,6 +295,9 @@ impl AttemptOwner for FakeOwner {
     }
     fn node_ask(&mut self, scope: AskScope<'_>) -> Result<Option<AskReply>, Self::Error> {
         self.asked.push(scope.ask.ask_id.clone());
+        if std::mem::take(&mut self.fail_node_ask_once) {
+            return Err(NoObservation);
+        }
         Ok(self.answers.get(&scope.ask.ask_id).cloned())
     }
     fn notify_owner(&mut self, filing: AskFiling<'_>) -> Result<bool, Self::Error> {
