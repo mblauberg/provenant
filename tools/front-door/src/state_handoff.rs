@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 /// The files of a 1.x root that hold owner configuration, relative to it.
 /// Run state, stores, ledgers, worktree records and caches stay behind, and
 /// provider credentials live with each provider, never in the state root.
+/// `agy-identity-<digest>.json` is a TTL probe cache and
+/// `projects/<id>/project.json` a path-derived binding; both are re-derived.
 pub(crate) const OWNER_FILES: &[&str] = &[
     // Every configuration domain: accounts, routing, profile presets,
     // Fabric peers, lanes, landing and the shared settings source.
@@ -149,6 +151,18 @@ fn copy(plan: &Handoff) -> io::Result<Handoff> {
             }
             // Keeps the mode, which the receipt and host identity readers check.
             std::fs::copy(plan.from.join(file), &target)?;
+            if file == Path::new("install/receipt.json") {
+                let mut receipt: provenant_records::InstallReceipt = provenant_records::decode(
+                    std::fs::File::open(&target)?,
+                    provenant_records::Limits::default(),
+                )
+                .map_err(io::Error::other)?;
+                receipt.state_format_version = provenant_records::STATE_FORMAT_VERSION;
+                std::fs::write(
+                    &target,
+                    provenant_records::encode(&receipt).map_err(io::Error::other)?,
+                )?;
+            }
             std::fs::File::open(&target)?.sync_all()?;
         }
         for directory in std::iter::once(stage.clone()).chain(
@@ -218,7 +232,24 @@ mod tests {
         std::fs::create_dir_all(legacy.join("runs/run"))?;
         std::fs::write(legacy.join("config.toml"), b"schema_version = 1\n")?;
         std::fs::write(legacy.join("host-id"), [b'a'; 32])?;
-        std::fs::write(legacy.join("install/receipt.json"), b"{}")?;
+        let receipt = provenant_records::InstallReceipt {
+            extra: Default::default(),
+            schema_version: 1,
+            state_format_version: 1,
+            source_digest: provenant_records::SourceDigest::from_bytes([1; 32]),
+            manifest_digest: provenant_records::FileDigest::from_bytes([2; 32]),
+            asset_digest: provenant_records::SourceDigest::from_bytes([3; 32]),
+            target: "fixture".into(),
+            toolchain: "fixture".into(),
+            bin_dir: provenant_records::AbsolutePath::new(&home.join("bin"))?,
+            harnesses: vec![],
+            harness_targets: vec![],
+            entries: vec![],
+        };
+        std::fs::write(
+            legacy.join("install/receipt.json"),
+            provenant_records::encode(&receipt)?,
+        )?;
         std::fs::write(legacy.join("run.sqlite3"), b"run state")?;
         std::fs::write(legacy.join("runs/run/result.md"), b"result")?;
         Ok((
@@ -251,7 +282,19 @@ mod tests {
         for (path, bytes) in copied {
             let path = path?;
             assert!(OWNER_FILES.iter().any(|name| Path::new(name) == path));
-            assert_eq!(bytes, std::fs::read(legacy.join(&path))?);
+            if path == Path::new("install/receipt.json") {
+                let copied: provenant_records::InstallReceipt = serde_json::from_slice(&bytes)?;
+                let mut original: provenant_records::InstallReceipt =
+                    serde_json::from_slice(&std::fs::read(legacy.join(&path))?)?;
+                assert_eq!(
+                    copied.state_format_version,
+                    provenant_records::STATE_FORMAT_VERSION
+                );
+                original.state_format_version = copied.state_format_version;
+                assert_eq!(copied, original);
+            } else {
+                assert_eq!(bytes, std::fs::read(legacy.join(&path))?);
+            }
         }
         // An existing root is left alone: a second install copies nothing.
         assert!(super::plan(&state, &home)?.is_none());

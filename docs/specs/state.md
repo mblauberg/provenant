@@ -134,7 +134,10 @@ every 1.x launch agent by label, then copies `config.toml`, `host-id` and
 `install/receipt.json` (regular files only, modes kept) into a staged directory
 renamed into place. A failed stop copies nothing; a non-empty root and any
 other explicit root are never seeded. The copied receipt's links stay owned, so
-the install replaces them. A dry run reports the copy and writes nothing.
+the install replaces them. Staging stamps the receipt with the current state
+format before publication, even if the later install fails. The agy identity
+probe cache and path-derived project bindings are re-derived. A dry run reports
+the copy and writes nothing.
 - Why: rollback is reinstalling 1.x, which needs its root intact, and two
   versions must never run agents at once.
 - Test: `src/state_handoff.rs::copies_only_owner_configuration_and_never_writes_the_old_root`;
