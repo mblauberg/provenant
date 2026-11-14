@@ -2,10 +2,10 @@
 use crate::fabric;
 use provenant_cli::{Globals, check::Providers};
 use provenant_confinement::worktrees::WorkerObserver;
-use provenant_core::{AttemptId, CancelToken, Clock};
+use provenant_core::{AttemptId, CancelToken, Clock, DurationMicros, Pause};
 use provenant_fabric_runtime::{
     coordination::facade::GraphInput,
-    graph::{AttemptOutcome, FileJournal, GraphRun, NodeState},
+    graph::{AttemptOutcome, GraphRun, NodeState},
 };
 use provenant_providers::host::LocalSignin;
 use provenant_quota::{QuotaStatus, ReadinessReason};
@@ -13,10 +13,7 @@ use provenant_records::{CommandResult, Outcome, StopCause};
 use provenant_routing::{Catalogue, ModelId};
 use serde::Serialize;
 use serde_json::json;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    time::Duration,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 const PROMPT: &str = "Reply with exactly one word: OK. Do not use tools, read files, change files, run commands or perform any other work.";
 
@@ -361,6 +358,7 @@ fn settlement(row: &mut Row, run: &GraphRun) -> bool {
 fn live(
     row: &mut Row,
     settings: Settings,
+    interval: DurationMicros,
     globals: &Globals,
     workers: &'static dyn WorkerObserver,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -388,12 +386,8 @@ fn live(
     if let Some(error) = &launch_error {
         row.error_code = Some(error.code().to_owned());
     }
-    let mut changes = FileJournal::watch_changes(
-        &factory.context.roots.state,
-        factory.context.identity.project,
-    )?;
-    // Arm before the first read: a very fast provider cannot fall between
-    // sampling its terminal state and subscribing to the owner's events.
+    // Re-read the typed graph state at the configured local wait interval
+    // (domains.wait.local_interval_ms) until it settles or the budget ends.
     let wait = provenant_core::WaitBudget::cli(
         factory.clock.mono_now(),
         settings
@@ -414,13 +408,15 @@ fn live(
         if settlement(row, &run) {
             return Ok(());
         }
-        let remaining = Duration::from_micros(wait.remaining(factory.clock.mono_now()).as_micros());
-        if !changes.wait(remaining)? {
+        let remaining = wait.remaining(factory.clock.mono_now());
+        if remaining.as_micros() == 0 || cancel.is_cancelled() {
             row.status = Verdict::Fail;
             row.cause = Cause::Check(CheckCause::SettlementFailed);
             row.error_code = Some("settlement_wait_expired".into());
             return Ok(());
         }
+        let pause = remaining.as_micros().min(interval.as_micros());
+        factory.backoff.wait(DurationMicros::from_micros(pause), &cancel);
     }
 }
 
@@ -445,6 +441,14 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
             crate::roots::Product::Required,
         )?;
         let mut rows = select(inventory(&resolved.roots)?, &args.routes)?;
+        let interval = provenant_config::read_with_domains(
+            &resolved.roots,
+            &provenant_cli::domains::SECTIONS,
+        )?
+        .domains
+        .wait
+        .local_interval_ms;
+        let interval = DurationMicros::from_micros(interval.saturating_mul(1000));
         if args.live {
             // Factories and SQLite connections belong to their worker, never
             // shared across threads. Each route stays on the normal run path.
@@ -455,7 +459,7 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
                     scope.spawn(move || loop {
                         let row = match queue.lock() { Ok(mut queue) => queue.next(), Err(_) => None };
                         let Some(row) = row else { break; };
-                        if let Err(error) = live(row, settings, globals, workers) {
+                        if let Err(error) = live(row, settings, interval, globals, workers) {
                             row.status = Verdict::Fail;
                             row.cause = Cause::Check(CheckCause::LaunchRefused);
                             row.error_code.get_or_insert_with(|| error.downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>().map_or("provider_check_error", |error| error.code()).to_owned());

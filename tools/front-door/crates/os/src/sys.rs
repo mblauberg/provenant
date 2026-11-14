@@ -353,8 +353,6 @@ pub mod profile;
 #[doc(hidden)]
 pub mod raw_exec;
 
-/// Native filesystem events for settlement readers.
-pub mod file_events;
 #[doc(hidden)]
 pub mod fs;
 
