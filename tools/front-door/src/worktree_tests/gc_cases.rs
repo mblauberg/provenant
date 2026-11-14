@@ -1237,7 +1237,7 @@ pub(super) fn gc_collects_a_settled_lane_whose_completion_attempt_failed() -> Re
 /// collector busy or never ran. The path-based sweep keeps such a lane; the
 /// owner-bound pass for unsettled receipts collects it.
 pub(super) fn gc_collects_a_fast_forwarded_lane_its_settlement_missed() -> Result {
-    use crate::fabric::gc_cleanup::{COLLECTION_WAIT_SECONDS, SPAWNED};
+    use crate::fabric::gc_cleanup::SPAWNED;
     for busy in [true, false] {
         let fixture = crate::fabric::peer_tests::SettlementFixture::resumed_with_lane_commit()?;
         let rig = &fixture.rig;
@@ -1256,20 +1256,24 @@ pub(super) fn gc_collects_a_fast_forwarded_lane_its_settlement_missed() -> Resul
                 .map_err(|error| error.to_string())?
                 .pop()
                 .ok_or("settlement did not start collection")?;
-            // A sweep in progress holds the collector, so the worker exits.
-            let held = crate::worktrees::collection_lock(&fixture.roots)?;
-            COLLECTION_WAIT_SECONDS.set(1);
-            let outcome = crate::fabric::gc_cleanup::run(&request, &FreeWorkers);
-            COLLECTION_WAIT_SECONDS.set(120);
+            // Only this lane is busy. Other GC items remain collectable.
+            let state = provenant_os::fs::Directory::open_anchor(
+                &fixture
+                    .rig
+                    .state
+                    .join("worktrees")
+                    .join(fixture.settled.project_id.to_string())
+                    .join(provenant_confinement::worktrees::state_dir_name(
+                        &fixture.worktree,
+                    )),
+            )?;
+            let held = state.try_lock(
+                std::ffi::OsStr::new("writer.lock"),
+                provenant_os::fs::LockMode::Exclusive,
+            )?;
+            crate::fabric::gc_cleanup::run(&request, &FreeWorkers)?;
+            assert!(fixture.worktree.exists());
             drop(held);
-            outcome?;
-            let receipt = settlement_receipt(&fixture)?;
-            assert_eq!(
-                receipt["reason"],
-                crate::worktrees::COLLECTION_BUSY,
-                "{receipt}"
-            );
-            assert_eq!(receipt["retryable"], true, "{receipt}");
         } else {
             SPAWNED.set(Err("detached collection could not start".into()));
             crate::fabric::settle_owned_worktree(

@@ -142,6 +142,38 @@ fn a_settled_attempt_appends_one_row_even_when_settlement_is_retried() -> Result
 }
 
 #[test]
+fn concurrent_retries_count_an_attempt_once() -> Result {
+    let (_temp, state) = state()?;
+    let prices = prices()?;
+    let row = row(&fact(1, 20_000, "m", Some(1))?, &key(1)?, Some(&prices))?;
+    std::thread::scope(|scope| {
+        let mut threads = Vec::new();
+        for _ in 0..8 {
+            threads.push(scope.spawn(|| settle(&state, &row).map_err(|error| error.to_string())));
+        }
+        for thread in threads {
+            thread.join().unwrap().unwrap();
+        }
+    });
+    let ledger = read(&state)?;
+    assert!(ledger.unrecognised.is_empty());
+    assert_eq!(ledger.rows, [row.clone()]);
+    assert_eq!(spend(&ledger.rows, None, None, None)?.attempts, 1);
+    let directory = Directory::open_anchor(&state.join(DIRECTORY))?;
+    let mut conflicting = row.clone();
+    conflicting.outcome = "different".into();
+    let segment = conflicting.segment();
+    let mut line = serde_json::to_vec(&conflicting)?;
+    line.push(b'\n');
+    JsonLedger::new(&directory, OsStr::new(&segment)).append(&line)?;
+    let ledger = read(&state)?;
+    assert_eq!(ledger.rows, [row]);
+    assert_eq!(ledger.unrecognised.len(), 1);
+    assert!(ledger.unrecognised[0].line.is_some());
+    Ok(())
+}
+
+#[test]
 fn settled_cost_for_a_past_window_equals_the_telemetry_report() -> Result {
     let (_temp, state) = state()?;
     let prices = prices()?;

@@ -714,28 +714,6 @@ fn retained_lane_settlement_leaves_output_and_cache_for_gc()
         },
         integration: None,
     };
-    let collection = crate::worktrees::collection_lock(&fixture.roots)?;
-    settle_owned_worktree(
-        &fixture.settled,
-        &fixture.roots,
-        &FreeWorkers,
-        Some(&delivery),
-    )?;
-    assert!(fixture.worktree.join("build/artifact").exists());
-    assert!(cache.exists());
-    let clock = SystemClock;
-    let cancel = CancelToken::new();
-    let call = provenant_run::Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
-    let busy = fixture
-        .store
-        .worktree_settlement(fixture.settled.attempt_id, &call)?
-        .ok_or("missing busy settlement receipt")?;
-    assert_eq!(busy["state"], "retained", "{busy}");
-    assert_eq!(busy["cleanup_deferred"], true);
-    drop(collection);
     let state = provenant_os::fs::Directory::open_anchor(
         &fixture
             .rig
@@ -782,65 +760,5 @@ fn retained_lane_settlement_leaves_output_and_cache_for_gc()
         );
         assert!(orphan.exists(), "unrelated cache collected");
     }
-    Ok(())
-}
-
-#[test]
-fn explicit_writer_defers_tracking_ref_refresh_while_collection_is_busy()
--> Result<(), Box<dyn std::error::Error>> {
-    if host_test(
-        "fabric::peer_tests::peer_graph_submission::explicit_writer_defers_tracking_ref_refresh_while_collection_is_busy",
-    )? {
-        return Ok(());
-    }
-    let fixture = SettlementFixture::resumed()?;
-    let clock = SystemClock;
-    let cancel = CancelToken::new();
-    let owner_path = worktrees::with_context(
-        &fixture.roots,
-        &fixture.rig.home,
-        &fixture.rig.project,
-        &clock,
-        &cancel,
-        |context| {
-            let tree = provenant_confinement::verify_worktree(context.repo, &fixture.worktree)?;
-            Ok(tree.repo().private_git_dir().join("provenant-owner.json"))
-        },
-    )?;
-    std::fs::remove_file(owner_path)?;
-    let git = provenant_os::git::git_executable().ok_or("git")?;
-    let remote = fixture.rig.root.join("remote.git");
-    for args in [
-        vec!["init", "--bare", remote.to_str().ok_or("remote path")?],
-        vec![
-            "remote",
-            "add",
-            "origin",
-            remote.to_str().ok_or("remote path")?,
-        ],
-        vec![
-            "push",
-            "origin",
-            "refs/heads/resumed-lane:refs/heads/resumed-lane",
-        ],
-        vec!["update-ref", "-d", "refs/remotes/origin/resumed-lane"],
-    ] {
-        let output = fixture.rig.execute(&git, &args, None)?;
-        assert_eq!(
-            crate::worktree_tests::support::code(&output),
-            0,
-            "{}",
-            String::from_utf8_lossy(&output.stderr.bytes)
-        );
-    }
-    let collection = crate::worktrees::collection_lock(&fixture.roots)?;
-    settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
-    let output = fixture.rig.execute(
-        &git,
-        &["rev-parse", "--verify", "refs/remotes/origin/resumed-lane"],
-        None,
-    )?;
-    assert_ne!(crate::worktree_tests::support::code(&output), 0);
-    drop(collection);
     Ok(())
 }

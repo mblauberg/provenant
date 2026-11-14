@@ -9,6 +9,7 @@ use std::{
 pub struct Report {
     pub removed: Vec<PathBuf>,
     pub bytes: u64,
+    pub busy: Vec<PathBuf>,
 }
 
 /// Collect oldest generations until both limits hold. A busy store is left untouched.
@@ -18,20 +19,43 @@ pub fn collect(
     max_bytes: u64,
     dry_run: bool,
 ) -> Result<Report, Box<dyn std::error::Error>> {
-    let _lock = crate::target_seed::lock_store(state)?;
     let store = crate::target_seed::store_path(state);
     let mut report = Report::default();
+    let _lock = match crate::target_seed::lock_store(state) {
+        Ok(lock) => lock,
+        Err(error)
+            if matches!(
+                error.downcast_ref::<provenant_os::fs::FsError>(),
+                Some(provenant_os::fs::FsError::LockTimeout { .. })
+            ) =>
+        {
+            report.busy.push(store);
+            return Ok(report);
+        }
+        Err(error) => return Err(error),
+    };
     // A single build lock protects all stages. After a crash the OS releases
     // it, allowing the next collection to reclaim every abandoned tree.
-    if let Ok(_build_lock) = crate::target_seed::lock_build(state) {
-        for entry in fs::read_dir(&store)? {
-            let entry = entry?;
-            if entry.file_name().to_string_lossy().starts_with(".staging-")
-                && entry.file_type()?.is_dir()
-            {
-                remove(&entry.path(), dry_run, &mut report)?;
+    match crate::target_seed::lock_build(state) {
+        Ok(_build_lock) => {
+            for entry in fs::read_dir(&store)? {
+                let entry = entry?;
+                if entry.file_name().to_string_lossy().starts_with(".staging-")
+                    && entry.file_type()?.is_dir()
+                {
+                    remove(&entry.path(), dry_run, &mut report)?;
+                }
             }
         }
+        Err(error)
+            if matches!(
+                error.downcast_ref::<provenant_os::fs::FsError>(),
+                Some(provenant_os::fs::FsError::LockTimeout { .. })
+            ) =>
+        {
+            report.busy.push(store.clone())
+        }
+        Err(error) => return Err(error),
     }
     let root = store.join("generations");
     let mut generations = Vec::new();
@@ -142,7 +166,7 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let generation = generation(state.path(), "001", 3);
         let guard = crate::target_seed::lock_store(state.path()).unwrap();
-        assert!(collect(state.path(), 0, 0, false).is_err());
+        assert!(!collect(state.path(), 0, 0, false).unwrap().busy.is_empty());
         assert!(generation.exists());
         drop(guard);
         collect(state.path(), 0, 0, false).unwrap();

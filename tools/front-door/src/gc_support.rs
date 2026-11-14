@@ -1,7 +1,7 @@
 //! Host observations used by the existing GC composition.
 use crate::worktrees::Error;
 use provenant_confinement::worktrees::WorktreeContext;
-use provenant_core::{ActorId, CancelToken, Clock, GitOid, Roots, WaitBudget};
+use provenant_core::{ActorId, CancelToken, Clock, GitOid, Roots};
 use provenant_os::{
     clock::SystemClock,
     exec::{ExecOptions, ExecOutcome, Executor, StreamPolicy, Termination},
@@ -491,14 +491,15 @@ pub(crate) fn disk_alert(
     let gc = root.open_verified_directory(OsStr::new("gc"))?;
     let clock = SystemClock;
     let cancel = CancelToken::new();
-    let budget = WaitBudget::cli(clock.mono_now(), 5).map_err(|_| Error::Budget)?;
-    let _lock = gc.lock(
-        OsStr::new("alert.lock"),
-        LockMode::Exclusive,
-        budget,
-        &cancel,
-        &clock,
-    )?;
+    let _lock = match gc.try_lock(OsStr::new("alert.lock"), LockMode::Exclusive) {
+        Ok(lock) => lock,
+        Err(provenant_os::fs::FsError::LockTimeout { .. }) => {
+            return Ok(vec![
+                "disk alert skipped: alert item busy; next pass retries".into(),
+            ]);
+        }
+        Err(error) => return Err(error.into()),
+    };
     let latch = OsStr::new("low-disk.json");
     let latched = match gc.metadata_at(latch, false) {
         Ok(_) => true,

@@ -25,10 +25,12 @@ provenant --project /absolute/path/to/repo gc --apply --json
   `--pressure` is the capped (five seconds) sweep writer admission runs when
   free space is below `gc.free_floor`; it fetches nothing and removes no
   worktrees. `gc.schedule = false` disables scheduled sweeps. Full and pressure
-  sweeps share `<state>/gc/collection.lock`; a busy collector is skipped.
+  sweeps use the retention class table and try each item's custody independently.
+  Busy items are reported and skipped; a later pass collects them. There is no
+  collection-wide lock.
 - Preview evidence never authorises deletion: apply takes a fresh census after
   acquiring writer custody. A census it cannot complete keeps the tree, and the
-  error names the process and why. Read `data.provider_state`, `build_dirs`,
+  error names the process and why. Read `data.provider_state`, `staging_busy`, `target_seeds.busy`, `build_dirs`,
   `worktree_cleanup[]` and `unobserved_projects` in the JSON; default output is
   only counts and exceptions.
 - Chair session start and saves warn when free space on the state, checkout or

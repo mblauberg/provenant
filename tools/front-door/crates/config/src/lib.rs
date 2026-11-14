@@ -14,8 +14,9 @@ mod history;
 mod schema;
 pub use gc::{
     ForeignWorktrees, GcSettings, LaneBuildSettings, MemoryPressureThreshold,
-    PROJECT_WRITER_LANES_CEILING, ProjectGcSettings, STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings,
-    WRITER_LANES_CEILING, deserialize_auto, parse_cache_size,
+    PROJECT_WRITER_LANES_CEILING, ProjectGcSettings, RETENTION_CLASSES, RetentionClass,
+    RetentionKind, RetentionTrigger, STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings,
+    WRITER_LANES_CEILING, deserialize_auto, parse_cache_size, retention_schedule,
 };
 pub use github_policy::GithubPolicy;
 mod harness;

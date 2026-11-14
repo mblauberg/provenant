@@ -631,7 +631,6 @@ mod tests {
     #[test]
     fn busy_quota_cache_preserves_terminal_and_sealed_evidence()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_core::WaitBudget;
         use provenant_os::{
             capture::{FrameDecoder, FrameEvent},
             fs::LockMode,
@@ -646,16 +645,8 @@ mod tests {
         std::fs::create_dir(&quota)?;
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
         std::fs::set_permissions(&quota, std::fs::Permissions::from_mode(0o700))?;
-        let clock = SystemClock::new();
-        let cancel = CancelToken::new();
         let directory = Directory::open_anchor(&quota)?;
-        let lock = directory.lock(
-            OsStr::new("quota.lock"),
-            LockMode::Exclusive,
-            WaitBudget::cli(clock.mono_now(), 5)?,
-            &cancel,
-            &clock,
-        )?;
+        let lock = directory.try_lock(OsStr::new("quota.lock"), LockMode::Exclusive)?;
         let registration = &provenant_providers::opencode::REGISTRATION;
         let frames = QuotaFrames {
             decoder: Mutex::new(registration.stdout_decoder),

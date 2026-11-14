@@ -483,6 +483,14 @@ impl RunStore {
             Ok(false) => {}
             Err(error) => return Err(error.into()),
         }
+        // Age cannot grant custody of private, unimported Git objects or an
+        // attempt whose loss has not been proven. Apply this to every payload
+        // collector, including temporary cleanup and log retention.
+        if pinned_payload(&attempt, record)? {
+            return Err(RunError::Validation(
+                "payload retained: custody proof unavailable",
+            ));
+        }
         Ok(Some(Held {
             attempt,
             continuing,
@@ -2812,6 +2820,29 @@ mod tests {
         assert_eq!(report.pinned_bytes, report.accounted_bytes);
         assert!(pair.older.join("provider-state/candidate-0/blob").exists());
         assert!(pair.newer.join("provider-state/candidate-0/blob").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn age_collection_keeps_unimported_git_until_custody_is_proven() -> TestResult {
+        let pair = pair()?;
+        fs::create_dir(pair.older.join("tmp"))?;
+        fs::write(pair.older.join("tmp/objects"), "unlanded work")?;
+        fs::write(pair.older.join("writer-objects.json"), "{}")?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let report = sweep(&pair.store, &pair.context, 1, 8 * DAY_MICROS, false, &call)?;
+        assert!(
+            report
+                .kept
+                .iter()
+                .any(|issue| issue.path.starts_with(&pair.older))
+        );
+        assert_eq!(
+            fs::read_to_string(pair.older.join("tmp/objects"))?,
+            "unlanded work"
+        );
+        assert!(pair.older.join("provider-state/candidate-0/blob").exists());
         Ok(())
     }
 

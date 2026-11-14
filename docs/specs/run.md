@@ -1406,7 +1406,7 @@ registration, sequencer state and head are checked under removal locks.
 Only declared regenerable output may be discarded; other ignored files retain
 the checkout. Durable removal intent permits replay when the checkout is gone.
 
-Tracking-ref refresh in the worker is best effort, bounded and outside the collection lock.
+Tracking-ref refresh in the worker is best effort, bounded and before item custody.
 Failure cannot change the attempt outcome or an adopted tree's receipt. The
 [lifecycle policy](../worktrees.md) owns operational guidance.
 
@@ -1477,7 +1477,7 @@ Each artefact reports one `ArtefactOutcome` (`artefact`, `name`, `remote`,
 settlement or the pass. Completion cleanup is one detached attempt per
 settlement and keeps no queue or retry state. A transient failure leaves a
 non-final receipt. The next applied `gc` sweep runs the same owner-bound
-collection, under the collection lock it holds, for each terminal lane whose
+collection, trying each item's custody without a collection-wide lock, for each terminal lane whose
 receipt is deferred, retryable or pruning and whose worktree exists, landing
 against the fetched default branch (falling back to the owner's base when the
 fetch fails, there is no origin, or the sweep is a pressure sweep, matching

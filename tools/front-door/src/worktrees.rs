@@ -388,6 +388,7 @@ struct GcData {
     target_seeds: provenant_run::target_seed_gc::Report,
     build_dirs: provenant_run::build_dir_gc::Report,
     graph_checkpoints_removed: usize,
+    staging_busy: Vec<PathBuf>,
     worktree_cleanup: Vec<worktrees::WorktreeGcReport>,
     alerts: Vec<String>,
     unobserved_projects: Vec<PathBuf>,
@@ -482,6 +483,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
                 target_seeds: Default::default(),
                 build_dirs: Default::default(),
                 graph_checkpoints_removed: 0,
+                staging_busy: Vec::new(),
                 worktree_cleanup,
                 alerts,
                 notice: None,
@@ -875,17 +877,6 @@ pub(crate) fn land_cleanup(
         roots::Product::Required,
     )?;
     let config = provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?;
-    let _collection = match event_collection_lock(&roots) {
-        Ok(lock) => lock,
-        Err(Error::Fs(provenant_os::fs::FsError::LockTimeout { .. })) => {
-            return Ok(LandWorktree {
-                registered: true,
-                kept: Some(COLLECTION_BUSY.into()),
-                ..Default::default()
-            });
-        }
-        Err(error) => return Err(error),
-    };
     with_context(
         &roots,
         &home,
@@ -1028,45 +1019,6 @@ pub(crate) fn land_cleanup(
     )
 }
 
-/// How long an event caller (settlement or landing) waits for a busy
-/// collection pass before deferring to the next sweep.
-pub(crate) const EVENT_LOCK_WAIT_SECS: u64 = if cfg!(test) { 1 } else { 5 };
-pub(crate) const COLLECTION_BUSY: &str = "GC collection busy; the next sweep collects it";
-
-pub(crate) fn collection_lock(
-    roots: &provenant_core::Roots,
-) -> Result<provenant_os::fs::LockGuard, Error> {
-    collection_lock_for(roots, None)
-}
-
-/// Take the collection lock, waiting a bounded time for a pass in progress.
-pub(crate) fn event_collection_lock(
-    roots: &provenant_core::Roots,
-) -> Result<provenant_os::fs::LockGuard, Error> {
-    collection_lock_for(roots, Some(EVENT_LOCK_WAIT_SECS))
-}
-
-pub(crate) fn collection_lock_for(
-    roots: &provenant_core::Roots,
-    wait_secs: Option<u64>,
-) -> Result<provenant_os::fs::LockGuard, Error> {
-    let budget = match wait_secs {
-        Some(seconds) => WaitBudget::cli(SystemClock.mono_now(), seconds)
-            .map_err(|_| Error::GcObservation("invalid GC lock wait"))?,
-        None => WaitBudget::nonblocking(SystemClock.mono_now()),
-    };
-    provenant_config::private_directory(&roots.state.as_path().join("gc"), true)
-        .map_err(|_| Error::GcObservation("cannot establish GC lock directory"))?;
-    let directory = Directory::open_anchor(&roots.state.as_path().join("gc"))?;
-    Ok(directory.lock(
-        OsStr::new("collection.lock"),
-        provenant_os::fs::LockMode::Exclusive,
-        budget,
-        &CancelToken::new(),
-        &SystemClock,
-    )?)
-}
-
 fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<GcData, Error> {
     use provenant_confinement::cache::{CacheGcPolicy, gc_worktree_cargo_caches_with_writer_guard};
 
@@ -1082,11 +1034,6 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         roots,
         ..
     } = roots::resolve(globals, workspace, roots::Product::Required)?;
-    let collection = if command.dry_run {
-        None
-    } else {
-        Some(collection_lock(&roots)?)
-    };
     let facts = worktrees::RepoFacts::default();
     let mut projects = Vec::new();
     let mut project_ids = Vec::new();
@@ -1221,28 +1168,26 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 // owner-bound proof before the path-based pass below, landing
                 // against the fetched default branch or falling back to the
                 // owner's base when upstream is None.
-                let collected = match collection.as_ref() {
-                    Some(lock) if command.apply && !command.dry_run => {
-                        crate::fabric::gc_cleanup::collect_unsettled(
-                            &roots,
-                            &home,
-                            &project.path,
-                            project.binding.project_id(),
-                            lock,
-                            upstream.as_ref().map(|(_, oid)| *oid),
-                            workers,
-                        )
-                        .unwrap_or_else(|error| {
-                            use std::io::Write;
-                            let _ = writeln!(
-                                std::io::stderr().lock(),
-                                "warning: settled lane collection failed for {}: {error}",
-                                project.path.display()
-                            );
-                            Vec::new()
-                        })
-                    }
-                    _ => Vec::new(),
+                let collected = if command.apply && !command.dry_run {
+                    crate::fabric::gc_cleanup::collect_unsettled(
+                        &roots,
+                        &home,
+                        &project.path,
+                        project.binding.project_id(),
+                        upstream.as_ref().map(|(_, oid)| *oid),
+                        workers,
+                    )
+                    .unwrap_or_else(|error| {
+                        use std::io::Write;
+                        let _ = writeln!(
+                            std::io::stderr().lock(),
+                            "warning: settled lane collection failed for {}: {error}",
+                            project.path.display()
+                        );
+                        Vec::new()
+                    })
+                } else {
+                    Vec::new()
                 };
                 let lanes: Vec<_> = project
                     .lanes
@@ -1343,11 +1288,6 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .wall_now()
         .map(|now| i128::from(now.as_micros()) * 1_000)
         .map_err(|_| Error::Budget)?;
-    crate::staging_gc::collect(
-        roots.state.as_path(),
-        now_ns - i128::from(command.idle_days) * 86_400 * 1_000_000_000,
-        command.dry_run,
-    )?;
     let policy = CacheGcPolicy {
         idle_before_ns: Some(now_ns - i128::from(command.idle_days) * 86_400 * 1_000_000_000),
         free_floor_bytes: Some(free_floor),
@@ -1366,43 +1306,6 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         project_owners: lanes.iter().map(|info| info.path.clone()).collect(),
         selected_only: command.pressure && !command.scheduled,
     };
-    let report = gc_worktree_cargo_caches_with_writer_guard(&home, &policy, |path| {
-        for project in &projects {
-            if project.lanes.iter().any(|lane| lane.path == path) {
-                return if policy.dry_run {
-                    worktrees::cache_writer_probe(&project.state, path)
-                } else {
-                    worktrees::cache_writer_guard(&project.state, path).map(Some)
-                };
-            }
-        }
-        Err(worktrees::Occupancy::custody_unknown(
-            path.to_path_buf(),
-            "writer registration was not observed",
-        ))
-    });
-    let provider_state = if command.pressure {
-        crate::provider_retention::collect_pressure(
-            (!command.scheduled).then_some(project_ids.as_slice()),
-            &roots,
-            &home,
-            &assets,
-            config.retention.provider_state_days,
-            config.retention.logs_days,
-            config.retention.payload_cap_bytes,
-            command.dry_run,
-        )
-    } else {
-        crate::provider_retention::collect_with_logs(
-            &roots,
-            &home,
-            &assets,
-            config.retention.provider_state_days,
-            config.retention.logs_days,
-            config.retention.payload_cap_bytes,
-            command.dry_run,
-        )
-    };
     let alert_floor = config
         .gc
         .alert_below
@@ -1412,34 +1315,124 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .map_err(|_| Error::GcObservation("invalid alert threshold"))?
         .unwrap_or(0)
         .max(free_floor);
+    use provenant_config::{RetentionKind, RetentionTrigger, retention_schedule};
+    let mut report = Ok(Default::default());
+    let mut staging_busy = Vec::new();
+    let mut provider_state = Default::default();
+    let mut chair_logs = Default::default();
+    let mut seed_collection: Result<
+        provenant_run::target_seed_gc::Report,
+        Box<dyn std::error::Error>,
+    > = Ok(Default::default());
+    let mut build_collection: Result<
+        provenant_run::build_dir_gc::Report,
+        Box<dyn std::error::Error>,
+    > = Ok(Default::default());
     let seed_policy = &config.domains.fabric.lanes.cargo_seed;
-    let seed_collection = if command.dry_run {
-        Ok(Default::default())
-    } else {
-        provenant_run::target_seed_gc::collect(
-            roots.state.as_path(),
-            seed_policy.max_generations,
-            seed_policy.max_bytes,
-            false,
-        )
-    };
-    // Lane build output goes last among collections: it is the largest, and
-    // the sweep holds host admission while it removes.
     let build_settings = config.domains.fabric.lanes.build_settings();
-    let build_collection = if command.dry_run {
-        Ok(Default::default())
+    let trigger = if command.pressure {
+        RetentionTrigger::Gc
     } else {
-        provenant_run::build_dir_gc::collect(
-            roots.state.as_path(),
-            &home,
-            provenant_run::build_dir_gc::Limits {
-                max_bytes: build_settings.build_dir_cap(),
-                free_floor,
-                grace_seconds: build_settings.build_dir_grace_seconds(),
-            },
-            false,
-        )
+        RetentionTrigger::FullGc
     };
+    for class in retention_schedule(trigger) {
+        match class.class {
+            RetentionKind::LaneCargoCaches => {
+                report = gc_worktree_cargo_caches_with_writer_guard(&home, &policy, |path| {
+                    for project in &projects {
+                        if project.lanes.iter().any(|lane| lane.path == path) {
+                            return if policy.dry_run {
+                                worktrees::cache_writer_probe(&project.state, path)
+                            } else {
+                                worktrees::cache_writer_guard(&project.state, path).map(Some)
+                            };
+                        }
+                    }
+                    Err(worktrees::Occupancy::custody_unknown(
+                        path.to_path_buf(),
+                        "writer registration was not observed",
+                    ))
+                });
+            }
+            RetentionKind::Staging => {
+                staging_busy = crate::staging_gc::collect(
+                    roots.state.as_path(),
+                    now_ns - i128::from(command.idle_days) * 86_400 * 1_000_000_000,
+                    command.dry_run,
+                )?;
+            }
+            RetentionKind::ProviderState => {
+                provider_state = if command.pressure {
+                    crate::provider_retention::collect_pressure(
+                        (!command.scheduled).then_some(project_ids.as_slice()),
+                        &roots,
+                        &home,
+                        &assets,
+                        config.retention.provider_state_days,
+                        config.retention.logs_days,
+                        config.retention.payload_cap_bytes,
+                        command.dry_run,
+                    )
+                } else {
+                    crate::provider_retention::collect_with_logs(
+                        &roots,
+                        &home,
+                        &assets,
+                        config.retention.provider_state_days,
+                        config.retention.logs_days,
+                        config.retention.payload_cap_bytes,
+                        command.dry_run,
+                    )
+                };
+            }
+            RetentionKind::ChairLogs => {
+                chair_logs = crate::chair_log_retention::collect(
+                    &roots.state,
+                    provenant_workflow::log::Retention {
+                        max_age_seconds: config.retention.chair_log_days * 86_400,
+                        replay_horizon_seconds: config.retention.chair_log_replay_seconds(),
+                        max_entries: config.retention.chair_log_entries,
+                        max_bytes: config.retention.chair_log_bytes,
+                    },
+                    i64::try_from(now_ns / 1_000_000_000).map_err(|_| Error::Budget)?,
+                    command.dry_run,
+                );
+            }
+            RetentionKind::TargetSeeds => {
+                seed_collection = if command.dry_run {
+                    Ok(Default::default())
+                } else {
+                    provenant_run::target_seed_gc::collect(
+                        roots.state.as_path(),
+                        seed_policy.max_generations,
+                        seed_policy.max_bytes,
+                        false,
+                    )
+                };
+            }
+            RetentionKind::BuildDirectories => {
+                build_collection = if command.dry_run {
+                    Ok(Default::default())
+                } else {
+                    provenant_run::build_dir_gc::collect(
+                        roots.state.as_path(),
+                        &home,
+                        provenant_run::build_dir_gc::Limits {
+                            max_bytes: build_settings.build_dir_cap(),
+                            free_floor,
+                            grace_seconds: build_settings.build_dir_grace_seconds(),
+                        },
+                        false,
+                    )
+                };
+            }
+            // Custody-only and append-triggered classes never enter GC.
+            RetentionKind::GitWorktrees
+            | RetentionKind::ObservationLedgers
+            | RetentionKind::QuotaHistory
+            | RetentionKind::Usage => {}
+        }
+    }
     // Observe after every collection class, including a partially failed sweep.
     let mut alerts =
         crate::gc_support::disk_alert(&roots, &project_ids, alert_floor, command.dry_run)
@@ -1487,23 +1480,6 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 .all(|project| project.output.is_empty() && project.idle_output.is_empty()))
         .then(|| "pressure collection: no eligible data in scope".into())
     };
-    // Full GC visits all session logs, including those belonging to projects
-    // that are no longer registered. Pressure GC stays within its short budget.
-    let chair_logs = if command.pressure {
-        Default::default()
-    } else {
-        crate::chair_log_retention::collect(
-            &roots.state,
-            provenant_workflow::log::Retention {
-                max_age_seconds: config.retention.chair_log_days * 86_400,
-                replay_horizon_seconds: config.retention.chair_log_replay_seconds(),
-                max_entries: config.retention.chair_log_entries,
-                max_bytes: config.retention.chair_log_bytes,
-            },
-            i64::try_from(now_ns / 1_000_000_000).map_err(|_| Error::Budget)?,
-            command.dry_run,
-        )
-    };
     Ok(GcData {
         report,
         idle_days: command.idle_days,
@@ -1512,6 +1488,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         target_seeds,
         build_dirs,
         graph_checkpoints_removed,
+        staging_busy,
         unobserved_projects,
         skipped_transient,
         worktree_cleanup,
