@@ -159,9 +159,9 @@ pub struct GhForge {
     state: PathBuf,
     /// `owner/name`, read once.
     repository: Option<String>,
-    /// How old a shared CI answer may be: zero for a gate decision, the
-    /// observer's poll for a post-merge waiter.
-    max_age: Duration,
+    /// Adapter-owned cadence from the shared observer; caller settings remain
+    /// the fallback for forge implementations without an observer.
+    observation_interval: Option<Duration>,
     budget: Duration,
     deadline: Option<std::time::Instant>,
 }
@@ -171,7 +171,7 @@ impl GhForge {
             project: project.to_owned(),
             state: state.to_owned(),
             repository: None,
-            max_age: Duration::ZERO,
+            observation_interval: None,
             budget: Duration::from_secs(120),
             deadline: None,
         }
@@ -190,10 +190,18 @@ impl GhForge {
         if let Some(repository) = &self.repository {
             return Ok(repository.clone());
         }
-        let repository = self.json("repos/{owner}/{repo}")?["full_name"]
-            .as_str()
-            .ok_or_else(|| LandingError::Failed("repository has no canonical name".into()))?
-            .to_owned();
+        let budget = self
+            .reader()
+            .deadline
+            .saturating_duration_since(std::time::Instant::now());
+        let repository =
+            crate::pr::observer::repository_for_project(&self.state, &self.project, budget)
+                .map_err(|error| match error {
+                    ObserveError::RateLimited { .. } => {
+                        LandingError::RateLimited(error.to_string())
+                    }
+                    _ => LandingError::Failed(error.to_string()),
+                })?;
         self.repository = Some(repository.clone());
         Ok(repository)
     }
@@ -203,12 +211,22 @@ impl GhForge {
         budget: Duration,
     ) -> Result<serde_json::Value, LandingError> {
         let repository = self.repository_name()?;
-        Observer::open(&self.state, &self.project, &repository, budget)
-            .and_then(|mut observer| observer.resource(path, Duration::ZERO, budget))
+        let mut observer = Observer::open(&self.state, &self.project, &repository, budget)
             .map_err(|error| match error {
                 ObserveError::RateLimited { .. } => LandingError::RateLimited(error.to_string()),
                 _ => LandingError::Failed(error.to_string()),
-            })
+            })?;
+        let resource =
+            observer
+                .resource(path, Duration::ZERO, budget)
+                .map_err(|error| match error {
+                    ObserveError::RateLimited { .. } => {
+                        LandingError::RateLimited(error.to_string())
+                    }
+                    _ => LandingError::Failed(error.to_string()),
+                })?;
+        self.observation_interval = Some(observer.fast_interval());
+        Ok(resource)
     }
     fn pull_request_with_budget(
         &mut self,
@@ -263,10 +281,11 @@ impl GhForge {
         method: MergeMethod,
     ) -> Result<String, LandingError> {
         object_id(head)?;
-        let membership = self
-            .pull_request(number)?
-            .stack
-            .ok_or(LandingError::PublicationUnknown)?;
+        let pull = self.pull_request(number)?;
+        let observation_interval = self
+            .observation_interval
+            .ok_or_else(|| LandingError::Failed("forge observation cadence unavailable".into()))?;
+        let membership = pull.stack.ok_or(LandingError::PublicationUnknown)?;
         let members = self.stack_members(membership.number)?;
         let position = members
             .iter()
@@ -350,7 +369,7 @@ impl GhForge {
                             {
                                 break;
                             }
-                            std::thread::sleep(Duration::from_secs(1).min(left));
+                            std::thread::sleep(observation_interval.min(left));
                         }
                     }
                     return Ok(sha);
@@ -374,7 +393,7 @@ impl GhForge {
             if left.is_zero() {
                 return Err(LandingError::PublicationUnknown);
             }
-            std::thread::sleep(Duration::from_secs(1).min(left));
+            std::thread::sleep(observation_interval.min(left));
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             if left.is_zero() {
                 return Err(LandingError::PublicationUnknown);
@@ -576,6 +595,8 @@ impl Forge for GhForge {
     }
     fn set_project_path(&mut self, path: &Path) {
         self.project = path.to_owned();
+        self.repository = None;
+        self.observation_interval = None;
     }
     fn repository_identity(&mut self) -> Result<String, LandingError> {
         let repository = self.json("repos/{owner}/{repo}")?;
@@ -644,25 +665,42 @@ impl Forge for GhForge {
         }
         Ok(latest.into_values().flatten().collect())
     }
+    fn observation_interval(&self) -> Option<Duration> {
+        self.observation_interval
+    }
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError> {
         let commit = object_id(commit)?;
         let repository = self.repository_name()?;
-        #[allow(clippy::disallowed_methods, reason = "forge read budget")]
-        let budget = self
-            .reader()
-            .deadline
-            .saturating_duration_since(std::time::Instant::now());
-        let runs = Observer::open(&self.state, &self.project, &repository, budget)
-            .and_then(|mut observer| observer.checks(commit, self.max_age, budget))
+        let deadline = self.reader().deadline;
+        #[allow(clippy::disallowed_methods, reason = "one forge observation deadline")]
+        let remaining = || deadline.saturating_duration_since(std::time::Instant::now());
+        let mut observer = Observer::open(&self.state, &self.project, &repository, remaining())
             .map_err(|error| match error {
                 ObserveError::RateLimited { .. } => LandingError::RateLimited(error.to_string()),
                 _ => LandingError::CiUnavailable(error.to_string()),
             })?;
-        let tree =
-            self.json(&format!("repos/{{owner}}/{{repo}}/git/commits/{commit}"))?["tree"]["sha"]
-                .as_str()
-                .ok_or_else(|| LandingError::Failed("commit has no tree".into()))?
-                .to_owned();
+        self.observation_interval = Some(observer.fast_interval());
+        let runs = observer
+            .checks(commit, Duration::ZERO, remaining())
+            .map_err(|error| match error {
+                ObserveError::RateLimited { .. } => LandingError::RateLimited(error.to_string()),
+                _ => LandingError::CiUnavailable(error.to_string()),
+            })?;
+        self.observation_interval = Some(observer.next_poll_interval());
+        let commit_resource = observer
+            .resource(
+                &format!("git/commits/{commit}"),
+                Duration::ZERO,
+                remaining(),
+            )
+            .map_err(|error| match error {
+                ObserveError::RateLimited { .. } => LandingError::RateLimited(error.to_string()),
+                _ => LandingError::CiUnavailable(error.to_string()),
+            })?;
+        let tree = commit_resource["tree"]["sha"]
+            .as_str()
+            .ok_or_else(|| LandingError::Failed("commit has no tree".into()))?
+            .to_owned();
         let (checks, result) = gate_checks(runs);
         Ok(vec![GateEvidence {
             commit: commit.to_owned(),
@@ -683,10 +721,8 @@ impl Forge for GhForge {
         timeout: Duration,
     ) -> Result<Vec<GateEvidence>, LandingError> {
         self.deadline = Some(std::time::Instant::now() + timeout);
-        self.max_age = crate::pr::observer::POLL;
         let result = self.checks(commit);
         self.deadline = None;
-        self.max_age = Duration::ZERO;
         result
     }
     fn merge(
@@ -1428,8 +1464,18 @@ pub(super) fn observe_checks(
     sleep: &mut dyn FnMut(Duration),
 ) -> Result<GateEvidence, LandingError> {
     observe_checks_with(candidate, definition, poll_seconds, sleep, &mut || {
-        forge.checks(&candidate.commit)
+        let checks = forge.checks(&candidate.commit);
+        let next_interval = forge.observation_interval();
+        CheckObservation {
+            checks,
+            next_interval,
+        }
     })
+}
+
+struct CheckObservation {
+    checks: Result<Vec<GateEvidence>, LandingError>,
+    next_interval: Option<Duration>,
 }
 
 fn observe_checks_with(
@@ -1437,22 +1483,26 @@ fn observe_checks_with(
     definition: &GateDefinition,
     poll_seconds: u64,
     sleep: &mut dyn FnMut(Duration),
-    read: &mut dyn FnMut() -> Result<Vec<GateEvidence>, LandingError>,
+    read: &mut dyn FnMut() -> CheckObservation,
 ) -> Result<GateEvidence, LandingError> {
-    let poll = poll_seconds.max(1);
-    let mut elapsed = 0;
+    let fallback = Duration::from_secs(poll_seconds);
+    let timeout = Duration::from_secs(definition.timeout_seconds);
+    let mut elapsed = Duration::ZERO;
     loop {
-        let observed = match read() {
+        let observation = read();
+        let poll = observation.next_interval.unwrap_or(fallback);
+        let observed = match observation.checks {
             // A rate limit skips this poll; the bound still ends the wait.
-            Err(LandingError::RateLimited(message)) if elapsed < definition.timeout_seconds => {
+            Err(LandingError::RateLimited(message)) if elapsed < timeout => {
                 use std::io::Write;
                 let _ = writeln!(
                     std::io::stderr().lock(),
                     "warning: candidate {} check read skipped: {message}",
                     candidate.commit
                 );
-                sleep(Duration::from_secs(poll));
-                elapsed += poll;
+                let pause = poll.min(timeout.saturating_sub(elapsed));
+                sleep(pause);
+                elapsed += pause;
                 continue;
             }
             observed => observed?,
@@ -1462,19 +1512,20 @@ fn observe_checks_with(
             .next()
             .ok_or_else(|| LandingError::Failed("forge returned no check evidence".into()))?;
         let mut evidence = bind_evidence(candidate, definition, &observed)?;
-        evidence.duration_seconds = Some(elapsed);
+        evidence.duration_seconds = Some(elapsed.as_secs());
         let settled = !matches!(evidence.result, GateResult::Pending | GateResult::Missing);
-        if settled || elapsed >= definition.timeout_seconds {
+        if settled || elapsed >= timeout {
             return Ok(evidence);
         }
-        sleep(Duration::from_secs(poll));
-        elapsed += poll;
+        let pause = poll.min(timeout.saturating_sub(elapsed));
+        sleep(pause);
+        elapsed += pause;
     }
 }
 impl GateRunner for CheckGate {
     fn set_project_path(&mut self, path: &Path) {
         self.project = path.to_owned();
-        self.forge.project = path.to_owned();
+        self.forge.set_project_path(path);
     }
     #[allow(clippy::disallowed_methods)]
     fn gate(
@@ -2460,13 +2511,43 @@ esac
             &definition(&["ci"], None),
             3,
             &mut |pause| pauses.push(pause),
-            &mut || Ok(vec![samples.pop_front().unwrap()]),
+            &mut || CheckObservation {
+                checks: Ok(vec![samples.pop_front().unwrap()]),
+                next_interval: None,
+            },
         )
         .unwrap();
         assert_eq!(result.result, GateResult::Passed);
         assert_eq!(result.duration_seconds, Some(3));
         assert_eq!(pauses, [Duration::from_secs(3)]);
         assert_eq!(result.pool.as_deref(), Some("app"));
+    }
+
+    #[test]
+    fn pending_check_uses_the_adapter_interval_before_the_next_read() {
+        let settings = provenant_cli::wait::Settings {
+            pr_interval_ms: 37,
+            ..Default::default()
+        };
+        let fast = Duration::from_millis(settings.pr_interval_ms);
+        let mut samples = std::collections::VecDeque::from([
+            observed(&[("ci", Some("app"), GateResult::Pending)]),
+            observed(&[("ci", Some("app"), GateResult::Passed)]),
+        ]);
+        let mut pauses = Vec::new();
+        let result = observe_checks_with(
+            &candidate(),
+            &definition(&["ci"], None),
+            3,
+            &mut |pause| pauses.push(pause),
+            &mut || CheckObservation {
+                checks: Ok(vec![samples.pop_front().unwrap()]),
+                next_interval: Some(fast),
+            },
+        )
+        .unwrap();
+        assert_eq!(result.result, GateResult::Passed);
+        assert_eq!(pauses, [fast]);
     }
 
     #[test]

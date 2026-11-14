@@ -95,6 +95,11 @@ pub trait Forge {
     fn head(&mut self, number: u64) -> Result<String, LandingError>;
     fn approvals(&mut self, number: u64, head: &str) -> Result<Vec<Approval>, LandingError>;
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError>;
+    /// Adapter-selected cadence for the next observation, if it owns one.
+    /// Callers use their declared policy cadence when the adapter has none.
+    fn observation_interval(&self) -> Option<std::time::Duration> {
+        None
+    }
     fn checks_with_timeout(
         &mut self,
         commit: &str,

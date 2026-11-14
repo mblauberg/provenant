@@ -14,7 +14,9 @@ pub struct FakeForge {
     pub head_reads: BTreeMap<u64, VecDeque<String>>,
     pub approvals_at_head: BTreeMap<(u64, String), Vec<Approval>>,
     pub check_runs: BTreeMap<String, Vec<GateEvidence>>,
+    pub check_sequences: BTreeMap<String, VecDeque<Vec<GateEvidence>>>,
     pub check_timeouts: Vec<std::time::Duration>,
+    pub next_observation_interval: Option<std::time::Duration>,
     pub labels: BTreeMap<u64, Vec<String>>,
     pub direct_push: bool,
     pub lose_merge_response: bool,
@@ -33,6 +35,9 @@ pub struct FakeForge {
     pub reverts: Vec<(u64, String, String, String)>,
 }
 impl Forge for FakeForge {
+    fn observation_interval(&self) -> Option<std::time::Duration> {
+        self.next_observation_interval
+    }
     fn stack_members(&mut self, number: u64) -> Result<Vec<StackMember>, LandingError> {
         self.stacks
             .get(&number)
@@ -79,6 +84,13 @@ impl Forge for FakeForge {
     }
     #[allow(clippy::disallowed_methods, reason = "simulate a slow forge in tests")]
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError> {
+        if let Some(observation) = self
+            .check_sequences
+            .get_mut(commit)
+            .and_then(VecDeque::pop_front)
+        {
+            return Ok(observation);
+        }
         Ok(self.check_runs.get(commit).cloned().unwrap_or_default())
     }
     fn checks_with_timeout(

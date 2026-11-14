@@ -236,12 +236,12 @@ fn follow_with(
         return Ok(());
     }
     let landed = tip(receipt);
-    let mut elapsed = 0;
+    let timeout = std::time::Duration::from_secs(post.timeout_seconds);
+    let mut elapsed = std::time::Duration::ZERO;
     let mut observed_failures = Vec::new();
     let mut last_pending = post.checks.clone();
     let failed = loop {
-        let remaining = std::time::Duration::from_secs(post.timeout_seconds)
-            .saturating_sub(clock().max(std::time::Duration::from_secs(elapsed)));
+        let remaining = timeout.saturating_sub(clock().max(elapsed));
         let observation = if remaining.is_zero() {
             Observed::Unsettled {
                 failed: Vec::new(),
@@ -249,7 +249,7 @@ fn follow_with(
             }
         } else {
             let result = observe(forge, &landed, &post.checks, remaining);
-            if clock() >= std::time::Duration::from_secs(post.timeout_seconds) {
+            if clock() >= timeout {
                 match result? {
                     Observed::Failed(failed) => Observed::Failed(failed),
                     Observed::Unsettled { failed, pending } => {
@@ -261,11 +261,11 @@ fn follow_with(
                 result?
             }
         };
-        elapsed = elapsed.max(clock().as_secs());
+        elapsed = elapsed.max(clock());
         match observation {
             Observed::Passed => break None,
             Observed::Failed(names) => break Some(names),
-            Observed::Unsettled { failed, pending } if elapsed >= post.timeout_seconds => {
+            Observed::Unsettled { failed, pending } if elapsed >= timeout => {
                 for name in failed {
                     if !observed_failures.contains(&name) {
                         observed_failures.push(name);
@@ -291,16 +291,17 @@ fn follow_with(
                         observed_failures.push(name);
                     }
                 }
-                let pause = settings
-                    .poll_seconds
-                    .max(1)
-                    .min(post.timeout_seconds - elapsed);
-                sleep(std::time::Duration::from_secs(pause));
+                let fallback = std::time::Duration::from_secs(settings.poll_seconds);
+                let pause = forge
+                    .observation_interval()
+                    .unwrap_or(fallback)
+                    .min(timeout.saturating_sub(elapsed));
+                sleep(pause);
                 elapsed += pause;
             }
         }
     };
-    let seconds = clock().as_secs().max(elapsed);
+    let seconds = clock().as_secs().max(elapsed.as_secs());
     let post_cost = match &post.pool {
         Some(pool) => super::budget::estimate(&settings.budget, &[(pool.clone(), seconds)])?,
         None => CostEstimate::Unknown {
@@ -684,6 +685,55 @@ mod tests {
             ]
         );
         assert!(r.alarms.0.iter().any(|alarm| alarm.code == "unsettled"));
+        Ok(())
+    }
+
+    #[test]
+    fn post_merge_wait_uses_the_forge_observation_interval() -> Result<(), LandingError> {
+        let mut r = rig(false, false, 1);
+        let wait_settings = provenant_cli::wait::Settings {
+            pr_interval_ms: 37,
+            ..Default::default()
+        };
+        let fast = std::time::Duration::from_millis(wait_settings.pr_interval_ms);
+        r.forge.next_observation_interval = Some(fast);
+        r.forge.check_sequences.insert(
+            "l1".into(),
+            std::collections::VecDeque::from([
+                vec![GateEvidence {
+                    checks: vec![CheckEvidence {
+                        name: "post".into(),
+                        issuer: None,
+                        result: GateResult::Pending,
+                    }],
+                    ..super::super::receipt::tests::evidence("l1")
+                }],
+                vec![GateEvidence {
+                    checks: vec![CheckEvidence {
+                        name: "post".into(),
+                        issuer: None,
+                        result: GateResult::Passed,
+                    }],
+                    ..super::super::receipt::tests::evidence("l1")
+                }],
+            ]),
+        );
+        let elapsed = std::cell::Cell::new(std::time::Duration::ZERO);
+        let pauses = std::cell::RefCell::new(Vec::new());
+        follow_with(
+            &mut r.forge,
+            &mut r.repo,
+            Approvals::forge(),
+            &mut r.gate,
+            &mut r.alarms,
+            &mut r.receipt,
+            &|duration| {
+                pauses.borrow_mut().push(duration);
+                elapsed.set(elapsed.get() + duration);
+            },
+            &|| elapsed.get(),
+        )?;
+        assert_eq!(pauses.borrow().as_slice(), &[fast]);
         Ok(())
     }
 

@@ -185,6 +185,15 @@ fn adaptive_freshness(
     if caller_max_age.is_zero() {
         return Duration::ZERO;
     }
+    adaptive_interval(cached, history, cadence, now_ms)
+}
+
+fn adaptive_interval(
+    cached: &Cached,
+    history: &[RunDuration],
+    cadence: Cadence,
+    now_ms: i64,
+) -> Duration {
     let fast = cadence.fast;
     let pending = cached
         .runs
@@ -359,25 +368,15 @@ impl Observer<port::SelectedTransport, WallClock> {
         budget: Duration,
     ) -> Result<Self, ObserveError> {
         let transport = port::select_transport(state, project, budget)?;
-        let settings = match settings_roots(state, project).and_then(|roots| {
-            let sections = provenant_config::DomainSections::<WaitDomain>::new(&WAIT_SECTIONS);
-            provenant_config::read_with_domains(&roots, &sections)
-                .map(|config| config.domains.wait)
-                .map_err(|error| {
-                    ObserveError::Unavailable(format!(
-                        "cannot read CI cadence configuration: {error}"
-                    ))
-                })
-        }) {
-            Ok(settings) => settings,
-            Err(error) => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: {error}; using compiled CI observation cadence"
-                );
-                provenant_cli::wait::Settings::default()
-            }
-        };
+        let roots = settings_roots(state, project).map_err(|error| {
+            ObserveError::Unavailable(format!("cannot read CI cadence configuration: {error}"))
+        })?;
+        let sections = provenant_config::DomainSections::<WaitDomain>::new(&WAIT_SECTIONS);
+        let settings = provenant_config::read_with_domains(&roots, &sections)
+            .map(|config| config.domains.wait)
+            .map_err(|error| {
+                ObserveError::Unavailable(format!("cannot read CI cadence configuration: {error}"))
+            })?;
         Self::with_settings(state, repository, transport, WallClock, settings)
     }
 }
@@ -665,10 +664,9 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                     Err(Fetch::Failed(message)) => return Err(ObserveError::Unavailable(message)),
                 }
             };
-            self.next_poll_interval = adaptive_freshness(
+            self.next_poll_interval = adaptive_interval(
                 &cached,
                 &self.history,
-                max_age,
                 self.cadence,
                 self.clock.now().as_millisecond(),
             );
@@ -1684,6 +1682,11 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         assert_eq!(
             adaptive_freshness(&Cached::default(), &[], Duration::ZERO, cadence, 0),
             Duration::ZERO,
+        );
+        assert_eq!(
+            adaptive_interval(&Cached::default(), &[], cadence, 0),
+            Duration::from_secs(2),
+            "forced reads still publish the configured next cadence",
         );
     }
 
