@@ -434,8 +434,10 @@ pub(crate) fn capture_source(
     previous: Option<&AccountRecord>,
 ) -> Result<ProbeCapture, ProbeFailure> {
     live.capture_source(plan, previous, None, |live, account, _deadline, details| {
-        let free_account = provenant_records::AdapterSpec::get(&account.scope.adapter)
-            .is_some_and(|spec| spec.is_free_account(&account.scope.account_key));
+        let free_account =
+            provenant_records::AdapterSpec::get(&account.scope.adapter).is_some_and(|spec| {
+                spec.is_free_plan(account.options.get("plan").and_then(Value::as_str))
+            });
         if free_account {
             details.note =
                 Some("Observed free-limit refusals only; allowance and daily reset unknown".into());

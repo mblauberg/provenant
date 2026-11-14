@@ -45,9 +45,17 @@ impl crate::Settings {
         for record in records {
             if !provenant_records::AdapterSpec::get(&record.account.adapter).is_some_and(|spec| {
                 spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
-            }) || provenant_records::AdapterSpec::get(&record.account.adapter)
-                .is_some_and(|spec| spec.is_free_account(&record.account.account_key))
-            {
+            }) || provenant_records::AdapterSpec::get(&record.account.adapter).is_some_and(
+                |spec| {
+                    spec.is_free_plan(
+                        record
+                            .snapshot
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.details.as_ref())
+                            .and_then(|details| details.plan.as_deref()),
+                    )
+                },
+            ) {
                 continue;
             }
             let Some(snapshot) = &mut record.snapshot else {

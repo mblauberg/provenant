@@ -386,6 +386,7 @@
                 fixture_ref: format!("installed/{adapter}/version"),
                 catalogue_revision: catalogue.revision().into(),
                 account_key: Some("key".into()),
+                plan: None,
                 observed_models: Vec::new(),
                 observed_unix_seconds: now,
                 expires_unix_seconds: now + 300,
@@ -485,6 +486,7 @@
             fixture_ref: "installed/opencode/version".into(),
             catalogue_revision: catalogue.revision().into(),
             account_key: Some("go".into()),
+            plan: Some("go".into()),
             observed_models: Vec::new(),
             observed_unix_seconds: now,
             expires_unix_seconds: now + 300,
@@ -567,6 +569,7 @@
         std::fs::set_permissions(&zen_path, std::fs::Permissions::from_mode(0o600))?;
         let mut zen_available = available.clone();
         zen_available.account_key = Some("zen".into());
+        zen_available.plan = Some("zen".into());
         zen_available.fixture_ref = "installed/opencode/version".into();
         let zen_request = super::RouteRequest {
             read_heavy: false,

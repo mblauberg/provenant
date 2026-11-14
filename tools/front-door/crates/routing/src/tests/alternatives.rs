@@ -788,6 +788,7 @@ fn rolling_window_limits_go_despite_monthly_headroom() -> Result<(), Box<dyn std
     let mut record = availability();
     record.adapter = "opencode".into();
     record.account_key = Some("go".into());
+    record.plan = Some("go".into());
     let records = [record];
     let registry = [provenant_providers::opencode::REGISTRATION];
     let access = [AccessContext {

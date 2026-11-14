@@ -128,7 +128,7 @@ impl LiveQuota {
         settings: &Settings,
     ) -> Result<Self, QuotaError> {
         let mut accounts = Vec::new();
-        for registration in settings.with_derived_accounts().entries.values() {
+        for registration in settings.unique_accounts().entries.values() {
             let dir = &registration.directory;
             if !dir.is_absolute()
                 || dir
@@ -1502,11 +1502,14 @@ mod zen_tests {
     use provenant_quota::{QuotaProbeInput, QuotaStatus, Refusal};
 
     #[test]
-    fn zen_is_derived_and_uses_refusals_without_reading_go_ledger() {
+    fn registered_zen_uses_refusals_without_reading_go_ledger() {
         let settings: Settings = serde_json::from_value(json!({
             "entries": {"paid": {
                 "adapter": "opencode", "label": "go", "key": "go",
                 "directory": "/fixture/opencode", "plan": "go"
+            }, "free": {
+                "adapter": "opencode", "label": "zen", "key": "free-identity",
+                "directory": "/fixture/opencode-zen", "plan": "zen"
             }}
         }))
         .unwrap();
@@ -1518,15 +1521,23 @@ mod zen_tests {
             .unwrap();
         let live = LiveQuota::new(&roots, Path::new("/fixture/home"), &settings).unwrap();
         let accounts = live.accounts().unwrap();
-        assert_eq!(accounts.len(), 2);
-        assert!(accounts.iter().any(|scope| scope.account_key == "go"));
+        let identities: std::collections::BTreeSet<_> = accounts
+            .iter()
+            .map(|scope| scope.account_key.as_str())
+            .collect();
+        assert_eq!(
+            identities,
+            settings
+                .entries
+                .values()
+                .map(|entry| entry.key.as_str())
+                .collect()
+        );
         let zen = accounts
             .iter()
-            .find(|scope| scope.account_key == "zen")
+            .find(|scope| scope.account_key == "free-identity")
             .unwrap();
         assert_eq!(zen.label, "zen");
-        let derived = settings.with_derived_accounts();
-        assert_eq!(derived.with_derived_accounts().entries.len(), 2);
         let mut previous = AccountRecord::empty(zen.clone());
         previous.refusals.push(Refusal {
             extra: Default::default(),

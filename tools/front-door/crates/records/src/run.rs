@@ -557,6 +557,15 @@ impl RouteRecord {
         source: &str,
     ) -> Self {
         Self {
+            extra: route
+                .extra
+                .get("effort_warning")
+                .map(|warning| {
+                    [("effort_warning".into(), warning.clone())]
+                        .into_iter()
+                        .collect()
+                })
+                .unwrap_or_default(),
             provider: Some(route.adapter.clone()),
             model: Some(format!("{}/{}", route.adapter, route.model)),
             effort: route.effort.clone(),

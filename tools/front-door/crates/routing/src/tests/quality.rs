@@ -1,10 +1,12 @@
 use super::*;
+use std::collections::BTreeSet;
 
 #[test]
-fn capability_priors_and_exploration_are_preferences_on_nonempty_draws()
--> Result<(), Box<dyn std::error::Error>> {
+fn outcome_priors_and_exploration_rank_eligible_members() -> Result<(), Box<dyn std::error::Error>>
+{
     let catalogue = Catalogue::bundled()?;
     let mut config: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "capability_policy": {"senior": {"mode":"disabled"}},
         "pools": {"senior": [
             {"model":"codex/gpt-6-luna","weight":1},
             {"model":"codex/gpt-6.1-sol","weight":1},
@@ -181,6 +183,203 @@ fn account_ranking_uses_reset_adjusted_headroom_and_live_load_independent_of_ord
             .account_key
             .as_deref(),
         Some("slow")
+    );
+    Ok(())
+}
+
+#[test]
+fn catalogue_tiers_enforce_declared_capability_eligibility()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    assert_eq!(
+        catalogue.pools.keys().collect::<BTreeSet<_>>(),
+        catalogue.capability_policy.keys().collect::<BTreeSet<_>>()
+    );
+    let config = RoutingConfig::default();
+    let mut records = Vec::new();
+    for registration in REGISTRY {
+        let spec =
+            provenant_records::AdapterSpec::get(registration.adapter.id()).ok_or("adapter")?;
+        let plans: Vec<_> = if spec.account_model_plans.is_empty() {
+            vec![None]
+        } else {
+            spec.account_model_plans
+                .iter()
+                .map(|plan| Some(plan.plan))
+                .collect()
+        };
+        for plan in plans {
+            records.push(AvailabilityRecord {
+                adapter: spec.name.into(),
+                plan: plan.map(str::to_owned),
+                account_key: Some(format!("fixture-{}", plan.unwrap_or("account"))),
+                observed_models: vec![],
+                ..availability()
+            });
+        }
+    }
+    let access: Vec<_> = records
+        .iter()
+        .map(|record| AccessContext {
+            adapter: &record.adapter,
+            disclosure_ref: "fixture",
+            confinement_ref: "fixture",
+        })
+        .collect();
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    for (tier, policy) in &catalogue.capability_policy {
+        let mut query = request(catalogue.pools[tier][0].model.as_str())?;
+        query.choice = RouteChoice::NamedRoute(RouteName::parse(tier)?);
+        for seed in 0..64 {
+            let route = resolve_with_seed(&query, &ctx, "capability-tiers", seed)?;
+            let picked = catalogue
+                .model(&picked_model(&route)?)
+                .ok_or("picked model")?;
+            assert!(
+                policy
+                    .minimum()
+                    .is_none_or(|minimum| picked.capability >= minimum)
+            );
+            let receipt = route.pool_selection.ok_or("receipt")?;
+            let decision = &receipt.extra["capability_policy"];
+            assert_eq!(decision["relaxed"], false);
+            assert_eq!(
+                serde_json::from_value::<CapabilityPolicy>(decision["policy"].clone())?,
+                *policy
+            );
+            assert!(
+                decision["source"]
+                    .as_str()
+                    .is_some_and(|s| s.contains(tier))
+            );
+            let excluded: BTreeSet<_> = decision["excluded"]
+                .as_array()
+                .ok_or("excluded")?
+                .iter()
+                .map(|row| row["model"].as_str().ok_or("model"))
+                .collect::<Result<_, _>>()?;
+            for member in &catalogue.pools[tier] {
+                let capability = catalogue.model(&member.model).ok_or("member")?.capability;
+                let below = policy.minimum().is_some_and(|minimum| capability < minimum);
+                assert_eq!(excluded.contains(member.model.as_str()), below);
+                if below {
+                    assert!(
+                        receipt
+                            .candidates
+                            .iter()
+                            .find(|c| c.model == member.model.as_str())
+                            .ok_or("candidate")?
+                            .exclusion
+                            .is_some()
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn capability_overrides_change_eligibility_and_empty_floor_warns()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let mut config = RoutingConfig::default();
+    let members: Vec<_> = catalogue
+        .models()
+        .iter()
+        .filter(|m| m.model.adapter() == "codex")
+        .map(|m| RoutePoolMember {
+            model: m.model.clone(),
+            weight: 1,
+            effort: None,
+            efforts: m.efforts.clone(),
+            free: m.free,
+        })
+        .collect();
+    config.pools.insert("senior".into(), members.clone());
+    config.preference_sources.insert(
+        "domains.routing.capability_policy.senior.mode".into(),
+        "fixture:user".into(),
+    );
+    let records = [availability()];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "fixture",
+        confinement_ref: "fixture",
+    }];
+    let mut query = request(members[0].model.as_str())?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("senior")?);
+    for policy in [
+        CapabilityPolicy::Minimum {
+            minimum: Capability::Strong,
+            fallback: CapabilityFallback::WarnRelax,
+        },
+        CapabilityPolicy::Minimum {
+            minimum: Capability::General,
+            fallback: CapabilityFallback::WarnRelax,
+        },
+        CapabilityPolicy::Disabled,
+    ] {
+        config.capability_policy.insert("senior".into(), policy);
+        let mut ctx = context(&catalogue, &config, now()?);
+        ctx.availability = &records;
+        ctx.access = &access;
+        let route = resolve_with_seed(&query, &ctx, "capability-override", 0)?;
+        let receipt = route.pool_selection.ok_or("receipt")?;
+        let decision = &receipt.extra["capability_policy"];
+        assert_eq!(decision["relaxed"], false);
+        assert!(
+            decision["source"]
+                .as_str()
+                .is_some_and(|s| s.contains("fixture:user"))
+        );
+        for member in &members {
+            let below = policy.minimum().is_some_and(|min| {
+                catalogue
+                    .model(&member.model)
+                    .is_some_and(|m| m.capability < min)
+            });
+            let candidate = receipt
+                .candidates
+                .iter()
+                .find(|c| c.model == member.model.as_str())
+                .ok_or("candidate")?;
+            assert_eq!(candidate.exclusion.is_some(), below);
+        }
+    }
+    let weakest = members
+        .iter()
+        .min_by_key(|m| catalogue.model(&m.model).map(|m| m.capability))
+        .ok_or("member")?
+        .clone();
+    config.pools.insert("senior".into(), vec![weakest.clone()]);
+    config.capability_policy.insert(
+        "senior".into(),
+        CapabilityPolicy::Minimum {
+            minimum: Capability::Frontier,
+            fallback: CapabilityFallback::WarnRelax,
+        },
+    );
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    let route = resolve_with_seed(&query, &ctx, "capability-fallback", 0)?;
+    assert_eq!(route.model, weakest.model.model());
+    let receipt = route.pool_selection.ok_or("receipt")?;
+    assert_eq!(receipt.extra["capability_policy"]["relaxed"], true);
+    assert!(
+        receipt.extra["capability_policy"]["warning"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+    );
+    assert!(
+        receipt.extra["capability_policy"]["excluded"]
+            .as_array()
+            .ok_or("exclusions")?
+            .iter()
+            .any(|row| row["model"] == weakest.model.as_str())
     );
     Ok(())
 }

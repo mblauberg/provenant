@@ -513,11 +513,9 @@ pub fn report(
             })
             .collect();
         let free_pool = provenant_records::AdapterSpec::get(&record.account.adapter)
-            .and_then(|spec| spec.free_account.map(|(key, _)| (key, spec.free_pool)))
-            .filter(|(key, _)| record.account.account_key == *key)
-            .map(|(_, pool)| pool);
+            .and_then(|spec| spec.free_pool);
         let in_free = |refusal: &&crate::RefusalRow| {
-            free_pool.is_some_and(|pool| refusal.pool.as_deref() == pool)
+            free_pool.is_some_and(|pool| refusal.pool.as_deref() == Some(pool))
         };
         let free_refused = refusals.iter().any(|refusal| in_free(&refusal));
         // A free-pool refusal or a spent plan usage limit makes the whole

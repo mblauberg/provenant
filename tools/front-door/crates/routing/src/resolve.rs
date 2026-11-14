@@ -292,7 +292,28 @@ pub fn list(
                     .find(|m| {
                         m.model.adapter() == adapter
                             && provenant_records::AdapterSpec::get(adapter).is_none_or(|spec| {
-                                spec.account_serves_model(account, m.model.model())
+                                spec.account_serves_model(
+                                    context
+                                        .availability
+                                        .iter()
+                                        .find(|a| {
+                                            a.adapter == adapter
+                                                && a.account_key.as_deref() == Some(account)
+                                        })
+                                        .and_then(|a| a.plan.as_deref())
+                                        .or_else(|| {
+                                            context
+                                                .quota
+                                                .iter()
+                                                .find(|q| {
+                                                    q.snapshot.account.adapter == adapter
+                                                        && q.snapshot.account.account_key == account
+                                                })
+                                                .and_then(|q| q.snapshot.details.as_ref())
+                                                .and_then(|d| d.plan.as_deref())
+                                        }),
+                                    m.model.model(),
+                                )
                             })
                     })?
                     .model
@@ -948,7 +969,10 @@ pub fn pacing_preview(model: &ModelId, context: &RoutingContext<'_>) -> Vec<Paci
         .filter(|q| {
             q.snapshot.account.adapter == model.adapter()
                 && provenant_records::AdapterSpec::get(model.adapter()).is_none_or(|spec| {
-                    spec.account_serves_model(&q.snapshot.account.account_key, model.model())
+                    spec.account_serves_model(
+                        q.snapshot.details.as_ref().and_then(|d| d.plan.as_deref()),
+                        model.model(),
+                    )
                 })
         })
         .map(|q| Some(q.snapshot.account.account_key.clone()))
@@ -960,9 +984,7 @@ pub fn pacing_preview(model: &ModelId, context: &RoutingContext<'_>) -> Vec<Paci
             .filter(|a| {
                 a.adapter == model.adapter()
                     && provenant_records::AdapterSpec::get(model.adapter()).is_none_or(|spec| {
-                        a.account_key
-                            .as_deref()
-                            .is_none_or(|key| spec.account_serves_model(key, model.model()))
+                        spec.account_serves_model(a.plan.as_deref(), model.model())
                     })
             })
             .map(|a| a.account_key.clone()),
@@ -1660,6 +1682,25 @@ fn account_load(
     }
 }
 
+/// Normalise only valid, catalogued controls for adapters declaring this policy.
+/// Unknown models and invalid controls retain the usual explicit error.
+fn normalised_effort<'e>(
+    model: &ModelId,
+    effort: Option<&'e str>,
+    context: &ValidatedContext<'_>,
+) -> (Option<&'e str>, Option<&'e str>) {
+    let dropped = effort.filter(|value| {
+        crate::request::effort_valid(value)
+            && provenant_records::AdapterSpec::get(model.adapter())
+                .is_some_and(|spec| spec.drop_unsupported_effort)
+            && context
+                .catalogue
+                .model(model)
+                .is_some_and(|entry| !entry.efforts.iter().any(|allowed| allowed == value))
+    });
+    (if dropped.is_some() { None } else { effort }, dropped)
+}
+
 fn candidate(
     model: &ModelId,
     effort: Option<&str>,
@@ -1667,6 +1708,7 @@ fn candidate(
     avoid_cooling: bool,
     intent: RouteIntent,
 ) -> Result<RouteAlternative, RoutingError> {
+    let (effort, dropped_effort) = normalised_effort(model, effort, context);
     let entry = admissible(model, effort, context)?;
     #[cfg(test)]
     let spec = context
@@ -1691,11 +1733,8 @@ fn candidate(
         .iter()
         .filter(|a| {
             a.adapter == model.adapter()
-                && provenant_records::AdapterSpec::get(model.adapter()).is_none_or(|spec| {
-                    a.account_key
-                        .as_deref()
-                        .is_none_or(|key| spec.account_serves_model(key, model.model()))
-                })
+                && provenant_records::AdapterSpec::get(model.adapter())
+                    .is_none_or(|spec| spec.account_serves_model(a.plan.as_deref(), model.model()))
         })
         .filter(|a| {
             let permitted = context
@@ -1796,6 +1835,12 @@ fn candidate(
         },
     };
     let mut extra = provenant_records::ExtraFields::default();
+    if let Some(value) = dropped_effort {
+        extra.insert("effort_warning".into(), serde_json::json!({
+            "requested": value, "applied": effort, "model": model.as_str(),
+            "source": "adapter:drop_unsupported_effort", "reason": "unsupported model effort dropped"
+        }));
+    }
     if availability.is_none()
         && let Err(warning) = check_go_allowance(model, context.config, context.catalogue)
     {
@@ -2119,10 +2164,7 @@ impl Excluded<'_> {
         let serving_accounts_remain = context.availability.iter().any(|record| {
             record.adapter == model.adapter()
                 && provenant_records::AdapterSpec::get(model.adapter()).is_none_or(|spec| {
-                    record
-                        .account_key
-                        .as_deref()
-                        .is_none_or(|key| spec.account_serves_model(key, model.model()))
+                    spec.account_serves_model(record.plan.as_deref(), model.model())
                 })
         });
         if let Some(rule) = self
@@ -2355,6 +2397,7 @@ fn resolve_inner(
 }
 
 struct ClassifiedPool {
+    capability_policy: Option<crate::quality::CapabilityDecision>,
     candidates: Vec<RouteSelectionCandidate>,
     routes: Vec<Option<RouteAlternative>>,
     weighted: Vec<(usize, u64)>,
@@ -2411,8 +2454,10 @@ fn classify_pool(
     context: &ValidatedContext<'_>,
     excluded_members: Excluded<'_>,
     avoid_cooling: bool,
+    minimum: Option<Capability>,
 ) -> Result<ClassifiedPool, RoutingError> {
     let mut classified = ClassifiedPool {
+        capability_policy: None,
         candidates: Vec::with_capacity(members.len()),
         routes: Vec::with_capacity(members.len()),
         weighted: Vec::new(),
@@ -2426,7 +2471,30 @@ fn classify_pool(
         exclusions: Vec::new(),
     };
     for member in members {
-        let effort = request.effort.clone().or(member.effort.clone());
+        let mut effort = request.effort.clone().or(member.effort.clone());
+        let capability = context
+            .catalogue
+            .model(&member.model)
+            .map(|entry| entry.capability)
+            .unwrap_or_default();
+        if let Some(minimum) = minimum.filter(|minimum| capability < *minimum) {
+            let detail = format!("capability {capability:?} below {minimum:?}");
+            classified
+                .exclusions
+                .push(format!("{}: {detail}", member.model.as_str()));
+            classified.candidates.push(RouteSelectionCandidate {
+                extra: Default::default(),
+                model: member.model.as_str().into(),
+                weight: member.weight,
+                factor_basis_points: NEUTRAL_FACTOR_BASIS_POINTS,
+                pacing_detail: None,
+                effort,
+                readiness: None,
+                exclusion: Some(detail),
+            });
+            classified.routes.push(None);
+            continue;
+        }
         let mut factor_basis_points = NEUTRAL_FACTOR_BASIS_POINTS;
         let spent = context
             .availability
@@ -2434,11 +2502,7 @@ fn classify_pool(
             .filter(|a| {
                 a.adapter == member.model.adapter()
                     && provenant_records::AdapterSpec::get(member.model.adapter()).is_none_or(
-                        |spec| {
-                            a.account_key.as_deref().is_none_or(|key| {
-                                spec.account_serves_model(key, member.model.model())
-                            })
-                        },
+                        |spec| spec.account_serves_model(a.plan.as_deref(), member.model.model()),
                     )
             })
             .map(|a| latest_reading(&member.model, a, context, false))
@@ -2510,8 +2574,8 @@ fn classify_pool(
         let exclusion = if !privacy_allowed(&member.model, request.confidential, context.catalogue)
         {
             Some(("confidential", "confidential model"))
-        } else if effort
-            .as_deref()
+        } else if normalised_effort(&member.model, effort.as_deref(), context)
+            .0
             .is_some_and(|value| !member.efforts.iter().any(|allowed| allowed == value))
         {
             Some(("effort", "unsupported effort"))
@@ -2534,6 +2598,10 @@ fn classify_pool(
                 request.intent,
             ) {
                 Ok(resolved) => {
+                    effort = resolved.effort.clone();
+                    if let Some(warning) = resolved.extra.get("effort_warning") {
+                        ranking.insert("effort_warning".into(), warning.clone());
+                    }
                     if let Some(family) = excluded_members.required_family
                         && matches!(&resolved.readiness, RouteReadiness::Unavailable { reason, .. } if reason.is_account_block())
                     {
@@ -2863,6 +2931,97 @@ fn selection_receipt(
     }
 }
 
+/// The one deciding point for capability eligibility, including its declared relaxation.
+fn classify_with_capability_policy(
+    name: &str,
+    members: &[RoutePoolMember],
+    request: &RouteRequest,
+    context: &ValidatedContext<'_>,
+    excluded: Excluded<'_>,
+    avoid_cooling: bool,
+) -> Result<ClassifiedPool, RoutingError> {
+    let path = format!("domains.routing.capability_policy.{name}");
+    let (policy, source) = if let Some(policy) = context.config.capability_policy.get(name) {
+        (
+            *policy,
+            format!(
+                "{}:{path}",
+                context
+                    .config
+                    .preference_sources
+                    .get(&format!("{path}.mode"))
+                    .map(String::as_str)
+                    .unwrap_or("config")
+            ),
+        )
+    } else {
+        (
+            context
+                .catalogue
+                .capability_policy
+                .get(name)
+                .copied()
+                .unwrap_or_default(),
+            format!("catalogue:capability_policy.{name}"),
+        )
+    };
+    let mut classified = classify_pool(
+        name,
+        members,
+        request,
+        context,
+        excluded,
+        avoid_cooling,
+        policy.minimum(),
+    )?;
+    let exclusions = members
+        .iter()
+        .filter_map(|member| {
+            let capability = context
+                .catalogue
+                .model(&member.model)
+                .map(|m| m.capability)
+                .unwrap_or_default();
+            policy
+                .minimum()
+                .filter(|minimum| capability < *minimum)
+                .map(|minimum| crate::quality::CapabilityExclusion {
+                    model: member.model.as_str().into(),
+                    capability,
+                    minimum,
+                })
+        })
+        .collect();
+    let relaxed = matches!(policy, CapabilityPolicy::Minimum { fallback: CapabilityFallback::WarnRelax, .. })
+        && classified.routes.iter().all(Option::is_none)
+        // Cooling is advisory: retry the qualified set before relaxing its floor.
+        && (!avoid_cooling || classify_pool(name, members, request, context, excluded, false, policy.minimum())?
+            .routes.iter().all(Option::is_none));
+    if relaxed {
+        classified = classify_pool(
+            name,
+            members,
+            request,
+            context,
+            excluded,
+            avoid_cooling,
+            None,
+        )?;
+    }
+    classified.capability_policy = Some(crate::quality::CapabilityDecision {
+        policy,
+        source,
+        excluded: exclusions,
+        relaxed,
+        warning: relaxed.then(|| {
+            format!(
+                "no otherwise eligible member meets {name} capability policy; warn_relax applied"
+            )
+        }),
+    });
+    Ok(classified)
+}
+
 fn classify_with_image_preference(
     name: &str,
     members: &[RoutePoolMember],
@@ -2871,7 +3030,8 @@ fn classify_with_image_preference(
     excluded: Excluded<'_>,
     avoid_cooling: bool,
 ) -> Result<ClassifiedPool, RoutingError> {
-    let mut classified = classify_pool(name, members, request, context, excluded, avoid_cooling)?;
+    let mut classified =
+        classify_with_capability_policy(name, members, request, context, excluded, avoid_cooling)?;
     let image = |index: usize| image_input_supported(&members[index].model, context);
     let has_ready_image = members
         .iter()
@@ -3016,6 +3176,11 @@ fn select_pool(
         .cloned()
         .ok_or(RoutingError::Catalogue)?;
     let mut receipt = selection_receipt(name, &classified, &draw, &route);
+    if let Some(policy) = &classified.capability_policy {
+        receipt
+            .extra
+            .insert("capability_policy".into(), serde_json::json!(policy));
+    }
     receipt.extra.insert(
         "weight_source".into(),
         if context.config.pools.contains_key(name) {

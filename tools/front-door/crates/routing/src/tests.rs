@@ -55,6 +55,7 @@ fn opencode_accounts() -> [AvailabilityRecord; 2] {
     ["zen", "go"].map(|key| AvailabilityRecord {
         adapter: "opencode".into(),
         account_key: Some(key.into()),
+        plan: Some(key.into()),
         ..availability()
     })
 }
@@ -90,6 +91,7 @@ fn availability() -> AvailabilityRecord {
         fixture_ref: "test".into(),
         catalogue_revision: Catalogue::bundled().unwrap().revision,
         account_key: Some("opaque-account".into()),
+        plan: None,
         observed_models: vec!["test".into()],
         observed_unix_seconds: 80,
         expires_unix_seconds: 120,
@@ -377,6 +379,7 @@ fn agy_account(key: &str) -> AvailabilityRecord {
     AvailabilityRecord {
         adapter: "agy".into(),
         account_key: Some(key.into()),
+        plan: Some(key.into()),
         ..availability()
     }
 }
@@ -546,6 +549,7 @@ fn go_alias_quota_case(
         AvailabilityRecord {
             adapter: "opencode".into(),
             account_key: Some("go".into()),
+            plan: Some("go".into()),
             ..availability()
         },
     ];

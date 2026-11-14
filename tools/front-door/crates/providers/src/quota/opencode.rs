@@ -10,9 +10,9 @@ pub(crate) fn decode_source(
         capture,
         |payload, windows, details| {
             decode_opencode(payload, windows);
-            if !provenant_records::AdapterSpec::get(&plan.account.adapter)
-                .is_some_and(|spec| spec.is_free_account(&plan.account.account_key))
-            {
+            if !provenant_records::AdapterSpec::get(&plan.account.adapter).is_some_and(|spec| {
+                spec.is_free_plan(details.as_ref().and_then(|details| details.plan.as_deref()))
+            }) {
                 let details = super::details_mut(details);
                 details.source = Some("local-ledger".into());
                 details.coverage = Some("partial".into());

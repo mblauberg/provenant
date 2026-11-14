@@ -172,7 +172,7 @@ pub(crate) fn recorded_model_readiness(
 ) -> Vec<RecordedReadiness> {
     let mut seen = BTreeSet::new();
     settings
-        .with_derived_accounts()
+        .unique_accounts()
         .entries
         .into_iter()
         .filter_map(|(id, entry)| {
@@ -185,8 +185,9 @@ pub(crate) fn recorded_model_readiness(
                         && hint != format!("{}/{}", entry.adapter, entry.key)
                 })
                 || !seen.insert((entry.adapter.clone(), entry.key.clone()))
-                || provenant_records::AdapterSpec::get(&entry.adapter)
-                    .is_some_and(|spec| !spec.account_serves_model(&entry.key, model.model()))
+                || provenant_records::AdapterSpec::get(&entry.adapter).is_some_and(|spec| {
+                    !spec.account_serves_model(entry.plan.as_deref(), model.model())
+                })
             {
                 return None;
             }
@@ -221,16 +222,9 @@ pub(crate) fn recorded_model_readiness(
 /// The OpenCode snapshot reports the Go plan's pools, which only govern models
 /// served by the `opencode-go` provider. Free (Zen) and other configured
 /// providers must not inherit its account-level exhaustion.
-pub(super) fn snapshot_governs(adapter: &str, account: &str, model: &ModelId) -> bool {
-    provenant_records::AdapterSpec::get(adapter).is_none_or(|spec| {
-        if let Some((free_account, prefix)) = spec.free_account
-            && account == free_account
-        {
-            return model.model().starts_with(prefix);
-        }
-        spec.quota_model_prefix
-            .is_none_or(|prefix| model.model().starts_with(prefix))
-    })
+pub(super) fn snapshot_governs(adapter: &str, plan: Option<&str>, model: &ModelId) -> bool {
+    provenant_records::AdapterSpec::get(adapter)
+        .is_none_or(|spec| spec.account_serves_model(plan, model.model()))
 }
 pub(super) fn quota_observations(
     catalogue: &Catalogue,
@@ -284,7 +278,13 @@ pub(super) fn quota_observations(
                 .filter(|model| model.adapter() == adapter)
                 .cloned(),
         );
-        models.retain(|model| snapshot_governs(adapter, &record.account.account_key, model));
+        models.retain(|model| {
+            snapshot_governs(
+                adapter,
+                snapshot.details.as_ref().and_then(|d| d.plan.as_deref()),
+                model,
+            )
+        });
         if observations.len().saturating_add(models.len()) > 256 {
             return Err(provenant_quota::QuotaError::Invalid("quota observation bound").into());
         }
@@ -303,8 +303,7 @@ pub(super) fn resolve_account_reference(
     field: &str,
     settings: &provenant_providers::accounts::Settings,
 ) -> Result<String, EdgeError> {
-    let derived = settings.with_derived_accounts();
-    let valid = derived
+    let valid = settings
         .entries
         .iter()
         .map(|(id, entry)| {
@@ -328,10 +327,7 @@ pub(super) fn resolve_account_reference(
             .map(|(id, entry)| (id.clone(), entry.clone()))
             .collect::<Vec<_>>()
     };
-    let mut matches = matches_for(settings);
-    if matches.is_empty() {
-        matches = matches_for(&derived);
-    }
+    let matches = matches_for(settings);
     match matches.as_slice() {
         [(_, entry)] => Ok(format!("{}/{}", entry.adapter, entry.key)),
         [] => Err(EdgeError::AccountProfile {

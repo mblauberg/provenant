@@ -203,7 +203,26 @@ design = [
     { model = "claude/claude-opus-5-5", weight = 1, efforts = ["low", "medium", "high", "xhigh"] },
 ]
 
-# D8: capability preferences never change eligibility. Empty config tables disable them.
+# Each tier declares eligibility independently of ranking preferences.
+# Config domains.routing.capability_policy.<tier> overrides the complete policy.
+[capability_policy.utility]
+mode = "disabled"
+[capability_policy.junior]
+mode = "disabled"
+[capability_policy.senior]
+mode = "minimum"
+minimum = "strong"
+fallback = "warn_relax"
+[capability_policy.principal]
+mode = "minimum"
+minimum = "frontier"
+fallback = "warn_relax"
+[capability_policy.writing]
+mode = "disabled"
+[capability_policy.design]
+mode = "disabled"
+
+# Preferences apply only among eligible members; empty config tables disable them.
 [capability_preferences.senior]
 general = 1
 strong = 4
