@@ -138,7 +138,7 @@ pub enum Command {
     #[command(name = "retry", add = crate::metadata::CoreCommand(5, "provenant retry fix-login"))]
     Retry(Resume),
     /// Queue a steering message for a lane when its provider supports control
-    #[command(add = crate::metadata::CoreCommand(3, "provenant steer fix-login/implement --text-stdin < message.md"))]
+    #[command(add = crate::metadata::CoreCommand(3, "provenant steer fix-login/implement --brief-file - < message.md"))]
     Steer(crate::inbox::Steer),
     /// Apply a patch to unstarted graph nodes
     #[command(add = crate::metadata::CoreCommand(6, "provenant edit fix-login --file patch.json"))]
@@ -554,14 +554,17 @@ pub struct GraphRunArgs {
     #[arg(required_unless_present = "file", conflicts_with = "file")]
     pub template: Option<String>,
     /// Brief for the template
-    #[arg(conflicts_with_all = ["file", "brief_file"])]
+    #[arg(conflicts_with_all = ["file", "brief_file", "brief_text"])]
     pub brief: Option<String>,
+    /// Brief for the template (alternative to the positional brief)
+    #[arg(long = "brief", value_name = "TEXT", conflicts_with_all = ["file", "brief", "brief_file"])]
+    pub brief_text: Option<String>,
     /// Handle for the graph: `status`, `wait` and `output` take it. The same
     /// input under the same name finds its graph; changed input starts NAME-2.
     #[arg(long, value_parser = graph_name)]
     pub name: Option<String>,
     /// Read the brief from a file, or from standard input given `-`
-    #[arg(long, conflicts_with = "file")]
+    #[arg(long, conflicts_with_all = ["file", "brief", "brief_text"])]
     pub brief_file: Option<PathBuf>,
     /// Place attempts on this peer name or host ID
     #[arg(long)]
@@ -692,8 +695,11 @@ pub struct Resume {
     #[arg(value_name = "TARGET")]
     pub target: Target,
     /// Replace the node's brief; a graph target needs exactly one node
-    #[arg(long, conflicts_with = "extend")]
+    #[arg(long, conflicts_with_all = ["extend", "brief_file"])]
     pub brief: Option<String>,
+    /// Read a replacement brief from a file, or from standard input given `-`
+    #[arg(long, conflicts_with = "extend")]
+    pub brief_file: Option<PathBuf>,
     /// Raise a graph limit or budget (KEY=VALUE) on a graph target; may be repeated
     #[arg(long, value_name = "KEY=VALUE")]
     pub extend: Vec<String>,

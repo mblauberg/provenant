@@ -201,6 +201,18 @@ fn validate_entry(entry: &crate::DomainSection, table: &Table) -> Vec<SectionErr
             code: "retired.bundle_bytes",
         }];
     }
+    if entry.name == "fabric"
+        && table
+            .get("graph")
+            .and_then(Item::as_table_like)
+            .is_some_and(|graph| graph.contains_key("writer_launch_seconds"))
+    {
+        return vec![SectionError {
+            detail: None,
+            field: "graph.writer_launch_seconds".into(),
+            code: "retired.writer_launch_seconds",
+        }];
+    }
     (entry.validate)(table)
 }
 
@@ -1588,7 +1600,7 @@ impl Overrides<'_> {
     fn issue(&mut self, path: &[String], rule: &'static str) {
         let graph_policy =
             path.len() >= 4 && path[0] == "domains" && path[1] == "fabric" && path[2] == "graph";
-        let retired_key = rule == "retired.bundle_bytes";
+        let retired_key = rule.starts_with("retired.");
         let rejected = if graph_policy {
             numeric_rejected(at(self.user, path))
         } else {
@@ -1647,6 +1659,8 @@ impl Overrides<'_> {
             key.extend(relative);
             let rule = if key == ["domains", "fabric", "limits", "bundle_bytes"] {
                 "retired.bundle_bytes"
+            } else if key == ["domains", "fabric", "graph", "writer_launch_seconds"] {
+                "retired.writer_launch_seconds"
             } else {
                 "unknown_key"
             };

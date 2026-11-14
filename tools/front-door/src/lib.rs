@@ -1203,6 +1203,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             fabric::GraphCommand::Retry {
                 extend: &cmd.extend,
                 brief: cmd.brief.as_deref(),
+                brief_file: cmd.brief_file.as_deref(),
             },
             globals,
             process.workers(),

@@ -716,7 +716,7 @@ fn recover_provisioning(
                     index,
                     facade,
                     Some(failed_at),
-                    context.config.graph.writer_launch_seconds,
+                    context.config.graph.writer_provision_seconds,
                     Default::default(),
                 )
                 .map_err(|_| ServiceError::Facade(FacadeError::StateCorrupt))?;
@@ -1063,21 +1063,22 @@ fn provisioning_refusal(error: provenant_confinement::worktrees::WorktreeError) 
     }
 }
 
-/// Start a writer launch once; every later lock and retry uses this deadline.
+/// Start one independent provisioning allowance; later locks and retries reuse it.
+/// The caller's reader wait never extends or shortens writer provisioning.
 pub fn writer_launch_budget(
     context: &Context,
     clock: &dyn Clock,
-    caller: WaitBudget,
+    _caller: WaitBudget,
 ) -> WaitBudget {
     let now = clock.mono_now();
     let floor = provenant_core::DurationMicros::from_micros(
         context
             .config
             .graph
-            .writer_launch_seconds
+            .writer_provision_seconds
             .saturating_mul(1_000_000),
     );
-    WaitBudget::up_to(now, floor.max(caller.remaining(now)))
+    WaitBudget::up_to(now, floor)
 }
 
 /// Preserve the typed worktree failure for the graph launch owner.
@@ -2050,7 +2051,7 @@ mod provisioning_tests {
         inputs.state_dir = Some(root.path().join("state"));
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
         let mut context = Context::open(roots, &home, &project)?;
-        context.config.graph.writer_launch_seconds = 60;
+        context.config.graph.writer_provision_seconds = 60;
         let cancel = CancelToken::new();
         let clock = provenant_os::clock::SystemClock::new();
         let budget = WaitBudget::cli(clock.mono_now(), 30)?;

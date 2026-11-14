@@ -1500,7 +1500,7 @@ fn steer_graph_and_node_refuse_an_unlaunched_attempt_before_reading_stdin() -> R
     // A node target names its newest attempt; one with no provider session
     // yet is refused as a target before any steer text is read.
     for target in ["steer-ambiguous", "steer-ambiguous/accept"] {
-        let (output, value) = rig.run(&["steer", target, "--text-stdin"])?;
+        let (output, value) = rig.run(&["steer", target, "--brief-file", "-"])?;
         assert!(!output.status.success(), "{value}");
         assert_eq!(value["status"], "refused", "{value}");
         assert_eq!(value["error"]["code"], "steer_target_refused", "{value}");

@@ -32,6 +32,24 @@ impl<J: provenant_fabric_runtime::graph::GraphJournal> provenant_fabric_runtime:
         }
         Ok(())
     }
+    fn apply_cancellation(
+        &mut self,
+        document: &provenant_fabric_runtime::graph::GraphDocument,
+        checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+    ) -> Result<bool, Self::Error> {
+        self.journal.apply_cancellation(document, checkpoint)
+    }
+}
+
+pub(super) fn cancellation_receipt(
+    mut run: provenant_fabric_runtime::graph::GraphRun,
+    request_id: String,
+) -> provenant_fabric_runtime::graph::GraphRun {
+    run.checkpoint.extra.insert(
+        "cancellation_request_receipt".into(),
+        serde_json::json!({"request_id":request_id}),
+    );
+    run
 }
 
 /// Discover pending journals and check deadlines under the same lock as explicit advance.
@@ -141,7 +159,7 @@ pub(crate) fn tick_graphs(
                 // A tick has no caller wait: its launches, including writer
                 // binding, have the configured launch allowance.
                 let budget =
-                    WaitBudget::cli(clock.mono_now(), context.config.graph.writer_launch_seconds)?;
+                    WaitBudget::cli(clock.mono_now(), context.config.graph.launch_wait_seconds)?;
                 let factory = Factory {
                     project_attribution: crate::usage::attribution_enabled(&context.roots),
                     context,
@@ -751,6 +769,24 @@ impl Factory {
                 "Unreadable graph record retired. Identifiable attempts and inbox requests were cancelled; unidentifiable work and writer fences require inspection.".into(),
             ));
         }
+        let cancel_request = match &input {
+            GraphInput::Cancel { reason, .. } => Some(
+                FileJournal::request_cancellation(
+                    &self.context.roots.state,
+                    self.context.identity.project,
+                    provenant_fabric_runtime::graph::CancellationTarget {
+                        graph_id: id,
+                        node: None,
+                        reason: reason.as_deref(),
+                    },
+                    budget,
+                    cancel,
+                    &self.clock,
+                )
+                .map_err(graph_journal_error)?,
+            ),
+            _ => None,
+        };
         let open = |budget| {
             FileJournal::open(
                 &self.context.roots.state,
@@ -764,43 +800,69 @@ impl Factory {
         let launch_digest = document
             .as_ref()
             .and_then(|document| document.replay_digest());
-        let mut journal = match launch_digest {
-            // A fresh launch does not queue behind another launch that bound
-            // this name to other input: it loses the name at once and takes
-            // the next one. While the holder has not bound yet, probe in short
-            // slices so the answer arrives as soon as it binds. The same input
-            // waits, as a replay.
-            Some(digest) => loop {
-                let slice = WaitBudget::up_to(
-                    self.clock.mono_now(),
-                    provenant_core::DurationMicros::from_micros(200_000),
-                )
-                .cap_at(budget.deadline().as_mono_time());
-                match open(slice) {
-                    Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
-                        provenant_os::fs::FsError::LockTimeout { .. },
-                    )) if budget.remaining(self.clock.mono_now()).as_micros() > 0 => {
-                        let bound = FileJournal::execution(
-                            &self.context.roots.state,
-                            self.context.identity.project,
-                            id,
-                        )
-                        .ok()
-                        .flatten();
-                        match bound {
-                            Some(bound) if bound.document.replay_digest() != Some(digest) => {
-                                return Err(FacadeError::Conflict);
-                            }
-                            Some(_) => break open(budget),
-                            None => continue,
-                        }
-                    }
-                    opened => break opened,
+        let mut journal = if let Some(request_id) = cancel_request.as_ref() {
+            match FileJournal::try_open(
+                &self.context.roots.state,
+                self.context.identity.project,
+                id,
+            ) {
+                Ok(journal) => journal,
+                Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
+                    provenant_os::fs::FsError::LockTimeout { .. },
+                )) => {
+                    let checkpoint = FileJournal::read_checkpoint(
+                        &self.context.roots.state,
+                        self.context.identity.project,
+                        id,
+                    )
+                    .map_err(graph_journal_error)?
+                    .ok_or(FacadeError::NotFound)?;
+                    return Ok(cancellation_receipt(
+                        graph_snapshot(checkpoint),
+                        request_id.clone(),
+                    ));
                 }
-            },
-            None => open(budget),
-        }
-        .map_err(|_| FacadeError::io("access graph journal"))?;
+                Err(error) => return Err(graph_journal_error(error)),
+            }
+        } else {
+            match launch_digest {
+                // A fresh launch does not queue behind another launch that bound
+                // this name to other input: it loses the name at once and takes
+                // the next one. While the holder has not bound yet, probe in short
+                // slices so the answer arrives as soon as it binds. The same input
+                // waits, as a replay.
+                Some(digest) => loop {
+                    let slice = WaitBudget::up_to(
+                        self.clock.mono_now(),
+                        provenant_core::DurationMicros::from_micros(200_000),
+                    )
+                    .cap_at(budget.deadline().as_mono_time());
+                    match open(slice) {
+                        Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
+                            provenant_os::fs::FsError::LockTimeout { .. },
+                        )) if budget.remaining(self.clock.mono_now()).as_micros() > 0 => {
+                            let bound = FileJournal::execution(
+                                &self.context.roots.state,
+                                self.context.identity.project,
+                                id,
+                            )
+                            .ok()
+                            .flatten();
+                            match bound {
+                                Some(bound) if bound.document.replay_digest() != Some(digest) => {
+                                    return Err(FacadeError::Conflict);
+                                }
+                                Some(_) => break open(budget),
+                                None => continue,
+                            }
+                        }
+                        opened => break opened,
+                    }
+                },
+                None => open(budget),
+            }
+            .map_err(|_| FacadeError::io("access graph journal"))?
+        };
         if let Some(document) = &document {
             // GC and admission hold this graph's lock. If collection removed
             // the source after it was read, restore the exact bytes before
@@ -1021,20 +1083,23 @@ impl Factory {
             .map_err(graph_journal_error)?
             .ok_or(FacadeError::NotFound)?;
         if let GraphInput::Cancel { reason, .. } = &input {
+            let execution = FileJournal::execution(
+                &self.context.roots.state,
+                self.context.identity.project,
+                id,
+            )
+            .map_err(graph_journal_error)?
+            .ok_or(FacadeError::NotFound)?;
+            journal
+                .apply_cancellation(&execution.document, &mut checkpoint)
+                .map_err(graph_journal_error)?;
             // Persist the admission fence before asking the run owner to stop live attempts.
             if !checkpoint.cancelled || reason.is_some() {
                 checkpoint.cancel_reason = reason.clone();
             }
             checkpoint.cancelled = true;
             let detached = provenant_fabric_runtime::graph::relay::fence_detached_cancellation(
-                &FileJournal::execution(
-                    &self.context.roots.state,
-                    self.context.identity.project,
-                    id,
-                )
-                .map_err(graph_journal_error)?
-                .ok_or(FacadeError::NotFound)?
-                .document,
+                &execution.document,
                 &mut checkpoint,
             )
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
@@ -1105,7 +1170,11 @@ impl Factory {
                 return Err(error);
             }
         }
-        Ok(graph_snapshot(checkpoint))
+        let run = graph_snapshot(checkpoint);
+        Ok(match cancel_request {
+            Some(request_id) => cancellation_receipt(run, request_id),
+            None => run,
+        })
     }
 
     fn graph_checkout(&self) -> Result<PathBuf, provenant_os::fs::FsError> {

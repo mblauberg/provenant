@@ -76,15 +76,42 @@ impl Factory {
             );
         };
         use provenant_fabric_runtime::graph::GraphJournal;
-        let mut journal = FileJournal::open(
+        let request_id = FileJournal::request_cancellation(
             &self.context.roots.state,
             self.context.identity.project,
-            &target.graph,
+            provenant_fabric_runtime::graph::CancellationTarget {
+                graph_id: &target.graph,
+                node: Some(parent),
+                reason: reason.as_deref(),
+            },
             budget,
             cancel,
             &self.clock,
         )
         .map_err(graph_journal_error)?;
+        let mut journal = match FileJournal::try_open(
+            &self.context.roots.state,
+            self.context.identity.project,
+            &target.graph,
+        ) {
+            Ok(journal) => journal,
+            Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
+                provenant_os::fs::FsError::LockTimeout { .. },
+            )) => {
+                let checkpoint = FileJournal::read_status_checkpoint(
+                    &self.context.roots.state,
+                    self.context.identity.project,
+                    &target.graph,
+                )
+                .map_err(graph_journal_error)?
+                .ok_or(FacadeError::NotFound)?;
+                return Ok(super::graph_execution::cancellation_receipt(
+                    graph_snapshot(checkpoint),
+                    request_id,
+                ));
+            }
+            Err(error) => return Err(graph_journal_error(error)),
+        };
         let execution = FileJournal::execution(
             &self.context.roots.state,
             self.context.identity.project,
@@ -96,6 +123,9 @@ impl Factory {
             .load(&target.graph)
             .map_err(graph_journal_error)?
             .ok_or(FacadeError::NotFound)?;
+        journal
+            .apply_cancellation(&execution.document, &mut checkpoint)
+            .map_err(graph_journal_error)?;
         let subtree = provenant_fabric_runtime::graph::cancel_node_subtree(
             &execution.document,
             &mut checkpoint,
@@ -153,7 +183,10 @@ impl Factory {
         if let Some(error) = first_error {
             return Err(error);
         }
-        Ok(graph_snapshot(checkpoint))
+        Ok(super::graph_execution::cancellation_receipt(
+            graph_snapshot(checkpoint),
+            request_id,
+        ))
     }
 }
 
@@ -969,7 +1002,25 @@ pub(crate) enum GraphCommand<'a> {
     Retry {
         extend: &'a [String],
         brief: Option<&'a str>,
+        brief_file: Option<&'a std::path::Path>,
     },
+}
+
+fn validate_retry_brief_target(
+    target: &provenant_cli::Target,
+    rows: &[Value],
+) -> Result<(), &'static str> {
+    let target_id = target.to_string();
+    if !rows
+        .iter()
+        .any(|row| row["id"].as_str() == Some(target_id.as_str()))
+    {
+        return Err("retry brief target did not resolve to a current graph row");
+    }
+    if target.node.is_none() && rows.iter().filter(|row| row["kind"] == "node").count() != 1 {
+        return Err("retry --brief requires a target with exactly one node");
+    }
+    Ok(())
 }
 
 /// Read one graph target through the host relay. Inside a lane the host
@@ -1017,6 +1068,15 @@ pub(crate) fn unified_graph_command(
                 })?,
             )
         };
+        let brief_source = match &command {
+            GraphCommand::Retry {
+                brief, brief_file, ..
+            } => provenant_cli::brief::select_brief_source([
+                brief.map(|text| provenant_cli::brief::BriefSource::Text(text.to_owned())),
+                brief_file.map(|path| provenant_cli::brief::BriefSource::file(path.to_path_buf())),
+            ])?,
+            _ => None,
+        };
         if let Some(factory) = factory.as_ref().filter(|factory| !factory.context.in_lane) {
             for target in targets {
                 match resolve(
@@ -1035,6 +1095,29 @@ pub(crate) fn unified_graph_command(
                 }
             }
         }
+        if brief_source.is_some() && matches!(&command, GraphCommand::Retry { .. }) {
+            let Some(factory) = &factory else {
+                return Err(std::io::Error::other("retry brief needs graph state").into());
+            };
+            if targets.is_empty() {
+                return Err(std::io::Error::other("retry brief needs a target").into());
+            }
+            for target in targets {
+                let input = json!({"op":"status","id":target.to_string()});
+                let budget = WaitBudget::cli(
+                    factory.clock.mono_now(),
+                    factory.context.config.graph.launch_wait_seconds,
+                )?;
+                let data = factory.graph_document(input, budget, &CancelToken::new())?;
+                let rows = data["rows"].as_array().ok_or(FacadeError::StateCorrupt)?;
+                validate_retry_brief_target(target, rows).map_err(std::io::Error::other)?;
+            }
+        }
+        let resolved_brief = brief_source
+            .map(|source| {
+                provenant_cli::brief::read_brief(source, provenant_cli::brief::MAX_BRIEF_BYTES)
+            })
+            .transpose()?;
         let selectors: Vec<(String, Option<&str>)> = if targets.is_empty() {
             vec![(String::new(), None)]
         } else {
@@ -1055,9 +1138,9 @@ pub(crate) fn unified_graph_command(
                         input["reason"] = json!(reason);
                     }
                 }
-                GraphCommand::Retry { extend, brief } => {
+                GraphCommand::Retry { extend, .. } => {
                     input["extend"] = json!(extend);
-                    if let Some(brief) = brief {
+                    if let Some(brief) = &resolved_brief {
                         input["brief"] = json!(brief);
                     }
                 }
@@ -1070,7 +1153,10 @@ pub(crate) fn unified_graph_command(
                 documents.push(data);
                 continue;
             };
-            let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
+            let budget = WaitBudget::cli(
+                factory.clock.mono_now(),
+                factory.context.config.graph.launch_wait_seconds,
+            )?;
             let mut data = factory.graph_document(input, budget, &cancel).map_err(|error| {
                 if matches!(command, GraphCommand::Retry { .. })
                     && matches!(error, FacadeError::InvalidInput { detail: Some(InvalidInputDetail::GraphReason(_)) } | FacadeError::GraphRelayRefused { detail: Some(InvalidInputDetail::GraphReason(_)), .. })
@@ -1090,6 +1176,16 @@ pub(crate) fn unified_graph_command(
             let rows = data["rows"].as_array().ok_or(FacadeError::StateCorrupt)?;
             human.push_str(&render_graph_status(rows));
             data["digests"] = json!(super::graph_status::node_digests(rows));
+            if matches!(command, GraphCommand::Stop { .. })
+                && data["cancellation_requested"]["pending_acknowledgement"] == true
+            {
+                let request_id = data["cancellation_requested"]["request_id"]
+                    .as_str()
+                    .unwrap_or("unknown");
+                human.push_str(&format!(
+                    "cancellation requested; acknowledgement pending ({request_id})\n"
+                ));
+            }
             documents.push(data);
         }
         let data = match <[Value; 1]>::try_from(documents) {
@@ -1116,59 +1212,146 @@ pub(crate) fn unified_graph_steer(
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
 ) -> u8 {
-    let result = (|| -> Result<Result<Value, &'static str>, Box<dyn std::error::Error>> {
+    enum SteerResult {
+        Queued(Value),
+        Refused(&'static str),
+        Unsupported(provenant_records::control::ControlReceipt),
+    }
+    let result = (|| -> Result<SteerResult, Box<dyn std::error::Error>> {
         let factory = factory(globals, workers)?;
         let (resolved, checkpoint) =
             resolve_with_checkpoint(&factory, &args.target, Want::Attempt { settled: false })?;
-        let reference = match provenant_cli::inbox::live_steer_reference(&checkpoint, &resolved) {
-            Ok(reference) => reference,
-            Err(message) => return Ok(Err(message)),
-        };
-        let text = String::from_utf8(read_steering_stdin()?)?;
         let cancel = CancelToken::new();
-        let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
+        let budget = WaitBudget::cli(
+            factory.clock.mono_now(),
+            factory.context.config.graph.launch_wait_seconds,
+        )?;
+        let target = match super::steer::verified_target(
+            &factory,
+            &resolved,
+            &checkpoint,
+            budget,
+            &cancel,
+        ) {
+            Ok(Some(target)) => target,
+            Ok(None) | Err(_) => {
+                return Ok(SteerResult::Refused(
+                    "steering requires one verified, accepted, current live attempt",
+                ));
+            }
+        };
+        let source = provenant_cli::brief::select_brief_source([
+            args.brief
+                .clone()
+                .map(provenant_cli::brief::BriefSource::Text),
+            args.brief_file
+                .clone()
+                .map(provenant_cli::brief::BriefSource::file),
+        ])?
+        .ok_or_else(|| std::io::Error::other("steer requires a brief source"))?;
+        let text = provenant_cli::brief::read_brief(
+            source,
+            provenant_records::control::CONTROL_TEXT_BYTES,
+        )?;
         let mut facade = BoundFacade { factory: &factory };
-        let (host, id) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
-        let operation_id = args
-            .operation_id
-            .as_ref()
-            .map(|operation| {
+        let (host, id) = target
+            .reference
+            .split_once('/')
+            .ok_or(FacadeError::StateCorrupt)?;
+        let operation_id = match args.operation_id.as_ref() {
+            Some(operation) => {
                 let digest = provenant_records::CanonicalV1::record_digest(
                     "graph-steer",
                     1,
-                    &(operation, reference),
+                    &(operation, &target.reference),
                 )
                 .map_err(|_| FacadeError::StateCorrupt)?;
-                provenant_core::OperationId::parse(&format!(
+                Some(provenant_core::OperationId::parse(&format!(
                     "steer-{}",
                     provenant_core::hex(digest.as_bytes())
-                ))
-                .map_err(|_| FacadeError::StateCorrupt)
-            })
-            .transpose()?;
+                ))?)
+            }
+            None if target.target.host != Some(factory.context.identity.host) => {
+                let bytes = provenant_os::fs::entropy_128()?;
+                Some(provenant_core::OperationId::parse(&format!(
+                    "steer-{}",
+                    provenant_core::hex(&bytes)
+                ))?)
+            }
+            None => None,
+        };
+        let extra = if target.target.host != Some(factory.context.identity.host) {
+            [
+                ("graph_steer".into(), json!(true)),
+                (
+                    "graph_launch_actor".into(),
+                    json!(target.launch_actor.to_string()),
+                ),
+                (
+                    "graph_launch_operation".into(),
+                    serde_json::to_value(&target.launch_operation)?,
+                ),
+                (
+                    "graph_origin_work_key".into(),
+                    serde_json::to_value(&target.work_key)?,
+                ),
+            ]
+            .into()
+        } else {
+            Default::default()
+        };
         let input = provenant_fabric_runtime::inbox::InboxInput::Steer {
-            extra: Default::default(),
+            extra,
             attempt: id.parse()?,
             text,
             operation_id,
         };
-        let receipt = facade.inbox_owner(input, Some(host.into()), budget, &cancel)?;
-        Ok(Ok(json!({"receipts":[receipt]})))
+        let result = match facade.inbox_owner(input, Some(host.into()), budget, &cancel) {
+            Ok(result) => result,
+            Err(provenant_fabric_runtime::relay::ServiceError::InboxOwner { .. }) => {
+                return Ok(SteerResult::Refused(
+                    "steering requires one verified, accepted, current live attempt",
+                ));
+            }
+            Err(error) => return Err(Box::new(error)),
+        };
+        match result {
+            provenant_fabric_runtime::inbox::InboxResult::Control { receipt }
+                if receipt.state == provenant_records::control::ControlState::Unsupported =>
+            {
+                Ok(SteerResult::Unsupported(receipt))
+            }
+            provenant_fabric_runtime::inbox::InboxResult::Control { receipt } => {
+                Ok(SteerResult::Queued(json!({"receipts":[receipt]})))
+            }
+            _ => Err(FacadeError::StateCorrupt.into()),
+        }
     })();
     match result {
-        Ok(Ok(data)) => crate::emit(
+        Ok(SteerResult::Queued(data)) => crate::emit(
             &provenant_records::CommandResult::new("steer", provenant_records::Outcome::Ok, data),
             globals,
             "steering queued\n",
             false,
         ),
-        Ok(Err(message)) => crate::fail(
+        Ok(SteerResult::Refused(message)) => crate::fail(
             "steer",
             provenant_records::Outcome::Refused,
             "steer_target_refused",
             message,
             globals,
         ),
+        Ok(SteerResult::Unsupported(receipt)) => {
+            let error = provenant_cli::inbox::unsupported_control_error(&receipt);
+            let human = error.message.clone();
+            let mut result = provenant_records::CommandResult::new(
+                "steer",
+                provenant_records::Outcome::Refused,
+                json!({"receipts":[receipt]}),
+            );
+            result.error = Some(error);
+            crate::emit(&result, globals, &human, false)
+        }
         Err(error) => command_fail("steer", error.as_ref(), globals),
     }
 }
@@ -1531,7 +1714,10 @@ pub(crate) fn unified_graph_trace(
             .map_err(target_fault)?
             .attempt_ref
         };
-        let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
+        let budget = WaitBudget::cli(
+            factory.clock.mono_now(),
+            factory.context.config.graph.launch_wait_seconds,
+        )?;
         let mut data =
             factory.graph_document(json!({"op":"trace", "id":id}), budget, &CancelToken::new())?;
         if let (Some(reference), Some(events)) = (attempt, data["events"].as_array_mut()) {
@@ -1607,7 +1793,10 @@ pub(crate) fn unified_graph_output(
                     error
                 }
             })?;
-            let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
+            let budget = WaitBudget::cli(
+                factory.clock.mono_now(),
+                factory.context.config.graph.launch_wait_seconds,
+            )?;
             host_graph_output(command, edge, &factory, budget, &CancelToken::new())
         };
         return read().unwrap_or_else(|error| output_error(error.as_ref()));
@@ -2188,10 +2377,6 @@ fn missing_graph_context(error: &(dyn std::error::Error + 'static)) -> bool {
     clippy::disallowed_methods,
     reason = "sample the real-time stdin transport deadline"
 )]
-fn read_steering_stdin() -> std::io::Result<Vec<u8>> {
-    provenant_os::sys::hook_io::read_stdin(4096, Instant::now() + std::time::Duration::from_secs(5))
-}
-
 /// The relay has already bound this input to the calling attempt's graph.
 pub(crate) fn read_lane_graph(
     holder: &provenant_run::HolderContext,
@@ -2302,6 +2487,26 @@ mod tests {
     use provenant_fabric_runtime::graph::{
         GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
     };
+
+    #[test]
+    fn retry_brief_validates_the_resolved_target_and_single_node_before_input() {
+        let graph: provenant_cli::Target = "work".parse().unwrap();
+        let rows = [
+            json!({"id":"work","kind":"graph"}),
+            json!({"id":"work/inspect","kind":"node"}),
+        ];
+        assert!(validate_retry_brief_target(&graph, &rows).is_ok());
+        let multiple_nodes = [
+            json!({"id":"work","kind":"graph"}),
+            json!({"id":"work/inspect","kind":"node"}),
+            json!({"id":"work/test","kind":"node"}),
+        ];
+        assert!(validate_retry_brief_target(&graph, &multiple_nodes).is_err());
+
+        let node: provenant_cli::Target = "work/inspect".parse().unwrap();
+        assert!(validate_retry_brief_target(&node, &rows).is_ok());
+        assert!(validate_retry_brief_target(&node, &[]).is_err());
+    }
 
     #[test]
     fn unreadable_attempt_keeps_other_status_rows() {

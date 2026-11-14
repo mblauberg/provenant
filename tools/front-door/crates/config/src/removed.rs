@@ -208,6 +208,15 @@ pub const REMOVED: &[Removed] = &[
         "no direct equivalent; delete this stale pipeline table",
     ),
     diagnostic_code(
+        "retired.writer_launch_seconds",
+        "removed setting; use `domains.fabric.graph.launch_wait_seconds` for launch and wait, `domains.fabric.graph.writer_provision_seconds` for writer provisioning",
+    ),
+    flag(
+        &["steer"],
+        "text-stdin",
+        "provenant steer TARGET --brief-file -",
+    ),
+    diagnostic_code(
         "moved_to_schedule.starts",
         "replace `starts_unix_seconds` with `schedule.starts`",
     ),

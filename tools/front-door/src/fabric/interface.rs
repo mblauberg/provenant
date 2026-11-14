@@ -619,11 +619,22 @@ impl Factory {
             })
             .transpose()
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-        let launch = provenant_cli::fabric::graph_relay::writer_launch_budget(
-            &self.context,
-            &self.clock,
-            budget,
-        );
+        let launch = match &request {
+            provenant_fabric_runtime::graph::relay::RelayOp::Add(child) if child.has_writers() => {
+                let writer = provenant_cli::fabric::graph_relay::writer_launch_budget(
+                    &self.context,
+                    &self.clock,
+                    budget,
+                );
+                WaitBudget::up_to(
+                    self.clock.mono_now(),
+                    budget
+                        .remaining(self.clock.mono_now())
+                        .max(writer.remaining(self.clock.mono_now())),
+                )
+            }
+            _ => budget,
+        };
         let within =
             std::time::Duration::from_micros(launch.remaining(self.clock.mono_now()).as_micros())
                 .saturating_add(std::time::Duration::from_secs(1));
@@ -1904,6 +1915,7 @@ impl Factory {
         cancel: &CancelToken,
         stopping: bool,
     ) -> Result<Value, FacadeError> {
+        let cancellation_request = run.checkpoint.extra.remove("cancellation_request_receipt");
         let mut timed_out = false;
         if let Some(seconds) = input.get("wait_seconds").and_then(Value::as_u64) {
             let wait = WaitBudget::cli(self.clock.mono_now(), seconds)
@@ -1941,26 +1953,16 @@ impl Factory {
                     provenant_core::DurationMicros::from_micros(250_000.min(remaining.as_micros())),
                     cancel,
                 );
-                run = if stopping && target.node.is_some() {
-                    self.stop_target(
-                        target,
-                        input
-                            .get("reason")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                        budget,
-                        cancel,
-                    )?
-                } else {
-                    self.graph(
-                        GraphInput::Status {
-                            extra: Default::default(),
-                            id: target.graph.clone(),
-                        },
-                        budget,
-                        cancel,
-                    )?
-                };
+                // The original stop request is durable. Rechecking status
+                // must not append another request while its owner is busy.
+                run = self.graph(
+                    GraphInput::Status {
+                        extra: Default::default(),
+                        id: target.graph.clone(),
+                    },
+                    budget,
+                    cancel,
+                )?;
             }
         }
         let mut rows = super::unified::status_rows(&run, target);
@@ -1971,7 +1973,26 @@ impl Factory {
             cancel,
             budget,
         )?;
-        Ok(json!({"rows":rows,"timed_out":timed_out}))
+        let mut receipt = json!({"rows":rows,"timed_out":timed_out});
+        if let Some(request_id) = cancellation_request
+            .as_ref()
+            .and_then(|receipt| receipt.get("request_id"))
+            .and_then(Value::as_str)
+        {
+            let pending = FileJournal::cancellation_request_pending(
+                &self.context.roots.state,
+                self.context.identity.project,
+                &target.graph,
+                request_id,
+            )
+            .map_err(graph_journal_error)?;
+            receipt["cancellation_requested"] = json!({
+                "request_id": request_id,
+                "acknowledged": !pending,
+                "pending_acknowledgement": pending,
+            });
+        }
+        Ok(receipt)
     }
 
     fn wait_document(
@@ -2716,6 +2737,117 @@ mod tests {
             host_launch: None,
             workers: &Workers,
         })
+    }
+
+    #[test]
+    fn refused_retry_leaves_the_persisted_graph_readable_and_unchanged() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        let project = factory.context.identity.project;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../crates/fabric-runtime/src/fixtures/graph-checkpoint.json"
+        ))?;
+        let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+            serde_json::from_value(fixture["checkpoint"].clone())?;
+        let execution: GraphDocument =
+            serde_json::from_value(fixture["execution"]["document"].clone())?;
+        let directory: PathBuf = factory
+            .context
+            .roots
+            .state
+            .as_path()
+            .join("fabric/graphs")
+            .join(project.to_string());
+        let mut journal = FileJournal::open(
+            &factory.context.roots.state,
+            project,
+            &execution.graph_id,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.bind(provenant_fabric_runtime::graph::GraphExecution {
+            extra: Default::default(),
+            directory: PathBuf::from("/legacy/project"),
+            document: execution,
+            review_base: None,
+            integration_base: None,
+        })?;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        let path = directory.join("graph-g-test.json");
+        let before = std::fs::read(&path)?;
+
+        let error = factory
+            .graph_document(
+                json!({"op":"retry","id":"g-test/reader","brief":"ghp_abcdefghijklmnopqrstuvwxyz0123456789"}),
+                budget,
+                &cancel,
+            )
+            .expect_err("secret replacement brief must be refused");
+        assert!(matches!(error, FacadeError::InvalidInput { .. }));
+        assert_eq!(std::fs::read(&path)?, before);
+        assert_eq!(
+            FileJournal::read_checkpoint(&factory.context.roots.state, project, "g-test")?,
+            Some(checkpoint)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stop_reports_pending_acknowledgement_without_the_graph_lock() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        let project = factory.context.identity.project;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../crates/fabric-runtime/src/fixtures/graph-checkpoint.json"
+        ))?;
+        let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+            serde_json::from_value(fixture["checkpoint"].clone())?;
+        checkpoint.nodes[0].state = provenant_fabric_runtime::graph::NodeState::Running;
+        checkpoint.nodes[0].attempts[0].state =
+            provenant_fabric_runtime::graph::AttemptState::Running;
+        checkpoint.nodes[0].attempts[0].outcome = None;
+        let execution: GraphDocument =
+            serde_json::from_value(fixture["execution"]["document"].clone())?;
+        let mut journal = FileJournal::open(
+            &factory.context.roots.state,
+            project,
+            &execution.graph_id,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.bind(provenant_fabric_runtime::graph::GraphExecution {
+            extra: Default::default(),
+            directory: PathBuf::from("/legacy/project"),
+            document: execution,
+            review_base: None,
+            integration_base: None,
+        })?;
+        journal.save(&checkpoint)?;
+
+        let receipt = factory.graph_document(
+            json!({"op":"stop","id":"g-test","wait_seconds":0}),
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(receipt["cancellation_requested"]["acknowledged"], false);
+        assert_eq!(
+            receipt["cancellation_requested"]["pending_acknowledgement"],
+            true
+        );
+        assert_eq!(receipt["timed_out"], true);
+        assert_eq!(
+            FileJournal::read_checkpoint(&factory.context.roots.state, project, "g-test")?
+                .ok_or("checkpoint missing")?,
+            checkpoint
+        );
+        Ok(())
     }
 
     #[test]

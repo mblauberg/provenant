@@ -117,6 +117,44 @@ leaves the prior checkpoint.
   `crates/fabric-runtime/src/graph/plan_tests.rs::plan_validates_host_limits_before_saving`
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
+### Verified live steering
+
+`steer` resolves one current graph attempt by WorkKey and its accepted launch
+receipt, including when its checkpoint has no attempt reference. Local ownership
+binds project, graph, node, attempt and launch actor. Authenticated peer ownership
+also binds the exact origin WorkKey to the receiver graph and actor. Run-internal
+continuations must preserve project, graph, node and owner, advance one attempt
+ordinal and name their predecessor; only the current live leaf receives control.
+Missing, conflicting, terminal or unverifiable ownership refuses before stdin is
+read. Generic remote inbox steering remains owner-local; the graph control path
+carries and verifies the accepted launch scope. Unsupported controls refuse with
+`control_unsupported` and the `retry` alternative on the CLI.
+
+### Launch and writer provisioning allowances
+
+`domains.fabric.graph.launch_wait_seconds` bounds general command launch and
+read/wait work; `domains.fabric.graph.writer_provision_seconds` gives each writer
+provisioning its independent allowance. Both default to 55 seconds, validate in
+1..=14400, and report their effective configuration source. Changing a reader's
+wait does not change a writer's provisioning allowance. The retired
+`graph.writer_launch_seconds` is refused by config validation with both new keys
+named in its diagnostic; it is never an alias.
+
+### Graph cancellation intent
+
+`stop` first writes a bounded request under a short control lock that is separate
+from the graph journal lock. The request is bound to the graph plan and instance,
+and may name the graph or one node subtree. A launch owner checks requests at
+graph and attempt binding boundaries; it saves the cancellation fence before
+acknowledging and removing the request. A stop that finds the graph journal busy
+returns `cancellation_requested` with its request ID and pending acknowledgement
+state. Re-reading status does not enqueue another request. The owner preserves
+the accepted attempt receipt before applying cancellation, and a resume cannot
+clear a newly acknowledged stop in the same advance.
+- Why: a launch may hold the journal lock while preparing a writer, but stop
+  must remain durable and available during that work.
+- Test: `crates/fabric-runtime/src/graph/cancellation_intent.rs::cancellation_intent_survives_graph_lock_and_is_acknowledged_after_save`
+
 ### Sources and read roots
 
 Read roots grant reading only, limited to the project, its linked worktrees and
