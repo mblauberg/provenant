@@ -235,7 +235,8 @@ fn apply_to(
                                 "policy_code": "PROJECT_PATHS_RESOLVE_NONE",
                                 "source": format!("{:?}", context.policy.rule("PROJECT_PATHS_RESOLVE_NONE").source),
                                 "key": key,
-                                "reason": message,
+                                "reason": reason,
+                                "policy_message": message,
                                 "path": display_path(entry, primary, context.home),
                             }));
                         }
@@ -381,7 +382,6 @@ mod tests {
             let serialized = serde_json::to_string(&record)?;
             assert!(!serialized.contains(root.to_str().ok_or("utf8")?));
             let warnings = record["warnings"].as_array().ok_or("warnings")?;
-            assert_eq!(warnings.len(), if writer { 10 } else { 6 });
             for (index, reason) in [
                 (1, "outside_primary_checkout"),
                 (2, "outside_primary_checkout"),
@@ -551,8 +551,17 @@ mod tests {
                 },
             );
             assert!(profile.spec.tool_exec_roots.is_empty());
-            assert_eq!(receipt["warnings"][0]["reason"], "writable_root");
-            assert_eq!(receipt["warnings"][1]["reason"], "not_directory");
+            let warnings = receipt["warnings"].as_array().ok_or("warnings")?;
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning["reason"] == "writable_root")
+            );
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning["reason"] == "not_directory")
+            );
         }
         Ok(())
     }

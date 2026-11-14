@@ -125,7 +125,8 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         account: None,
         authority_digest: Digest::from_bytes([23; 32]),
         writer: Some(run::WriterRequest {
-            extra: Default::default(),
+            extra: [("custody_project".into(), serde_json::json!(binding.project_id()))]
+                .into(),
             project: project.clone(),
             worktree: worktree.clone(),
         }),
@@ -522,8 +523,9 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
             "attempt_number": 1, "revision": 1, "generation": 0,
             "requested_route": {"kind": "model", "provider": adapter, "model": "fixture-model"},
             "applied_route": {"provider": adapter, "model": format!("{adapter}/fixture-model"), "account_key": "local"},
-            "authority_digest": Digest::from_bytes([0; 32]), "session": "fixture-session",
-            "queued_at": "2026-10-25T00:00:00.000000Z", "state": {"state": "queued"}, "usage": {},
+            "authority_digest": Digest::from_bytes([0; 32]), "read_only_writable": [],
+            "session": "fixture-session", "queued_at": "2026-10-25T00:00:00.000000Z",
+            "state": {"state": "queued"}, "usage": {},
             "prompt": {"path": {"encoding": "utf8", "path": "prompt.txt"}, "digest": FileDigest::from_bytes([0; 32]), "bytes": 0, "complete": true, "redacted": false}
         }))?;
         let state = Path::new("/fixture/missing-state");

@@ -111,7 +111,10 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
                 )
                 .err()
                 .ok_or("nested threshold accepted")?;
-                assert!(error.to_string().contains("host configuration"), "{error}");
+                assert!(
+                    !matches!(error, PrepareError::Prompt(_)),
+                    "a warning-level argv threshold must not refuse: {error}"
+                );
             }
         }
     }

@@ -577,17 +577,14 @@ pub(super) fn launch_prompt(
     }
     check_launch_prompt(text, paths, Some(adapter), argv_limit, argv_origin, policy)?;
     let prompt = Prompt::new(text.to_owned()).with_argv_limit(argv_limit, argv_origin);
-    if !AdapterSpec::get(adapter).is_some_and(|spec| spec.argv_prompt) {
-        return Ok(prompt);
-    }
-    if let Err(error) = prompt.check_argv(policy) {
-        // Nested lanes cannot use the parent-writable attempt directory for a
-        // prompt artifact. Warn/Off already proceed with the immutable argv;
-        // a strict policy keeps the typed refusal.
-        if paths.lane_depth > 1 {
-            return Err(error.into());
-        }
-    } else {
+    if !AdapterSpec::get(adapter).is_some_and(|spec| spec.argv_prompt)
+        || !prompt.argv_limit_exceeded()
+        || paths.lane_depth > 1
+    {
+        // Nested lanes cannot publish into the parent-writable attempt. Their
+        // policy check above decides whether an oversized inline argument may
+        // proceed; top-level launches spill whenever the argument exceeds its
+        // configured byte threshold.
         return Ok(prompt);
     }
     let attempt = paths
@@ -615,6 +612,10 @@ pub(super) fn launch_prompt(
         }
     };
     let name = "prompt.md";
+    let prompt = Prompt::from_file(attempt.join(name)).with_argv_limit(argv_limit, argv_origin);
+    // Check the small file-reference argument before publishing the prompt so
+    // a strict, unusually small limit cannot leave an orphaned artifact.
+    prompt.check_argv(policy)?;
     match directory.atomic_write(
         name.as_ref(),
         ".prompt-",
@@ -627,7 +628,5 @@ pub(super) fn launch_prompt(
         Err(error) if error.is_exists() && matches(name)? => {}
         Err(error) => return Err(error.to_string().into()),
     }
-    let prompt = Prompt::from_file(attempt.join(name)).with_argv_limit(argv_limit, argv_origin);
-    prompt.check_argv(policy)?;
     Ok(prompt)
 }

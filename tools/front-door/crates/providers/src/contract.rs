@@ -232,8 +232,12 @@ impl Prompt {
     pub fn text(&self) -> &str {
         &self.text
     }
+    pub fn argv_limit_exceeded(&self) -> bool {
+        self.text.len() > self.argv_limit
+    }
+
     pub fn check_argv(&self, policy: &Policy) -> Result<(), ProviderError> {
-        if self.text.len() <= self.argv_limit {
+        if !self.argv_limit_exceeded() {
             return Ok(());
         }
         let error = || ProviderError::PromptTooLarge {

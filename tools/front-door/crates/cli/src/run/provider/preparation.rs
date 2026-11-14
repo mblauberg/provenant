@@ -4902,8 +4902,9 @@ mod refusal_cause_tests {
 }
 
 #[test]
-fn argv_spill_refusal_preserves_setting_and_source() -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_records::diagnostic::{Diagnostic, ResourceFact, SettingSource};
+fn oversized_argv_prompt_spills_to_private_attempt_state() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_records::diagnostic::SettingSource;
     let temp = tempfile::tempdir()?;
     let root = std::fs::canonicalize(temp.path())?;
     let paths = run::LaunchPaths {
@@ -4918,31 +4919,21 @@ fn argv_spill_refusal_preserves_setting_and_source() -> Result<(), Box<dyn std::
         temporary_alias: None,
     };
     let policy = provenant_records::policy::Policy::default();
-    let error = launch_prompt(
-        "PROMPT_SECRET_SENTINEL",
+    let text = "PROMPT_SECRET_SENTINEL";
+    let prompt = launch_prompt(
+        text,
         &paths,
         &root,
         "cursor",
         1,
         SettingSource::Configuration,
         &policy,
-    )
-    .err()
-    .ok_or("spill instruction exceeded configured argv budget")?;
-    let refusal = PrepareError::Prompt(error).into_refusal();
-    assert_eq!(
-        refusal.resource,
-        Some(ResourceFact::ArgvPromptLimit {
-            limit: 1,
-            origin: SettingSource::Configuration
-        })
-    );
-    let diagnostic = refusal
-        .resource
-        .unwrap()
-        .project(Diagnostic::new("INVALID"));
-    let encoded = serde_json::to_string(&diagnostic)?;
-    assert!(encoded.contains("domains.run.argv_prompt_limit_bytes"));
+    )?;
+    let file = prompt
+        .file()
+        .ok_or("oversized argv prompt was not spilled")?;
+    assert_eq!(std::fs::read_to_string(file)?, text);
+    assert!(!prompt.text().contains(text));
     assert!(encoded.contains("host configuration"));
     assert!(diagnostic.next.is_some());
     assert!(!encoded.contains("PROMPT_SECRET_SENTINEL"));

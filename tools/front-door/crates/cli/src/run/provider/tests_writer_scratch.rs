@@ -165,7 +165,8 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         account: None,
         authority_digest: Digest::from_bytes([4; 32]),
         writer: Some(run::WriterRequest {
-            extra: Default::default(),
+            extra: [("custody_project".into(), serde_json::json!(binding.project_id()))]
+                .into(),
             project: project.clone(),
             worktree: project.join(".worktrees/writer"),
         }),
