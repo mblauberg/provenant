@@ -34,7 +34,7 @@ concurrency:
 
 jobs:
   macos-scope:
-    name: Select macOS checks
+    name: Select Rust and macOS checks
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -49,7 +49,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - name: Select macOS checks from changed paths
+      - name: Select Rust and macOS checks from changed paths
         id: paths
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -58,10 +58,13 @@ jobs:
         run: scripts/select-macos-checks
 
   generated-reference:
-    name: Harness assets and generated reference
+    name: Generated reference
+    needs: macos-scope
+    if: needs.macos-scope.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
       CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
     permissions:
       contents: read
@@ -70,28 +73,15 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Check shell syntax
-        run: git ls-files -z -- '*.sh' | xargs -0 -n1 bash -n
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.1 --profile minimal
       - name: Cache Rust build artefacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          shared-key: ${{ inputs.cold_cache && format('front-door-ci-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci' }}
+          shared-key: ${{ inputs.cold_cache && format('front-door-ci-dev-default-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci-dev-default' }}
           add-job-id-key: false
-          save-if: false
-      - name: Check harness assets
-        run: |
-          python3 -m venv "$RUNNER_TEMP/harness-venv"
-          "$RUNNER_TEMP/harness-venv/bin/pip" install PyYAML==6.0.2
-          echo "$RUNNER_TEMP/harness-venv/bin" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/harness-venv/bin/python" scripts/check-harness
-          "$RUNNER_TEMP/harness-venv/bin/python" scripts/test-check-harness
-
-      - name: Test retrospective analysis
-        run: python3 -m unittest discover -s skills/improve/scripts/tests -v
-
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       # Generated reference is not tracked: this proves it still renders, and
       # leaves the output for download. It never compares against a checkout.
       - name: Generate contract reference
@@ -102,8 +92,6 @@ jobs:
           name: contract-reference
           path: docs/reference
           if-no-files-found: error
-      - name: Require documentation inventory and resolvable evidence
-        run: scripts/check-doc-truth --inventory-only --strict-inventory --strict-citations
       # Commands and non-evidence inline references remain advisory.
       - name: Report unresolved documentation references
         continue-on-error: true
@@ -116,12 +104,12 @@ jobs:
   # hash partitions. `ci-status` gates on all jobs, and a
   # matrix job reports success only when every partition succeeds.
   rust-lint:
-    name: Rust lint
+    name: Lint and script checks
     needs: macos-scope
-    if: needs.macos-scope.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
       CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
       CARGO_INCREMENTAL: "0"
     permissions:
@@ -134,22 +122,27 @@ jobs:
       # The runner image ships rustup; the toolchain is pinned here and in
       # tools/front-door/rust-toolchain.toml (ADR 0027).
       - name: Set Rust temporary directory
+        if: needs.macos-scope.outputs.run_rust == 'true'
         env:
           TMPDIR: ${{ runner.temp }}
         run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
+        if: needs.macos-scope.outputs.run_rust == 'true'
         run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
       - name: Cache Rust build artefacts
+        if: needs.macos-scope.outputs.run_rust == 'true'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          shared-key: ${{ inputs.cold_cache && format('front-door-ci-lint-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci-lint' }}
+          shared-key: ${{ inputs.cold_cache && format('front-door-ci-lint-dev-all-features-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci-lint-dev-all-features' }}
           add-job-id-key: false
-          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Check formatting
+        if: needs.macos-scope.outputs.run_rust == 'true'
         working-directory: tools/front-door
         run: cargo fmt --all --check
       - name: Check isolated test features
+        if: needs.macos-scope.outputs.run_rust == 'true'
         working-directory: tools/front-door
         run: |
           # Separate invocations prevent workspace feature unification from hiding missing dependencies.
@@ -162,58 +155,183 @@ jobs:
           cargo check --locked -p provenant-providers --features recording
           cargo check --locked -p provenant-providers --all-targets --features recording
       - name: Lint
+        if: needs.macos-scope.outputs.run_rust == 'true'
         working-directory: tools/front-door
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Check harness assets
+        run: |
+          python3 -m venv "$RUNNER_TEMP/harness-venv"
+          "$RUNNER_TEMP/harness-venv/bin/pip" install PyYAML==6.0.2
+          echo "$RUNNER_TEMP/harness-venv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/harness-venv/bin/python" scripts/check-harness
+          "$RUNNER_TEMP/harness-venv/bin/python" scripts/test-check-harness
+
+      - name: Test retrospective analysis
+        run: python3 -m unittest discover -s skills/improve/scripts/tests -v
+
+      - name: Require documentation inventory and resolvable evidence
+        run: scripts/check-doc-truth --inventory-only --strict-inventory --strict-citations
+      - name: Install spelling checker
+        uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
+        timeout-minutes: 3
+        with:
+          tool: typos-cli@1.51.1
+      - name: Install ShellCheck
+        uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
+        timeout-minutes: 3
+        with:
+          tool: shellcheck@0.11.0
+          fallback: none
+      # Cache the pinned archives; the key names their versions and checksums,
+      # so changing a pin also changes the key. Checksums are verified on every
+      # run, cached or not.
+      - name: Restore actionlint and lychee archives
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/generic-tools/downloads
+          key: generic-tools-actionlint-1.7.12-8aca8db9-lychee-0.24.2-1f4e0ef7
+      # actionlint and lychee are not in install-action's supported catalogue.
+      # Verify the pinned upstream release archives before executing them.
+      # Each download retries transient failures within a 3-minute budget.
+      - name: Install actionlint and lychee
+        timeout-minutes: 7
+        env:
+          TOOL_DIR: ${{ runner.temp }}/generic-tools
+        run: |
+          downloads="$TOOL_DIR/downloads"
+          mkdir -p "$downloads" "$TOOL_DIR/bin"
+          # Reuse a cached archive only if its checksum still matches the pin.
+          fetch_verified() {
+            if ! echo "$3  $2" | sha256sum --check --status; then
+              scripts/download-with-retry "$1" "$2"
+              echo "$3  $2" | sha256sum --check
+            fi
+          }
+          fetch_verified \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            "$downloads/actionlint.tar.gz" \
+            8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          tar -xzf "$downloads/actionlint.tar.gz" -C "$TOOL_DIR/bin" actionlint
+          fetch_verified \
+            https://github.com/lycheeverse/lychee/releases/download/lychee-v0.24.2/lychee-x86_64-unknown-linux-gnu.tar.gz \
+            "$downloads/lychee.tar.gz" \
+            1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a
+          tar -xzf "$downloads/lychee.tar.gz" --strip-components=1 -C "$TOOL_DIR/bin" lychee-x86_64-unknown-linux-gnu/lychee
+          echo "$TOOL_DIR/bin" >> "$GITHUB_PATH"
+      - name: Check spelling
+        run: git ls-files | typos --file-list - --force-exclude
+      - name: Check skill and library writing style
+        run: |
+          scripts/test-check-writing
+          scripts/check-writing
+      - name: Check workflows and their shell blocks
+        run: actionlint
+      - name: Check shell scripts
+        run: |
+          { git ls-files '*.sh'; grep -lE '^#!.*\b(ba)?sh\b' scripts/* 2>/dev/null; } | sort -u | xargs -r shellcheck
+      - name: Test CI and verification scripts
+        run: |
+          scripts/test-select-macos-checks
+          scripts/test-check-ci-status
+          scripts/test-select-affected-crate-tests
+          scripts/test-verify-tier
+          scripts/test-download-with-retry
+      - name: Test native inventory evidence
+        run: scripts/test-check-native-inventory
+      - name: Test flaky-test quarantine
+        run: scripts/test-flaky-quarantine
+      - name: Check local Markdown links and fragments
+        run: git ls-files '*.md' | lychee --offline --include-fragments --files-from -
+      - name: Check retired names
+        run: scripts/check-retired-names
+      - name: Test scratch-path advisory
+        run: scripts/test-check-scratch-paths
+      - name: Advise on scratch-path citations
+        continue-on-error: true
+        run: scripts/check-scratch-paths
+      - name: Check release-note fragments
+        run: scripts/collate-release-notes --check
+      - name: Test release-note collation
+        run: scripts/test-collate-release-notes
+      - name: Test documentation reference checks
+        run: |
+          scripts/test-generate-reference
+          scripts/test-check-doc-truth
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          version: "1.31.1"
+          # Audit workflow definitions on every tested tree.
+          inputs: ".github/workflows"
+          online-audits: "false"
+          advanced-security: "false"
+          annotations: "true"
 
   rust-test-archive:
     name: Build Linux test archive
     needs: macos-scope
+    if: needs.macos-scope.outputs.run_rust == 'true'
+    outputs:
+      nextest_filter: ${{ steps.affected.outputs.nextest_filter }}
+      quarantine_filter: ${{ steps.quarantine.outputs.filter }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
       CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
       CARGO_INCREMENTAL: "0"
     permissions:
       contents: read
     steps:
-      # Keep this job successful when Rust is unselected: ci-status requires it.
       - name: Check out repository
-        if: needs.macos-scope.outputs.run_rust == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Set Rust temporary directory
-        if: needs.macos-scope.outputs.run_rust == 'true'
         env:
           TMPDIR: ${{ runner.temp }}
         run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
-        if: needs.macos-scope.outputs.run_rust == 'true'
         run: rustup toolchain install 1.99.1 --profile minimal
       - name: Cache Rust build artefacts
-        if: needs.macos-scope.outputs.run_rust == 'true'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          shared-key: ${{ inputs.cold_cache && format('front-door-ci-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci' }}
+          shared-key: ${{ inputs.cold_cache && format('front-door-ci-test-recording-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci-test-recording' }}
           add-job-id-key: false
-          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Install nextest
-        if: needs.macos-scope.outputs.run_rust == 'true'
         uses: ./.github/actions/install-nextest
         timeout-minutes: 10
-      - name: Check literal nextest test filters
-        if: needs.macos-scope.outputs.run_rust == 'true'
-        working-directory: tools/front-door
-        run: python3 ../../scripts/check-nextest-filters
       - name: Build Linux test archive
-        if: needs.macos-scope.outputs.run_rust == 'true'
         working-directory: tools/front-door
         run: >-
           cargo nextest archive --profile ci --workspace --locked --features provenant-providers/recording
           --archive-file "$RUNNER_TEMP/linux-tests.tar.zst"
+      - name: Select affected Rust tests
+        id: affected
+        working-directory: tools/front-door
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          IS_MAIN: ${{ github.event_name != 'pull_request' }}
+        run: ../../scripts/select-affected-crate-tests
+      - name: Validate selectors and flaky-test quarantine once
+        id: quarantine
+        working-directory: tools/front-door
+        run: |
+          cargo nextest list --profile ci --ignore-default-filter --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --message-format json > "$RUNNER_TEMP/linux-test-list.json"
+          python3 ../../scripts/check-nextest-filters --test-list "$RUNNER_TEMP/linux-test-list.json"
+          filter="$(../../scripts/flaky-quarantine --test-list "$RUNNER_TEMP/linux-test-list.json")"
+          printf 'filter=%s\n' "$filter" >> "$GITHUB_OUTPUT"
+      # Example tests are not part of nextest's default target inventory.
+      - name: Run provider recording example test
+        if: steps.affected.outputs.run_provider_example == 'true'
+        working-directory: tools/front-door
+        run: cargo test --locked -p provenant-providers --features recording --example record bash_proof_needs_a_matching_successful_tool_result
       - name: Upload Linux test archive
-        if: needs.macos-scope.outputs.run_rust == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linux-tests
@@ -249,21 +367,6 @@ jobs:
         run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.1 --profile minimal
-      - name: Select affected Rust tests
-        id: affected
-        working-directory: tools/front-door
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          IS_MAIN: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/land/') }}
-        run: ../../scripts/select-affected-crate-tests
-      - name: Cache Rust build artefacts
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          workspaces: tools/front-door
-          shared-key: ${{ inputs.cold_cache && format('front-door-ci-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci' }}
-          add-job-id-key: false
-          save-if: false
       - name: Install nextest
         uses: ./.github/actions/install-nextest
         timeout-minutes: 10
@@ -272,27 +375,15 @@ jobs:
         with:
           name: linux-tests
           path: ${{ runner.temp }}
-      - name: Validate flaky-test quarantine
-        id: quarantine
-        working-directory: tools/front-door
-        run: |
-          filter="$(../../scripts/flaky-quarantine)"
-          printf '%s\n' "$filter" > "$RUNNER_TEMP/quarantine-filter"
-          if [ -n "$filter" ]; then
-            echo "Validated quarantined tests: $filter" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo 'No quarantined tests.' >> "$GITHUB_STEP_SUMMARY"
-          fi
       # Extract into the original target layout for tests with compiled-in binary paths.
       # Hash partitioning is stable per test, and each runner keeps its own
-      # serial-process group, so the serial worktree suites split across both.
+      # serial-process group, so the serial worktree suites split across the partitions.
       - name: Run workspace tests
         working-directory: tools/front-door
         env:
-          NEXTTEST_FILTER: ${{ steps.affected.outputs.nextest_filter }}
-          QUARANTINE_FILTER_FILE: ${{ runner.temp }}/quarantine-filter
+          NEXTTEST_FILTER: ${{ needs.rust-test-archive.outputs.nextest_filter }}
+          QUARANTINE_FILTER: ${{ needs.rust-test-archive.outputs.quarantine_filter }}
         run: |
-          QUARANTINE_FILTER="$(cat "$QUARANTINE_FILTER_FILE")"
           filter="$NEXTTEST_FILTER"
           if [ -n "$QUARANTINE_FILTER" ]; then
             if [ -n "$filter" ]; then
@@ -322,20 +413,13 @@ jobs:
         continue-on-error: true
         working-directory: tools/front-door
         env:
-          QUARANTINE_FILTER_FILE: ${{ runner.temp }}/quarantine-filter
+          QUARANTINE_FILTER: ${{ needs.rust-test-archive.outputs.quarantine_filter }}
         run: |
-          QUARANTINE_FILTER="$(cat "$QUARANTINE_FILTER_FILE")"
           if [ -n "$QUARANTINE_FILTER" ]; then
             cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --status-level flaky --final-status-level pass -E "$QUARANTINE_FILTER"
           else
             echo 'No quarantined tests to run.'
           fi
-      # Cargo does not include example tests in the default nextest selection.
-      - name: Run provider recording example test
-        if: matrix.partition == 1 && steps.affected.outputs.run_provider_example == 'true'
-        working-directory: tools/front-door
-        run: |
-          cargo test --locked -p provenant-providers --features recording --example record bash_proof_needs_a_matching_successful_tool_result
 
   rust-dependencies:
     name: Rust dependency policy
@@ -368,8 +452,8 @@ jobs:
         working-directory: tools/front-door
         run: cargo shear
 
-  rust-macos-tests:
-    name: Rust macOS tests
+  rust-macos-archive:
+    name: Build macOS test archive
     runs-on: macos-15
     timeout-minutes: 20
     needs: macos-scope
@@ -393,9 +477,9 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          shared-key: ${{ inputs.cold_cache && format('front-door-ci-macos-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci-macos' }}
+          shared-key: ${{ inputs.cold_cache && format('front-door-ci-macos-test-default-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci-macos-test-default' }}
           add-job-id-key: false
-          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Install nextest
         uses: ./.github/actions/install-nextest
         timeout-minutes: 10
@@ -407,12 +491,68 @@ jobs:
         run: >-
           cargo nextest archive --locked --workspace
           --archive-file "$RUNNER_TEMP/macos-tests.tar.zst"
+      - name: List macOS tests in the archive
+        working-directory: tools/front-door
+        run: cargo nextest list --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --message-format json > "$RUNNER_TEMP/native-test-list.json"
+      - name: Upload macOS test archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-tests
+          path: ${{ runner.temp }}/macos-tests.tar.zst
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: Upload macOS test list
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-test-list
+          path: ${{ runner.temp }}/native-test-list.json
+          if-no-files-found: error
+          retention-days: 1
+
+  rust-macos-tests:
+    name: Rust macOS tests (${{ matrix.group }})
+    runs-on: macos-15
+    timeout-minutes: 20
+    needs: [macos-scope, rust-macos-archive]
+    if: needs.macos-scope.outputs.run_macos == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [custody, provider-dispatch, dispatch, light]
+    env:
+      CARGO_INCREMENTAL: "0"
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set Rust temporary directory
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Install nextest
+        uses: ./.github/actions/install-nextest
+        timeout-minutes: 10
+      - name: Download macOS test archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: macos-tests
+          path: ${{ runner.temp }}
       - name: Install tools for native confinement smokes
         env:
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
+          NATIVE_GROUP: ${{ matrix.group }}
         run: |
-          brew install postgresql@18 node pnpm ripgrep
-          echo "PROVENANT_TEST_POSTGRES_BIN=$(brew --prefix postgresql@18)/bin" >> "$GITHUB_ENV"
+          brew install node pnpm ripgrep
+          if [ "$NATIVE_GROUP" = custody ] || [ "$NATIVE_GROUP" = light ]; then
+            brew install postgresql@18
+            echo "PROVENANT_TEST_POSTGRES_BIN=$(brew --prefix postgresql@18)/bin" >> "$GITHUB_ENV"
+          fi
       - name: Configure native census host policy
         run: |
           mkdir -p "$RUNNER_TEMP/provenant-native-host"
@@ -423,30 +563,28 @@ jobs:
             { path = "/Library/Apple/System/Library/PrivateFrameworks/MobileDevice.framework/Versions/A/Resources/usbmuxd", team_id = "platform" },
           ]
           TOML
-      - name: List macOS tests in the archive
-        working-directory: tools/front-door
-        run: cargo nextest list --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --message-format json > "$RUNNER_TEMP/native-test-list.json"
       - name: Run macOS supervisor custody tests
+        if: ${{ !cancelled() && matrix.group == 'custody' }}
         working-directory: tools/front-door
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
           PROVENANT_POSTGRES_REQUIRED: "1"
         run: |
-          ../../scripts/run-native-test-group custody cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E '((package(=provenant-supervisor) | package(=provenant-confinement) | package(=provenant-os) | package(=provenant-providers)) & !(test(=worktrees::census_tests::native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree) | test(=worktrees::census_tests::native_full_census_places_clean_merged_worktree_and_same_user_sleep) | (package(=provenant-os) & test(sys::pid::tests::native_)) | test(=tests::claude_network_on_native_tls_files_are_readable))) | (package(=provenant-cli) & test(=run::provider::project_paths::tests::configured_shared_path_allows_lane_lock_contended_by_host))'
+          ../../scripts/run-native-test-group custody cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite -E '((package(=provenant-supervisor) | package(=provenant-confinement) | package(=provenant-os) | package(=provenant-providers)) & !(test(=worktrees::census_tests::native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree) | test(=worktrees::census_tests::native_full_census_places_clean_merged_worktree_and_same_user_sleep) | (package(=provenant-os) & test(sys::pid::tests::native_)) | test(=tests::claude_network_on_native_tls_files_are_readable))) | (package(=provenant-cli) & test(=run::provider::project_paths::tests::configured_shared_path_allows_lane_lock_contended_by_host))'
       - name: Run macOS census tests
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'light' }}
         working-directory: tools/front-door
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
           PROVENANT_POSTGRES_REQUIRED: "1"
         run: |
-          PROVENANT_STATE_DIR="$RUNNER_TEMP/provenant-native-host" ../../scripts/run-native-test-group census cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --success-output immediate -E '(test(=worktrees::census_tests::native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree) | test(=worktrees::census_tests::native_full_census_places_clean_merged_worktree_and_same_user_sleep) | (package(=provenant-os) & test(sys::pid::tests::native_)))'
+          PROVENANT_STATE_DIR="$RUNNER_TEMP/provenant-native-host" ../../scripts/run-native-test-group census cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --success-output immediate -E '(test(=worktrees::census_tests::native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree) | test(=worktrees::census_tests::native_full_census_places_clean_merged_worktree_and_same_user_sleep) | (package(=provenant-os) & test(sys::pid::tests::native_)))'
       - name: Run macOS Cargo seed tests
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'light' }}
         working-directory: tools/front-door
-        run: ../../scripts/run-native-test-group cargo-seed cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'package(=provenant-run) & test(cargo_seed)'
+        run: ../../scripts/run-native-test-group cargo-seed cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite -E 'package(=provenant-run) & test(cargo_seed)'
       - name: Run dispatch confinement integration tests
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'dispatch' }}
         working-directory: tools/front-door
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
@@ -454,7 +592,7 @@ jobs:
         # One thread keeps these writer fixtures serial, as the separate
         # cargo test invocations did.
         run: >-
-          ../../scripts/run-native-test-group dispatch cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --test-threads 1
+          ../../scripts/run-native-test-group dispatch cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --test-threads 1
           -E 'binary(=worktrees) & (test(=lane_prepare_isolates_nested_state) | test(=lane_prepare_isolates_nested_publishing_state)
           | test(=read_only_lane_builds_and_tests_swift_in_scratch)
           | test(=read_only_lane_builds_and_tests_cargo_in_scratch)
@@ -467,41 +605,65 @@ jobs:
           | test(=writer_reconcile_refuses_unfinished_cherry_pick_and_releases))
           | (package(=provenant-fabric-runtime) & test(=graph::tests::composite_and_allowance_tests::writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source))'
       - name: Run native writer capability probes
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'light' }}
         working-directory: tools/front-door
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
           PROVENANT_LANE_TOOLS_REQUIRED: "1"
-        run: ../../scripts/run-native-test-group capability cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'binary(=worktrees) & test(=lane_prepare_isolates_nested_writer_state)'
+        run: ../../scripts/run-native-test-group capability cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite -E 'binary(=worktrees) & test(=lane_prepare_isolates_nested_writer_state)'
       - name: Run provider dispatch integration tests
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'provider-dispatch' }}
         working-directory: tools/front-door
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
-        run: ../../scripts/run-native-test-group provider-dispatch cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'binary(=graph_provider) | binary(=command_adapter)'
+        run: ../../scripts/run-native-test-group provider-dispatch cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite -E 'binary(=graph_provider) | binary(=command_adapter)'
       - name: Require Claude network and native TLS file probes
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'light' }}
         working-directory: tools/front-door
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
-        run: ../../scripts/run-native-test-group tls cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'package(=provenant-providers) & test(claude_network_on)'
+        run: ../../scripts/run-native-test-group tls cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite -E 'package(=provenant-providers) & test(claude_network_on)'
 
-      - name: Verify required native test inventory
-        if: always()
-        run: scripts/check-native-inventory "$RUNNER_TEMP/native-test-list.json" "$RUNNER_TEMP/native-test-results"
       - name: Preserve native test evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: native-test-evidence
+          name: native-test-evidence-${{ matrix.group }}
           path: |
-            ${{ runner.temp }}/native-test-list.json
             ${{ runner.temp }}/native-test-results/
-          if-no-files-found: ignore
+          if-no-files-found: error
+          retention-days: 1
+
+  rust-macos-inventory:
+    name: Verify macOS native evidence
+    needs: [macos-scope, rust-macos-archive, rust-macos-tests]
+    if: ${{ always() && needs.macos-scope.outputs.run_macos == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download native test list
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: native-test-list
+          path: ${{ runner.temp }}
+      - name: Collect every native invocation
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: native-test-evidence-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/native-test-results
+      - name: Verify required native test inventory
+        run: scripts/check-native-inventory "$RUNNER_TEMP/native-test-list.json" "$RUNNER_TEMP/native-test-results"
 
   # #1339: stripping proc-macro dylibs broke macOS release builds at install
   # time. Exercise the front door's release build without LTO for speed; the
-  # full-LTO build runs only at install (docs/runbooks/install.md).
+  # configured LTO build runs at release and install (docs/runbooks/install.md).
   rust-macos-release:
     name: Rust macOS release smoke
     runs-on: macos-15
@@ -572,116 +734,8 @@ jobs:
         working-directory: apps/quota-menubar
         run: swift test
 
-  generic-checks:
-    name: Spelling, workflows and Markdown links
-    runs-on: ubuntu-latest
-    # Covers the worst case of the download budgets below: two tool downloads
-    # at 3 minutes each, plus the install-action budgets and the checks.
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install spelling checker
-        uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
-        timeout-minutes: 3
-        with:
-          tool: typos-cli@1.51.1
-      - name: Install ShellCheck
-        uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
-        timeout-minutes: 3
-        with:
-          tool: shellcheck@0.11.0
-          fallback: none
-      # Cache the pinned archives; the key names their versions and checksums,
-      # so changing a pin also changes the key. Checksums are verified on every
-      # run, cached or not.
-      - name: Restore actionlint and lychee archives
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/generic-tools/downloads
-          key: generic-tools-actionlint-1.7.12-8aca8db9-lychee-0.24.2-1f4e0ef7
-      # actionlint and lychee are not in install-action's supported catalogue.
-      # Verify the pinned upstream release archives before executing them.
-      # Each download retries transient failures within a 3-minute budget.
-      - name: Install actionlint and lychee
-        timeout-minutes: 7
-        env:
-          TOOL_DIR: ${{ runner.temp }}/generic-tools
-        run: |
-          downloads="$TOOL_DIR/downloads"
-          mkdir -p "$downloads" "$TOOL_DIR/bin"
-          # Reuse a cached archive only if its checksum still matches the pin.
-          fetch_verified() {
-            if ! echo "$3  $2" | sha256sum --check --status; then
-              scripts/download-with-retry "$1" "$2"
-              echo "$3  $2" | sha256sum --check
-            fi
-          }
-          fetch_verified \
-            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
-            "$downloads/actionlint.tar.gz" \
-            8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
-          tar -xzf "$downloads/actionlint.tar.gz" -C "$TOOL_DIR/bin" actionlint
-          fetch_verified \
-            https://github.com/lycheeverse/lychee/releases/download/lychee-v0.24.2/lychee-x86_64-unknown-linux-gnu.tar.gz \
-            "$downloads/lychee.tar.gz" \
-            1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a
-          tar -xzf "$downloads/lychee.tar.gz" --strip-components=1 -C "$TOOL_DIR/bin" lychee-x86_64-unknown-linux-gnu/lychee
-          echo "$TOOL_DIR/bin" >> "$GITHUB_PATH"
-      - name: Check spelling
-        run: git ls-files | typos --file-list - --force-exclude
-      - name: Check skill and library writing style
-        run: |
-          scripts/test-check-writing
-          scripts/check-writing
-      - name: Check workflows and their shell blocks
-        run: actionlint
-      - name: Check shell scripts
-        run: |
-          { git ls-files '*.sh'; grep -lE '^#!.*\b(ba)?sh\b' scripts/* 2>/dev/null; } | sort -u | xargs -r shellcheck
-      - name: Test CI and verification scripts
-        run: |
-          scripts/test-select-macos-checks
-          scripts/test-check-ci-status
-          scripts/test-verify-tier
-          scripts/test-download-with-retry
-      - name: Test native inventory evidence
-        run: scripts/test-check-native-inventory
-      - name: Test flaky-test quarantine
-        run: scripts/test-flaky-quarantine
-      - name: Check local Markdown links and fragments
-        run: git ls-files '*.md' | lychee --offline --include-fragments --files-from -
-      - name: Check retired names
-        run: scripts/check-retired-names
-      - name: Test scratch-path advisory
-        run: scripts/test-check-scratch-paths
-      - name: Advise on scratch-path citations
-        continue-on-error: true
-        run: scripts/check-scratch-paths
-      - name: Check release-note fragments
-        run: scripts/collate-release-notes --check
-      - name: Test release-note collation
-        run: scripts/test-collate-release-notes
-      - name: Test documentation reference checks
-        run: |
-          scripts/test-generate-reference
-          scripts/test-check-doc-truth
-      - name: Run zizmor
-        uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
-        with:
-          version: "1.31.1"
-          # Audit workflow definitions on every tested tree.
-          inputs: ".github/workflows"
-          online-audits: "false"
-          advanced-security: "false"
-          annotations: "true"
-
-  # Keep one required check. The macOS job may skip only when its path filter
-  # explicitly says it is unnecessary; all other skips fail closed.
+  # ci-status is the single required check. Only explicitly unselected Rust
+  # and macOS jobs may skip; failures, cancellations and absent jobs fail closed.
   ci-status:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -693,10 +747,11 @@ jobs:
       - rust-lint
       - rust-test-archive
       - rust
+      - rust-macos-archive
       - rust-macos-tests
+      - rust-macos-inventory
       - rust-macos-release
       - rust-dependencies
-      - generic-checks
     if: always()
     steps:
       - name: Check out repository

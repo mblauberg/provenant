@@ -22,6 +22,8 @@ jobs:
   verify:
     if: inputs.tier != 'lane'
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
     timeout-minutes: 60
     steps:
       - name: Verify the dispatched ref
@@ -55,6 +57,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
       CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
       CARGO_INCREMENTAL: "0"
     steps:
@@ -73,7 +76,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          shared-key: front-door-ci-lint
+          shared-key: front-door-ci-lint-dev-all-features
           add-job-id-key: false
           save-if: false
       - name: Check formatting

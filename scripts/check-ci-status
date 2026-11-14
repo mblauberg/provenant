@@ -4,10 +4,9 @@ import json
 import os
 import sys
 
-REQUIRED = frozenset({"macos-scope", "generated-reference", "rust-lint", "rust", "rust-macos-tests", "rust-macos-release", "rust-dependencies", "generic-checks"})
-MACOS = frozenset({"rust-macos-tests", "rust-macos-release"})
-# Skipped only for prose-only changes (scripts/select-macos-checks run_rust=false).
-RUST = frozenset({"rust-lint", "rust", "rust-dependencies"})
+MACOS = frozenset({"rust-macos-archive", "rust-macos-tests", "rust-macos-inventory", "rust-macos-release"})
+RUST = frozenset({"generated-reference", "rust-test-archive", "rust", "rust-dependencies"})
+REQUIRED = MACOS | RUST | {"macos-scope", "rust-lint"}
 
 
 def failures(needs, run_macos, run_rust="true"):

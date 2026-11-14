@@ -182,4 +182,25 @@ result=$(run_selector)
 test "$result" = 'run_macos=false
 run_rust=false'
 
+# Static documentation images and role prose also skip builds; Rust beside them does not.
+git -C "$repo" checkout -q --detach "$common"
+mkdir -p "$repo/docs/images" "$repo/roles"
+printf '%s\n' image > "$repo/docs/images/pipeline.svg"
+printf '%s\n' role > "$repo/roles/reviewer.md"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'non-code assets'
+head=$(git -C "$repo" rev-parse HEAD)
+base=$common
+result=$(run_selector)
+test "$result" = 'run_macos=false
+run_rust=false'
+mkdir -p "$repo/tools/front-door/src"
+printf '%s\n' 'fn main() {}' > "$repo/tools/front-door/src/main.rs"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'mixed Rust and non-code assets'
+head=$(git -C "$repo" rev-parse HEAD)
+result=$(run_selector)
+test "$result" = 'run_macos=true
+run_rust=true'
+
 echo 'macOS scope selector checks passed'

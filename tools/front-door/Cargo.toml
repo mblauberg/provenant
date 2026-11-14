@@ -122,10 +122,14 @@ provenant-supervisor = { workspace = true, features = ["fixture"] }
 [profile.dev]
 debug = "line-tables-only"
 
+[profile.test]
+# Tests need assertions, not DWARF; retain line tables in the developer profile.
+debug = 0
+
 [profile.release]
 opt-level = "z"
-lto = true
-codegen-units = 1
+lto = "thin"
+codegen-units = 4
 panic = "unwind"
 debug = 0
 strip = true
