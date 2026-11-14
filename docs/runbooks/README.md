@@ -4,9 +4,20 @@ Anchor: [`check-doc-truth`](../../scripts/check-doc-truth)
 
 Procedures the tool cannot make obvious. Command syntax is `provenant help --all`.
 
-- [github-workflow](github-workflow.md): issues, branches, PRs, landing
-- [lane-lifecycle](lane-lifecycle.md): launch refusals, delivery, recovery
-- [routing-and-templates](routing-and-templates.md), [providers](providers.md), [cloud-launch](cloud-launch.md), [fabric-hosts](fabric-hosts.md), [configuration](configuration.md#git-pre-push-hook-and-local-gate)
-- [gc](gc.md), [telemetry](telemetry.md), [human-inbox](human-inbox.md), [session-checkpoints](session-checkpoints.md), [claude-hooks](claude-hooks.md)
-- [ci](ci.md), [test-tiers](test-tiers.md), [bench](bench.md)
-- Owner setup: [install](install.md); local gates and pre-push hooks: [configuration](configuration.md#git-pre-push-hook-and-local-gate)
+**Set up and configure**
+
+- [Install, upgrade and remove](install.md)
+- [Harness configuration](configuration.md): precedence, lane sandbox, worktree setup, pre-push hook
+- [Providers and accounts](providers.md), [fabric hosts](fabric-hosts.md), [cloud launch](cloud-launch.md)
+- [Routing and templates](routing-and-templates.md)
+
+**Do the work**
+
+- [GitHub workflow](github-workflow.md): issues, branches, pull requests, landing
+- [Lane lifecycle](lane-lifecycle.md): launch, delivery, recovery
+- [Human inbox](human-inbox.md), [session checkpoints](session-checkpoints.md), [Claude hooks](claude-hooks.md)
+
+**Keep it healthy**
+
+- [CI](ci.md), [test tiers](test-tiers.md), [bench](bench.md)
+- [GC](gc.md), [telemetry](telemetry.md)
