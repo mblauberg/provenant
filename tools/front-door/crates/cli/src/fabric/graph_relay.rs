@@ -1792,8 +1792,8 @@ mod provisioning_tests {
             .is_err()
         );
         let path = ".worktrees/graph-parent--child";
-        // A child binding must survive registry contention beyond a short
-        // settlement deadline too. The original budget remains expired afterwards.
+        // Busy registry access is a retryable condition. It must not extend
+        // the caller's deadline or wait for the other writer to finish.
         let clock = provenant_os::clock::SystemClock;
         let directory = provenant_os::fs::Directory::open_anchor(&project.join(".git"))?;
         let held = directory.lock(
@@ -1803,24 +1803,27 @@ mod provisioning_tests {
             &cancel,
             &clock,
         )?;
-        let short = WaitBudget::cli(clock.mono_now(), 1)?;
-        std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
-            scope.spawn(move || {
-                let clock = provenant_os::clock::SystemClock;
-                clock
-                    .wait_until(
-                        clock
-                            .mono_now()
-                            .checked_add(provenant_core::DurationMicros::from_micros(2_000_000))
-                            .unwrap(),
-                    )
-                    .unwrap();
-                drop(held);
-            });
-            provision_child(&context, path, &source, short, &cancel)?;
-            Ok(())
-        })?;
-        assert_eq!(short.remaining(clock.mono_now()).as_micros(), 0);
+        let busy = provision_child_with_budget(
+            &context,
+            path,
+            &source,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+        );
+        assert!(matches!(
+            busy,
+            Err(ServiceError::Facade(FacadeError::WriterLockBusy))
+        ));
+        assert!(!project.join(path).exists());
+        drop(held);
+        // The caller retries once the registry is available.
+        provision_child_with_budget(
+            &context,
+            path,
+            &source,
+            WaitBudget::cli(clock.mono_now(), 1)?,
+            &cancel,
+        )?;
         let output = provenant_os::fixture::git_command()
             .current_dir(project.join(path))
             .args(["rev-parse", "HEAD"])

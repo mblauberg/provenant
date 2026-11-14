@@ -3631,7 +3631,7 @@ mod tests {
     }
 
     #[test]
-    fn unverified_login_preserves_mismatch_refusal_and_newer_auth()
+    fn login_expiry_metadata_does_not_create_readiness_refusal()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir()?;
@@ -3688,20 +3688,19 @@ mod tests {
             expires_unix_seconds: Some(120),
         });
         write(&file)?;
-        assert_eq!(
-            read_readiness(state, &scope, 150).reason,
-            Some(ReadinessReason::LoginExpired)
-        );
+        // Login expiry is display metadata, not route readiness evidence.
+        let expiry_only = read_readiness(state, &scope, 150);
+        assert_eq!(expiry_only.reason, Some(ReadinessReason::NotProbed));
+        assert!(expiry_only.observed_scope.is_none());
         assert_eq!(
             read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(120)))
                 .reason,
             Some(ReadinessReason::NotProbed)
         );
-        assert_eq!(
-            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(90)))
-                .reason,
-            Some(ReadinessReason::LoginExpired)
-        );
+        let older_probe =
+            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(90)));
+        assert_eq!(older_probe.reason, Some(ReadinessReason::NotProbed));
+        assert!(older_probe.observed_scope.is_none());
         file.login = None;
         file.sync_probe_result(
             &account,

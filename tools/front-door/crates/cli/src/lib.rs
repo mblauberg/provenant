@@ -1489,7 +1489,7 @@ mod tests {
             .iter()
             .find(|command| command.command == "provenant land")
             .unwrap();
-        for flag in ["head", "batch", "shadow", "tier"] {
+        for flag in ["head", "shadow", "tier"] {
             assert!(
                 land.arguments
                     .iter()

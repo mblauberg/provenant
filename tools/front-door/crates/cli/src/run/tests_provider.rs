@@ -289,7 +289,7 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
         "attempt_number": 1, "revision": 1, "generation": 0,
         "requested_route": {"kind":"model","provider":"codex","model":"codex/gpt-6.1-sol"},
         "applied_route": {"provider":"codex","model":"codex/gpt-6.1-sol","effort":"high","account_label":null},
-        "authority_digest": provenant_core::Digest::from_bytes([5; 32]), "queued_at": now,
+        "authority_digest": provenant_core::Digest::from_bytes([5; 32]), "read_only_writable": [], "queued_at": now,
         "state": {"state":"terminal","outcome":"lost","exit_code":null,"finished_at":now,"reason":null},
         "usage": {}, "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"}, "digest":CanonicalV1::file_digest(b""),"bytes":0,"complete":true,"redacted":false}
     }))?;

@@ -223,8 +223,8 @@ fn seed_opencode_session(
 ) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(data)?;
     let db = rusqlite::Connection::open(data.join("opencode.db"))?;
-    db.execute_batch("CREATE TABLE session (id TEXT PRIMARY KEY); CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)")?;
-    db.execute("INSERT INTO session VALUES (?1)", [session])?;
+    db.execute_batch("CREATE TABLE session_v2 (id TEXT PRIMARY KEY); CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)")?;
+    db.execute("INSERT INTO session_v2 VALUES (?1)", [session])?;
     db.execute(
         "INSERT INTO session_message VALUES (?1, 'assistant', ?2)",
         (
@@ -811,7 +811,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                 input.request.parent_attempt = None;
                 input.request.lane_depth = None;
                 input.request.task.writer = Some(run::WriterRequest {
-                    extra: Default::default(),
+                    extra: [("custody_project".into(), json!(session.context.project_id))].into(),
                     project: fixture.project.clone(),
                     worktree: fixture.tree.clone(),
                 });

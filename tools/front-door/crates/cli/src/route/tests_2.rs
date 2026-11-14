@@ -174,7 +174,8 @@
         let settings: Settings = serde_json::from_value(serde_json::json!({"entries": {
             "one": {"adapter":"claude", "label":"office", "key":"shared", "directory":"/tmp/a"},
             "two": {"adapter":"codex", "label":"other", "key":"shared", "directory":"/tmp/b"},
-            "three": {"adapter":"opencode", "label":"zen", "key":"work", "directory":"/tmp/c"}
+            "three": {"adapter":"opencode", "label":"zen", "key":"work", "directory":"/tmp/c"},
+            "four": {"adapter":"opencode", "label":"go", "key":"go", "directory":"/tmp/d"}
         }}))
         .unwrap();
         assert_eq!(

@@ -122,6 +122,7 @@ pub const REMOVED: &[Removed] = &[
     verb(&["stats"], "provenant telemetry cost --by node"),
     verb(&["pr", "land"], "provenant land NUMBER --wait"),
     verb(&["fabric", "graph"], "provenant status NAME"),
+    verb(&["fabric", "mcp"], "provenant fabric"),
     verb(&["fabric_graph"], "provenant run TEMPLATE BRIEF"),
     verb(&["quota", "usage"], "provenant telemetry cost --by account"),
     verb(&["config", "migrate"], "provenant config check"),
