@@ -69,13 +69,8 @@ ordinary lane work can continue without publishing credentials.
 
 ## Cargo seeding
 
-Cargo target seeds use the Cargo build directory selected by
-`.provenant/verify.json`'s `workspace`, defaulting to the project root. The host
-seed builder and writer preparation use that same selector, at any nesting depth.
-Preparation sets the lane-owned Cargo environment before checking the selected
-directory's Cargo configuration and ancestor configs; non-Cargo projects skip
-target seeding quietly. Seed build, publication and private APFS cloning follow
-the [Cargo target seed lifecycle](../specs/run.md#cargo-target-seed).
+Keep the lane's Cargo bindings. The [run spec](../specs/run.md#cargo-target-seed)
+owns the seed lifecycle; [GC](gc.md) owns retention.
 
 ## Recovery
 
@@ -102,9 +97,6 @@ evidence and refuses attempts with process evidence, a fence or worktree custody
 `reconcile` reports storage errors in `writer_reservation_errors`
 and exits non-zero. A valid handoff declaring `stopped_early` or `blocked` makes
 an otherwise successful lane settle as `review_required`.
-
-When a release breaks state readability, finish or stop pending graphs and drain
-writers on every host before [upgrading](install.md#bootstrap-and-upgrade).
 
 ## Waiting
 

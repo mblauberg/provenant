@@ -19,12 +19,10 @@ affect a crate's unit tests), `test_threads` and runner hosts are set in
 `.provenant/verify.json`. Heavy tiers warn locally and continue, so run them on
 a host with spare capacity.
 
-CI differs from T2 in that it narrows a pull request to the affected set, runs
-the example test only when affected, and reruns quarantined tests in an advisory
-step. `scripts/verify-tier --tier 2 --host ci` dispatches `verify-tiers.yml`
-with `gh` against the pushed branch tip and waits; the workflow must already be
-on the remote's default branch, and the credential must permit dispatch and
-reading runs.
+See [CI](ci.md#pipeline) for pull request selection. A configured host can
+run `scripts/verify-tier --tier 2 --host ci` against a pushed branch; the
+workflow must exist on the remote default branch and the credential must permit
+dispatch and reading runs.
 
 A configured runner is an argument array with `{commit}`, `{tier}` and optional
 `{remote}` fields, such as `["scripts/verify-peer-runner", "peer-name",

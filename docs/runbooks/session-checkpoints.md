@@ -3,13 +3,11 @@
 Owner: workflow
 Anchor: tools/front-door/crates/workflow/src/session.rs
 
-Save UTF-8 Markdown (up to 256 KiB) with
+Save UTF-8 Markdown with
 `provenant workflow session save SESSION --file FILE` and read it with
 `provenant workflow session show SESSION`. The `session` skill owns checkpoint
-content and goal continuation; this page owns identity and recovery. Oversized
-checkpoints and references known to be closed warn but still save. Chair session
-start and a successful save also warn when free space on the state, checkout or
-lane Cargo volume falls below twice `gc.free_floor`; see [gc](gc.md).
+content and goal continuation; this page owns identity and recovery. See
+[GC](gc.md) for free-space warnings.
 
 ## Identity
 
