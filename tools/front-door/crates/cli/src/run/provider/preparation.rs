@@ -3856,13 +3856,27 @@ pub(super) fn prepare_candidates(
         {
             None => provenant_config::GithubPolicy::default(),
             Some(Ok(policy)) => policy,
-            // Sandboxed publishing has always refused an unreadable policy.
-            Some(Err(error)) if sandbox.effective => return Err(error.to_string().into()),
+            // Sandboxed publishing refuses an unreadable policy: its selected
+            // credential restrictions cannot be applied.
+            Some(Err(error)) if sandbox.effective => {
+                return Err(launch_policy.boundary_error(
+                    "PREPARATION_PREPARE_WITH_CREDENTIALS",
+                    provenant_records::policy::Facts::violation(error.to_string()),
+                    error.to_string().into(),
+                ));
+            }
             Some(Err(error)) => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: {label}: GitHub policy unreadable, the gh wrapper applies no deny list: {error}"
-                );
+                if let Some(message) = launch_policy
+                    .check(
+                        "PREPARATION_GITHUB_POLICY_NONE",
+                        provenant_records::policy::Facts::violation(format!(
+                            "{label}: GitHub policy unreadable, the gh wrapper applies no deny list: {error}"
+                        )),
+                    )
+                    .message()
+                {
+                    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                }
                 provenant_config::GithubPolicy::default()
             }
         };
@@ -3912,10 +3926,17 @@ pub(super) fn prepare_candidates(
             let mediated = match spec.configure_gh_shim(scratch, gh, &gh_shim) {
                 Ok(()) => true,
                 Err(error) => {
-                    let _ = writeln!(
-                        std::io::stderr().lock(),
-                        "warning: {label}: gh wrapper unavailable, gh runs uncounted: {error}"
-                    );
+                    if let Some(message) = launch_policy
+                        .check(
+                            "PREPARATION_GH_SHIM_NONE",
+                            provenant_records::policy::Facts::violation(format!(
+                                "{label}: gh wrapper unavailable, gh runs uncounted: {error}"
+                            )),
+                        )
+                        .message()
+                    {
+                        let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                    }
                     false
                 }
             };

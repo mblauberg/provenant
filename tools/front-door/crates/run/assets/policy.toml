@@ -179,6 +179,22 @@ strength = "refuse"
 justification = "Publishing policy must be read and its selected GitHub credential restrictions applied before publishing is enabled."
 
 [[rule]]
+code = "PREPARATION_GITHUB_POLICY_NONE"
+site = "cli/src/run/provider/preparation.rs#prepare_candidates"
+boundary = "none"
+strength = "warn"
+knob = "policy.PREPARATION_GITHUB_POLICY_NONE"
+justification = "An unsandboxed lane already holds the user's own gh login; an unreadable GitHub policy warns and its gh wrapper applies no deny list."
+
+[[rule]]
+code = "PREPARATION_GH_SHIM_NONE"
+site = "cli/src/run/provider/preparation.rs#prepare_candidates"
+boundary = "none"
+strength = "warn"
+knob = "policy.PREPARATION_GH_SHIM_NONE"
+justification = "An unsandboxed lane whose counting gh wrapper cannot be installed runs gh unmediated; the receipt records it as unmediated."
+
+[[rule]]
 code = "PREPARATION_PREPARE_WRITER_DEPENDENCIES_NONE"
 site = "cli/src/run/provider/preparation.rs#prepare_writer_dependencies_with_policy"
 boundary = "none"
