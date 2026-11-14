@@ -84,10 +84,17 @@ pub struct Limits {
     pub weekly_anchor: Option<String>,
 }
 impl Settings {
-    /// The Console's Zen allowance shares a login with Go, but never its quota
-    /// or pacing identity. Derive it in memory without changing registrations.
+    /// Effective account rows are keyed by credential identity, never model.
+    /// Go and Zen each own one row; Zen shares the Go credential directory when
+    /// it has no explicit registration, but never copies Go quota or pacing.
     pub fn with_derived_accounts(&self) -> Self {
         let mut settings = self.clone();
+        let mut identities = std::collections::BTreeSet::new();
+        settings.entries.retain(|_, entry| {
+            provenant_records::AdapterSpec::get(&entry.adapter)
+                .is_none_or(|spec| spec.free_account.is_none())
+                || identities.insert((entry.adapter.clone(), entry.key.clone()))
+        });
         for spec in provenant_records::ADAPTER_SPECS {
             let Some((key, _)) = spec.free_account else {
                 continue;
@@ -102,7 +109,7 @@ impl Settings {
             let Some(mut entry) = settings
                 .entries
                 .values()
-                .find(|entry| entry.adapter == spec.name)
+                .find(|entry| entry.adapter == spec.name && entry.key == spec.local_account.0)
                 .cloned()
             else {
                 continue;
@@ -883,5 +890,60 @@ mod config_tests {
             assert_eq!(config.domains.accounts.entries["work"].key, "work-key");
             assert_eq!(config.warnings.len(), 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod account_pool_tests {
+    use super::*;
+    #[test]
+    fn go_and_zen_share_one_account_row_per_identity_across_models() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({"entries": {
+            "go": {"adapter":"opencode","label":"go","key":"go","directory":"/fixture/go"},
+            "go-model-alias": {"adapter":"opencode","label":"same","key":"go","directory":"/fixture/go"},
+            "zen": {"adapter":"opencode","label":"zen","key":"zen","directory":"/fixture/zen"}
+        }})).unwrap();
+        let effective = settings.with_derived_accounts();
+        for (key, models) in [
+            (
+                "go",
+                [
+                    "opencode-go/glm-5.3-flash",
+                    "opencode-go/deepseek-v4.1-flash",
+                ],
+            ),
+            (
+                "zen",
+                [
+                    "opencode/glm-5.3-flash-free",
+                    "opencode/deepseek-v4.1-flash-free",
+                ],
+            ),
+        ] {
+            let accounts: Vec<_> = effective
+                .entries
+                .values()
+                .filter(|entry| entry.adapter == "opencode" && entry.key == key)
+                .collect();
+            assert_eq!(
+                accounts.len(),
+                1,
+                "one credential identity per service, never per model"
+            );
+            assert_eq!(
+                accounts[0].directory,
+                PathBuf::from(format!("/fixture/{key}"))
+            );
+            let spec = provenant_records::AdapterSpec::get("opencode").unwrap();
+            assert!(
+                models
+                    .iter()
+                    .all(|model| spec.account_serves_model(key, model))
+            );
+        }
+        assert_eq!(
+            effective.with_derived_accounts().entries.len(),
+            effective.entries.len()
+        );
     }
 }

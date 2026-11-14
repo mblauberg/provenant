@@ -2863,6 +2863,7 @@ mod panel_tests {
         let context = RoutingContext {
             policy_account_hint: None,
             choice_context: None,
+            selection_evidence: None,
             catalogue: &catalogue,
             config: &config,
             registry: provenant_providers::REGISTRY,

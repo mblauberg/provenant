@@ -91,10 +91,7 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
                         availability_ref: "preview".into(),
                         expires_unix_seconds: now + 60,
                     };
-                    match admission.check_with_partial_headroom(
-                        &probe,
-                        context.config.allow_unknown_partial_headroom,
-                    ) {
+                    match admission.check(&probe) {
                         Ok(()) if !spent(record, now) => return Ok(None),
                         Ok(()) => member.push("allowance exhausted".to_owned()),
                         Err(error) => member.push(error.to_string()),

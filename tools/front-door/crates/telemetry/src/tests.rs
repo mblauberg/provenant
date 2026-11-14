@@ -1587,3 +1587,95 @@ fn context_bands_price_each_reply_by_the_context_it_sent() {
         ]
     );
 }
+
+#[test]
+fn route_priors_count_only_attributed_comparable_quality_outcomes() {
+    use crate::route_outcomes::{Evidence, priors};
+    let evidence =
+        |number, outcome, pool: Option<&str>, role: Option<&str>, partial, known: bool| {
+            let mut fact = fact(number, None);
+            fact.terminal_state = outcome;
+            fact.tier = Some("senior".into());
+            fact.context = Some(provenant_records::run::WorkContext {
+                role: role.map(str::to_owned),
+                ..Default::default()
+            });
+            Evidence {
+                fact,
+                pool: pool.map(str::to_owned),
+                partial,
+                access: known.then(|| "stored_launch".into()),
+            }
+        };
+    let rows = priors([
+        evidence(
+            1,
+            AttemptOutcome::Succeeded,
+            Some("senior"),
+            Some("review"),
+            false,
+            true,
+        ),
+        evidence(
+            2,
+            AttemptOutcome::Succeeded,
+            Some("senior"),
+            Some("review"),
+            true,
+            true,
+        ),
+        evidence(
+            3,
+            AttemptOutcome::Failed,
+            Some("senior"),
+            Some("review"),
+            false,
+            true,
+        ),
+        evidence(
+            4,
+            AttemptOutcome::QuotaLimited,
+            Some("senior"),
+            Some("review"),
+            false,
+            true,
+        ),
+        evidence(
+            5,
+            AttemptOutcome::Succeeded,
+            None,
+            Some("review"),
+            false,
+            true,
+        ),
+        evidence(
+            6,
+            AttemptOutcome::Succeeded,
+            Some("junior"),
+            Some("review"),
+            false,
+            true,
+        ),
+        evidence(
+            7,
+            AttemptOutcome::Succeeded,
+            Some("senior"),
+            None,
+            false,
+            true,
+        ),
+        evidence(
+            8,
+            AttemptOutcome::Succeeded,
+            Some("senior"),
+            Some("review"),
+            false,
+            false,
+        ),
+    ])
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].successes, rows[0].failures), (1, 2));
+    assert_eq!(rows[0].role, "review");
+    assert!(!rows[0].source.is_empty());
+}

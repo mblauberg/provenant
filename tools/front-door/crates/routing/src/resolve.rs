@@ -26,6 +26,7 @@ pub struct RoutingContext<'a> {
     /// Preview-only account policy selection. It never supplies availability.
     pub policy_account_hint: Option<&'a str>,
     /// Risk and task stratum, when supplied by the dispatch.
+    pub selection_evidence: Option<&'a crate::SelectionEvidence>,
     pub choice_context: Option<(&'a str, &'a str)>,
     pub catalogue: &'a Catalogue,
     pub config: &'a RoutingConfig,
@@ -222,9 +223,6 @@ pub fn list(
                         .flatten()
                         .any(|member| member.model == entry.model))
         }) {
-            if check_go_allowance(&entry.model, context.config, context.catalogue).is_err() {
-                continue;
-            }
             let efforts = std::iter::once(None).chain(entry.efforts.iter().cloned().map(Some));
             for effort in efforts {
                 if admissible(&entry.model, effort.as_deref(), context).is_ok() {
@@ -866,7 +864,7 @@ fn pacing_factor_basis_points(
                 context.catalogue.quota_pool(model),
             )
         })
-        .map(|window| format!(" reserve exclusion window={}", window.pool))
+        .map(|window| format!(" reserve warning window={}", window.pool))
         .unwrap_or_default();
     let detail = format!("{detail}{reserve_detail}");
     let neutral_detail = match profile.and_then(|p| p.deadline.as_ref()) {
@@ -1118,42 +1116,13 @@ fn account_reason<'q>(
             || reading_exhausted(&q.snapshot, model, context)
         {
             Some(RouteExclusionReason::Exhausted)
-        } else if partial == provenant_quota::PartialHeadroom::Unknown
-            && !context.config.allow_unknown_partial_headroom
-        {
-            Some(RouteExclusionReason::UnknownPartialHeadroom)
         } else {
             None
         };
     }
-    let (policy, profile, _, _) =
-        effective_profile(context, model, availability.account_key.as_deref());
+    let (policy, _, _, _) = effective_profile(context, model, availability.account_key.as_deref());
     if reason.is_none() && policy == PacingPolicy::Off {
         reason = Some(RouteExclusionReason::Disabled);
-    }
-    if reason.is_none()
-        && policy == PacingPolicy::Pace
-        && let Some(q) = quota
-        && matches!(
-            q.snapshot.status,
-            QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
-        )
-        && pacing_reserve_window(
-            &q.snapshot,
-            context.now_seconds(),
-            context
-                .config
-                .pacing_reserve
-                .get(model.adapter())
-                .copied()
-                .unwrap_or_default(),
-            profile,
-            model.adapter(),
-            context.catalogue.quota_pool(model),
-        )
-        .is_some()
-    {
-        reason = Some(RouteExclusionReason::PacingReserve);
     }
     (reason, quota)
 }
@@ -1471,6 +1440,145 @@ fn cooling(model: &ModelId, account: Option<&str>, context: &ValidatedContext<'_
     })
 }
 
+fn account_load(
+    model: &ModelId,
+    availability: &AvailabilityRecord,
+    context: &RoutingContext<'_>,
+) -> AccountLoad {
+    let key = availability.account_key.as_deref();
+    let (policy, profile, pacing_source, _) = effective_profile(context, model, key);
+    let (pacing_factor, _, _) = pacing_factor_basis_points(policy, model, key, context);
+    let quota = latest_reading(model, availability, context, true);
+    let limiting = quota
+        .into_iter()
+        .flat_map(|q| &q.snapshot.windows)
+        .filter(|w| {
+            selected_window(
+                w,
+                profile,
+                model.adapter(),
+                context.catalogue.quota_pool(model),
+            )
+        })
+        .filter(|w| {
+            w.resets_unix_seconds
+                .is_none_or(|reset| reset > context.now_seconds())
+        })
+        .map(|w| {
+            let headroom = 10_000_u64.saturating_sub(w.used_basis_points.min(10_000));
+            let eta = w
+                .resets_unix_seconds
+                .map(|reset| reset.saturating_sub(context.now_seconds()).max(1) as u64);
+            (headroom, eta)
+        })
+        .min_by_key(|(headroom, eta)| {
+            u128::from(*headroom) * 3_600 / u128::from(eta.unwrap_or(3_600))
+        });
+    let mut warnings = Vec::new();
+    if let Err(warning) = check_go_allowance(model, context.config, context.catalogue) {
+        let source = context
+            .config
+            .preference_sources
+            .get("domains.routing.opencode_go.min_monthly_allowance_usd")
+            .map(String::as_str)
+            .unwrap_or("unresolved");
+        warnings.push(format!(
+            "{warning}; source={source}:domains.routing.opencode_go.min_monthly_allowance_usd"
+        ));
+    }
+    if let Some(q) = quota {
+        if !context.config.allow_unknown_partial_headroom
+            && provenant_quota::partial_headroom(
+                &q.snapshot,
+                model.adapter(),
+                model.model(),
+                &context.catalogue.admission_pools(model),
+                context.now_seconds(),
+            ) == provenant_quota::PartialHeadroom::Unknown
+        {
+            warnings.push(format!(
+                "partial headroom unknown; ranking penalty; source={:?}",
+                context
+                    .config
+                    .partial_headroom_source
+                    .as_ref()
+                    .map(|source| format!("{source:?}"))
+                    .unwrap_or_else(
+                        || "default:routing.allow_unknown_partial_headroom=false".into()
+                    )
+            ));
+        }
+        if policy == PacingPolicy::Pace
+            && let Some(window) = pacing_reserve_window(
+                &q.snapshot,
+                context.now_seconds(),
+                context
+                    .config
+                    .pacing_reserve
+                    .get(model.adapter())
+                    .copied()
+                    .unwrap_or_default(),
+                profile,
+                model.adapter(),
+                context.catalogue.quota_pool(model),
+            )
+        {
+            let source = if window.profile {
+                if key.is_some_and(|key| {
+                    context
+                        .config
+                        .pacing
+                        .accounts
+                        .contains_key(&format!("{}/{key}", model.adapter()))
+                }) {
+                    "config:pacing.accounts"
+                } else {
+                    "config:pacing.free"
+                }
+            } else if context.config.pacing_reserve.contains_key(model.adapter()) {
+                "config:pacing_reserve"
+            } else {
+                "default:pacing_reserve"
+            };
+            warnings.push(format!(
+                "pacing reserve {}% window={}; ranking penalty; source={source}",
+                window.percent, window.pool
+            ));
+        }
+    }
+    AccountLoad {
+        account_key: availability.account_key.clone(),
+        account_source: availability.fixture_ref.clone(),
+        headroom_basis_points: limiting.map(|(headroom, _)| headroom),
+        reset_eta_seconds: limiting.and_then(|(_, eta)| eta),
+        live_lanes: context
+            .selection_evidence
+            .filter(|e| e.live_lanes_known)
+            .and_then(|e| {
+                key.map(|key| {
+                    e.live_lanes
+                        .get(&(model.adapter().into(), key.into()))
+                        .copied()
+                        .unwrap_or(0)
+                })
+            }),
+        pacing: policy,
+        pacing_factor_basis_points: pacing_factor,
+        penalty_basis_points: (0..warnings.len()).fold(10_000_u32, |factor, _| (factor / 4).max(1)),
+        source: format!(
+            "quota={}; live_lanes={}; pacing={pacing_source}",
+            quota
+                .map(|q| format!("snapshot/revision/{}", q.snapshot.revision))
+                .unwrap_or_else(|| "unknown".into()),
+            context
+                .selection_evidence
+                .map(|e| e.source.as_str())
+                .unwrap_or("unknown")
+        ),
+        warnings,
+    }
+}
+
 fn candidate(
     model: &ModelId,
     effort: Option<&str>,
@@ -1539,8 +1647,9 @@ fn candidate(
         .map(|a| {
             let (reason, _) = account_reason(model, a, access, context);
             let (policy, _, _, _) = effective_profile(context, model, a.account_key.as_deref());
-            let (headroom, _, standby) =
+            let (_, _, standby) =
                 pacing_factor_basis_points(policy, model, a.account_key.as_deref(), context);
+            let load = account_load(model, a, context);
             let spent = latest_reading(model, a, context, false)
                 .is_some_and(|q| reading_exhausted(&q.snapshot, model, context));
             (
@@ -1552,7 +1661,8 @@ fn candidate(
                     latest_reading(model, a, context, true).is_some(),
                     !avoid_cooling || !cooling(model, a.account_key.as_deref(), context),
                     !standby,
-                    headroom,
+                    load.score(),
+                    std::cmp::Reverse(a.account_key.as_deref()),
                 ),
             )
         })
@@ -1619,6 +1729,11 @@ fn candidate(
         },
     };
     let mut extra = provenant_records::ExtraFields::default();
+    if availability.is_none()
+        && let Err(warning) = check_go_allowance(model, context.config, context.catalogue)
+    {
+        extra.insert("allowance_warning".into(), serde_json::json!({"warning":warning,"source":context.config.preference_sources.get("domains.routing.opencode_go.min_monthly_allowance_usd").map(String::as_str).unwrap_or("unresolved")}));
+    }
     if let Some(value) = dropped_effort {
         extra.insert(
             "effort_warning".into(),
@@ -1628,13 +1743,9 @@ fn candidate(
             )),
         );
     }
-    if matches!(
-        &readiness,
-        RouteReadiness::Unavailable {
-            reason: RouteExclusionReason::PacingReserve,
-            ..
-        }
-    ) && let Some(availability) = availability
+    if let Some(availability) = availability
+        && effective_profile(context, model, availability.account_key.as_deref()).0
+            == PacingPolicy::Pace
         && let Some(quota) = latest_reading(model, availability, context, true)
     {
         use provenant_records::diagnostic::{
@@ -1688,6 +1799,11 @@ fn candidate(
                 }),
             );
         }
+    }
+    if let Some(availability) = availability {
+        let load = account_load(model, availability, context);
+        extra.insert("account_load".into(), serde_json::json!(load));
+        extra.insert("account_load_score".into(), load.score().into());
     }
     if evaluated.iter().all(|(_, reason, _)| reason.is_some()) && !evaluated.is_empty() {
         let details: Vec<_> = evaluated
@@ -2193,6 +2309,7 @@ struct ClassifiedPool {
     exclusions: Vec<String>,
 }
 struct PoolDraw {
+    exploration: bool,
     index: usize,
     roll: u64,
     total_weight: u64,
@@ -2229,6 +2346,7 @@ fn image_input_supported(model: &ModelId, _context: &ValidatedContext<'_>) -> bo
 }
 
 fn classify_pool(
+    name: &str,
     members: &[RoutePoolMember],
     request: &RouteRequest,
     context: &ValidatedContext<'_>,
@@ -2346,6 +2464,7 @@ fn classify_pool(
         let mut pacing_detail = None;
         let mut readiness = None;
         let mut option = None;
+        let mut ranking = provenant_records::ExtraFields::default();
         let exclusion = if let Some((kind, detail)) = exclusion {
             classified.exclusions.push(detail.to_owned());
             Some(kind.to_owned())
@@ -2419,8 +2538,83 @@ fn classify_pool(
                         context,
                     );
                     let cache_factor = model_policy.cache_factor_basis_points(request.intent);
+                    let capability = context
+                        .catalogue
+                        .model(&member.model)
+                        .map(|m| m.capability)
+                        .unwrap_or_default();
+                    let role = context
+                        .selection_evidence
+                        .map(|e| e.role(request.intent.workload, request.intent.writes))
+                        .unwrap_or(if request.intent.workload == Workload::Review {
+                            "review"
+                        } else if request.intent.writes {
+                            "writer"
+                        } else {
+                            "task"
+                        });
+                    let selector =
+                        if role == "review" || request.intent.workload == Workload::Review {
+                            "review"
+                        } else {
+                            name
+                        };
+                    let (preferences, source) = context
+                        .config
+                        .capability_preferences
+                        .get(selector)
+                        .map(|weights| (Some(weights), "config"))
+                        .unwrap_or((
+                            context.catalogue.capability_preferences.get(selector),
+                            "catalogue",
+                        ));
+                    let capability_weight = preferences
+                        .and_then(|weights| weights.get(&capability))
+                        .copied()
+                        .unwrap_or(1)
+                        .max(1);
+                    let prior = context
+                        .config
+                        .outcome_priors
+                        .enabled
+                        .then(|| {
+                            context.selection_evidence.and_then(|e| {
+                                e.priors.iter().find(|prior| {
+                                    prior.model == member.model
+                                        && prior.pool == name
+                                        && prior.role == role
+                                })
+                            })
+                        })
+                        .flatten();
+                    let prior_factor = prior.map_or(10_000, RoutePrior::factor_basis_points);
+                    let load = context
+                        .availability
+                        .iter()
+                        .find(|a| {
+                            a.adapter == member.model.adapter()
+                                && a.account_key == resolved.account_key
+                        })
+                        .map(|a| account_load(&member.model, a, context));
+                    let load_factor = load.as_ref().map_or(u64::from(factor), |load| load.score());
                     factor_basis_points =
                         ((u64::from(factor) * u64::from(cache_factor)) / 10_000) as u32;
+                    let ranking_factor_basis_points = (u128::from(load_factor)
+                        * u128::from(cache_factor)
+                        * u128::from(capability_weight)
+                        * u128::from(prior_factor)
+                        / 100_000_000)
+                        .clamp(1, u128::from(u32::MAX))
+                        as u32;
+                    ranking.insert(
+                        "ranking_factor_basis_points".into(),
+                        ranking_factor_basis_points.into(),
+                    );
+                    ranking.insert("capability_preference".into(), serde_json::json!({"capability":capability,"weight":capability_weight,"selector":selector,"source":source}));
+                    ranking.insert("outcome_prior".into(), serde_json::json!({"enabled":context.config.outcome_priors.enabled,"role":role,"pool":name,"factor_basis_points":prior_factor,"evidence":prior,"source":if !context.config.outcome_priors.enabled {"config:disabled"} else if prior.is_some() {"route_outcomes"} else {"no_evidence"}}));
+                    if let Some(load) = load {
+                        ranking.insert("account_load".into(), serde_json::json!(load));
+                    }
                     if avoid_cooling
                         && cooling(&member.model, resolved.account_key.as_deref(), context)
                     {
@@ -2459,7 +2653,7 @@ fn classify_pool(
                             }
                         } else {
                             let weight = u64::from(member.weight)
-                                .saturating_mul(u64::from(factor_basis_points));
+                                .saturating_mul(u64::from(ranking_factor_basis_points));
                             classified
                                 .weighted
                                 .push((classified.candidates.len(), weight));
@@ -2517,7 +2711,7 @@ fn classify_pool(
             }
         };
         classified.candidates.push(RouteSelectionCandidate {
-            extra: Default::default(),
+            extra: ranking,
             model: member.model.as_str().into(),
             weight: member.weight,
             factor_basis_points,
@@ -2535,7 +2729,27 @@ fn draw_pool(
     name: &str,
     classified: &ClassifiedPool,
     seed: Option<(&str, u64)>,
+    settings: &OutcomePriorSettings,
 ) -> Result<PoolDraw, RoutingError> {
+    let (operation, task) = seed.unwrap_or(("route-preview", 0));
+    if settings.enabled
+        && !classified.weighted.is_empty()
+        && stable_roll(operation, task, &format!("{name}/exploration"), 10_000)
+            < u64::from(settings.exploration_percent) * 100
+    {
+        let roll = stable_roll(
+            operation,
+            task,
+            &format!("{name}/exploration/member"),
+            classified.weighted.len() as u64,
+        );
+        return Ok(PoolDraw {
+            exploration: true,
+            index: classified.weighted[roll as usize].0,
+            roll,
+            total_weight: classified.weighted.len() as u64,
+        });
+    }
     let total_weight = classified
         .weighted
         .iter()
@@ -2567,6 +2781,7 @@ fn draw_pool(
         exclusions: classified.exclusions.clone(),
     })?;
     Ok(PoolDraw {
+        exploration: false,
         index,
         roll,
         total_weight,
@@ -2592,13 +2807,14 @@ fn selection_receipt(
 }
 
 fn classify_with_image_preference(
+    name: &str,
     members: &[RoutePoolMember],
     request: &RouteRequest,
     context: &ValidatedContext<'_>,
     excluded: Excluded<'_>,
     avoid_cooling: bool,
 ) -> Result<ClassifiedPool, RoutingError> {
-    let mut classified = classify_pool(members, request, context, excluded, avoid_cooling)?;
+    let mut classified = classify_pool(name, members, request, context, excluded, avoid_cooling)?;
     let image = |index: usize| image_input_supported(&members[index].model, context);
     let has_ready_image = members
         .iter()
@@ -2652,8 +2868,8 @@ fn select_pool(
     excluded_members: Excluded<'_>,
 ) -> Result<PoolPick, RoutingError> {
     let mut classified =
-        classify_with_image_preference(members, request, context, excluded_members, true)?;
-    let (draw, reason) = match draw_pool(name, &classified, seed) {
+        classify_with_image_preference(name, members, request, context, excluded_members, true)?;
+    let (draw, reason) = match draw_pool(name, &classified, seed, &context.config.outcome_priors) {
         Ok(draw)
             if !matches!(
                 classified.routes[draw.index]
@@ -2665,9 +2881,15 @@ fn select_pool(
                     && matches!(candidate.readiness, Some(RouteReadiness::Ready { .. }))
             }) =>
         {
-            let normal =
-                classify_with_image_preference(members, request, context, excluded_members, false)?;
-            let normal_draw = draw_pool(name, &normal, seed)?;
+            let normal = classify_with_image_preference(
+                name,
+                members,
+                request,
+                context,
+                excluded_members,
+                false,
+            )?;
+            let normal_draw = draw_pool(name, &normal, seed, &context.config.outcome_priors)?;
             if matches!(
                 normal.routes[normal_draw.index]
                     .as_ref()
@@ -2690,9 +2912,16 @@ fn select_pool(
                 .iter()
                 .any(|candidate| candidate.exclusion.as_deref() == Some("capacity cooldown")) =>
         {
-            classified =
-                classify_with_image_preference(members, request, context, excluded_members, false)?;
-            let draw = draw_pool(name, &classified, seed).map_err(|_| error)?;
+            classified = classify_with_image_preference(
+                name,
+                members,
+                request,
+                context,
+                excluded_members,
+                false,
+            )?;
+            let draw = draw_pool(name, &classified, seed, &context.config.outcome_priors)
+                .map_err(|_| error)?;
             (
                 draw,
                 Some("all eligible candidates cooling, normal selection"),
@@ -2715,6 +2944,7 @@ fn select_pool(
     });
     let draw = if let Some(index) = preferred_index {
         PoolDraw {
+            exploration: false,
             index,
             roll: 0,
             total_weight: 0,
@@ -2738,8 +2968,14 @@ fn select_pool(
         }
         .into(),
     );
+    receipt.extra.insert("exploration".into(), serde_json::json!({"selected":draw.exploration,"percent":context.config.outcome_priors.exploration_percent,"enabled":context.config.outcome_priors.enabled,"source":context.config.preference_sources.get("domains.routing.outcome_priors.exploration_percent").map(String::as_str).unwrap_or("default")}));
+    if let Some(load) = route.extra.get("account_load") {
+        receipt.extra.insert("account_load".into(), load.clone());
+    }
     let rule = if preferred_index.is_some() {
         "model_choice_override"
+    } else if draw.exploration {
+        "exploration_draw"
     } else if draw.total_weight > 0 {
         "weighted_draw"
     } else if classified.first_zero_ready == Some(draw.index) {

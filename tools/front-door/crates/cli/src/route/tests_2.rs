@@ -259,7 +259,7 @@
     }
 
     #[test]
-    fn go_floor_gates_explicit_pool_and_fallback_dispatch() -> Result<(), Box<dyn Error>> {
+    fn go_allowance_preference_never_refuses_a_ready_dispatch() -> Result<(), Box<dyn Error>> {
         use std::os::unix::fs::PermissionsExt;
         struct Resolver;
         impl provenant_core::PathResolver for Resolver {
@@ -334,104 +334,25 @@
                 &[],
             )
         };
-        let preview = super::Route::Resolve(super::RouteResolve {
-            writes: false,
-            account: None,
-            name: None,
-            request: super::RouteRequest {
-                read_heavy: false,
-                model: Some(super::Model("opencode/opencode-go/glm-5.3-flash".into())),
-                route: None,
-                effort: None,
-                confidential: false,
-                fallback: vec![],
-                exclude: vec![],
-            },
-        });
-        match super::execute(&preview, &roots, provenant_core::WallTime::from_micros(0)?) {
-            Err(error) => assert!(error.to_string().contains("$60")),
-            Ok(_) => panic!("preview must refuse the model"),
+        for floor in [61, 1_000] {
+            std::fs::write(
+                &path,
+                format!(
+                    "schema_version=1\n[domains.routing.pools]\ntest=[{{model='opencode/opencode-go/glm-5.3-flash',weight=1}}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd={floor}\n"
+                ),
+            )?;
+            for query in [
+                request(Some("opencode/opencode-go/glm-5.3-flash"), None)?,
+                request(None, Some("test"))?,
+            ] {
+                let selected = resolve(&query)?;
+                assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
+                assert!(super::check_dispatch_candidate(&roots, &selected, super::REGISTRY).is_ok());
+                let warning = &selected.extra["account_load"]["warnings"];
+                assert!(warning.as_array().is_some_and(|rows| !rows.is_empty()));
+                assert!(warning.to_string().contains("source=config"));
+            }
         }
-        let error =
-            resolve(&request(Some("opencode/opencode-go/glm-5.3-flash"), None)?).unwrap_err();
-        let error = error.to_string();
-        assert!(error.contains("glm-5.3-flash") && error.contains("$60"));
-        // Isolate catalogue eligibility from the independent allowance floor.
-        let floor_config = std::fs::read_to_string(&path)?;
-        std::fs::write(
-            &path,
-            floor_config.replace(
-                "min_monthly_allowance_usd=61",
-                "min_monthly_allowance_usd=0",
-            ),
-        )?;
-        for model in ["opencode-go/unlisted", "opencode-go/glm-5.2"] {
-            let resolved = resolve(&request(Some(&format!("opencode/{model}")), None)?)?;
-            assert_eq!(resolved.model, model);
-            assert_eq!(resolved.eligibility, RouteEligibility::UnverifiedModel);
-        }
-        std::fs::write(&path, floor_config)?;
-        let fallback = |model: Option<&str>, route: Option<&str>| -> Result<(), Box<dyn Error>> {
-            let request = super::RouteRequest {
-                read_heavy: false,
-                model: model.map(|m| super::Model(m.into())),
-                route: route.map(str::to_owned),
-                effort: None,
-                confidential: false,
-                fallback: vec![super::Model(
-                    "opencode/opencode-go/deepseek-v4.1-flash".into(),
-                )],
-                exclude: vec![],
-            };
-            let resolved = resolve(&request.to_domain()?)?;
-            assert!(super::check_dispatch_candidate(&roots, &resolved, super::REGISTRY).is_err());
-            assert_eq!(
-                resolved.alternatives.as_slice()[0].model,
-                "opencode-go/deepseek-v4.1-flash"
-            );
-            Ok(())
-        };
-        fallback(Some("opencode/opencode-go/glm-5.3-flash"), None)?;
-        std::fs::write(
-            &path,
-            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/glm-5.3-flash',weight=1}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd=61\n",
-        )?;
-        fallback(None, Some("test"))?;
-        std::fs::write(
-            &path,
-            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/glm-5.3-flash',weight=1},{model='opencode/opencode-go/deepseek-v4.1-flash',weight=1}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd=100\n",
-        )?;
-        let error = resolve(&request(None, Some("test"))?)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("glm-5.3-flash") && error.contains("deepseek-v4.1-flash"),
-            "{error}"
-        );
-        std::fs::write(
-            &path,
-            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/glm-5.3-flash',weight=1},{model='opencode/opencode-go/deepseek-v4.1-flash',weight=0}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd=61\n",
-        )?;
-        let selected = resolve(&request(None, Some("test"))?)?;
-        assert_eq!(selected.model, "opencode-go/deepseek-v4.1-flash");
-        assert!(
-            selected.pool_selection.as_ref().unwrap().redraws[0]
-                .reason
-                .contains("$60")
-        );
-        let mut candidate = selected.clone();
-        candidate.model = "opencode-go/unlisted".into();
-        assert!(
-            super::check_dispatch_candidate(&roots, &candidate, super::REGISTRY)
-                .unwrap_err()
-                .contains("unknown")
-        );
-        candidate.model = "opencode-go/glm-5.3-flash".into();
-        assert!(
-            super::check_dispatch_candidate(&roots, &candidate, super::REGISTRY)
-                .unwrap_err()
-                .contains("$60")
-        );
         Ok(())
     }
 

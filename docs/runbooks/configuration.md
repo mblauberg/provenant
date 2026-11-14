@@ -231,9 +231,10 @@ thirty_day = 59
 expires = "2026-11-04T00:00:00Z"
 ```
 
-Provisional Go pool members stay excluded while their windows are
-uncalibrated; accept unknown headroom on this host with
+Uncalibrated Go windows warn and lower a member's ranking without excluding it.
+Remove that preference penalty on this host with
 `provenant config set routing.allow_unknown_partial_headroom true`.
+Measured exhausted allowance still refuses a launch.
 
 ## Chair account switching
 

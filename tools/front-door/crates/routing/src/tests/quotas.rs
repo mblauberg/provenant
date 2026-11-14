@@ -464,14 +464,13 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
     ctx.access = &access;
     ctx.quota = &observations;
     let explicit = request(model)?;
-    let refused = resolve(&explicit, &ctx)?;
-    assert!(matches!(
-        refused.readiness,
-        RouteReadiness::Unavailable {
-            reason: RouteExclusionReason::UnknownPartialHeadroom,
-            ..
-        }
-    ));
+    let selected = resolve(&explicit, &ctx)?;
+    assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
+    assert!(
+        selected.extra["account_load"]["warnings"]
+            .as_array()
+            .is_some_and(|warnings| !warnings.is_empty())
+    );
     let mut ctx = context(&catalogue, &config, now()?);
     ctx.availability = &availability;
     ctx.access = &access;
@@ -502,8 +501,8 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
         }
     };
     let calibrated = apply(&raw);
-    // Selection and launch admission must interpret the same fresh scoped
-    // observation and opt-in identically, including calibration expiry.
+    // Calibration and its expiry only change a preference. Across both knob
+    // values, only measured exhaustion may refuse selection or launch.
     let mut expired_for_table = duplicate(&calibrated);
     expired_for_table
         .snapshot
@@ -521,46 +520,47 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
         low_power: true,
         solo: false,
     }];
-    for (name, observation, opt_in, expected) in [
-        ("partial default", duplicate(&raw), false, false),
-        ("partial opted in", duplicate(&raw), true, true),
-        ("exhausted opted in", exhausted_for_table, true, false),
-        ("calibrated", duplicate(&calibrated), false, true),
-        ("calibration expired", expired_for_table, false, false),
+    for (name, observation, exhausted) in [
+        ("partial", duplicate(&raw), false),
+        ("exhausted", exhausted_for_table, true),
+        ("calibrated", duplicate(&calibrated), false),
+        ("calibration expired", expired_for_table, false),
     ] {
-        let mut row_config = config.clone();
-        row_config.allow_unknown_partial_headroom = opt_in;
-        let observations = [observation];
-        let mut ctx = context(&catalogue, &row_config, now()?);
-        ctx.availability = &availability;
-        ctx.access = &access;
-        ctx.quota = &observations;
-        let selected = resolve(&explicit, &ctx)?;
-        let ready = matches!(selected.readiness, RouteReadiness::Ready { .. });
-        let mut admitted_route = selected.clone();
-        // Check the independent admission policy with a fresh readiness grant,
-        // so an earlier selection refusal cannot mask a headroom disagreement.
-        admitted_route.readiness = RouteReadiness::Ready {
-            extra: Default::default(),
-            availability_ref: "fixture".into(),
-            expires_unix_seconds: 120,
-        };
-        let mut record = AccountRecord::empty(observations[0].snapshot.account.clone());
-        record.revision = observations[0].snapshot.revision;
-        record.snapshot = Some(observations[0].snapshot.clone());
-        let records = [record];
-        let admission = provenant_quota::Admission {
-            policies: &policy,
-            now_unix_seconds: 100,
-            records: &records,
-            pools: &[],
+        for opt_in in [false, true] {
+            let mut row_config = config.clone();
+            row_config.allow_unknown_partial_headroom = opt_in;
+            let observations = [duplicate(&observation)];
+            let mut ctx = context(&catalogue, &row_config, now()?);
+            ctx.availability = &availability;
+            ctx.access = &access;
+            ctx.quota = &observations;
+            let selected = resolve(&explicit, &ctx)?;
+            let ready = matches!(selected.readiness, RouteReadiness::Ready { .. });
+            let mut admitted_route = selected.clone();
+            // Check the independent admission policy with a fresh readiness grant,
+            // so an earlier selection refusal cannot mask a headroom disagreement.
+            admitted_route.readiness = RouteReadiness::Ready {
+                extra: Default::default(),
+                availability_ref: "fixture".into(),
+                expires_unix_seconds: 120,
+            };
+            let mut record = AccountRecord::empty(observations[0].snapshot.account.clone());
+            record.revision = observations[0].snapshot.revision;
+            record.snapshot = Some(observations[0].snapshot.clone());
+            let records = [record];
+            let admission = provenant_quota::Admission {
+                policies: &policy,
+                now_unix_seconds: 100,
+                records: &records,
+                pools: &[],
+            }
+            .check(&admitted_route);
+            assert_eq!(
+                (ready, admission.is_ok()),
+                (!exhausted, !exhausted),
+                "{name}, allow_unknown={opt_in}: {admission:?}"
+            );
         }
-        .check_with_partial_headroom(&admitted_route, opt_in);
-        assert_eq!(
-            (ready, admission.is_ok()),
-            (expected, expected),
-            "{name}: {admission:?}"
-        );
     }
     for (key, five_hour, seven_day, expected) in [
         ("go", None, None, "five_hour, seven_day"),

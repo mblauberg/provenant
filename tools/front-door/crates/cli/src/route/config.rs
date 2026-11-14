@@ -839,8 +839,6 @@ pub(super) fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<D
                     .compaction
                     .window
                     .and_then(|window| model_policy.policy.break_even_turns(window, 15_000, 0));
-                provenant_routing::check_go_allowance(&model, context.config, context.catalogue)
-                    .map_err(EdgeError::GoAllowance)?;
                 let quota = records
                     .iter()
                     .find(|r| {
@@ -915,10 +913,7 @@ pub(super) fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<D
                         availability_ref: "preview".into(),
                         expires_unix_seconds: now.unix_seconds().saturating_add(60),
                     };
-                    let result = admission.check_with_partial_headroom(
-                        &candidate,
-                        context.config.allow_unknown_partial_headroom,
-                    );
+                    let result = admission.check(&candidate);
                     match &result {
                         Ok(()) => possible = true,
                         Err(error) => refusals.push(format!("{}: {error}", row.account_key)),

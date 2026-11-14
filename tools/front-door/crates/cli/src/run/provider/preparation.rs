@@ -1624,6 +1624,7 @@ mod stale_readiness_tests {
                        access: &[AccessContext<'_>]| {
             let context = RoutingContext {
                 choice_context: None,
+                selection_evidence: None,
                 policy_account_hint: None,
                 catalogue: &catalogue,
                 config: &config,
@@ -2380,6 +2381,14 @@ pub(super) fn prepare_candidates(
         )),
         _ => None,
     };
+    let routing_evidence = crate::route::selection_evidence(
+        roots,
+        &home,
+        &source,
+        task.context
+            .as_ref()
+            .and_then(|context| context.role.as_deref()),
+    );
     let resolve = |availability: &[provenant_providers::AvailabilityRecord],
                    rejected: &[provenant_routing::ModelId]| {
         crate::route::resolve_dispatch_rejecting_family(
@@ -2398,6 +2407,7 @@ pub(super) fn prepare_candidates(
                 Some((context.risk_tier.as_deref()?, context.task_kind.as_deref()?))
             }),
             required_family,
+            Some(&routing_evidence),
         )
         .map(|mut resolved| {
             // The router cannot observe host fences. Preserve the known
@@ -2591,6 +2601,7 @@ pub(super) fn prepare_candidates(
                             Some((context.risk_tier.as_deref()?, context.task_kind.as_deref()?))
                         }),
                         required_family,
+                        Some(&routing_evidence),
                     )
                     .ok()
                 };
@@ -3831,6 +3842,7 @@ mod receipt_tests {
         let context = RoutingContext {
             policy_account_hint: None,
             choice_context: None,
+            selection_evidence: None,
             catalogue: &catalogue,
             config: &config,
             registry: REGISTRY,

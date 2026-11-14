@@ -4,6 +4,7 @@ use super::*;
 fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error::Error>> {
     let mut catalogue = Catalogue::bundled()?;
     catalogue.models.push(ModelEntry {
+        capability: Default::default(),
         free: false,
         model: ModelId::parse("codex/test")?,
         efforts: vec!["high".into()],
@@ -14,6 +15,7 @@ fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error
         quota_pool: None,
     });
     catalogue.models.push(ModelEntry {
+        capability: Default::default(),
         free: false,
         model: ModelId::parse("codex/no-effort")?,
         efforts: vec![],
@@ -619,6 +621,7 @@ fn family_requires_provider_answer_evidence_at_the_same_revision()
     assert_eq!(wrong.record().family, None);
     let mut broker = catalogue.clone();
     broker.models.push(ModelEntry {
+        capability: Default::default(),
         free: false,
         model: ModelId::parse("codex/claude-haiku-4-5-20251001")?,
         efforts: vec![],
@@ -744,8 +747,11 @@ fn account_spend_and_expiring_override_ignore_reserve() -> Result<(), Box<dyn st
         ctx.access = &access;
         ctx.quota = &observations;
         let route = resolve(&request("codex/test")?, &ctx)?;
+        assert!(reason(&route).is_none());
         assert_eq!(
-            reason(&route) == Some(&RouteExclusionReason::PacingReserve),
+            route.extra["account_load"]["warnings"]
+                .as_array()
+                .is_some_and(|warnings| !warnings.is_empty()),
             excluded,
             "profile={profile}, overrides={overrides}"
         );

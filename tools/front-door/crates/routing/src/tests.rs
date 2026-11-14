@@ -24,6 +24,7 @@ fn context<'a>(
     RoutingContext {
         policy_account_hint: None,
         choice_context: None,
+        selection_evidence: None,
         catalogue,
         config,
         registry: REGISTRY,
@@ -605,6 +606,7 @@ mod exclusions;
 mod ladder;
 mod policies;
 mod preferences;
+mod quality;
 mod quotas;
 mod readiness;
 mod selection;

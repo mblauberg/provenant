@@ -23,7 +23,7 @@ pub use resolution::fixture_resolve_dispatch;
 use resolution::*;
 pub(crate) use resolution::{
     DispatchError, check_dispatch_candidate, recorded_model_readiness,
-    resolve_dispatch_rejecting_family,
+    resolve_dispatch_rejecting_family, selection_evidence,
 };
 pub use resolution::{depletion_facts, resolve_review_family};
 use serde::Serialize;
@@ -586,7 +586,7 @@ pub(crate) enum EdgeError {
     #[error("{0}")]
     Pacing(&'static str),
     #[error("{0}")]
-    GoAllowance(String),
+    Admission(String),
     #[error("{message}")]
     AccountProfile {
         kind: AccountProfileError,

@@ -27,13 +27,15 @@ overridable in the selected state's `config.toml`.
 
 ## Pacing
 
-The resolver draws among ready members by weight times the pacing factor. `pace`
-divides remaining quota headroom by remaining window time (clamped 0.25 to 2.0)
-and takes the lowest factor across windows with a future reset; a window past
-its reserve (defaults 85% used for five-hour, 90% for seven-day) makes the
-account unavailable as `pacing_reserve`. Missing quota data is neutral. Go pool
-members with uncalibrated partial windows are ineligible unless
-`routing.allow_unknown_partial_headroom` is true. Per-account profiles beat
+The resolver ranks accounts by headroom per reset time and live lane load, then
+weights ready pool members with capability and outcome preferences. Receipts
+retain the pacing factor and each ranking input separately. A window past its
+reserve (defaults 85% used for five-hour, 90% for seven-day) warns and lowers
+ranking. Uncalibrated partial Go windows also warn and lower ranking; set
+`routing.allow_unknown_partial_headroom` to remove that penalty. Neither
+preference excludes a ready route; measured exhaustion still refuses. See the
+[routing spec](../specs/routing.md#capability-account-load-and-outcome-preferences)
+for capability overrides and the outcome-prior off switch. Per-account profiles beat
 provider defaults; a profile can be `spend`, `pace`, `max` or `off` (`off`
 prevents routing, free models included):
 

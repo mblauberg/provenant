@@ -268,16 +268,8 @@ impl Admission<'_> {
 
     /// Check provider readiness, current allowance and the account record's
     /// persisted refusals.
+    /// Unknown partial coverage is advisory; confirmed exhaustion remains binding.
     pub fn check(&self, route: &ResolvedRoute) -> Result<(), QuotaError> {
-        self.check_with_partial_headroom(route, false)
-    }
-
-    /// Opt in only to uncalibrated partial headroom; exhaustion remains binding.
-    pub fn check_with_partial_headroom(
-        &self,
-        route: &ResolvedRoute,
-        allow_unknown: bool,
-    ) -> Result<(), QuotaError> {
         match route.readiness {
             RouteReadiness::Ready {
                 expires_unix_seconds,
@@ -303,20 +295,15 @@ impl Admission<'_> {
                     "authentication required; sign in to the selected account",
                 ));
             }
-            match partial_headroom(
+            if partial_headroom(
                 snapshot,
                 &route.adapter,
                 &route.model,
                 self.pools,
                 self.now_unix_seconds,
-            ) {
-                PartialHeadroom::Exhausted => {
-                    return Err(QuotaError::Refused("allowance exhausted"));
-                }
-                PartialHeadroom::Unknown if !allow_unknown => {
-                    return Err(QuotaError::Refused("uncalibrated partial coverage"));
-                }
-                _ => {}
+            ) == PartialHeadroom::Exhausted
+            {
+                return Err(QuotaError::Refused("allowance exhausted"));
             }
         }
         Ok(())
@@ -715,10 +702,7 @@ mod admission_tests {
         let mut active = raw.clone();
         settings.apply_calibration(&mut active, 1000);
         assert!(check(&active, 1000).is_ok());
-        assert!(matches!(
-            check(&active, 1100),
-            Err(QuotaError::Refused("uncalibrated partial coverage"))
-        ));
+        assert!(check(&active, 1100).is_ok());
         let mut partial = raw.clone();
         settings.apply_calibration(&mut partial, 1100);
         partial[0]
@@ -732,33 +716,16 @@ mod admission_tests {
                 used_basis_points: 9999,
                 resets_unix_seconds: None,
             });
-        assert!(matches!(
-            check(&partial, 1100),
-            Err(QuotaError::Refused("uncalibrated partial coverage"))
-        ));
-        let opt_in = |records: &[AccountRecord]| {
-            Admission {
-                policies: crate::source::TEST_POLICIES,
-                now_unix_seconds: 1100,
-                records,
-                pools: &[],
-            }
-            .check_with_partial_headroom(&route, true)
-        };
-        assert!(opt_in(&partial).is_ok());
+        assert!(check(&partial, 1100).is_ok());
         partial[0].snapshot.as_mut().unwrap().windows[0].used_basis_points = 10000;
         partial[0].snapshot.as_mut().unwrap().status = QuotaStatus::Unknown;
         assert!(matches!(
             check(&partial, 1100),
             Err(QuotaError::Refused("allowance exhausted"))
         ));
-        assert!(matches!(
-            opt_in(&partial),
-            Err(QuotaError::Refused("allowance exhausted"))
-        ));
         partial[0].snapshot.as_mut().unwrap().windows[0].resets_unix_seconds = Some(1099);
         assert!(matches!(
-            opt_in(&partial),
+            check(&partial, 1100),
             Err(QuotaError::Refused("allowance exhausted"))
         ));
         settings.calibration.get_mut("go").unwrap().five_hour = Some(100);
