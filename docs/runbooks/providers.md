@@ -38,9 +38,24 @@ Provenant cannot check that the token belongs to the registered account. It
 lasts about a year; revoke it in the account settings on claude.ai, or revert by
 deleting the file. Never copy it between account directories.
 
-A separately registered directory can hold a copied single-use refresh token;
-quota never rotates it, so sign in interactively there when `provenant quota`
-reports `login_expired`.
+Register each directory with its own CLI login; do not copy refresh tokens.
+The selected directory refreshes even when another directory has the same
+account email. Claude owns rotation. Provenant admits a refresh only with at
+least `domains.quota.refresh_min_budget_seconds` remaining (60 seconds by
+default) in its independent `refresh_budget_seconds` budget (120 seconds by
+default). An admitted CLI refresh finishes even past either soft deadline.
+Quota publication still checks its original claim revision and expiry; a late
+rotation helps the next probe or launch without publishing a stale result.
+
+`refresh_pending` means the access token needs renewal and the account remains
+routable. Access-token expiry is informational. Sign-in end comes from
+`claude auth status --json`'s `loginExpiresAt`, with a warning ten days ahead by
+default; only `loggedIn:false` establishes signed out. A usage refusal gets one
+CLI refresh and one retry when the admission budget allows it. If the CLI still
+reports signed in, a repeated refusal stays refresh pending. Pending evidence
+is timestamped and expires with the account's probe interval. Operational
+failures keep their own error and backoff; a probe without auth evidence clears
+the older auth facts.
 
 ## Agy accounts
 
@@ -58,7 +73,9 @@ is missing, a symlink, hard-linked or the same inode as your own, registration,
 launch and quota fail naming the path (`KEYCHAIN_UNAVAILABLE` in `provenant quota`
 and `provenant hosts doctor`). A launch also skips the route on a changed Google
 identity (`re-register it`). Re-registering or `provenant quota tick` re-probes
-a repaired account at once.
+a repaired account at once. A safe atomic save at the same account path is
+accepted. If keychain metadata changes during a quota probe, the observation
+retries on a short transient backoff instead of reporting keychain unavailable.
 
 Add a second account on macOS (the empty keychain password and no lock timeout
 are deliberate, so a headless lane never prompts):

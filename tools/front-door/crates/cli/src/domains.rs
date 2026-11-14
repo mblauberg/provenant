@@ -747,7 +747,10 @@ mod tests {
         let roots = roots(&temp);
         std::fs::create_dir_all(roots.state.as_path()).unwrap();
         let default = provenant_config::read_with_domains(&roots, &SECTIONS).unwrap();
-        assert_eq!(default.domains.quota.login_expiry_warning_seconds, 3600);
+        assert_eq!(
+            default.domains.quota.login_expiry_warning_seconds,
+            10 * 24 * 60 * 60
+        );
         assert!(matches!(
             default.origins["domains.quota.login_expiry_warning_seconds"],
             provenant_config::Origin::Compiled { .. }

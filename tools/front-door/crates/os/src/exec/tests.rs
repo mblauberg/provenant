@@ -509,3 +509,21 @@ fn normal_and_failed_exit_clean_the_process_group_before_reaping()
     }
     Ok(())
 }
+
+#[test]
+fn non_interruptible_transaction_finishes_after_its_soft_deadline() {
+    let temp = tempfile::tempdir().unwrap();
+    let argv = [
+        OsString::from("/bin/sh"),
+        OsString::from("-c"),
+        OsString::from("printf committed"),
+    ];
+    let executor = SystemExecutor::new(1).unwrap();
+    let mut options = ExecOptions::new(&argv, temp.path(), Duration::ZERO);
+    options.wait_for_completion = true;
+    options.stdout = StreamPolicy::Capture { limit: 100 };
+    let outcome = executor.execute(options).unwrap();
+    assert_eq!(outcome.termination, Termination::Exit(0));
+    assert_eq!(outcome.stdout.bytes, b"committed");
+    assert!(!outcome.timed_out);
+}

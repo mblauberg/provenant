@@ -42,6 +42,8 @@ pub enum ProviderError {
     IsolatedKeychainUnavailable(String),
     #[error("provider login token is unavailable")]
     CredentialUnavailable,
+    #[error("provider token refresh is pending")]
+    RefreshDeferred,
     #[error("provider login token was not found")]
     CredentialNotFound,
     #[error("provider login token has expired")]
@@ -80,7 +82,8 @@ impl ProviderError {
             | Self::LoginRequired
             | Self::CredentialUnavailable
             | Self::CredentialNotFound
-            | Self::CredentialExpired => B::None,
+            | Self::CredentialExpired
+            | Self::RefreshDeferred => B::None,
         }
     }
 }

@@ -413,8 +413,12 @@ if [ -n "$app_stage" ]; then
         helper_path="$HOME/Applications/$app/$helper_executable"
         agent_temp=$(mktemp "${agent}.update.XXXXXX") || die 4 'Could not prepare the menu bar LaunchAgent update'
         cp -p "$agent" "$agent_temp" || die 4 'Could not prepare the menu bar LaunchAgent update'
-        plutil -replace ProgramArguments.0 -string "$helper_path" "$agent_temp" || die 4 'Could not update the Provenant menu bar LaunchAgent'
+        plutil -replace ProgramArguments -array "$agent_temp" || die 4 'Could not reset the Provenant menu bar LaunchAgent arguments'
+        plutil -insert ProgramArguments.0 -string "$helper_path" "$agent_temp" || die 4 'Could not update the Provenant menu bar LaunchAgent'
         [ "$(plutil -extract ProgramArguments.0 raw -o - "$agent_temp")" = "$helper_path" ] || die 4 'Could not verify the Provenant menu bar LaunchAgent'
+        if plutil -extract ProgramArguments.1 raw -o - "$agent_temp" >/dev/null 2>&1; then
+            die 4 'Could not verify the Provenant menu bar LaunchAgent arguments'
+        fi
         mv -f "$agent_temp" "$agent" || die 4 'Could not publish the menu bar LaunchAgent'
         agent_temp=
         [ -x "$helper_path" ] || die 4 'The installed Provenant app has no menu bar helper'

@@ -1,4 +1,3 @@
-
 #[test]
 fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -312,6 +311,11 @@ impl provenant_os::exec::Executor for KeychainScript {
         &self,
         options: provenant_os::exec::ExecOptions<'_>,
     ) -> Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError> {
+        if options.argv.get(1).is_some_and(|arg| arg == "-p") {
+            assert!(options.wait_for_completion);
+            assert!(options.process_group);
+            assert!(options.inherited_lease.is_some());
+        }
         let text = |items: &[OsString]| {
             items
                 .iter()
@@ -989,13 +993,15 @@ fn claude_lane_prefers_the_registered_lane_token_and_never_rotates_the_login() {
         config_dir: &config,
     };
     let key = crate::identity::fingerprint("fixture@example.test").unwrap();
-    let account =
-        crate::identity::RegisteredAccount::new("claude", &key, config.clone()).unwrap();
+    let account = crate::identity::RegisteredAccount::new("claude", &key, config.clone()).unwrap();
     let lane = claude::refresh_for_account(&script, &login, &account, &|| now, now + 60_000)
         .expect("lane token");
     assert_eq!(lane.access, "fixture-lane-token");
     let calls = script.script.calls.lock().unwrap();
-    assert!(calls.iter().all(|(argv, _, _)| argv[1] == "auth"), "{calls:?}");
+    assert!(
+        calls.iter().all(|(argv, _, _)| argv[1] == "auth"),
+        "{calls:?}"
+    );
 }
 
 #[test]
@@ -1160,6 +1166,11 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
     assert!(token.is_err());
     assert!(calls.is_empty());
 
+    // A short admission budget defers an expired token without spawning Claude.
+    let (token, calls) = run_by(vec![item("fixture-access", now)], now + 59_999);
+    assert!(matches!(token, Err(ProviderError::RefreshDeferred)));
+    assert!(calls.is_empty());
+
     // A live token is used as read: no refresh, and Debug never shows it.
     let (token, calls) = run(vec![item("fixture-access", now + hour)]);
     let token = token.expect("live token");
@@ -1192,7 +1203,7 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
     let (token, _) = run(vec![expiring.clone(), expiring.clone()]);
     token.expect("still usable");
     let (token, _) = run(vec![expiring, item("fixture-access", now + 30_000)]);
-    assert!(matches!(token, Err(ProviderError::CredentialUnavailable)));
+    assert!(matches!(token, Err(ProviderError::RefreshDeferred)));
 
     // An expired token is refreshed; it stays expired only if the CLI fails.
     let (token, calls) = run(vec![
@@ -1205,7 +1216,7 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
         item("fixture-access", now),
         item("fixture-access", now),
     ]);
-    assert!(matches!(token, Err(ProviderError::CredentialExpired)));
+    assert!(matches!(token, Err(ProviderError::RefreshDeferred)));
     assert_eq!(calls.len(), 1);
 
     // Corrupt stored JSON cannot be repaired by refreshing.

@@ -325,6 +325,7 @@ impl Executor for HostProbeExecutor<'_> {
                 .map(|filter| filter as &mut dyn CaptureFilter),
             cancel: options.cancel,
             timeout: options.timeout,
+            wait_for_completion: options.wait_for_completion,
             terminate_grace: options.terminate_grace,
             reap_timeout: options.reap_timeout,
             stop_on_output_limit: options.stop_on_output_limit,

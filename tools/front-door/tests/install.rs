@@ -1357,7 +1357,7 @@ esac
     fs::remove_dir_all(retained)?;
     fs::write(
         &plutil,
-        "#!/bin/sh\ncase \"$1\" in -replace) printf '%s' \"$4\" > \"$5\" ;; -extract) cat \"$6\" ;; esac\n",
+        "#!/bin/sh\ncase \"$1:$2\" in -replace:ProgramArguments) : > \"$4\" ;; -insert:ProgramArguments.0) printf '%s' \"$4\" > \"$5\" ;; -extract:ProgramArguments.0) cat \"$6\" ;; *) exit 1 ;; esac\n",
     )?;
     fs::write(&launchctl, "#!/bin/sh\nexit 0\n")?;
     // A retained legacy bundle must not look like an active wrapper stage.
@@ -1780,9 +1780,12 @@ fn upgrade_pins_one_release_replays_settings_and_reports_peer_failure() -> Resul
     let agent = home.join("Library/LaunchAgents/dev.provenant.quota-menubar.plist");
     fs::create_dir_all(agent.parent().ok_or("agent parent")?)?;
     if cfg!(target_os = "macos") {
+        let old_arguments = "<string>/old/build/quota-menubar</string>".repeat(32);
         fs::write(
             &agent,
-            r#"<?xml version="1.0"?><plist version="1.0"><dict><key>Label</key><string>dev.provenant.quota-menubar</string><key>ProgramArguments</key><array><string>/old/build/quota-menubar</string><string>--kept</string></array></dict></plist>"#,
+            format!(
+                r#"<?xml version="1.0"?><plist version="1.0"><dict><key>Label</key><string>dev.provenant.quota-menubar</string><key>ProgramArguments</key><array>{old_arguments}<string>--kept</string></array></dict></plist>"#
+            ),
         )?;
     }
     let fake_bin = rig.root.join("fake-bin");
@@ -2056,17 +2059,24 @@ esac
     );
     assert!(installed_app.join(MENU_EXECUTABLE).is_file());
     if cfg!(target_os = "macos") {
-        let plist = fs::read_to_string(&agent)?;
         let agent_path = agent.to_str().ok_or("agent")?;
-        assert!(
-            plist.contains(
-                installed_app
-                    .join(MENU_EXECUTABLE)
-                    .to_str()
-                    .ok_or("agent path")?
-            )
-        );
-        assert!(plist.contains("--kept"));
+        let helper_executable = installed_app.join(MENU_EXECUTABLE);
+        let helper_path = helper_executable.to_str().ok_or("agent path")?;
+        let arguments = rig.execute_os(
+            Path::new("/usr/bin/plutil"),
+            &[
+                "-extract".into(),
+                "ProgramArguments".into(),
+                "json".into(),
+                "-o".into(),
+                "-".into(),
+                agent_path.into(),
+            ],
+            None,
+        )?;
+        assert_eq!(code(&arguments), 0);
+        let arguments: Vec<String> = serde_json::from_slice(&arguments.stdout.bytes)?;
+        assert_eq!(arguments, vec![helper_path]);
         let launches = fs::read_to_string(&launch_log)?;
         assert!(launches.contains("bootout gui/"));
         assert!(launches.contains("bootstrap gui/"));

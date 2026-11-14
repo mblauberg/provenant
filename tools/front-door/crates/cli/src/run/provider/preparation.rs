@@ -157,7 +157,6 @@ pub(super) fn provider_preparation_fallback(
     use provenant_providers::ProviderError;
     match error {
         ProviderError::LoginRequired
-        | ProviderError::CredentialUnavailable
         | ProviderError::CredentialNotFound
         | ProviderError::CredentialExpired => provenant_routing::FallbackOutcome::AuthRequired,
         _ => provenant_routing::FallbackOutcome::Other,
@@ -173,7 +172,17 @@ pub(super) fn credential_failure_skip(
     directory: &Path,
 ) -> SkippedRoute {
     use provenant_providers::ProviderError;
-    let mut skipped = skip(route, SkipKind::AuthRequired, "credential refresh failed");
+    let kind = if matches!(
+        error,
+        ProviderError::LoginRequired
+            | ProviderError::CredentialNotFound
+            | ProviderError::CredentialExpired
+    ) {
+        SkipKind::AuthRequired
+    } else {
+        SkipKind::Refused
+    };
+    let mut skipped = skip(route, kind, "credential refresh failed");
     let cause = match error {
         ProviderError::CredentialNotFound => provenant_records::RouteExclusionReason::AuthRequired,
         ProviderError::CredentialExpired => provenant_records::RouteExclusionReason::LoginExpired,
@@ -2163,6 +2172,17 @@ pub(super) fn prepare_candidates(
                                     == Some(provenant_quota::ProbeFailure::AccountMismatch)
                         });
                     let auth_failure = mismatch
+                        || diagnostic_records.iter().any(|record| {
+                            record.account.adapter == entry.adapter
+                                && record.account.account_key == entry.key
+                                && (record
+                                    .last_error
+                                    .is_some_and(provenant_quota::ProbeFailure::needs_login)
+                                    || record.snapshot.as_ref().is_some_and(|snapshot| {
+                                        snapshot.status
+                                            == provenant_quota::QuotaStatus::AuthRequired
+                                    }))
+                        })
                         || matches!(
                             recorded.reason,
                             Some(
@@ -3107,8 +3127,8 @@ pub(super) fn prepare_candidates(
             let authority = match credential_authority(roots.state.as_path(), paths, &login) {
                 Ok(authority) => authority,
                 Err(error) => {
-                    previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
-                    reasons.push(skip(&label, SkipKind::AuthRequired, error));
+                    previous_outcome = provenant_routing::FallbackOutcome::Other;
+                    reasons.push(skip(&label, SkipKind::Refused, error));
                     continue;
                 }
             };
@@ -3129,7 +3149,7 @@ pub(super) fn prepare_candidates(
             ) {
                 Ok(token) => Some(token),
                 Err(error) => {
-                    previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
+                    previous_outcome = provider_preparation_fallback(&error);
                     reasons.push(credential_failure_skip(
                         &label,
                         &error,

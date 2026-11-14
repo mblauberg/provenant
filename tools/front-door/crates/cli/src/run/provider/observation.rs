@@ -194,6 +194,9 @@ pub(super) fn account_observation_error(
     error: &provenant_providers::ProviderError,
 ) -> AccountObservationError {
     use provenant_providers::ProviderError;
+    if matches!(error, ProviderError::RefreshDeferred) {
+        return AccountObservationError::Other("provider CLI deferred token refresh".into());
+    }
     if matches!(
         error,
         ProviderError::LoginRequired

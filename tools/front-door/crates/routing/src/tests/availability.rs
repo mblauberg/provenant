@@ -340,6 +340,19 @@ fn availability_access_and_scoped_quota_are_independent_gates()
         };
         assert_eq!(reason(&resolve(&query, &auth_context)?), expected.as_ref());
     }
+    let refresh_pending = [quota(
+        "codex/test",
+        "opaque-account",
+        QuotaStatus::RefreshPending,
+        1,
+        80,
+        120,
+    )?];
+    let pending_context = RoutingContext {
+        quota: &refresh_pending,
+        ..context
+    };
+    assert!(reason(&resolve(&query, &pending_context)?).is_none());
     let newer_unknown = [
         quota(
             "codex/test",

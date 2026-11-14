@@ -9,6 +9,12 @@ use std::collections::BTreeMap;
 pub struct Settings {
     pub max_parallel: u64,
     pub wall_budget_seconds: u64,
+    /// Independent CLI refresh deadline, in seconds.
+    #[serde(default = "default_refresh_budget_seconds")]
+    pub refresh_budget_seconds: u64,
+    /// Minimum independent refresh budget remaining before the CLI may start.
+    #[serde(default = "default_refresh_min_budget_seconds")]
+    pub refresh_min_budget_seconds: u64,
     /// Timer and open-panel polling overrides, keyed by adapter.
     #[serde(default)]
     pub polling_intervals: BTreeMap<String, PollingIntervals>,
@@ -48,9 +54,17 @@ impl Settings {
 fn default_history_max_bytes() -> u64 {
     crate::DEFAULT_HISTORY_MAX_BYTES
 }
-pub const DEFAULT_LOGIN_WARNING_SECONDS: u64 = 3600;
+pub const DEFAULT_LOGIN_WARNING_SECONDS: u64 = 10 * 24 * 60 * 60;
 fn default_login_warning_seconds() -> u64 {
     DEFAULT_LOGIN_WARNING_SECONDS
+}
+pub const DEFAULT_REFRESH_BUDGET_SECONDS: u64 = 120;
+fn default_refresh_budget_seconds() -> u64 {
+    DEFAULT_REFRESH_BUDGET_SECONDS
+}
+pub const DEFAULT_REFRESH_MIN_BUDGET_SECONDS: u64 = 60;
+fn default_refresh_min_budget_seconds() -> u64 {
+    DEFAULT_REFRESH_MIN_BUDGET_SECONDS
 }
 /// Most accounts a single quota probe tick may run at once.
 pub const MAX_PARALLEL: u64 = 16;
@@ -100,6 +114,8 @@ impl Default for Settings {
         Self {
             max_parallel: 3,
             wall_budget_seconds: DEFAULT_WALL_BUDGET_SECONDS,
+            refresh_budget_seconds: default_refresh_budget_seconds(),
+            refresh_min_budget_seconds: default_refresh_min_budget_seconds(),
             polling_intervals: BTreeMap::new(),
             display: Display::default(),
             calibration: BTreeMap::new(),
@@ -118,6 +134,15 @@ impl DomainConfig for Settings {
             (
                 "wall_budget_seconds",
                 (1..=MAX_WALL_BUDGET_SECONDS).contains(&self.wall_budget_seconds),
+            ),
+            (
+                "refresh_budget_seconds",
+                (1..=MAX_WALL_BUDGET_SECONDS).contains(&self.refresh_budget_seconds),
+            ),
+            (
+                "refresh_min_budget_seconds",
+                (1..=MAX_WALL_BUDGET_SECONDS).contains(&self.refresh_min_budget_seconds)
+                    && self.refresh_min_budget_seconds <= self.refresh_budget_seconds,
             ),
         ]
         .into_iter()
@@ -183,6 +208,12 @@ impl DomainConfig for Settings {
 pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::int("max_parallel", 1, MAX_PARALLEL as i64),
     FieldMetadata::int("wall_budget_seconds", 1, MAX_WALL_BUDGET_SECONDS as i64),
+    FieldMetadata::int("refresh_budget_seconds", 1, MAX_WALL_BUDGET_SECONDS as i64),
+    FieldMetadata::int(
+        "refresh_min_budget_seconds",
+        1,
+        MAX_WALL_BUDGET_SECONDS as i64,
+    ),
     FieldMetadata::int("login_expiry_warning_seconds", 0, i64::MAX),
     FieldMetadata::int(
         "history_max_bytes",
@@ -199,7 +230,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
 ];
 pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     "quota",
-    |_| "max_parallel = 3\nwall_budget_seconds = 55\nhistory_max_bytes = 4194304\nlogin_expiry_warning_seconds = 3600\n\n[display]\nheadline = \"auto\"\nicon = \"most_constrained\"\n",
+    |_| "max_parallel = 3\nwall_budget_seconds = 55\nrefresh_budget_seconds = 120\nrefresh_min_budget_seconds = 60\nhistory_max_bytes = 4194304\nlogin_expiry_warning_seconds = 864000\n\n[display]\nheadline = \"auto\"\nicon = \"most_constrained\"\n",
 )
 .with_boundary_check(|error| error.code == "ceiling")
 .with_fields(FIELD_METADATA);
@@ -214,12 +245,34 @@ mod tests {
     #[test]
     fn login_warning_defaults_and_overrides() {
         let defaults = parse(BASE).unwrap();
-        assert_eq!(defaults.login_expiry_warning_seconds, 3600);
+        assert_eq!(defaults.login_expiry_warning_seconds, 864_000);
+        assert_eq!(defaults.refresh_budget_seconds, 120);
+        assert_eq!(defaults.refresh_min_budget_seconds, 60);
         for seconds in [0, 900, 86_400] {
             let settings =
                 parse(&format!("{BASE}login_expiry_warning_seconds = {seconds}\n")).unwrap();
             assert_eq!(settings.login_expiry_warning_seconds, seconds);
             assert!(settings.validate().is_empty());
+        }
+    }
+    #[test]
+    fn refresh_budgets_have_safe_defaults_and_bounded_overrides() {
+        let defaults = parse(BASE).unwrap();
+        assert_eq!(defaults.refresh_budget_seconds, 120);
+        assert_eq!(defaults.refresh_min_budget_seconds, 60);
+        for (budget, minimum) in [(60, 1), (120, 60), (600, 600)] {
+            let settings = parse(&format!(
+                "{BASE}refresh_budget_seconds = {budget}\nrefresh_min_budget_seconds = {minimum}\n"
+            ))
+            .unwrap();
+            assert!(settings.validate().is_empty());
+        }
+        for (budget, minimum) in [(0, 1), (60, 0), (60, 61), (601, 1)] {
+            let settings = parse(&format!(
+                "{BASE}refresh_budget_seconds = {budget}\nrefresh_min_budget_seconds = {minimum}\n"
+            ))
+            .unwrap();
+            assert!(!settings.validate().is_empty());
         }
     }
     #[test]

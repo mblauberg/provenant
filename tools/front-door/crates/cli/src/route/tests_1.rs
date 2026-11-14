@@ -344,94 +344,96 @@
             AccountRecord, AccountScope, LOCAL_HOST, ReadinessFile, ReadinessReason,
         };
         use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir()?;
-        let mut inputs =
-            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
-        inputs.state_dir = Some(temp.path().join("state"));
-        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-        let dir = roots.state.as_path().join("readiness/key");
-        std::fs::create_dir_all(&dir)?;
-        for path in [
-            roots.state.as_path(),
-            roots.state.as_path().join("readiness").as_path(),
-            dir.as_path(),
-        ] {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-        }
-        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
-        let account = AccountRecord::empty(AccountScope {
-            adapter: "codex".into(),
-            account_key: "key".into(),
-            label: "work".into(),
-        });
-        let mut file = ReadinessFile::default();
-        file.sync_probe_result(
-            &account,
-            LOCAL_HOST,
-            now - 10,
-            300,
-            Some(ReadinessReason::SignedOut),
-        )?;
-        let path = dir.join("codex.json");
-        std::fs::write(&path, serde_json::to_vec(&file)?)?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        let catalogue = super::Catalogue::bundled()?;
-        let mut available = provenant_providers::AvailabilityRecord {
-            schema_version: 1,
-            adapter: "codex".into(),
-            executable: "/fixture/codex".into(),
-            version: "fixture".into(),
-            last_update: None,
-            fixture_ref: "installed/codex/version".into(),
-            catalogue_revision: catalogue.revision().into(),
-            account_key: Some("key".into()),
-            observed_models: Vec::new(),
-            observed_unix_seconds: now,
-            expires_unix_seconds: now + 300,
-        };
-        let request = super::RouteRequest {
-            read_heavy: false,
-            model: Some(super::Model("codex/unlisted-exact".into())),
-            route: None,
-            effort: None,
-            confidential: false,
-            fallback: vec![],
-            exclude: vec![],
-        }
-        .to_domain()?;
-        let access = [provenant_routing::AccessContext {
-            adapter: "codex",
-            disclosure_ref: "fixture",
-            confinement_ref: "fixture",
-        }];
-        let resolve = |record: &provenant_providers::AvailabilityRecord| {
-            super::resolve_dispatch(
-                &request,
-                &roots,
-                Some("key"),
-                ("fixture", 0),
-                std::slice::from_ref(record),
-                &access,
-                "fixture",
-                None,
-                &[],
-            )
-        };
-        let before = resolve(&available)?;
-        // Current recorded sign-out evidence excludes until a healthy probe clears it.
-        assert!(matches!(
-            before.readiness,
-            provenant_records::RouteReadiness::Unavailable {
-                reason: provenant_records::RouteExclusionReason::AuthRequired,
-                ..
+        for adapter in ["codex", "claude"] {
+            let temp = tempfile::tempdir()?;
+            let mut inputs =
+                provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+            inputs.state_dir = Some(temp.path().join("state"));
+            let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+            let dir = roots.state.as_path().join("readiness/key");
+            std::fs::create_dir_all(&dir)?;
+            for path in [
+                roots.state.as_path(),
+                roots.state.as_path().join("readiness").as_path(),
+                dir.as_path(),
+            ] {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
             }
-        ));
-        available.fixture_ref = "installed/codex/login-status".into();
-        let after = resolve(&available)?;
-        assert!(matches!(
-            after.readiness,
-            provenant_records::RouteReadiness::Ready { .. }
-        ));
+            let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+            let account = AccountRecord::empty(AccountScope {
+                adapter: adapter.into(),
+                account_key: "key".into(),
+                label: "work".into(),
+            });
+            let mut file = ReadinessFile::default();
+            file.sync_probe_result(
+                &account,
+                LOCAL_HOST,
+                now - 10,
+                300,
+                Some(ReadinessReason::SignedOut),
+            )?;
+            let path = dir.join(format!("{adapter}.json"));
+            std::fs::write(&path, serde_json::to_vec(&file)?)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            let catalogue = super::Catalogue::bundled()?;
+            let mut available = provenant_providers::AvailabilityRecord {
+                schema_version: 1,
+                adapter: adapter.into(),
+                executable: format!("/fixture/{adapter}"),
+                version: "fixture".into(),
+                last_update: None,
+                fixture_ref: format!("installed/{adapter}/version"),
+                catalogue_revision: catalogue.revision().into(),
+                account_key: Some("key".into()),
+                observed_models: Vec::new(),
+                observed_unix_seconds: now,
+                expires_unix_seconds: now + 300,
+            };
+            let request = super::RouteRequest {
+                read_heavy: false,
+                model: Some(super::Model(format!("{adapter}/unlisted-exact"))),
+                route: None,
+                effort: None,
+                confidential: false,
+                fallback: vec![],
+                exclude: vec![],
+            }
+            .to_domain()?;
+            let access = [provenant_routing::AccessContext {
+                adapter,
+                disclosure_ref: "fixture",
+                confinement_ref: "fixture",
+            }];
+            let resolve = |record: &provenant_providers::AvailabilityRecord| {
+                super::resolve_dispatch(
+                    &request,
+                    &roots,
+                    Some("key"),
+                    ("fixture", 0),
+                    std::slice::from_ref(record),
+                    &access,
+                    "fixture",
+                    None,
+                    &[],
+                )
+            };
+            let before = resolve(&available)?;
+            // Current recorded sign-out evidence excludes until a healthy probe clears it.
+            assert!(matches!(
+                before.readiness,
+                provenant_records::RouteReadiness::Unavailable {
+                    reason: provenant_records::RouteExclusionReason::AuthRequired,
+                    ..
+                }
+            ));
+            available.fixture_ref = format!("installed/{adapter}/login-status");
+            let after = resolve(&available)?;
+            assert!(matches!(
+                after.readiness,
+                provenant_records::RouteReadiness::Ready { .. }
+            ));
+        }
         Ok(())
     }
 

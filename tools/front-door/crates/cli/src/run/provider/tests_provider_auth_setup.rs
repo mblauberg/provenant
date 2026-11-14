@@ -4,7 +4,6 @@ fn provider_preparation_fallback_preserves_authority_and_identity_failures() {
     use provenant_routing::FallbackOutcome;
     for error in [
         ProviderError::LoginRequired,
-        ProviderError::CredentialUnavailable,
         ProviderError::CredentialNotFound,
         ProviderError::CredentialExpired,
     ] {
@@ -13,7 +12,12 @@ fn provider_preparation_fallback_preserves_authority_and_identity_failures() {
             FallbackOutcome::AuthRequired
         );
     }
+    assert_eq!(
+        provider_preparation_fallback(&ProviderError::RefreshDeferred),
+        FallbackOutcome::Other
+    );
     for error in [
+        ProviderError::CredentialUnavailable,
         ProviderError::UnsupportedPolicy,
         ProviderError::IdentityMismatch,
         ProviderError::UnknownIdentity,
@@ -930,13 +934,22 @@ fn credential_refresh_skip_retains_selected_account_login_only_for_typed_causes(
         assert!(!diagnostic.contains("/fixture/account work"));
         assert_eq!(skipped.diagnostic().code, "REFUSED");
     }
+    let deferred = credential_failure_skip(
+        "claude/model",
+        &ProviderError::RefreshDeferred,
+        &entry.label,
+        &entry.directory,
+    );
+    assert_eq!(deferred.kind, SkipKind::Refused);
+    assert_eq!(deferred.cause, None);
+    assert!(!deferred.detail.contains("claude auth login"));
     for error in [
         ProviderError::CredentialReadFailed("TOKEN_SENTINEL /private/provider\u{1b}".into()),
         ProviderError::CredentialUnavailable,
     ] {
         let skipped =
             credential_failure_skip("claude/model", &error, &entry.label, &entry.directory);
-        assert_eq!(skipped.kind, SkipKind::AuthRequired);
+        assert_eq!(skipped.kind, SkipKind::Refused);
         assert_eq!(skipped.cause, None);
         assert!(!skipped.detail.contains("TOKEN_SENTINEL"));
         assert!(!skipped.detail.contains("/private/provider"));

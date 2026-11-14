@@ -301,22 +301,6 @@ impl ReadinessFile {
         if scoped.state == ReadinessState::Unavailable {
             return scoped;
         }
-        if let Some(login) = &self.login
-            && login.scope.host == scope.host
-            && login.scope.adapter == scope.adapter
-            && login.scope.account_key == scope.account_key
-            && login.state(now, 0) == LoginExpiryState::Expired
-        {
-            return ReadinessRead {
-                observed_scope: Some(login.scope.clone()),
-                state: ReadinessState::Unavailable,
-                reason: Some(ReadinessReason::LoginExpired),
-                observed_unix_seconds: Some(login.observed_unix_seconds),
-                expires_unix_seconds: Some(login.valid_until_unix_seconds),
-                reset_unix_seconds: None,
-                evidence_ref: Some("login-expiry".into()),
-            };
-        }
         scoped
     }
 
@@ -472,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_expiry_excludes_only_after_expiration_and_expires_with_evidence() {
+    fn login_expiry_metadata_never_synthesizes_a_routing_veto() {
         let file = ReadinessFile {
             login: Some(LoginObservation {
                 scope: ReadinessScope {
@@ -498,15 +482,9 @@ mod tests {
             Some(ReadinessReason::NotProbed)
         );
         let expired = file.get(&route, 200);
-        assert_eq!(expired.state, ReadinessState::Unavailable);
-        assert_eq!(expired.reason, Some(ReadinessReason::LoginExpired));
-        assert!(matches!(
-            expired.project(),
-            provenant_records::RouteReadiness::Unavailable {
-                reason: provenant_records::RouteExclusionReason::LoginExpired,
-                ..
-            }
-        ));
+        assert_eq!(expired.state, ReadinessState::Unknown);
+        assert_eq!(expired.reason, Some(ReadinessReason::NotProbed));
+        assert!(expired.project().is_unknown());
         assert_eq!(
             file.get(&route, 300).reason,
             Some(ReadinessReason::NotProbed)

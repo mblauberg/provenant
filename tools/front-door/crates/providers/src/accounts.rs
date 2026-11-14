@@ -580,16 +580,8 @@ fn detect_with_org_inner(
     {
         return Err(ProviderError::UnknownIdentity);
     }
-    if out.termination != Termination::Exit(0) {
-        return Err(
-            if crate::Adapter::failure_cause(&crate::claude::Claude, &out.stderr.bytes)
-                == crate::FailureCause::AuthRequired
-            {
-                ProviderError::CredentialUnavailable
-            } else {
-                ProviderError::UnknownIdentity
-            },
-        );
+    if !matches!(out.termination, Termination::Exit(_)) {
+        return Err(ProviderError::UnknownIdentity);
     }
     #[derive(Deserialize)]
     struct Status {
@@ -604,6 +596,9 @@ fn detect_with_org_inner(
         serde_json::from_slice(&out.stdout.bytes).map_err(|_| ProviderError::UnknownIdentity)?;
     if !status.logged_in {
         return Err(ProviderError::LoginRequired);
+    }
+    if out.termination != Termination::Exit(0) {
+        return Err(ProviderError::UnknownIdentity);
     }
     let key = status
         .email

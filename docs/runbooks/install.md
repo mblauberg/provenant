@@ -250,8 +250,11 @@ collection only). A modified plist is kept and blocks install: move it aside,
 run `launchctl bootout gui/$UID/dev.provenant.peer` (or `.tick`), and rerun
 install. After an upgrade, confirm the tick is loaded with
 `launchctl print gui/$UID/dev.provenant.tick`; `launchctl kickstart -k` it if
-not. `provenant hosts doctor` shows its last exit; an idle exit 0 is normal and
-`provenant upgrade` is the repair for anything else.
+not. `provenant hosts doctor` shows its last exit; an idle exit 0 is normal. Exit 3
+means `provenant tick` reported an error in graph or scheduled work, or failed
+before it could complete the tick (including a result-write failure). Inspect
+that run's tick output and result to identify the underlying cause; upgrading
+only repairs installation drift.
 
 On Linux, a default-state install writes `provenant-tick.service` and
 `provenant-tick.timer` under `$XDG_CONFIG_HOME/systemd/user` (else

@@ -81,6 +81,11 @@ pub struct LiveQuota {
     roots: Option<provenant_core::Roots>,
     accounts: RefCell<Vec<Account>>,
     refresh_expired: bool,
+    refresh_pending: RefCell<bool>,
+    refresh_min_budget_seconds: u64,
+    refresh_budget_seconds: u64,
+    access_expiry: RefCell<Option<i64>>,
+    signed_in: RefCell<Option<bool>>,
     login_expiry: RefCell<Option<i64>>,
     readiness_failure: RefCell<Option<provenant_quota::ReadinessReason>>,
     last_reconcile_error: RefCell<Option<String>>,
@@ -174,6 +179,11 @@ impl LiveQuota {
             roots: Some(roots.clone()),
             accounts: RefCell::new(accounts),
             refresh_expired: true,
+            refresh_pending: RefCell::new(false),
+            refresh_min_budget_seconds: 60,
+            refresh_budget_seconds: 120,
+            access_expiry: RefCell::new(None),
+            signed_in: RefCell::new(None),
             login_expiry: RefCell::new(None),
             readiness_failure: RefCell::new(None),
             last_reconcile_error: RefCell::new(None),
@@ -181,6 +191,14 @@ impl LiveQuota {
             #[cfg(test)]
             executor: None,
         })
+    }
+    pub fn with_refresh_budget(mut self, seconds: u64) -> Self {
+        self.refresh_budget_seconds = seconds;
+        self
+    }
+    pub fn with_refresh_minimum(mut self, seconds: u64) -> Self {
+        self.refresh_min_budget_seconds = seconds;
+        self
     }
     pub fn last_reconcile_error(&self) -> Option<String> {
         self.last_reconcile_error.borrow().clone()
@@ -386,6 +404,9 @@ impl QuotaEffects for LiveQuota {
     ) -> Result<ProbeCapture, ProbeFailure> {
         *self.readiness_failure.borrow_mut() = None;
         *self.login_expiry.borrow_mut() = None;
+        *self.access_expiry.borrow_mut() = None;
+        *self.signed_in.borrow_mut() = None;
+        *self.refresh_pending.borrow_mut() = false;
         let account = self
             .accounts
             .borrow()
@@ -463,6 +484,15 @@ impl QuotaEffects for LiveQuota {
         }
     }
 
+    fn access_token_expiry_unix_seconds(&self) -> Option<i64> {
+        *self.access_expiry.borrow()
+    }
+    fn refresh_pending(&self) -> bool {
+        *self.refresh_pending.borrow()
+    }
+    fn signed_in(&self) -> Option<bool> {
+        *self.signed_in.borrow()
+    }
     fn login_expiry_unix_seconds(&self) -> Option<i64> {
         *self.login_expiry.borrow()
     }
@@ -589,6 +619,12 @@ impl LiveQuota {
         let signed_in = payload.get("status").and_then(Value::as_str) == Some("SUCCESS");
         let actual = agy_signed_in_account(signed_in, read(&log).ok())?;
         let key = format!("agy-{actual}");
+        // A safe atomic save is not a missing keychain. Its identity stamp is
+        // uncertain for this observation, so retry briefly rather than applying
+        // the unavailable-keychain backoff or caching an old account identity.
+        if crate::agy::keychain_stamp(&account.identity_dir) != stamp_before {
+            return Err(ProbeFailure::Network);
+        }
         let models = crate::quota::extract_agy_models(Some(&payload), None);
         crate::agy::remember_identity(
             &self.state,
@@ -687,6 +723,11 @@ mod tests {
             roots: None,
             accounts: RefCell::new(Vec::new()),
             refresh_expired: false,
+            refresh_pending: RefCell::new(false),
+            refresh_min_budget_seconds: 60,
+            refresh_budget_seconds: 120,
+            access_expiry: RefCell::new(None),
+            signed_in: RefCell::new(None),
             login_expiry: RefCell::new(None),
             readiness_failure: RefCell::new(None),
             last_reconcile_error: RefCell::new(None),
@@ -729,16 +770,22 @@ mod tests {
         struct ChangingKeychain {
             inner: AgyUsage,
             keychain: PathBuf,
+            atomic: bool,
         }
         impl Executor for ChangingKeychain {
             fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
                 let outcome = self.inner.execute(options)?;
-                // Modify in place: the inode guard still passes, but the stamp must not.
-                fs::write(&self.keychain, "signed in as a different account").unwrap();
+                if self.atomic {
+                    let replacement = self.keychain.with_extension("replacement");
+                    fs::write(&replacement, "atomic save").unwrap();
+                    fs::rename(replacement, &self.keychain).unwrap();
+                } else {
+                    fs::write(&self.keychain, "signed in as a different account").unwrap();
+                }
                 Ok(outcome)
             }
         }
-        for quota_probe in [false, true] {
+        for (quota_probe, atomic) in [(false, false), (true, false), (true, true)] {
             let root = tempfile::tempdir().unwrap();
             let home = root.path().join("home");
             let state = root.path().join("state");
@@ -754,6 +801,7 @@ mod tests {
                     homes: homes.clone(),
                 },
                 keychain,
+                atomic,
             };
             let key = format!(
                 "agy-{}",
@@ -772,8 +820,10 @@ mod tests {
                     identity_dir: home.clone(),
                     options: Value::Null,
                 };
-                live.agy(&account, live.now() + 60, &mut QuotaDetails::default())
-                    .unwrap();
+                assert_eq!(
+                    live.agy(&account, live.now() + 60, &mut QuotaDetails::default()),
+                    Err(ProbeFailure::Network)
+                );
             } else {
                 assert_eq!(
                     crate::accounts::detect(
@@ -1300,6 +1350,9 @@ mod tests {
         struct Selected {
             dir: PathBuf,
             expires_ms: i64,
+            refreshes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+            requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+            refusal: bool,
             credential_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         }
         impl Executor for Selected {
@@ -1314,23 +1367,34 @@ mod tests {
                         options.argv[3],
                         OsString::from(format!("Claude Code-credentials-{suffix}"))
                     );
-                    format!(
-                        r#"{{"claudeAiOauth":{{"accessToken":"fake-selected","expiresAt":{}}}}}"#,
-                        self.expires_ms
-                    )
-                    .into_bytes()
+                    fs::read(self.dir.join(".credentials.json")).unwrap()
                 } else if program == "claude" {
                     assert_eq!(options.argv[1], OsStr::new("auth"));
                     assert_eq!(options.argv[2], OsStr::new("status"));
                     let env = options.env.unwrap();
-                    if let Some((_, value)) = env.iter().find(|(key, _)| key == "CLAUDE_CONFIG_DIR")
-                    {
-                        assert_eq!(value, self.dir.as_os_str());
-                    }
-                    br#"{"loggedIn":true,"email":"selected@example.test"}"#.to_vec()
+                    let (_, value) = env
+                        .iter()
+                        .find(|(key, _)| key == "CLAUDE_CONFIG_DIR")
+                        .expect("probe only the selected login, never the default");
+                    assert_eq!(value, self.dir.as_os_str());
+                    br#"{"loggedIn":true,"email":"selected@example.test","loginExpiresAt":"2100-01-01T00:00:00Z"}"#.to_vec()
+                } else if program == "/fixture/claude" {
+                    assert!(options.wait_for_completion);
+                    assert!(options.inherited_lease.is_some());
+                    self.refreshes
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    fs::write(self.dir.join(".credentials.json"), format!(r#"{{"claudeAiOauth":{{"accessToken":"fake-renewed","expiresAt":{}}}}}"#, self.expires_ms + 7_200_000)).unwrap();
+                    Vec::new()
                 } else {
                     assert_eq!(program, "/usr/bin/curl");
-                    b"{}\n200".to_vec()
+                    let request = self
+                        .requests
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if self.refusal && request == 0 {
+                        b"{}\n401".to_vec()
+                    } else {
+                        b"{}\n200".to_vec()
+                    }
                 };
                 Ok(ExecOutcome {
                     termination: Termination::Exit(0),
@@ -1355,6 +1419,8 @@ mod tests {
         fs::create_dir_all(&state).unwrap();
         let mut live = quota(&home, state);
         let credential_reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let refreshes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let expires_ms = (live.now() + 3600) * 1000;
         fs::write(
             selected.join(".credentials.json"),
@@ -1366,6 +1432,9 @@ mod tests {
         live.executor = Some(Box::new(Selected {
             dir: selected.clone(),
             expires_ms,
+            refreshes: refreshes.clone(),
+            requests: requests.clone(),
+            refusal: scenario == 3,
             credential_reads: credential_reads.clone(),
         }));
         let account = Account {
@@ -1377,12 +1446,22 @@ mod tests {
             identity_dir: selected,
             options: Value::Null,
         };
-        if scenario == 0 {
+        if scenario == 0 || scenario == 3 {
+            live.refresh_expired = scenario == 3;
             assert!(
-                live.claude(&account, live.now() + 60, &mut QuotaDetails::default())
+                live.claude(&account, live.now() + 120, &mut QuotaDetails::default())
                     .is_ok()
             );
-            assert_eq!(live.login_expiry_unix_seconds(), Some(expires_ms / 1000));
+            assert_eq!(live.login_expiry_unix_seconds(), Some(4102444800));
+            assert_eq!(live.signed_in(), Some(true));
+            assert_eq!(
+                refreshes.load(std::sync::atomic::Ordering::Relaxed),
+                usize::from(scenario == 3)
+            );
+            assert_eq!(
+                requests.load(std::sync::atomic::Ordering::Relaxed),
+                if scenario == 3 { 2 } else { 1 }
+            );
             return;
         }
         if scenario == 1 {
@@ -1401,7 +1480,7 @@ mod tests {
             assert_eq!(
                 live.claude(
                     &wrong_account,
-                    live.now() + 60,
+                    live.now() + 120,
                     &mut QuotaDetails::default()
                 ),
                 Err(ProbeFailure::AccountMismatch)
@@ -1425,13 +1504,36 @@ mod tests {
         live.executor = Some(Box::new(Selected {
             dir: account.identity_dir.clone(),
             expires_ms,
+            refreshes: refreshes.clone(),
+            requests,
+            refusal: false,
             credential_reads,
         }));
-        assert_eq!(
-            live.claude(&account, live.now() + 60, &mut QuotaDetails::default(),),
-            Err(ProbeFailure::LoginExpired)
+        if scenario == 4 {
+            live.refresh_budget_seconds = 30;
+            assert_eq!(
+                live.claude(&account, live.now() + 120, &mut QuotaDetails::default()),
+                Err(ProbeFailure::RefreshDeferred)
+            );
+            assert_eq!(live.signed_in(), Some(true));
+            assert!(live.refresh_pending());
+            assert_eq!(
+                live.access_token_expiry_unix_seconds(),
+                Some(expires_ms / 1000)
+            );
+            assert_eq!(refreshes.load(std::sync::atomic::Ordering::Relaxed), 0);
+            return;
+        }
+        assert!(
+            live.claude(&account, live.now() + 120, &mut QuotaDetails::default())
+                .is_ok()
         );
-        assert_eq!(live.login_expiry_unix_seconds(), Some(expires_ms / 1000));
+        assert_eq!(refreshes.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(live.login_expiry_unix_seconds(), Some(4102444800));
+        assert_eq!(
+            live.access_token_expiry_unix_seconds(),
+            Some(expires_ms / 1000 + 7200)
+        );
         assert!(!live.state.join("quota-claude-refresh.json").exists());
     }
 
@@ -1444,8 +1546,18 @@ mod tests {
         claude_selected_identity(1);
     }
     #[test]
-    fn claude_quota_does_not_refresh_shared_account() {
+    fn claude_quota_refreshes_selected_login_for_same_account() {
         claude_selected_identity(2);
+    }
+
+    #[test]
+    fn claude_usage_refusal_refreshes_once_then_retries() {
+        claude_selected_identity(3);
+    }
+
+    #[test]
+    fn claude_expired_access_token_with_signed_in_status_defers_without_refresh() {
+        claude_selected_identity(4);
     }
 
     #[test]
@@ -1533,11 +1645,13 @@ mod tests {
             options: Value::Null,
         };
         assert_eq!(
-            live.claude(&account, live.now() + 60, &mut QuotaDetails::default()),
+            live.claude(&account, live.now() + 120, &mut QuotaDetails::default()),
             Err(ProbeFailure::Network)
         );
+        assert_eq!(live.signed_in(), Some(true));
+        assert!(live.refresh_pending());
         assert!(
-            live.claude(&account, live.now() + 60, &mut QuotaDetails::default())
+            live.claude(&account, live.now() + 120, &mut QuotaDetails::default())
                 .is_ok()
         );
         assert_eq!(count.load(Ordering::Relaxed), 2);

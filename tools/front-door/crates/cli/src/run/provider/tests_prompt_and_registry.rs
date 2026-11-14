@@ -356,7 +356,9 @@ fn an_account_mismatch_is_cleared_only_by_a_check_that_names_the_account() {
         assert!(super::preparation::login_check_can_clear(adapter, false));
         assert!(!super::preparation::login_check_can_clear(adapter, true));
     }
-    assert!(super::preparation::login_check_can_clear("agy", true));
+    for adapter in ["agy", "claude"] {
+        assert!(super::preparation::login_check_can_clear(adapter, true));
+    }
 }
 
 #[test]

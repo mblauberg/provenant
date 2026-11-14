@@ -364,8 +364,9 @@ fn parse_stored_token(bytes: &[u8], now_ms: u64) -> Result<OauthToken, ProviderE
 /// servers, no slash commands, no session file) in the executor's private
 /// working directory. Host callers share an exclusive config-directory lock
 /// across a second read, refresh and reread, so only one CLI can rotate its token.
-/// Every subprocess is capped by the caller's `deadline_ms` on the
-/// `now_ms` clock. The token is never logged, printed or persisted.
+/// Reads and admission use the caller's deadline. Once admitted, the CLI owns
+/// rotation and runs to completion; interrupting it can lose a single-use token.
+/// The token is never logged, printed or persisted.
 pub fn refresh_if_expiring(
     executor: &dyn Executor,
     login: &Login<'_>,
@@ -373,13 +374,36 @@ pub fn refresh_if_expiring(
     deadline_ms: u64,
     authority: Option<&CredentialAuthority>,
 ) -> Result<OauthToken, ProviderError> {
+    refresh_with_policy(
+        executor,
+        login,
+        now_ms,
+        deadline_ms,
+        authority,
+        60_000,
+        false,
+    )
+}
+
+/// `minimum_budget_ms` gates admission, not an in-flight rotation. `force`
+/// asks the CLI to revalidate after an API refusal even if local expiry is fresh.
+pub(super) fn refresh_with_policy(
+    executor: &dyn Executor,
+    login: &Login<'_>,
+    now_ms: &dyn Fn() -> u64,
+    deadline_ms: u64,
+    authority: Option<&CredentialAuthority>,
+    minimum_budget_ms: u64,
+    force: bool,
+) -> Result<OauthToken, ProviderError> {
     let source = credential_source(login)?;
+    let io_deadline = std::cell::Cell::new(deadline_ms);
     if let Some(authority) = authority {
         authority.check(&source, now_ms())?;
     }
     let budget = |cap: Duration| -> Result<Duration, ProviderError> {
-        match deadline_ms.saturating_sub(now_ms()) {
-            0 => Err(ProviderError::CredentialUnavailable),
+        match io_deadline.get().saturating_sub(now_ms()) {
+            0 => Err(ProviderError::RefreshDeferred),
             left => Ok(cap.min(Duration::from_millis(left))),
         }
     };
@@ -467,11 +491,14 @@ pub fn refresh_if_expiring(
         }
     };
     match read() {
-        Ok(token) if !token.needs_refresh(now_ms()) => return Ok(token),
+        Ok(token) if !force && !token.needs_refresh(now_ms()) => return Ok(token),
         // An expired token was read successfully, so refreshing is safe: no
         // running lane can still be using it. Read failures never refresh.
         Ok(_) | Err(ProviderError::CredentialExpired) => {}
         Err(error) => return Err(error),
+    }
+    if deadline_ms.saturating_sub(now_ms()) < minimum_budget_ms {
+        return Err(ProviderError::RefreshDeferred);
     }
     // Stable inode, never removed: reread storage under this cross-process
     // lock in case another caller already refreshed the token.
@@ -486,7 +513,7 @@ pub fn refresh_if_expiring(
     let wait = WaitBudget::nonblocking(deadline);
     let directory = Directory::open_anchor(login.config_dir)
         .map_err(|_| ProviderError::CredentialUnavailable)?;
-    let _refresh_lock = directory
+    let refresh_lock = directory
         .lock(
             OsStr::new("provenant-oauth-refresh.lock"),
             LockMode::Exclusive,
@@ -496,9 +523,12 @@ pub fn refresh_if_expiring(
         )
         .map_err(|_| ProviderError::CredentialUnavailable)?;
     match read() {
-        Ok(token) if !token.needs_refresh(now_ms()) => return Ok(token),
+        Ok(token) if !force && !token.needs_refresh(now_ms()) => return Ok(token),
         Ok(_) | Err(ProviderError::CredentialExpired) => {}
         Err(error) => return Err(error),
+    }
+    if deadline_ms.saturating_sub(now_ms()) < minimum_budget_ms {
+        return Err(ProviderError::RefreshDeferred);
     }
     if authority.is_some() && credential_source(login)? != source {
         return Err(ProviderError::CredentialUnavailable);
@@ -528,17 +558,31 @@ pub fn refresh_if_expiring(
     let mut options = ExecOptions::new(
         &argv,
         Path::new(PROBE_CWD),
-        budget(Duration::from_secs(60))?,
+        Duration::from_millis(minimum_budget_ms.max(60_000)),
     );
+    options.wait_for_completion = true;
+    // Terminal interruption of the host must not interrupt token persistence.
+    options.process_group = true;
+    // Rotation may outlive a crashing host. The CLI and its descendants keep
+    // the same exclusive lock until persistence has finished.
+    options.inherited_lease = Some(&refresh_lock);
     options.env = Some(&env);
     options.stdout = StreamPolicy::Discard;
     options.stderr = StreamPolicy::Discard;
     executor
         .execute(options)
         .map_err(|_| ProviderError::CredentialUnavailable)?;
-    let token = read()?;
+    // Persistence is complete before the CLI exits. Give the final read its own
+    // budget even when the caller's tick deadline passed during the rotation.
+    io_deadline.set(now_ms().saturating_add(10_000));
+    let token = read().map_err(|error| match error {
+        ProviderError::CredentialExpired | ProviderError::CredentialNotFound => {
+            ProviderError::RefreshDeferred
+        }
+        other => other,
+    })?;
     if token.expires_at_ms.saturating_sub(now_ms()) < MIN_LIFETIME_MS {
-        return Err(ProviderError::CredentialUnavailable);
+        return Err(ProviderError::RefreshDeferred);
     }
     Ok(token)
 }
@@ -563,7 +607,12 @@ pub fn refresh_for_account_authorised(
     deadline_ms: u64,
     authority: &CredentialAuthority,
 ) -> Result<OauthToken, ProviderError> {
-    authority.check(&credential_source(login)?, now_ms())?;
+    authority
+        .check(&credential_source(login)?, now_ms())
+        .map_err(|error| match error {
+            ProviderError::CredentialUnavailable => ProviderError::RefreshDeferred,
+            other => other,
+        })?;
     refresh_account(
         executor,
         login,
@@ -587,7 +636,7 @@ fn refresh_account(
     let check = || -> Result<(), ProviderError> {
         let remaining = deadline_ms.saturating_sub(now_ms());
         if remaining == 0 {
-            return Err(ProviderError::CredentialUnavailable);
+            return Err(ProviderError::RefreshDeferred);
         }
         let argv = [
             login.executable.into(),
@@ -612,37 +661,48 @@ fn refresh_account(
         options.stop_on_output_limit = true;
         let out = executor
             .execute(options)
-            .map_err(|_| ProviderError::CredentialUnavailable)?;
-        if out.termination != Termination::Exit(0)
+            .map_err(|_| ProviderError::RefreshDeferred)?;
+        if !matches!(out.termination, Termination::Exit(_))
             || out.timed_out
             || out.stdout.truncated
             || out.stdout.read_failed
             || out.drain_truncated
             || out.cancelled
         {
-            return Err(ProviderError::CredentialUnavailable);
+            return Err(ProviderError::RefreshDeferred);
         }
         #[derive(Deserialize)]
         struct Status {
             #[serde(rename = "loggedIn")]
             logged_in: bool,
+            #[serde(default)]
             email: String,
         }
         let status: Status = serde_json::from_slice(&out.stdout.bytes)
             .map_err(|_| ProviderError::UnknownIdentity)?;
-        if !status.logged_in
-            || crate::identity::fingerprint(&status.email).as_deref() != Some(account.key())
-        {
+        if !status.logged_in {
+            return Err(ProviderError::LoginRequired);
+        }
+        if out.termination != Termination::Exit(0) {
+            return Err(ProviderError::RefreshDeferred);
+        }
+        if crate::identity::fingerprint(&status.email).as_deref() != Some(account.key()) {
             return Err(ProviderError::IdentityMismatch);
         }
         Ok(())
     };
     check()?;
-    let mut token = match lane_token(login)? {
-        Some(token) => token,
-        None => refresh_if_expiring(executor, login, now_ms, deadline_ms, authority)?,
+    let token = match lane_token(login)? {
+        Some(token) => Ok(token),
+        None => refresh_if_expiring(executor, login, now_ms, deadline_ms, authority),
     };
     check()?;
+    let mut token = token.map_err(|error| match error {
+        ProviderError::CredentialExpired
+        | ProviderError::CredentialNotFound
+        | ProviderError::CredentialUnavailable => ProviderError::RefreshDeferred,
+        other => other,
+    })?;
     token.account = Some((account.key().into(), account.directory().to_owned()));
     Ok(token)
 }
