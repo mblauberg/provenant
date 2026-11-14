@@ -2943,6 +2943,11 @@ mod tests {
     #[test]
     fn subtree_stop_preserves_detached_children_and_unrelated_nodes()
     -> Result<(), Box<dyn std::error::Error>> {
+        if super::super::peer_tests::host_test(
+            "fabric::unified::tests::subtree_stop_preserves_detached_children_and_unrelated_nodes",
+        )? {
+            return Ok(());
+        }
         struct FreeWorkers;
         impl WorkerObserver for FreeWorkers {
             fn observe_roots(

@@ -2805,6 +2805,11 @@ mod tests {
 
     #[test]
     fn stop_reports_pending_acknowledgement_without_the_graph_lock() -> Result {
+        if super::super::peer_tests::host_test(
+            "fabric::interface::tests::stop_reports_pending_acknowledgement_without_the_graph_lock",
+        )? {
+            return Ok(());
+        }
         let rig = TestRig::new()?;
         let factory = factory(&rig)?;
         let project = factory.context.identity.project;
