@@ -283,12 +283,12 @@ if "$upgrade"; then
     else
         preflight_status=$?
         [ "$preflight_status" -eq 6 ] || die "$preflight_status" 'Upgrade preflight could not inspect state'
-        if ! "$non_interactive" && ! "$reset" && { ( : </dev/tty ) 2>/dev/null || [ "${PROVENANT_INSTALL_TTY:-}" = 1 ]; }; then
+        if ! "$non_interactive" && ! "$reset" && [ -t 0 ] && [ -t 2 ]; then
             ask "Type reset to delete the dropped state listed above" no
             [ "$answer" = reset ] && reset=true
         fi
         if ! "$reset"; then
-            die 6 'Upgrade stopped by preflight; rerun with --reset-state to acknowledge'
+            die 6 'Upgrade stopped by preflight; run: install.sh --upgrade --reset-state'
         fi
         if preflight; then
             :

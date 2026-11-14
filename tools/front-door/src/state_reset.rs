@@ -57,10 +57,47 @@ fn directory(dir: &Directory, name: &OsStr) -> io::Result<Option<Directory>> {
     Ok(Some(fs(dir.open_verified_directory(name))?))
 }
 
-/// Version numbers of the dropped stores at the format-2 cut-over, not a
-/// compatibility reader. A foreign header allows recovery after an old agent
-/// recreated a store, even when a format-2 receipt has already been published.
-fn foreign_header(root: &Directory, name: &str, expected: u32) -> io::Result<bool> {
+/// Versions shipped by 1.x releases. This is reset evidence, not a compatibility
+/// reader. Never extend these sets for a format-2 schema change.
+/// Audited v1.0.0..v1.11.1 tags: run schema_v{3,4,6,7,8,9,10}.sql,
+/// fabric-store db.rs migration-array lengths {7,13,15}, ledger.rs {1,2,5,6},
+/// and pr_contribution.rs (introduced in v1.3.0) version 4. Intermediate
+/// migration versions that were never a release's current schema are excluded.
+const FORMAT_ONE_VERSIONS: &[(&str, &[u32], u32)] = &[
+    (
+        "run.sqlite3",
+        &[3, 4, 6, 7, 8, 9, 10],
+        provenant_run::RUN_SCHEMA_VERSION,
+    ),
+    (
+        "fabric/fabric.sqlite3",
+        &[7, 13, 15],
+        provenant_fabric_store::CURRENT_SCHEMA_VERSION as u32,
+    ),
+    // The host-only file first shipped at v1.3.0 (schema 13).
+    (
+        "fabric/host.sqlite3",
+        &[13, 15],
+        provenant_fabric_store::CURRENT_SCHEMA_VERSION as u32,
+    ),
+    (
+        "admission.sqlite3",
+        &[1, 2, 5, 6],
+        provenant_run::ADMISSION_SCHEMA_VERSION,
+    ),
+    (
+        "pr-contributions.sqlite3",
+        &[4],
+        provenant_run::CONTRIBUTIONS_SCHEMA_VERSION,
+    ),
+];
+
+fn format_one_header(
+    root: &Directory,
+    name: &str,
+    shipped: &[u32],
+    current: u32,
+) -> io::Result<bool> {
     let (parent, leaf) = if let Some((parent, leaf)) = name.split_once('/') {
         let Some(parent) = directory(root, OsStr::new(parent))? else {
             return Ok(false);
@@ -72,19 +109,50 @@ fn foreign_header(root: &Directory, name: &str, expected: u32) -> io::Result<boo
     let Some(value) = metadata(&parent, OsStr::new(leaf))? else {
         return Ok(false);
     };
-    if value.kind != FileKind::Regular {
-        return Ok(true);
+    // Links are never evidence. An independently established reset may unlink
+    // them without following them, just like other dropped links.
+    if value.kind == FileKind::Symlink {
+        return Ok(false);
     }
-    let file = fs(parent.open_read(OsStr::new(leaf)))?;
-    let mut header = [0_u8; 64];
-    let complete = match file.take(64).read_exact(&mut header) {
-        Ok(()) => true,
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => false,
-        Err(error) => return Err(error),
+    let inspect = || -> io::Result<bool> {
+        if value.kind != FileKind::Regular {
+            return Err(io::Error::other("not a regular SQLite file"));
+        }
+        let file = fs(parent.open_read(OsStr::new(leaf)))?;
+        let mut header = [0_u8; 64];
+        let complete = match file.take(64).read_exact(&mut header) {
+            Ok(()) => true,
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => false,
+            Err(error) => return Err(error),
+        };
+        let version = u32::from_be_bytes(header[60..64].try_into().expect("four bytes"));
+        if !complete || (&header[..16] == b"SQLite format 3\0" && version == 0) {
+            for suffix in ["-wal", "-shm"] {
+                if metadata(&parent, OsStr::new(&format!("{leaf}{suffix}")))?.is_some() {
+                    // SQLite may not have checkpointed the schema yet. Never
+                    // open it or infer format 1 from an incomplete main file.
+                    return Ok(false);
+                }
+            }
+        }
+        if !complete || &header[..16] != b"SQLite format 3\0" {
+            return Err(io::Error::other("short or unrecognised SQLite header"));
+        }
+        if shipped.contains(&version) {
+            return Ok(true);
+        }
+        // Older format-2 schemas stay non-evidence after a later 2.x bump.
+        if version >= current || shipped.iter().all(|old| version > *old) {
+            return Ok(false);
+        }
+        Err(io::Error::other(format!(
+            "unknown SQLite user_version {version}"
+        )))
     };
-    Ok(!complete
-        || &header[..16] != b"SQLite format 3\0"
-        || u32::from_be_bytes([header[60], header[61], header[62], header[63]]) != expected)
+    inspect().map_err(|error| io::Error::other(format!(
+        "cannot identify {}: {error}; restore this store from a known backup or repair the install receipt and store before retrying; no state was reset",
+        parent.anchored_path().join(leaf).display()
+    )))
 }
 
 fn foreign_store_headers(store: &Directory) -> io::Result<bool> {
@@ -94,20 +162,8 @@ fn foreign_store_headers(store: &Directory) -> io::Result<bool> {
     for suffix in std::iter::once("").chain(COMPANIONS.iter().copied()) {
         foreign |= metadata(store, OsStr::new(&format!("work-index.sqlite3{suffix}")))?.is_some();
     }
-    for (name, version) in [
-        ("run.sqlite3", 12),
-        (
-            "fabric/fabric.sqlite3",
-            provenant_fabric_store::CURRENT_SCHEMA_VERSION as u32,
-        ),
-        (
-            "fabric/host.sqlite3",
-            provenant_fabric_store::CURRENT_SCHEMA_VERSION as u32,
-        ),
-        ("admission.sqlite3", 6),
-        ("pr-contributions.sqlite3", 2),
-    ] {
-        foreign |= foreign_header(store, name, version)?;
+    for &(name, shipped, current) in FORMAT_ONE_VERSIONS {
+        foreign |= format_one_header(store, name, shipped, current)?;
     }
     for container in ["attempts", "runs", "children"] {
         if let Some(parent) = directory(store, OsStr::new(container))? {
@@ -136,9 +192,10 @@ pub(crate) fn plan(state: &Path, receipt_format: Option<u64>) -> io::Result<Opti
             "reset requires an owned state root without group/other write access",
         ));
     }
-    let older = receipt_format.is_some_and(|v| v < provenant_records::STATE_FORMAT_VERSION);
-    let foreign = receipt_format == Some(provenant_records::STATE_FORMAT_VERSION)
-        && foreign_store_headers(&root)?;
+    let older = receipt_format == Some(1);
+    // A missing receipt uses exactly the same positive evidence. Validate all
+    // headers even with an old/pending receipt; corrupt files are never guessed.
+    let foreign = foreign_store_headers(&root)?;
     let mut entries = Vec::new();
     let mut dropped = Vec::new();
     for base in DROPPED {
@@ -162,7 +219,7 @@ pub(crate) fn plan(state: &Path, receipt_format: Option<u64>) -> io::Result<Opti
             }
         }
     }
-    if !older && !foreign && (receipt_format.is_some() || entries.is_empty()) {
+    if !older && !foreign {
         return Ok(None);
     }
     if receipt_format.is_none() && directory(&root, OsStr::new("install"))?.is_none() {
@@ -175,6 +232,7 @@ pub(crate) fn plan(state: &Path, receipt_format: Option<u64>) -> io::Result<Opti
     for entry in &entries {
         check_removal(&entry.parent, &entry.name)?;
     }
+    check_provider_history(&root)?;
     Ok(Some(Plan {
         root,
         state: state.into(),
@@ -182,6 +240,49 @@ pub(crate) fn plan(state: &Path, receipt_format: Option<u64>) -> io::Result<Opti
         entries,
         dropped,
     }))
+}
+
+fn check_provider_history(root: &Directory) -> io::Result<()> {
+    check_archive_ancestors(root, Path::new("provider-history/format-1"))?;
+    let mut found = Vec::new();
+    attempts(root, Path::new(""), &mut found)?;
+    for (path, attempt) in found {
+        if metadata(&attempt, OsStr::new("provider-history"))?
+            .is_some_and(|value| value.kind != FileKind::Directory)
+        {
+            return Err(io::Error::other(format!(
+                "{} is not a directory; move it aside or restore the provider history before retrying reset",
+                path.join("provider-history").display()
+            )));
+        }
+        check_archive_ancestors(
+            root,
+            &Path::new("provider-history/format-1")
+                .join(path)
+                .join("provider-history"),
+        )?;
+    }
+    Ok(())
+}
+
+fn check_archive_ancestors(root: &Directory, path: &Path) -> io::Result<()> {
+    let mut dir = fs(root.try_clone())?;
+    let mut relative = PathBuf::new();
+    for part in path.components() {
+        let name = part.as_os_str();
+        relative.push(name);
+        let Some(value) = metadata(&dir, name)? else {
+            break;
+        };
+        if value.kind != FileKind::Directory {
+            return Err(io::Error::other(format!(
+                "{} is not a directory; move it aside or restore provider history before retrying reset",
+                relative.display()
+            )));
+        }
+        dir = fs(dir.open_verified_directory(name))?;
+    }
+    Ok(())
 }
 
 /// Only traverse the run layout, not tmp payloads. Covers the base layout,
@@ -377,9 +478,6 @@ fn remove_aliases_in(
     fs(tmp.sync())
 }
 pub(crate) fn remove(plan: &Plan, quiesce: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
-    for entry in &plan.entries {
-        recheck(&entry.parent, &entry.name, entry.before)?;
-    }
     quiesce()?;
     // Agents may have created another dropped store since preflight. Replan
     // after bootout, while keeping the originally selected root identity.
@@ -388,9 +486,6 @@ pub(crate) fn remove(plan: &Plan, quiesce: impl FnOnce() -> io::Result<()>) -> i
     };
     if !fs(plan.root.metadata())?.same_identity(&fs(refreshed.root.metadata())?) {
         return Err(io::Error::other("state root changed identity before reset"));
-    }
-    for entry in &plan.entries {
-        recheck(&entry.parent, &entry.name, entry.before)?;
     }
     let plan = &refreshed;
     for entry in &plan.entries {
@@ -428,6 +523,126 @@ pub(crate) fn remove(plan: &Plan, quiesce: impl FnOnce() -> io::Result<()>) -> i
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn header(version: u32) -> Vec<u8> {
+        let mut bytes = vec![0; 64];
+        bytes[..16].copy_from_slice(b"SQLite format 3\0");
+        bytes[60..64].copy_from_slice(&version.to_be_bytes());
+        bytes
+    }
+
+    #[test]
+    fn only_shipped_format_one_versions_are_reset_evidence() -> TestResult {
+        for &(name, shipped, current) in FORMAT_ONE_VERSIONS {
+            assert!(
+                shipped.iter().all(|version| *version < current),
+                "{name}: format collision"
+            );
+            for version in shipped.iter().copied().chain([current, current + 1]) {
+                for receipt in [None, Some(provenant_records::STATE_FORMAT_VERSION)] {
+                    let temp = tempfile::tempdir()?;
+                    std::fs::create_dir(temp.path().join("install"))?;
+                    let path = temp.path().join(name);
+                    std::fs::create_dir_all(path.parent().ok_or("store parent")?)?;
+                    let bytes = header(version);
+                    std::fs::write(&path, &bytes)?;
+                    assert_eq!(
+                        plan(temp.path(), receipt)?.is_some(),
+                        shipped.contains(&version),
+                        "{name}: {version}, {receipt:?}"
+                    );
+                    assert_eq!(std::fs::read(&path)?, bytes);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn healthy_format_two_openers_never_plan_a_reset_even_with_uncheckpointed_wal() -> TestResult {
+        use provenant_core::{ActorId, AttemptId, CancelToken, ProjectId, RootInputs};
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        std::fs::create_dir(base.join("home"))?;
+        std::fs::create_dir(base.join("checkout"))?;
+        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+        inputs.state_dir = Some(base.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let state = roots.state.as_path();
+        let clock = provenant_os::clock::SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let context = provenant_run::ExecutionContext {
+            state_root: roots.state.clone(),
+            project_id: ProjectId::from_bytes([1; 16]),
+            actor_id: ActorId::from_bytes([2; 16]),
+            read_prompts: true,
+        };
+        let run = provenant_run::RunStore::open(&context, &call)?;
+        // Opens the real admission ledger before looking up the absent attempt.
+        assert!(
+            run.set_child_wait(AttemptId::from_bytes([3; 16]), true, &call)
+                .is_err()
+        );
+        assert!(state.join("admission.sqlite3").exists());
+        let contributions = provenant_run::Contributions::open(state, &call)?;
+        let fabric_call = provenant_fabric_store::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let fabric = provenant_fabric_store::Store::open(&roots.state, &fabric_call)?;
+        let host = provenant_fabric_store::HostStore::open(&roots.state, &fabric_call)?;
+        assert!(state.join("run.sqlite3-wal").exists());
+        let run_header = std::fs::read(state.join("run.sqlite3"))?;
+        assert!(
+            run_header.len() < 64 || run_header[60..64] == [0; 4],
+            "fixture must retain schema in WAL"
+        );
+        for receipt in [None, Some(provenant_records::STATE_FORMAT_VERSION)] {
+            assert!(plan(state, receipt)?.is_none());
+        }
+        drop((run, contributions, fabric, host));
+        for receipt in [None, Some(provenant_records::STATE_FORMAT_VERSION)] {
+            assert!(plan(state, receipt)?.is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_headers_refuse_and_incomplete_wal_headers_are_not_reset_evidence() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        std::fs::create_dir(temp.path().join("install"))?;
+        let path = temp.path().join("run.sqlite3");
+        for bytes in [b"not a database".to_vec(), header(0), header(5)] {
+            std::fs::write(&path, &bytes)?;
+            for receipt in [None, Some(1), Some(provenant_records::STATE_FORMAT_VERSION)] {
+                let error = plan(temp.path(), receipt)
+                    .err()
+                    .ok_or("unknown header accepted")?
+                    .to_string();
+                assert!(error.contains("run.sqlite3") && error.contains("before retrying"));
+                assert_eq!(std::fs::read(&path)?, bytes);
+            }
+        }
+        for suffix in ["-wal", "-shm"] {
+            let companion = temp.path().join(format!("run.sqlite3{suffix}"));
+            std::fs::write(&companion, "uncheckpointed")?;
+            for bytes in [Vec::new(), vec![0; 12], header(0)] {
+                std::fs::write(&path, &bytes)?;
+                for receipt in [None, Some(provenant_records::STATE_FORMAT_VERSION)] {
+                    assert!(plan(temp.path(), receipt)?.is_none());
+                    assert_eq!(std::fs::read(&path)?, bytes);
+                }
+            }
+            std::fs::remove_file(companion)?;
+        }
+        Ok(())
+    }
 
     #[test]
     fn refused_agent_quiescence_leaves_stores_intact()
@@ -435,13 +650,10 @@ mod tests {
         use super::*;
         let temp = tempfile::tempdir()?;
         std::fs::create_dir(temp.path().join("install"))?;
-        std::fs::write(temp.path().join("run.sqlite3"), "old store")?;
+        std::fs::write(temp.path().join("run.sqlite3"), header(10))?;
         let reset = plan(temp.path(), Some(1))?.ok_or("reset plan")?;
         assert!(remove(&reset, || Err(io::Error::other("agent still running"))).is_err());
-        assert_eq!(
-            std::fs::read_to_string(temp.path().join("run.sqlite3"))?,
-            "old store"
-        );
+        assert_eq!(std::fs::read(temp.path().join("run.sqlite3"))?, header(10));
         Ok(())
     }
 
@@ -451,9 +663,9 @@ mod tests {
         use super::*;
         let temp = tempfile::tempdir()?;
         std::fs::create_dir(temp.path().join("install"))?;
-        for name in ["run.sqlite3", "run.sqlite3-wal", "admission.sqlite3"] {
-            std::fs::write(temp.path().join(name), "old store")?;
-        }
+        std::fs::write(temp.path().join("run.sqlite3"), header(10))?;
+        std::fs::write(temp.path().join("run.sqlite3-wal"), "companion")?;
+        std::fs::write(temp.path().join("admission.sqlite3"), header(6))?;
         let reset = plan(temp.path(), Some(1))?.ok_or("reset plan")?;
         std::fs::remove_file(temp.path().join("run.sqlite3-wal"))?;
         remove(&reset, || Ok(()))?;
@@ -469,10 +681,10 @@ mod tests {
         use super::*;
         let temp = tempfile::tempdir()?;
         std::fs::create_dir(temp.path().join("install"))?;
-        std::fs::write(temp.path().join("run.sqlite3"), "old store")?;
+        std::fs::write(temp.path().join("run.sqlite3"), header(10))?;
         let reset = plan(temp.path(), Some(1))?.ok_or("reset plan")?;
         remove(&reset, || {
-            std::fs::write(temp.path().join("admission.sqlite3"), "recreated")
+            std::fs::write(temp.path().join("admission.sqlite3"), header(6))
         })?;
         assert!(!temp.path().join("admission.sqlite3").exists());
         Ok(())

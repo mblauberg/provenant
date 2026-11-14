@@ -82,6 +82,10 @@ pub use writer::{
 };
 
 pub use db::{ExecutionContext, Request, RunStore};
+/// Current SQLite versions, shared with the installer's header-only reset check.
+pub const RUN_SCHEMA_VERSION: u32 = db::SCHEMA.version as u32;
+pub const ADMISSION_SCHEMA_VERSION: u32 = ledger::SCHEMA.version as u32;
+pub const CONTRIBUTIONS_SCHEMA_VERSION: u32 = pr_contribution::SCHEMA.version as u32;
 pub use provenant_records::run::*;
 pub use provenant_supervisor::custody::AdmissionError;
 pub use reader::{

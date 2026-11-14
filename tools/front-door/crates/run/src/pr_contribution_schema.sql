@@ -26,4 +26,4 @@ CREATE TABLE reassignments (
  attempt TEXT NOT NULL, repository TEXT NOT NULL, number INTEGER NOT NULL,
  PRIMARY KEY(attempt, repository, number)
 ) STRICT;
-PRAGMA user_version=2;
+PRAGMA user_version=5;

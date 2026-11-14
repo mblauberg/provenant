@@ -58,17 +58,33 @@ To cut over from 1.x to 2.0.0, on **each host, peers included**:
 3. Copy the state directory if you want a complete archive.
 4. Use the **2.0 installer**: `install.sh --upgrade --reset-state`. A 1.x
    `provenant upgrade` does not understand `--reset-state`; it cannot perform
-   this cut-over. Read the dropped and kept lists before proceeding.
+   this cut-over. Its captured installer output must refuse immediately, without
+   opening a terminal. The reset prompt requires both stdin and stderr to be
+   terminals; otherwise run `install.sh --upgrade --reset-state` explicitly.
+   Read the dropped and kept lists before proceeding.
 5. Run `provenant check install` using the new binary.
 
 The installer validates all account previews and release smoke checks before
 resetting, boots out the old tick and peer agents, then restarts them after
-successful installation. If installation fails, the agents stay stopped; rerun
-the same acknowledged install before opening sessions. Provider archives move
+successful installation. If installation fails after shutdown, the output names
+the stopped or potentially stopped agents and prints the acknowledged install
+command that finishes installation and restarts the current agents. Rerun it
+before opening sessions. Provider archives move
 out of the dropped tree to `provider-history/format-1/`, retaining their relative
 attempt paths. Admission leases are dropped with the run stores. Read-only tmp
-directories and partial removal can be retried safely. A lock-named symlink
-refuses before deletion; remove that link explicitly before retrying.
+directories and partial removal can be retried safely. Dropped symlinks,
+including lock-named links, are unlinked with an identity check; their targets
+are never followed. A symlink or non-directory at a provider-history source or
+archive ancestor refuses during preflight, before shutdown or deletion.
+
+Only positively identified 1.x SQLite headers (or the retired work index) are
+reset evidence; filenames alone never establish the format when a receipt is
+missing. Format-2 schema bumps cannot trigger a reset. An empty/short main file
+or a zero schema header with WAL/shared-memory companions may be awaiting a
+checkpoint and is not format-1 evidence. Unknown or unreadable headers refuse,
+name the file and require repair or restoration before retrying. See the
+[state format contract](../specs/state.md#a-format-break-needs-acknowledgement)
+for the shipped-version table and receipt rules.
 
 From a format-2 binary, `provenant upgrade` preflights every configured host
 before installing any host and never prompts while capturing installer output.

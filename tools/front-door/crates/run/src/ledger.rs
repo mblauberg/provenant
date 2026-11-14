@@ -25,7 +25,7 @@ const FILE: &str = "admission.sqlite3";
 /// wall time is never recorded, so no clock step can move it.
 pub(crate) const SCHEMA: provenant_sqlite::Schema = provenant_sqlite::Schema {
     sql: include_str!("admission_schema.sql"),
-    version: 6,
+    version: 7,
 };
 
 /// Open, creating if needed, the ledger under the trusted host state root.
