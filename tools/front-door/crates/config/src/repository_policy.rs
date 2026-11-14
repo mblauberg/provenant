@@ -3,6 +3,7 @@ use crate::ConfigError;
 use provenant_os::fs::Directory;
 use serde::Deserialize;
 use std::{
+    borrow::Cow,
     ffi::OsStr,
     io::Read,
     path::{Component, Path, PathBuf},
@@ -51,6 +52,7 @@ impl RepositoryPolicy {
         let config: ProjectConfig =
             toml_edit::de::from_str(&text).map_err(|_| ConfigError::InvalidRepositoryPolicy)?;
         if config.launch_policy.protected_paths.iter().any(|path| {
+            let path = path_with_separators(path);
             path.as_os_str().is_empty()
                 || path.components().any(|part| {
                     matches!(
@@ -67,10 +69,11 @@ impl RepositoryPolicy {
     /// A directory input may contain a protected file, so overlap in either
     /// direction classifies it. Canonical paths also catch symlink aliases.
     pub fn protects(&self, checkout: &Path, cwd: &Path, path: &Path) -> bool {
+        let path = path_with_separators(path);
         let input = if path.is_absolute() {
             path.to_path_buf()
         } else {
-            cwd.join(path)
+            cwd.join(path.as_ref())
         };
         let input = normalise(&input);
         self.protected_paths.iter().any(|protected| {
@@ -87,23 +90,34 @@ impl RepositoryPolicy {
 
     pub fn protects_brief(&self, checkout: &Path, cwd: &Path, brief: &str) -> bool {
         let matches_reference = |token: &str| {
+            // Sentence punctuation is not a reference to the cwd or its parent.
+            if token.chars().all(sentence_punctuation) {
+                return false;
+            }
             // Try literal bytes first. Strip punctuation one character at a
             // time so filename punctuation survives ambiguous prose wrappers.
-            [token, token.trim_start_matches(path_delimiter)]
-                .into_iter()
-                .any(|mut path| {
-                    while !path.is_empty() {
-                        if self.protects(checkout, cwd, Path::new(path)) {
-                            return true;
-                        }
-                        let last = path.chars().next_back().expect("nonempty path");
-                        if !sentence_punctuation(last) {
-                            break;
-                        }
-                        path = &path[..path.len() - last.len_utf8()];
+            [
+                token,
+                token.trim_start_matches(path_delimiter),
+                token.trim_start_matches(sentence_punctuation),
+            ]
+            .into_iter()
+            .any(|mut path| {
+                while !path.is_empty() {
+                    if self.protects(checkout, cwd, Path::new(path)) {
+                        return true;
                     }
-                    false
-                })
+                    let Some(last) = path
+                        .chars()
+                        .next_back()
+                        .filter(|c| sentence_punctuation(*c))
+                    else {
+                        break;
+                    };
+                    path = &path[..path.len() - last.len_utf8()];
+                }
+                false
+            })
         };
         brief.split_whitespace().any(|token| {
             matches_reference(token) || token.split(path_delimiter).any(matches_reference)
@@ -112,7 +126,8 @@ impl RepositoryPolicy {
 }
 
 fn sentence_punctuation(c: char) -> bool {
-    c.is_ascii_punctuation() && !matches!(c, '/' | '\\' | '_' | '-')
+    c.is_ascii_punctuation() && !matches!(c, '/' | '\\')
+        || path_delimiter(c)
         || matches!(c, '…' | '。' | '，' | '！' | '？')
 }
 
@@ -144,10 +159,16 @@ fn path_delimiter(c: char) -> bool {
     )
 }
 
+fn path_with_separators(path: &Path) -> Cow<'_, Path> {
+    match path.to_str().filter(|text| text.contains('\\')) {
+        Some(text) => Cow::Owned(PathBuf::from(text.replace('\\', "/"))),
+        None => Cow::Borrowed(path),
+    }
+}
+
 fn normalise(path: &Path) -> PathBuf {
     // Briefs and declarations may spell separators in either common form.
-    let separated = path.to_str().map(|text| text.replace('\\', "/"));
-    let path = separated.as_deref().map(Path::new).unwrap_or(path);
+    let path = path_with_separators(path);
     let mut result = PathBuf::new();
     for component in path.components() {
         match component {
@@ -177,8 +198,13 @@ mod tests {
             "./private/brief.md",
             "private\\brief.md",
             "./private//brief.md",
+            "/fixture/repo/private/brief.md",
+            r"\fixture\repo\private\brief.md",
         ] {
-            for prefix in ["", "(", "[", "{", "<", "\"", "'", "`", "“", "‘", "**"] {
+            for prefix in [
+                "", "(", "[", "{", "<", "\"", "'", "`", "“", "‘", "**", "...", "#", "@", "=", "_",
+                "-",
+            ] {
                 for suffix in [
                     "", ".", ",", ":", ";", "!", "?", ")", "]", "}", ">", "\"", "'", "`", "”", "’",
                     "**.", ").", "]:",
@@ -193,12 +219,25 @@ mod tests {
                 }
             }
         }
+        for reference in [
+            "[brief](private/brief.md).",
+            "Read:private/brief.md.",
+            "Read \"private/brief.md\".",
+        ] {
+            assert!(policy.protects_brief(checkout, checkout, reference));
+            assert!(!policy.protects_brief(
+                checkout,
+                checkout,
+                &reference.replace("private", "public")
+            ));
+        }
         // Literal filename punctuation remains significant, not discarded.
         for name in [
             "private/brief.md.",
             "private/a,b.md",
             "private/.hidden",
             "private/a!b.md",
+            "private/_brief.md",
         ] {
             let policy = RepositoryPolicy {
                 confidential: false,
@@ -229,11 +268,13 @@ mod tests {
         assert!(policy.protects(root.path(), root.path(), Path::new("private/file.md")));
         assert!(policy.protects_brief(root.path(), root.path(), "Read `private/brief.md`"));
         assert!(!policy.protects_brief(root.path(), root.path(), "Read public/brief.md"));
-        std::fs::write(
-            root.path().join(REPOSITORY_CONFIG),
-            "[launch_policy]\nprotected_paths=['../escape']\n",
-        )
-        .unwrap();
-        assert!(RepositoryPolicy::read(root.path()).is_err());
+        for path in ["../escape", r"..\escape", r"\escape", "/escape"] {
+            std::fs::write(
+                root.path().join(REPOSITORY_CONFIG),
+                format!("[launch_policy]\nprotected_paths=['{path}']\n"),
+            )
+            .unwrap();
+            assert!(RepositoryPolicy::read(root.path()).is_err(), "{path}");
+        }
     }
 }
