@@ -8,6 +8,7 @@ pub mod cloud;
 pub mod config_reads;
 pub mod console;
 pub mod domains;
+pub mod external_contract;
 pub mod fabric;
 pub mod quota;
 pub(crate) mod quota_history;

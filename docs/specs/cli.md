@@ -4,6 +4,8 @@ Owner: `crates/cli` (grammar and rendering), `src/` (composition and hooks)
 Anchor: `tests/parser.rs`, `crates/cli/src/render.rs`, `tests/catalogue_read_only.rs`
 
 Use `provenant help --all` for commands and `provenant config schema` for configuration.
+The outward contract is declared in `crates/cli/src/external_contract.rs`, covering commands, lane environment and JSON schemas.
+No command currently promises cross-version stability, and direct internal-state readers are unsupported.
 
 ## Targets
 

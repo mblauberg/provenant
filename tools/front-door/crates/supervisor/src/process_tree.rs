@@ -13,6 +13,7 @@ use std::{
 };
 
 pub const ENV: &str = "PROVENANT_PROCESS_TREE";
+pub const SAMPLE_SCHEMA_VERSION: u32 = 2;
 pub const FILE: &str = "process-tree.json";
 pub const MAX_PROCESSES: usize = 4096;
 const MAX_BYTES: u64 = 1024 * 1024;
@@ -215,7 +216,7 @@ fn observe(
     let pid = u32::try_from(root.pid).map_err(|_| ObservationError::Unavailable)?;
     let snapshot = Snapshot {
         sample: Sample {
-            schema_version: 2,
+            schema_version: SAMPLE_SCHEMA_VERSION,
             root_pid: pid,
             sampled_at,
             swap_used_bytes: None,
@@ -384,7 +385,7 @@ fn select(
     if age > MAX_AGE_MICROS
         || sample.sampled_at > wall
         || snapshot.boot != boot
-        || sample.schema_version != 2
+        || sample.schema_version != SAMPLE_SCHEMA_VERSION
         || sample.processes.is_empty()
         || sample.processes.len() > MAX_PROCESSES
         || sample.processes.len() != snapshot.starts.len()
@@ -599,7 +600,7 @@ mod tests {
     fn snapshot() -> Snapshot {
         Snapshot {
             sample: Sample {
-                schema_version: 2,
+                schema_version: SAMPLE_SCHEMA_VERSION,
                 root_pid: 10,
                 sampled_at: WallTime::from_micros(1_000_000).unwrap(),
                 swap_used_bytes: Some(1024),

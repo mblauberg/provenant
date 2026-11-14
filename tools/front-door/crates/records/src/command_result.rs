@@ -1,4 +1,6 @@
 //! Version-one command transport facts, shared by CLI edges.
+
+use crate::wire::ENVELOPE_VERSION;
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,7 +55,7 @@ pub struct CommandResult<T> {
 impl<T> CommandResult<T> {
     pub fn new(command: impl Into<String>, status: Outcome, data: T) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: ENVELOPE_VERSION,
             command: command.into(),
             status,
             data,
