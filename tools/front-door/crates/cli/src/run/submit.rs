@@ -304,7 +304,7 @@ impl From<DiskCheck> for String {
                 reclaimed,
                 origin,
             } => format!(
-                "insufficient disk space on {}: {available} bytes available, floor {floor} bytes; gc.free_floor source: {}; bounded GC reported {reclaimed} bytes reclaimed; run `provenant gc --free-floor {floor}B` before dispatching a writer",
+                "insufficient disk space on {}: {available} bytes available, floor {floor} bytes; gc.critical_free source: {}; bounded GC reported {reclaimed} bytes reclaimed; run `provenant gc --free-floor {floor}B` before dispatching a writer",
                 path.display(),
                 origin.description()
             ),
@@ -409,6 +409,9 @@ pub(super) fn check_writer_disk_with_collection(
         let floor = settings
             .free_floor_bytes(state)
             .map_err(|error| DiskCheck::Unobserved(error.to_string()))?;
+        let critical = settings
+            .critical_free_bytes()
+            .map_err(|error| DiskCheck::Unobserved(error.to_string()))?;
         let cache = home.join("Library/Caches/provenant-lane-cargo");
         let (mut limiting, mut minimum) = (worktree, u64::MAX);
         for path in [worktree, state, cache.as_path()] {
@@ -417,7 +420,7 @@ pub(super) fn check_writer_disk_with_collection(
                 (limiting, minimum) = (path, bytes);
             }
         }
-        if minimum < floor {
+        if minimum < floor || minimum < critical {
             let reclaimed = if settings.schedule { collect() } else { 0 };
             minimum = u64::MAX;
             for path in [worktree, state, cache.as_path()] {
@@ -427,12 +430,27 @@ pub(super) fn check_writer_disk_with_collection(
                 }
             }
             if minimum < floor {
+                eprintln!(
+                    "warning: {minimum} bytes free; gc.free_floor={floor} (source: {}); builds continue above gc.critical_free={critical} (source: {})",
+                    if settings.free_floor.is_some() {
+                        "configuration"
+                    } else {
+                        "compiled default"
+                    },
+                    if settings.critical_free.is_some() {
+                        "configuration"
+                    } else {
+                        "compiled default"
+                    }
+                );
+            }
+            if minimum < critical {
                 return Err(DiskCheck::Low {
                     path: limiting.to_path_buf(),
                     available: minimum,
-                    floor,
+                    floor: critical,
                     reclaimed,
-                    origin: if settings.free_floor.is_some() {
+                    origin: if settings.critical_free.is_some() {
                         provenant_records::diagnostic::SettingSource::Configuration
                     } else {
                         provenant_records::diagnostic::SettingSource::ShippedDefault

@@ -660,6 +660,7 @@ pub(crate) fn disk_writer_state(project_state: &Directory, path: &Path) -> Occup
     }
     let _probe = match provenant_supervisor::custody::writer_observation_guard(&directory) {
         Ok(guard) => guard,
+        Err(provenant_supervisor::custody::CustodyError::Busy) => return Occupancy::Held,
         Err(error) => return Occupancy::custody_unknown(path.to_path_buf(), error.to_string()),
     };
     match cache_writer_probe_under_gate(project_state, path) {
@@ -691,11 +692,21 @@ pub fn cache_writer_probe(
         }
         Err(error) => return Err(unknown(error.to_string())),
         Ok(_) => provenant_supervisor::custody::writer_observation_guard(&directory)
-            .map_err(|error| unknown(error.to_string()))?,
+            .map_err(|error| observation_occupancy(path, error))?,
     };
     let result = cache_writer_probe_under_gate(project_state, path);
     drop(gate);
     result
+}
+
+fn observation_occupancy(
+    path: &Path,
+    error: provenant_supervisor::custody::CustodyError,
+) -> Occupancy {
+    match error {
+        provenant_supervisor::custody::CustodyError::Busy => Occupancy::Held,
+        error => Occupancy::custody_unknown(path.to_path_buf(), error.to_string()),
+    }
 }
 
 fn cache_writer_probe_under_gate(
@@ -746,7 +757,7 @@ pub fn cache_writer_guard(project_state: &Directory, path: &Path) -> Result<Lock
     let directory = writer_directory(project_state, path)
         .map_err(|error| unknown(format!("writer slot could not be opened: {error}")))?;
     let observation = provenant_supervisor::custody::writer_admission_guard(&directory)
-        .map_err(|error| unknown(error.to_string()))?;
+        .map_err(|error| observation_occupancy(path, error))?;
     let guard = directory
         .try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)
         .map_err(|error| match error {

@@ -18,10 +18,9 @@ pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<D
 }
 
 pub(crate) fn remove_temporary_best_effort(attempt: &Directory) -> provenant_os::fs::Result<()> {
-    // The alias goes first, so `tmp` still marks the attempt for GC if this is
-    // interrupted.
-    crate::short_temporary::remove(attempt);
-    remove_entry_tree(attempt, OsStr::new("tmp"))
+    // Terminal, unreserved scratch is a payload: fixture lock files no longer
+    // guard live data. The same no-follow owner-mode repair is used by GC.
+    remove_unreserved_terminal_temporary(attempt)
 }
 
 /// Reconcile and retention GC may dispose of lock-named payloads after proving the

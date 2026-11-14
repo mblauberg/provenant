@@ -26,7 +26,7 @@ fn disk_policy_refusal_uses_resource_projection() {
             .detail
             .as_deref()
             .unwrap()
-            .contains("gc.free_floor")
+            .contains("gc.critical_free")
     );
     assert!(
         diagnostic
@@ -213,6 +213,7 @@ fn writer_gc_settings_use_defaults_when_configuration_is_unreadable()
 fn writer_requires_space_on_every_output_volume() -> Result<(), String> {
     let settings = provenant_config::GcSettings {
         free_floor: Some("100B".into()),
+        critical_free: Some("100B".into()),
         ..Default::default()
     };
     let state = Path::new("/state");
@@ -264,6 +265,7 @@ fn writer_disk_default_floor_names_its_source() -> Result<(), String> {
 fn writer_disk_observation_failure_warns_and_continues() -> Result<(), String> {
     let settings = provenant_config::GcSettings {
         free_floor: Some("100B".into()),
+        critical_free: Some("100B".into()),
         ..Default::default()
     };
     let result = check_writer_disk_with(
@@ -281,6 +283,7 @@ fn writer_rechecks_once_after_collection_and_reports_reclaimed_bytes() -> Result
     use std::cell::Cell;
     let settings = provenant_config::GcSettings {
         free_floor: Some("100B".into()),
+        critical_free: Some("100B".into()),
         ..Default::default()
     };
     for remaining in [99, 100] {
@@ -358,6 +361,7 @@ fn writer_samples_missing_roots_without_creating_them() -> Result<(), Box<dyn st
     let base = temp.path().canonicalize()?;
     let settings = provenant_config::GcSettings {
         free_floor: Some("1B".into()),
+        critical_free: Some("1B".into()),
         ..Default::default()
     };
     let state = base.join("missing/state");
@@ -372,6 +376,7 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
     use provenant_records::run::TerminalCause;
     let settings = provenant_config::GcSettings {
         free_floor: Some("100B".into()),
+        critical_free: Some("100B".into()),
         ..Default::default()
     };
     let check = check_writer_disk_with(

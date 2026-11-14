@@ -3972,6 +3972,9 @@ pub(super) fn prepare_candidates(
             spec.argv
                 .splice(1..1, [argument.into(), scratch.as_os_str().to_owned()]);
         }
+        if writer.is_none() {
+            super::command::scratch_cargo_output(&mut spec.env, scratch);
+        }
         spec.complete_tool_requirements(&plan, &home, &cwd)?;
         if isolated {
             super::source_tree::ensure_profile_isolated(&source, &spec.profile.spec)

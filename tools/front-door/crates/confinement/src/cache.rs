@@ -77,6 +77,7 @@ pub struct CacheGcReport {
     /// Caches kept because ownership or writer state prevents removal.
     pub kept: Vec<CacheGcEntry>,
     pub bytes_freed: u64,
+    pub errors: Vec<CacheGcIssue>,
     /// Preview measurements stopped at the shared entry or time bound.
     pub bytes_estimated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,6 +91,14 @@ pub struct CacheGcReport {
     pub free_bytes_estimated: bool,
 }
 
+/// A failed operation, including its canonical cache root and OS cause.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CacheGcIssue {
+    pub path: PathBuf,
+    pub operation: String,
+    pub cause: String,
+}
+
 /// A failed sweep still reports completed removals and bytes already freed.
 #[derive(Debug, Error)]
 #[error("{source}")]
@@ -99,19 +108,19 @@ pub struct CacheGcError {
     pub source: Box<PermissionError>,
 }
 
-/// Preview accounting is deliberately a lower bound. An incomplete newest-write
-/// observation is MAX, so it can never authorise idle eviction.
+/// One full allocated-tree walk for preview and apply. Neither follows links.
+/// APFS clones and hard links can share physical blocks: allocated bytes are an
+/// observation, not a promise about the change in volume free space.
 struct MeasureBudget {
     remaining: usize,
     started: Option<std::time::Instant>,
     limited: bool,
 }
 impl MeasureBudget {
-    #[allow(clippy::disallowed_methods)] // Wall-clock bound on read-only preview work.
-    fn new(preview: bool) -> Self {
+    fn new(_preview: bool) -> Self {
         Self {
-            remaining: if preview { 20_000 } else { usize::MAX },
-            started: preview.then(std::time::Instant::now),
+            remaining: usize::MAX,
+            started: None,
             limited: false,
         }
     }
@@ -519,6 +528,29 @@ fn sweep_cache_root(
             failures.push((Some(name), error));
         }
     }
+    for (name, error) in &failures {
+        let (path, operation, cause) = match error {
+            PermissionError::CacheSweepFilesystem {
+                operation,
+                path,
+                source,
+            } => (
+                cache_root.join(path),
+                (*operation).to_owned(),
+                source.to_string(),
+            ),
+            error => (
+                cache_root.join(name.as_deref().unwrap_or(OsStr::new("."))),
+                "collect cache".into(),
+                error.to_string(),
+            ),
+        };
+        report.errors.push(CacheGcIssue {
+            path,
+            operation,
+            cause,
+        });
+    }
     if !failures.is_empty() {
         return Err(PermissionError::CacheSweepIo(std::io::Error::other(
             CacheSweepFailures(failures),
@@ -791,9 +823,7 @@ fn prune_worktree_cache(
                     "unlink",
                     &Path::new(removal_name).join(marker_name),
                 ))?;
-                report.bytes_freed = report
-                    .bytes_freed
-                    .saturating_add(marker.allocated.max(marker.size));
+                report.bytes_freed = report.bytes_freed.saturating_add(marker.allocated);
             }
             Err(error) if error.is_not_found() => {}
             Err(error) => {
@@ -1037,7 +1067,7 @@ fn measure_cache(
             directory.metadata_at(&name, false)
         })
         .map_err(cache_fs_error("stat", &path))?;
-        bytes = bytes.saturating_add(metadata.allocated.max(metadata.size));
+        bytes = bytes.saturating_add(metadata.allocated);
         newest = newest.max(metadata.modified_ns);
         if metadata.kind == FileKind::Directory {
             let child = cache_gc_operation("open verified", &relative.join(&name), || {
@@ -1088,6 +1118,9 @@ fn remove_cache_contents_at(
     if depth >= MAX_CACHE_SWEEP_DEPTH {
         return Err(PermissionError::CacheSweepDepth);
     }
+    directory
+        .make_writable()
+        .map_err(cache_fs_error("make cache writable", relative))?;
     let names = cache_gc_entries(directory.directory(), relative)
         .map_err(cache_fs_error("readdir", relative))?
         .take(MAX_CACHE_DIRECTORY_ENTRIES + 1)
@@ -1112,6 +1145,10 @@ fn remove_cache_contents_at(
         })
         .map_err(cache_fs_error("stat", &path))?;
         if metadata.kind == FileKind::Directory {
+            directory
+                .directory()
+                .make_owner_accessible_at(&name)
+                .map_err(cache_fs_error("make cache directory accessible", &path))?;
             let child = cache_gc_operation("open verified", &relative.join(&name), || {
                 directory.child(&name)
             })
@@ -1124,7 +1161,7 @@ fn remove_cache_contents_at(
             cache_gc_operation("unlink", &relative.join(&name), || directory.unlink(&name))
                 .map_err(cache_fs_error("unlink", &path))?;
         }
-        *bytes_freed = bytes_freed.saturating_add(metadata.allocated.max(metadata.size));
+        *bytes_freed = bytes_freed.saturating_add(metadata.allocated);
     }
     Ok(())
 }
@@ -1459,6 +1496,27 @@ mod tests {
             );
             assert!(budget.limited);
             assert!(path.join("artifact").exists());
+            Ok(())
+        }
+
+        #[test]
+        fn nested_tree_preview_and_apply_use_the_same_allocated_bytes()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let home = tempfile::tempdir()?;
+            let owner = home.path().join("missing-owner");
+            let path = cache(home.path(), &"a".repeat(64), &owner)?;
+            std::fs::create_dir_all(path.join("nested/deeper"))?;
+            std::fs::write(path.join("nested/deeper/payload"), vec![0; 128 * 1024])?;
+            let preview = gc_worktree_cargo_caches(
+                home.path(),
+                &CacheGcPolicy {
+                    dry_run: true,
+                    ..Default::default()
+                },
+            )?;
+            let apply = gc_worktree_cargo_caches(home.path(), &CacheGcPolicy::default())?;
+            assert_eq!(preview.bytes_freed, apply.bytes_freed);
+            assert!(!path.exists());
             Ok(())
         }
 

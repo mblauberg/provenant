@@ -418,17 +418,22 @@ fn gc_retention_bytes(data: &GcData) -> Vec<provenant_config::RetentionBytes> {
         .iter()
         .map(|class| {
             let observation = match class.class {
+                RetentionKind::LaneCargoCaches
+                    if !data.report.errors.is_empty() || data.report.bytes_estimated =>
+                {
+                    ByteObservation::Partial {
+                        bytes: data.report.bytes_freed,
+                    }
+                }
                 RetentionKind::LaneCargoCaches => ByteObservation::Measured {
                     bytes: data.report.bytes_freed,
                 },
-                RetentionKind::TargetSeeds if !data.report.dry_run => ByteObservation::Measured {
+                RetentionKind::TargetSeeds => ByteObservation::Measured {
                     bytes: data.target_seeds.bytes,
                 },
-                RetentionKind::BuildDirectories if !data.report.dry_run => {
-                    ByteObservation::Measured {
-                        bytes: data.build_dirs.bytes,
-                    }
-                }
+                RetentionKind::BuildDirectories => ByteObservation::Measured {
+                    bytes: data.build_dirs.bytes,
+                },
                 RetentionKind::PayloadCap => ByteObservation::Measured {
                     bytes: data.provider_state.payload.reclaimed_bytes,
                 },
@@ -686,6 +691,14 @@ fn gc_data_summary(data: &GcData) -> String {
     for error in &data.chair_logs.errors {
         human.push_str(&format!("{}: {}\n", error.path.display(), error.reason));
     }
+    for error in &data.report.errors {
+        human.push_str(&format!(
+            "{}: {}: {}\n",
+            error.path.display(),
+            error.operation,
+            error.cause
+        ));
+    }
     for error in &data.provider_state.errors {
         human.push_str(&format!("{}: {}\n", error.path.display(), error.reason));
     }
@@ -694,6 +707,7 @@ fn gc_data_summary(data: &GcData) -> String {
             human.push_str(&format!("kept {} (unobservable)\n", entry.path.display()));
         }
     }
+    human.push_str("Allocated tree bytes include shared clone blocks; actual volume space reclaimed may differ.\n");
     for project in &data.worktree_cleanup {
         if let Some(error) = &project.upstream_error {
             human.push_str(&format!("{error}; merged worktrees kept\n"));
@@ -1274,6 +1288,78 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         command.idle_days
     };
     let mut worktree_cleanup = Vec::new();
+    let lanes: Vec<_> = projects.iter().flat_map(|project| &project.lanes).collect();
+    let now_ns = SystemClock
+        .wall_now()
+        .map(|now| i128::from(now.as_micros()) * 1_000)
+        .map_err(|_| Error::Budget)?;
+    let policy = CacheGcPolicy {
+        idle_before_ns: Some(now_ns - i128::from(command.idle_days) * 86_400 * 1_000_000_000),
+        free_floor_bytes: Some(free_floor),
+        max_total_bytes: Some(
+            config
+                .gc
+                .lane_cargo_cache_max_bytes()
+                .map_err(Error::DiskSpace)?,
+        ),
+        dry_run: command.dry_run,
+        protected_owners: lanes
+            .iter()
+            .filter(|info| !info.occupancy.is_available())
+            .map(|info| (info.path.clone(), info.occupancy.clone()))
+            .collect(),
+        project_owners: lanes.iter().map(|info| info.path.clone()).collect(),
+        selected_only: command.pressure && !command.scheduled,
+    };
+    let alert_floor = config
+        .gc
+        .alert_below
+        .as_deref()
+        .map(provenant_config::parse_cache_size)
+        .transpose()
+        .map_err(|_| Error::GcObservation("invalid alert threshold"))?
+        .unwrap_or(0)
+        .max(free_floor);
+    use provenant_config::{RetentionKind, RetentionTrigger, retention_schedule};
+    let mut report = Ok(Default::default());
+    let mut staging_busy = Vec::new();
+    let mut provider_state = Default::default();
+    let mut chair_logs = Default::default();
+    let mut seed_collection: Result<
+        provenant_run::target_seed_gc::Report,
+        Box<dyn std::error::Error>,
+    > = Ok(Default::default());
+    let mut build_collection: Result<
+        provenant_run::build_dir_gc::Report,
+        Box<dyn std::error::Error>,
+    > = Ok(Default::default());
+    let seed_policy = &config.domains.fabric.lanes.cargo_seed;
+    let build_settings = config.domains.fabric.lanes.build_settings();
+    let trigger = if command.pressure {
+        RetentionTrigger::Gc
+    } else {
+        RetentionTrigger::FullGc
+    };
+    for class in retention_schedule(trigger) {
+        match class.class {
+            RetentionKind::LaneCargoCaches => {
+                report = gc_worktree_cargo_caches_with_writer_guard(&home, &policy, |path| {
+                    for project in &projects {
+                        if project.lanes.iter().any(|lane| lane.path == path) {
+                            return if policy.dry_run {
+                                worktrees::cache_writer_probe(&project.state, path)
+                            } else {
+                                worktrees::cache_writer_guard(&project.state, path).map(Some)
+                            };
+                        }
+                    }
+                    Err(worktrees::Occupancy::custody_unknown(
+                        path.to_path_buf(),
+                        "writer registration was not observed",
+                    ))
+                });
+            }
+            RetentionKind::GitWorktrees => {
     for project in &mut projects {
         let settings = config
             .gc
@@ -1430,76 +1516,6 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             Err(_) => unobserved_projects.push(project.path.clone()),
         }
     }
-    let lanes: Vec<_> = projects.iter().flat_map(|project| &project.lanes).collect();
-    let now_ns = SystemClock
-        .wall_now()
-        .map(|now| i128::from(now.as_micros()) * 1_000)
-        .map_err(|_| Error::Budget)?;
-    let policy = CacheGcPolicy {
-        idle_before_ns: Some(now_ns - i128::from(command.idle_days) * 86_400 * 1_000_000_000),
-        free_floor_bytes: Some(free_floor),
-        max_total_bytes: Some(
-            config
-                .gc
-                .lane_cargo_cache_max_bytes()
-                .map_err(Error::DiskSpace)?,
-        ),
-        dry_run: command.dry_run,
-        protected_owners: lanes
-            .iter()
-            .filter(|info| !info.occupancy.is_available())
-            .map(|info| (info.path.clone(), info.occupancy.clone()))
-            .collect(),
-        project_owners: lanes.iter().map(|info| info.path.clone()).collect(),
-        selected_only: command.pressure && !command.scheduled,
-    };
-    let alert_floor = config
-        .gc
-        .alert_below
-        .as_deref()
-        .map(provenant_config::parse_cache_size)
-        .transpose()
-        .map_err(|_| Error::GcObservation("invalid alert threshold"))?
-        .unwrap_or(0)
-        .max(free_floor);
-    use provenant_config::{RetentionKind, RetentionTrigger, retention_schedule};
-    let mut report = Ok(Default::default());
-    let mut staging_busy = Vec::new();
-    let mut provider_state = Default::default();
-    let mut chair_logs = Default::default();
-    let mut seed_collection: Result<
-        provenant_run::target_seed_gc::Report,
-        Box<dyn std::error::Error>,
-    > = Ok(Default::default());
-    let mut build_collection: Result<
-        provenant_run::build_dir_gc::Report,
-        Box<dyn std::error::Error>,
-    > = Ok(Default::default());
-    let seed_policy = &config.domains.fabric.lanes.cargo_seed;
-    let build_settings = config.domains.fabric.lanes.build_settings();
-    let trigger = if command.pressure {
-        RetentionTrigger::Gc
-    } else {
-        RetentionTrigger::FullGc
-    };
-    for class in retention_schedule(trigger) {
-        match class.class {
-            RetentionKind::LaneCargoCaches => {
-                report = gc_worktree_cargo_caches_with_writer_guard(&home, &policy, |path| {
-                    for project in &projects {
-                        if project.lanes.iter().any(|lane| lane.path == path) {
-                            return if policy.dry_run {
-                                worktrees::cache_writer_probe(&project.state, path)
-                            } else {
-                                worktrees::cache_writer_guard(&project.state, path).map(Some)
-                            };
-                        }
-                    }
-                    Err(worktrees::Occupancy::custody_unknown(
-                        path.to_path_buf(),
-                        "writer registration was not observed",
-                    ))
-                });
             }
             RetentionKind::Staging => {
                 staging_busy = crate::staging_gc::collect(
@@ -1546,36 +1562,21 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 );
             }
             RetentionKind::TargetSeeds => {
-                seed_collection = if command.dry_run {
-                    Ok(Default::default())
-                } else {
-                    provenant_run::target_seed_gc::collect(
-                        roots.state.as_path(),
-                        seed_policy.max_generations,
-                        seed_policy.max_bytes,
-                        false,
-                    )
-                };
+                seed_collection = provenant_run::target_seed_gc::collect(
+                    roots.state.as_path(), seed_policy.max_generations, seed_policy.max_bytes, command.dry_run,
+                );
             }
             RetentionKind::BuildDirectories => {
-                build_collection = if command.dry_run {
-                    Ok(Default::default())
-                } else {
-                    provenant_run::build_dir_gc::collect(
-                        roots.state.as_path(),
-                        &home,
-                        provenant_run::build_dir_gc::Limits {
-                            max_bytes: build_settings.build_dir_cap(),
-                            free_floor,
-                            grace_seconds: build_settings.build_dir_grace_seconds(),
-                        },
-                        false,
-                    )
-                };
+                build_collection = provenant_run::build_dir_gc::collect(
+                    roots.state.as_path(), &home,
+                    provenant_run::build_dir_gc::Limits {
+                        max_bytes: build_settings.build_dir_cap(), free_floor,
+                        grace_seconds: build_settings.build_dir_grace_seconds(),
+                    }, command.dry_run,
+                );
             }
             // Custody-only and append-triggered classes never enter GC.
-            RetentionKind::GitWorktrees
-            | RetentionKind::ObservationLedgers
+            RetentionKind::ObservationLedgers
             | RetentionKind::QuotaHistory
             | RetentionKind::Usage
             // Payload and scratch collection is owned by the ProviderState pass.
@@ -1620,7 +1621,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         }
     };
     let notice = if command.dry_run {
-        Some("bounded preview: upstream refresh, worktree removal, target seed and build-profile surveys deferred to applied GC".into())
+        Some("Allocated bytes are measured without following links; APFS clones may share physical blocks. Upstream evidence uses last fetched refs in previews.".into())
     } else {
         (command.pressure
             && report.removed.is_empty()

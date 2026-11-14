@@ -497,6 +497,55 @@ fn collect_owned_worktree_with(
         )?;
         return Ok(());
     };
+    // Private output belongs to a settled lane, not to the lifetime of its
+    // worktree. A continuation can recreate it; shared download links are
+    // unlinked without traversing their targets. Busy/unknown is retried by GC.
+    if let Err(error) = crate::worktrees::with_context_using_facts(
+        roots,
+        &settled.roots.home,
+        &writer.project,
+        std::time::Duration::ZERO,
+        workers,
+        store.repo_facts(),
+        |context, _| {
+            provenant_confinement::cache::gc_worktree_cargo_caches_with_writer_guard(
+                &settled.roots.home,
+                &provenant_confinement::cache::CacheGcPolicy {
+                    idle_before_ns: Some(i128::MAX),
+                    project_owners: [writer.worktree.clone()].into(),
+                    selected_only: true,
+                    ..Default::default()
+                },
+                |path| {
+                    let guard = worktrees::cache_writer_guard(context.project_state, path)?;
+                    let state = crate::gc_support::lane_states(
+                        roots,
+                        &settled.roots.home,
+                        &settled.roots.checkout,
+                        settled.project_id,
+                    )
+                    .map_err(|error| {
+                        worktrees::Occupancy::custody_unknown(path.to_owned(), error.to_string())
+                    })?;
+                    if state.get(path) != Some(&true) || !state.no_live_lanes(path) {
+                        return Err(worktrees::Occupancy::custody_unknown(
+                            path.to_owned(),
+                            "settlement custody is not free",
+                        ));
+                    }
+                    Ok(Some(guard))
+                },
+            )
+            .map_err(|error| crate::worktrees::Error::Permissions(*error.source))
+        },
+    ) {
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: private cache release for {}: {error}",
+            writer.worktree.display()
+        );
+    }
     // Recover an interrupted prune before classifying an absent worktree.
     let prior = store.worktree_settlement(record.attempt_id, &call)?;
     if replay_worktree_settlement(prior.as_ref(), &writer.worktree)?.is_none() {
@@ -743,38 +792,6 @@ fn collect_owned_worktree_with(
                         return Err(
                             "completion output cleanup failed; the next gc sweep retries it".into(),
                         );
-                    }
-                    // Retained lanes can resume with fresh caches. Restrict this
-                    // pass to their owner, including detached remnants, and prove
-                    // terminal state again while acquiring writer exclusion.
-                    if lane.occupancy.is_available() {
-                        let report = provenant_confinement::cache::gc_worktree_cargo_caches_with_writer_guard(
-                            &settled.roots.home,
-                            &provenant_confinement::cache::CacheGcPolicy {
-                                idle_before_ns: Some(i128::MAX),
-                                project_owners: [writer.worktree.clone()].into(),
-                                selected_only: true,
-                                ..Default::default()
-                            },
-                            |path| {
-                                let guard =
-                                    worktrees::cache_writer_guard(context.project_state, path)?;
-                                if !terminal(path) || !no_live(path) {
-                                    return Err(worktrees::Occupancy::custody_unknown(
-                                        path.to_path_buf(),
-                                        "lane settlement could not be verified",
-                                    ));
-                                }
-                                Ok(Some(guard))
-                            },
-                        )
-                        .map_err(|error| crate::worktrees::Error::Permissions(*error.source))?;
-                        if !report.kept.is_empty() {
-                            return Err(
-                                "completion cache cleanup retained busy or unobserved output"
-                                    .into(),
-                            );
-                        }
                     }
                     Ok(())
                 };

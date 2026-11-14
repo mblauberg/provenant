@@ -46,10 +46,19 @@ pub struct RetentionBytes {
     pub observation: ByteObservation,
 }
 
+/// Byte accounting is part of the class contract, shared by preview and apply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionMeasurement {
+    AllocatedTree,
+    OwnerDefined,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct RetentionClass {
     pub class: RetentionKind,
     pub owner: &'static str,
+    pub measurement: RetentionMeasurement,
     pub eligibility: RetentionEligibility,
     pub eligibility_detail: &'static str,
     /// Effective config keys, interpreted by the owner.
@@ -63,11 +72,11 @@ const GC_SETTLEMENT: &[RetentionTrigger] = &[RetentionTrigger::Gc, RetentionTrig
 const INSTALL: &[RetentionTrigger] = &[RetentionTrigger::Install];
 const APPEND: &[RetentionTrigger] = &[RetentionTrigger::Append];
 const NEVER: &[RetentionTrigger] = &[RetentionTrigger::Never];
-const CUSTODY: &[RetentionTrigger] = &[RetentionTrigger::Custody];
 
 macro_rules! retention_classes {
     ($($kind:ident => {
         owner: $owner:literal,
+        measure: $measure:ident,
         eligibility: $eligibility:ident,
         detail: $detail:literal,
         settings: [$($setting:literal),* $(,)?],
@@ -82,6 +91,7 @@ macro_rules! retention_classes {
             $(RetentionClass {
                 class: RetentionKind::$kind,
                 owner: $owner,
+                measurement: RetentionMeasurement::$measure,
                 eligibility: RetentionEligibility::$eligibility,
                 eligibility_detail: $detail,
                 settings: &[$($setting),*],
@@ -94,20 +104,15 @@ macro_rules! retention_classes {
 retention_classes! {
     LaneCargoCaches => {
         owner: "confinement/cache",
+        measure: AllocatedTree,
         eligibility: Declared,
         detail: "settled lane; verified cache owner and free writer custody",
         settings: ["gc.idle_days", "gc.lane_cargo_cache_max"],
         triggers: GC_SETTLEMENT
     },
-    GitWorktrees => {
-        owner: "confinement/worktrees",
-        eligibility: Declared,
-        detail: "terminal writer; clean Git; landed unchanged tip",
-        settings: ["gc.idle_days"],
-        triggers: CUSTODY
-    },
     ObservationLedgers => {
         owner: "telemetry/ledger",
+        measure: OwnerDefined,
         eligibility: Declared,
         detail: "permanent attempt evidence",
         settings: [],
@@ -115,6 +120,7 @@ retention_classes! {
     },
     Staging => {
         owner: "staging_gc",
+        measure: OwnerDefined,
         eligibility: Declared,
         detail: "free ingest/install item lock and idle age",
         settings: ["gc.idle_days"],
@@ -122,6 +128,7 @@ retention_classes! {
     },
     ProviderState => {
         owner: "run/retention",
+        measure: OwnerDefined,
         eligibility: Declared,
         detail: "terminal; free publication/writer custody; no retained private Git",
         settings: ["retention.provider_state_days", "retention.logs_days"],
@@ -129,6 +136,7 @@ retention_classes! {
     },
     ChairLogs => {
         owner: "workflow/log",
+        measure: OwnerDefined,
         eligibility: Declared,
         detail: "owner transaction after replay horizon",
         settings: ["retention.chair_log_days", "retention.chair_log_replay_days", "retention.chair_log_entries", "retention.chair_log_bytes"],
@@ -136,6 +144,7 @@ retention_classes! {
     },
     TargetSeeds => {
         owner: "run/target_seed_gc",
+        measure: OwnerDefined,
         eligibility: Declared,
         detail: "free store/clone and staging build locks",
         settings: ["domains.fabric.lanes.cargo_seed.max_generations", "domains.fabric.lanes.cargo_seed.max_bytes"],
@@ -143,13 +152,23 @@ retention_classes! {
     },
     BuildDirectories => {
         owner: "run/build_dir_gc",
+        measure: OwnerDefined,
         eligibility: Declared,
         detail: "GC boundary and free Cargo profile locks",
         settings: ["domains.fabric.lanes.build_dir_max_bytes", "domains.fabric.lanes.build_dir_grace_seconds", "gc.free_floor"],
         triggers: GC
     },
+    GitWorktrees => {
+        owner: "confinement/worktrees + custody/retirement",
+        measure: OwnerDefined,
+        eligibility: Declared,
+        detail: "free custody and census; clean Git; subsumed tip or idle retirement",
+        settings: ["gc.idle_days"],
+        triggers: GC_SETTLEMENT
+    },
     QuotaHistory => {
         owner: "cli/quota_history",
+        measure: OwnerDefined,
         eligibility: Declared,
         detail: "whole-line append and atomic rotation",
         settings: [],
@@ -157,6 +176,7 @@ retention_classes! {
     },
     Usage => {
         owner: "telemetry/usage",
+        measure: OwnerDefined,
         eligibility: Declared,
         detail: "whole-line append and atomic rotation",
         settings: [],
@@ -164,6 +184,7 @@ retention_classes! {
     },
     GraphCheckpoints => {
         owner: "fabric-runtime/graph/journal",
+        measure: OwnerDefined,
         eligibility: Declared,
         detail: "terminal checkpoint older than configured retention",
         settings: ["gc.graph_checkpoint_days"],
@@ -171,6 +192,7 @@ retention_classes! {
     },
     ManagedReleases => {
         owner: "install",
+        measure: OwnerDefined,
         eligibility: Declared,
         detail: "inactive managed release not in use",
         settings: [],
@@ -178,6 +200,7 @@ retention_classes! {
     },
     PayloadCap => {
         owner: "run/retention",
+        measure: OwnerDefined,
         eligibility: Declared,
         detail: "unpinned payload above the configured cap",
         settings: ["retention.payload_cap_bytes"],
@@ -185,13 +208,15 @@ retention_classes! {
     },
     AttemptScratch => {
         owner: "run/retention",
+        measure: OwnerDefined,
         eligibility: Declared,
-        detail: "terminal attempt scratch older than the retention cutoff",
+        detail: "settled attempt; evidence captured and private Git import complete",
         settings: ["retention.provider_state_days"],
-        triggers: GC
+        triggers: GC_SETTLEMENT
     },
     DiscardArchives => {
         owner: "confinement/worktrees/removal",
+        measure: OwnerDefined,
         eligibility: Unknown,
         detail: "archive writer and retention policy are not yet declared",
         settings: [],
@@ -532,6 +557,8 @@ pub struct GcSettings {
     pub idle_days: u64,
     pub graph_checkpoint_days: u64,
     pub free_floor: Option<String>,
+    /// Only this small critical threshold may stop new builds; free_floor warns.
+    pub critical_free: Option<String>,
     /// Total lane Cargo cache cap; defaults to 32 GiB.
     pub lane_cargo_cache_max: Option<String>,
     pub alert_below: Option<String>,
@@ -545,6 +572,7 @@ impl Default for GcSettings {
             idle_days: 7,
             graph_checkpoint_days: 90,
             free_floor: None,
+            critical_free: None,
             lane_cargo_cache_max: None,
             alert_below: None,
             projects: BTreeMap::new(),
@@ -572,6 +600,16 @@ impl GcSettings {
 
     /// The configured floor, or 1% of the state volume capped at 5 GiB.
     /// Installation can render before the state directory has been created.
+    /// Critical disk threshold, independent of the advisory collection target.
+    pub fn critical_free_bytes(&self) -> std::io::Result<u64> {
+        self.critical_free
+            .as_deref()
+            .map(parse_cache_size)
+            .transpose()
+            .map(|bytes| bytes.unwrap_or(2 * 1024_u64.pow(3)))
+            .map_err(std::io::Error::other)
+    }
+
     pub fn free_floor_bytes(&self, state: &Path) -> std::io::Result<u64> {
         if let Some(size) = &self.free_floor {
             return parse_cache_size(size).map_err(std::io::Error::other);
@@ -616,6 +654,9 @@ impl GcSettings {
             return Err("graph_checkpoint_days_range");
         }
         if let Some(size) = &self.free_floor {
+            parse_cache_size(size)?;
+        }
+        if let Some(size) = &self.critical_free {
             parse_cache_size(size)?;
         }
         if let Some(size) = &self.lane_cargo_cache_max {
@@ -727,10 +768,7 @@ mod tests {
             let decoded: RetentionBytes = serde_json::from_slice(&encoded).unwrap();
             assert_eq!(decoded, bytes);
         }
-        for kind in [
-            RetentionKind::GitWorktrees,
-            RetentionKind::ObservationLedgers,
-        ] {
+        for kind in [RetentionKind::ObservationLedgers] {
             assert!(!retention_schedule(RetentionTrigger::FullGc).any(|entry| entry.class == kind));
         }
         for class in retention_schedule(RetentionTrigger::Gc) {

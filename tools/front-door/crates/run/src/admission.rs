@@ -641,8 +641,7 @@ impl RunStore {
         )
         .filter(|left| *left > 0);
         let low_disk = disk.zip(floor).filter(|(free, (floor, _))| free < floor);
-        if ticket.lane_class == LaneClass::ReadOnly
-            && let Some((free, (floor, origin))) = low_disk
+        if let Some((free, (floor, origin))) = low_disk
             && let Some(warning) = read_only_disk_warning(&mut false, free, floor, origin)
         {
             eprintln!(
@@ -655,7 +654,23 @@ impl RunStore {
                 warning.next.as_deref().unwrap_or("free disk space")
             );
         }
-        let writer_disk = low_disk.filter(|_| ticket.lane_class == LaneClass::Writer);
+        let critical = provenant_config::GcSettings::read(&self.writer_registry)
+            .ok()
+            .and_then(|settings| {
+                settings.critical_free_bytes().ok().map(|bytes| {
+                    (
+                        bytes,
+                        if settings.critical_free.is_some() {
+                            provenant_records::diagnostic::SettingSource::Configuration
+                        } else {
+                            provenant_records::diagnostic::SettingSource::ShippedDefault
+                        },
+                    )
+                })
+            });
+        let writer_disk = disk
+            .zip(critical)
+            .filter(|(free, (critical, _))| free < critical);
         let observed = |error: RunError| (error.to_string(), error);
         // Each observation names its typed refusal; the policy decides its effect.
         let observations: [(&str, Option<(String, RunError)>); 4] = [
@@ -945,7 +960,7 @@ fn read_only_disk_warning(
     Some(
         ErrorKind::DiskFloor.diagnostic().category("warning")
             .detail(format!(
-                "disk space: {free} bytes available; gc.free_floor is {floor} bytes (source: {}); read-only lane is proceeding",
+                "disk space: {free} bytes available; gc.free_floor is {floor} bytes (source: {}); lane is proceeding",
                 origin.description()
             ))
             .next("free disk space or run `provenant gc --apply`"),
@@ -1051,7 +1066,7 @@ mod process_wait_tests {
         assert_eq!(
             warning.detail.as_deref(),
             Some(
-                "disk space: 99 bytes available; gc.free_floor is 100 bytes (source: host configuration); read-only lane is proceeding"
+                "disk space: 99 bytes available; gc.free_floor is 100 bytes (source: host configuration); lane is proceeding"
             )
         );
         assert!(warning.next.is_some());

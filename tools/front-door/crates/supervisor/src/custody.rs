@@ -1757,34 +1757,25 @@ pub fn prepare_writer_observation(directory: &Directory) -> Result<()> {
     Ok(())
 }
 
-/// Serialise admission with a brief read-only lock probe. This wait is separate
-/// from the writer Busy budget: an observer never owns writer custody.
+/// Try admission once. An observer is busy evidence, never a reason to wait.
 pub fn writer_admission_guard(directory: &Directory) -> Result<LockGuard> {
-    let clock = provenant_os::clock::SystemClock::new();
     directory
-        .lock(
-            OsStr::new("writer-probe.lock"),
-            LockMode::Exclusive,
-            WaitBudget::cli(clock.mono_now(), 5).map_err(|_| CustodyError::InvalidRecord)?,
-            &CancelToken::new(),
-            &clock,
-        )
-        .map_err(|error| CustodyError::ObservationGate(error.to_string()))
+        .try_lock(OsStr::new("writer-probe.lock"), LockMode::Exclusive)
+        .map_err(observation_error)
 }
 
-/// A read-only observer holds this only until its writer-lock probe is dropped.
-/// A missing gate leaves observation unresolved; readers never create it.
+/// Probe an existing gate once without creating state during observation.
 pub fn writer_observation_guard(directory: &Directory) -> Result<LockGuard> {
-    let clock = provenant_os::clock::SystemClock::new();
     directory
-        .lock_existing(
-            OsStr::new("writer-probe.lock"),
-            LockMode::Exclusive,
-            WaitBudget::cli(clock.mono_now(), 5).map_err(|_| CustodyError::InvalidRecord)?,
-            &CancelToken::new(),
-            &clock,
-        )
-        .map_err(|error| CustodyError::ObservationGate(error.to_string()))
+        .try_lock_existing(OsStr::new("writer-probe.lock"), LockMode::Exclusive)
+        .map_err(observation_error)
+}
+
+fn observation_error(error: FsError) -> CustodyError {
+    match error {
+        FsError::LockTimeout { .. } => CustodyError::Busy,
+        error => CustodyError::ObservationGate(error.to_string()),
+    }
 }
 
 /// Recovery carries a verified reservation and optional writer exclusion.

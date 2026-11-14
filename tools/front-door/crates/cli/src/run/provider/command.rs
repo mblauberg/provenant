@@ -268,6 +268,7 @@ pub(super) fn prepare_command(
             policy: &launch_policy,
         },
     )?;
+    scratch_cargo_output(&mut spec.env, &scratch);
     let process_tree_read = configure_process_tree(&mut spec, paths)?;
     let settings = config.domains.fabric.lanes.build_settings();
     let coordination_reads = configure_build_slots(
@@ -501,6 +502,16 @@ pub(super) fn set_cargo_jobs(
 /// Keep lane build output small: no incremental sessions and line tables
 /// instead of full debug info. A value the submitting environment or brief
 /// already supplied is left alone; `domains.fabric.lanes` overrides the defaults.
+/// Read-only source views never own build output. Scratch already has a
+/// settlement lifetime and no-follow disposal, including crashed attempts.
+pub(super) fn scratch_cargo_output(env: &mut Vec<(OsString, OsString)>, scratch: &Path) {
+    let target = scratch.join("target").into_os_string();
+    for key in ["CARGO_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"] {
+        env.retain(|(name, _)| name != key);
+        env.push((key.into(), target.clone()));
+    }
+}
+
 pub(super) fn set_cargo_profile(
     env: &mut Vec<(std::ffi::OsString, std::ffi::OsString)>,
     settings: &provenant_config::LaneBuildSettings,

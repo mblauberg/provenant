@@ -32,7 +32,7 @@ fn resource_pressure_and_busy_caps_never_queue_default_admission() -> TestResult
         let store = RunStore::open(&context(temp.path())?, &call)?;
         std::fs::write(
             store.writer_registry.join("config.toml"),
-            "schema_version=1\n[gc]\nfree_floor='100B'\n[domains.fabric.lanes]\nmax_lanes=1\nmax_writer_lanes=1\nstart_spacing_ms=600000\n",
+            "schema_version=1\n[gc]\nfree_floor='100B'\ncritical_free='100B'\n[domains.fabric.lanes]\nmax_lanes=1\nmax_writer_lanes=1\nstart_spacing_ms=600000\n",
         )?;
         let mut facts = HostFacts::new(1);
         facts.disk = 99;
@@ -57,7 +57,7 @@ fn strict_disk_floor_refuses_without_waiting_and_can_be_disabled() -> TestResult
         std::fs::write(
             store.writer_registry.join("config.toml"),
             format!(
-                "schema_version=1\n[knobs]\n'policy.ADMISSION_DISK'='{strength}'\n[gc]\nfree_floor='100B'\n"
+                "schema_version=1\n[knobs]\n'policy.ADMISSION_DISK'='{strength}'\n[gc]\nfree_floor='100B'\ncritical_free='100B'\n"
             ),
         )?;
         let id = starting(&store, &lane(80, true), &call)?;

@@ -1131,6 +1131,29 @@ fn never_spawned_resource_fact_survives_exit_storage() -> TestResult {
 }
 
 #[test]
+fn observation_gates_try_once_and_preserve_unknown_errors() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let directory = Directory::open_anchor(root.path())?;
+    let guard = writer_admission_guard(&directory)?;
+    assert!(matches!(
+        writer_observation_guard(&directory),
+        Err(CustodyError::Busy)
+    ));
+    assert!(matches!(
+        writer_admission_guard(&directory),
+        Err(CustodyError::Busy)
+    ));
+    drop(guard);
+    drop(writer_observation_guard(&directory)?);
+    std::fs::remove_file(root.path().join("writer-probe.lock"))?;
+    assert!(matches!(
+        writer_observation_guard(&directory),
+        Err(CustodyError::ObservationGate(_))
+    ));
+    Ok(())
+}
+
+#[test]
 fn writer_exclusion_gate_contention_honours_the_caller_deadline() -> TestResult {
     let root = tempfile::tempdir()?;
     // The directory reports its canonical path (`/private/var/...` on macOS).
