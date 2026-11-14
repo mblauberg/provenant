@@ -35,6 +35,8 @@ mod providers;
 pub use providers::{ProviderSettings, ProviderUpdate};
 mod project_binding;
 mod release;
+mod repository_policy;
+pub use repository_policy::{REPOSITORY_CONFIG, RepositoryPolicy};
 pub mod removed;
 mod retention;
 pub use removed::{REMOVED, Removed};
@@ -136,6 +138,8 @@ pub enum ConfigError {
     InvalidProjectLocation,
     #[error("project GitHub policy is invalid")]
     InvalidGithubPolicy,
+    #[error("repository launch policy is invalid (.provenant/config.toml [launch_policy])")]
+    InvalidRepositoryPolicy,
     #[error("project binding state is invalid")]
     InvalidProjectBinding,
     #[error("project binding lock budget is invalid")]

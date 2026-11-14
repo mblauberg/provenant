@@ -35,26 +35,25 @@ pub struct Approval {
     pub reference: String,
     pub reviewer: String,
 }
-/// A Provenant review record for a pull request: the head `H` it reviewed and
-/// the base `B` it read `H` against.
+/// Typed settlement of an independent Provenant review execution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReviewRecord {
     pub reference: String,
     pub reviewer: String,
     pub head: String,
-    pub base: String,
+    pub verdict: provenant_records::workflow::ReviewVerdict,
+    pub independent: bool,
 }
-/// A pull request's accepted review records, and the receipts for it that
-/// cannot be read as one, each with the reason and its remedy.
+/// A pull request's typed review records and any unusable source diagnostics.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Reviews {
     pub records: Vec<ReviewRecord>,
     pub unusable: Vec<String>,
 }
-/// Accepted Provenant review records, read when `land.approval = "receipt"`.
+/// Provenant review settlements, read when configured as an approval source.
 /// This is the approval port beside [`Forge::approvals`].
 pub trait ReviewRecords {
-    fn reviews(&self, number: u64) -> Result<Reviews, LandingError>;
+    fn reviews(&self, number: u64, head: &str) -> Result<Reviews, LandingError>;
 }
 pub trait Forge {
     fn set_project_path(&mut self, _path: &std::path::Path) {}

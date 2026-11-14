@@ -17,14 +17,38 @@ downgrade is inferred; a family comes only from provider protocol evidence at
 the catalogue revision, never from a name or output text. A pool draw is seeded
 from the operation, so a retry picks the same member without stored state, and
 the receipt names what ran and why. Capability facts never grant filesystem or
-network authority, and a confidential request admits only models that neither
-train on nor retain prompts.
+network authority, and a confidential request admits only models with an
+explicit catalogue guarantee that they do not train on prompts. Unknown
+training treatment is excluded.
 - Why: the receipt must name exactly what ran, and assurance claims must not be
   forgeable by output.
 - Test: `crates/routing/src/tests/policies.rs::exact_unknown_is_retained_but_requires_availability`;
   `crates/routing/src/tests/selection.rs::table_driven_weighted_pools_record_effort_readiness_roll_and_seed`;
   `crates/routing/src/tests/alternatives.rs::family_requires_provider_answer_evidence_at_the_same_revision`;
   `crates/routing/src/tests/selection.rs::confidential_pool_excludes_training_models`
+
+## Repository confidentiality at launch
+
+A repository may declare confidentiality or protected file/directory prefixes
+in `.provenant/config.toml` under `[launch_policy]`. With no declaration,
+ordinary routing is unchanged. The host classifies declared file inputs,
+including the original brief file, explicit read roots and attachments, brief
+path references and the observed Git diff before selecting a local or peer
+route. A protected match requires no-training treatment on every candidate,
+including fallback. A repository with protected paths and an incomplete diff
+observation is classified confidential rather than silently declassified.
+
+The accepted request seals the result and its sources. Recovery retains that
+classification even if the policy disappears and warns about a missing
+recorded configuration. This classifies launch inputs, not arbitrary file
+access an agent may discover while running.
+- Why: repository-declared confidential data must not reach a model that may
+  train on it, and replay must not reinterpret accepted inputs.
+- Test: `crates/cli/src/run/launch_policy.rs::tests::repository_classification_covers_inputs_briefs_diff_and_recovery`;
+  `src/fabric/owner.rs::recovery_rebuild_preserves_request_digest_for_any_submitted_spec`;
+  `crates/routing/src/tests/selection.rs::confidential_pool_excludes_training_models`
+- Owner: `crates/config/src/repository_policy.rs`,
+  `crates/cli/src/run/launch_policy.rs`, `src/fabric/owner.rs`
 
 ## One resolution, bounded alternatives
 

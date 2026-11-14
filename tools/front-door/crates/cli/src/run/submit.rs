@@ -617,9 +617,12 @@ fn submit_with_launcher(
             }
         }
     }
-    let profile = config
-        .dispatch_profile(&submission.knobs)
-        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+    let profile = match &submission.task.attempt.sealed_profile {
+        Some(profile) => profile.clone(),
+        None => config
+            .dispatch_profile(&submission.knobs)
+            .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?,
+    };
     let task = {
         let task = submission.task;
         {
@@ -632,7 +635,34 @@ fn submit_with_launcher(
             task_profile.settlement_retry_limit = task
                 .settlement_retry_limit
                 .map(|limit| limit.min(provenant_routing::MAX_SETTLEMENT_RETRIES));
-            let attempt = task.attempt;
+            let mut attempt = task.attempt;
+            // Seal direct-parent admission before hashing, just as graph and
+            // peer admission do. Continuations retain this immutable fact.
+            if !attempt.policy_sealed {
+                attempt.parent_sandboxed |= parent_attempt
+                    .is_some_and(|parent| session.store.attempt_floors_children(parent, call));
+            }
+            seal_launch_policy(
+                &mut attempt,
+                task.worktree.as_deref().unwrap_or(edge.cwd),
+                &task.prompt,
+                &task.access,
+                task.base.as_deref(),
+                task.head.as_deref(),
+            )?;
+            if let Some(policy) = &attempt.launch_policy {
+                task_profile.extra.insert(
+                    provenant_records::run::LAUNCH_POLICY_FIELD.into(),
+                    serde_json::to_value(policy).map_err(|error| {
+                        Fail::new(Status::Invalid, ErrorKind::Config, error.to_string())
+                    })?,
+                );
+            }
+            if let Some(admitted_by) = &attempt.admitted_by {
+                task_profile
+                    .extra
+                    .insert("admitted_by".into(), serde_json::json!(admitted_by));
+            }
             for key in ["write_scope", "policy_overrides"] {
                 if let Some(value) = attempt.extra.get(key) {
                     task_profile.extra.insert(key.into(), value.clone());

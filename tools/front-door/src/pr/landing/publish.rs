@@ -238,7 +238,7 @@ mod tests {
                 number,
                 head: head.into(),
                 approval: format!("approval-{number}"),
-                carried_paths: Vec::new(),
+                approval_evidence: None,
                 accepted: None,
                 base_branch: "main".into(),
             },
@@ -429,10 +429,10 @@ mod tests {
         );
         Ok(())
     }
-    /// A receipt whose proof cannot be read at revalidation withdraws its pull
-    /// request from publication, with the reason; the provable one stays.
+    /// A review on an older head withdraws its pull request from publication;
+    /// the exact-head approval stays.
     #[test]
-    fn revalidation_excludes_a_receipt_whose_proof_cannot_be_read() -> Result<(), LandingError> {
+    fn revalidation_excludes_a_review_on_an_older_head() -> Result<(), LandingError> {
         use crate::pr::landing::{approval::Approvals, fakes::FakeReviews, ports::ReviewRecord};
         use provenant_cli::domains::ApprovalSource;
         let mut forge = FakeForge::default();
@@ -453,7 +453,8 @@ mod tests {
             reference: format!("approval-{number}"),
             reviewer: "reviewer".into(),
             head: head.into(),
-            base: "fork".into(),
+            verdict: provenant_records::workflow::ReviewVerdict::Approve,
+            independent: true,
         };
         let reviews = FakeReviews::of(std::collections::BTreeMap::from([
             (1, vec![record(1, "head-1")]),
@@ -462,16 +463,11 @@ mod tests {
         let c = candidate();
         let excluded = revalidate_with_reasons(
             &mut forge,
-            &mut Approvals::new(ApprovalSource::Receipt, &reviews).at(&mut repo, "base"),
+            &mut Approvals::new(&[ApprovalSource::ProvenantReview], &reviews).at(&mut repo, "base"),
             &c,
         )?;
         assert_eq!(excluded.len(), 1, "{excluded:?}");
         assert_eq!(excluded[0].0, c.steps[1].pr);
-        assert!(
-            excluded[0].1.starts_with("unprovable: approval-2"),
-            "{}",
-            excluded[0].1
-        );
         Ok(())
     }
     #[test]

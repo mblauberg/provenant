@@ -450,7 +450,7 @@ mod tests {
                 number: n,
                 head: format!("h{n}"),
                 approval: format!("a{n}"),
-                carried_paths: Vec::new(),
+                approval_evidence: None,
                 accepted: None,
                 base_branch: "main".into(),
             };

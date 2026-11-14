@@ -194,12 +194,14 @@ impl<D> crate::ResolvedConfig<D> {
 pub const KNOB_SOURCES: &str = "knob_sources";
 
 /// Knobs whose effective source a lane's receipt, status and preamble show.
-const SOURCED_KNOBS: [&str; 5] = [
+const SOURCED_KNOBS: [&str; 7] = [
     "lanes.token_budget",
     "lanes.budget_action",
     "lanes.budget_grace",
     "lanes.ci_scope",
     "lanes.gh_budget",
+    "lanes.sandbox",
+    "lanes.sandbox_floor",
 ];
 
 /// Parsed once; the embedded text is immutable.

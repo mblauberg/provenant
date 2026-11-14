@@ -387,7 +387,7 @@ pub(super) fn confinement_request(
 /// Resolve the lane's sandbox from its route id (`adapter/model`), the
 /// sealed `lanes.sandbox` knob, the parent flag and the access the plan
 /// grants. The parent flag only narrows, so the host may set it on either the
-/// task or its profile. A knob value that is not a string sandboxes.
+/// task or its profile. Invalid optional knobs retain the default off.
 pub(super) fn sandbox_mode(
     host: &provenant_confinement::run_config::RunConfig,
     route: &str,
@@ -417,34 +417,145 @@ fn sandbox_mode_for_access(
     read_only: bool,
 ) -> provenant_confinement::run_config::SandboxMode {
     use provenant_confinement::run_config::SandboxInputs;
-    host.sandbox_for(SandboxInputs {
+    let sandbox = task
+        .profile
+        .knobs
+        .get("lanes.sandbox")
+        .and_then(serde_json::Value::as_str);
+    let strength = task
+        .profile
+        .knobs
+        .get("lanes.sandbox_floor")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("warn");
+    let parent = [&task.extra, &task.profile.extra].into_iter().any(|extra| {
+        extra
+            .get(provenant_records::run::PARENT_SANDBOXED_FIELD)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    });
+    let (floor, warn) = provenant_records::run::admission_floor(parent, sandbox, strength);
+    let mut mode = host.sandbox_for(SandboxInputs {
         route,
-        knob: task
-            .profile
-            .knobs
-            .get("lanes.sandbox")
-            .map(|value| value.as_str().unwrap_or("on")),
-        parent_sandboxed: [&task.extra, &task.profile.extra].into_iter().any(|extra| {
-            extra
-                .get(provenant_records::run::PARENT_SANDBOXED_FIELD)
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-        }),
+        knob: if floor { Some("on") } else { sandbox },
+        parent_sandboxed: floor,
         network_narrowed: network != NetworkAccess::Open,
         read_only,
         os_sandboxed: provenant_confinement::run_config::current_process_is_sandboxed(),
         platform_supported: cfg!(target_os = "macos"),
-    })
+    });
+    if floor && mode.effective {
+        mode.requested = sandbox == Some("on");
+        mode.source = provenant_confinement::run_config::SandboxSource::Parent;
+    }
+    if warn {
+        let source = task
+            .profile
+            .extra
+            .get(provenant_config::KNOB_SOURCES)
+            .and_then(|sources| sources.get("lanes.sandbox_floor"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("default");
+        let warning = format!(
+            "sandbox admission floor lowered; lanes.sandbox_floor=warn (source: {source}, boundary: none)"
+        );
+        mode.warning = Some(match mode.warning.take() {
+            Some(other) => format!("{other}; {warning}"),
+            None => warning,
+        });
+    }
+    mode
+}
+
+// Small: sealed public task/receipt round trips across every adapter candidate.
+#[cfg(test)]
+#[test]
+fn admission_policy_is_independent_of_primary_or_fallback_adapter()
+-> Result<(), Box<dyn std::error::Error>> {
+    let prepared = crate::run::tests::trace_run(
+        1,
+        provenant_core::AttemptId::from_bytes([9; 16]),
+        provenant_core::WallTime::from_micros(1)?,
+    )?;
+    for strength in ["off", "warn", "strict"] {
+        let mut task = prepared.request.task.clone();
+        task.profile.extra.insert(
+            provenant_records::run::PARENT_SANDBOXED_FIELD.into(),
+            true.into(),
+        );
+        task.profile
+            .knobs
+            .insert("lanes.sandbox".into(), "off".into());
+        task.profile
+            .knobs
+            .insert("lanes.sandbox_floor".into(), strength.into());
+        let task: run::TaskRequest = serde_json::from_value(serde_json::to_value(&task)?)?;
+        for route in [
+            "codex/gpt-6-luna",
+            "claude/claude-sonnet-5-5",
+            "command/fmt",
+        ] {
+            let mode = sandbox_mode_for_access(
+                &Default::default(),
+                route,
+                &task,
+                NetworkAccess::Open,
+                false,
+            );
+            if !provenant_confinement::run_config::current_process_is_sandboxed() {
+                assert_eq!(mode.effective, strength == "strict");
+                assert_eq!(
+                    mode.warning.is_some(),
+                    strength == "warn" || (strength == "strict" && !cfg!(target_os = "macos"))
+                );
+            } else {
+                assert!(mode.effective);
+            }
+            let mut receipt = run::RouteRecord::default();
+            let mut environment = Vec::new();
+            apply_sandbox_mode(&task, mode, &mut environment, &mut receipt);
+            assert_eq!(receipt.extra["sandbox_admission"]["strength"], strength);
+            assert_eq!(receipt.extra["sandbox_admission"]["boundary"], "none");
+            assert_eq!(receipt.extra["sandbox_admission"]["source"], "default");
+        }
+    }
+    Ok(())
 }
 
 /// Tell the lane its mode (`PROVENANT_SANDBOX=on|off`) and record it, with
 /// its source, in the applied route that the receipt and `status` read.
 pub(super) fn apply_sandbox_mode(
+    task: &run::TaskRequest,
     mode: provenant_confinement::run_config::SandboxMode,
     environment: &mut Vec<(std::ffi::OsString, std::ffi::OsString)>,
     route: &mut provenant_records::run::RouteRecord,
 ) {
     use provenant_confinement::run_config::SANDBOX_ENV;
+    if let Some(policy) = task
+        .profile
+        .extra
+        .get(provenant_records::run::LAUNCH_POLICY_FIELD)
+    {
+        route.extra.insert(
+            provenant_records::run::LAUNCH_POLICY_FIELD.into(),
+            policy.clone(),
+        );
+    }
+    let parent = [&task.extra, &task.profile.extra].into_iter().any(|extra| {
+        extra
+            .get(provenant_records::run::PARENT_SANDBOXED_FIELD)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    });
+    route.extra.insert("sandbox_admission".into(), serde_json::json!({
+        "parent_sandboxed": parent,
+        "boundary": "none",
+        "strength": task.profile.knobs.get("lanes.sandbox_floor").and_then(serde_json::Value::as_str).unwrap_or("warn"),
+        "knob": "lanes.sandbox_floor",
+        "source": task.profile.extra.get(provenant_config::KNOB_SOURCES)
+            .and_then(|sources| sources.get("lanes.sandbox_floor"))
+            .and_then(serde_json::Value::as_str).unwrap_or("default"),
+    }));
     environment.retain(|(name, _)| name != SANDBOX_ENV);
     environment.push((SANDBOX_ENV.into(), mode.env_value().into()));
     route.extra.insert(

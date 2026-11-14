@@ -1374,6 +1374,32 @@ pub(super) struct StoredCheckpoint {
     pub(super) execution: GraphExecution,
 }
 
+/// Read typed Provenant review settlements covering exactly `head`.
+/// The graph settlement writes this projection; the query never reads verdict prose.
+pub fn landing_reviews(
+    root: &StateRoot,
+    project: ProjectId,
+    head: provenant_core::GitOid,
+) -> Result<Vec<ReviewSettlement>, JournalError> {
+    let mut reviews = Vec::new();
+    for id in FileJournal::graph_ids(root, project)? {
+        let Some(checkpoint) = FileJournal::read_checkpoint(root, project, &id)? else {
+            continue;
+        };
+        for node in &checkpoint.nodes {
+            if node.state == NodeState::Succeeded
+                && let Some(review) = node
+                    .review_settlement
+                    .as_ref()
+                    .filter(|review| review.head == head)
+            {
+                reviews.push(review.clone());
+            }
+        }
+    }
+    Ok(reviews)
+}
+
 pub(super) fn open_or_create(directory: &Directory, name: &OsStr) -> Result<Directory, FsError> {
     match directory.open_verified_directory(name) {
         Ok(child) => Ok(child),

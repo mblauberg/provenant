@@ -14,7 +14,7 @@
 //! target per request and refuses a member pinned to another base.
 use super::{
     LandingError,
-    approval::{Approvals, Proof},
+    approval::Approvals,
     driver,
     model::{GateDefinition, Outcome, Pin},
     policy::LandPolicy,
@@ -33,8 +33,6 @@ pub enum ReviewProof {
     /// The policy's approval source decides.
     #[default]
     Policy,
-    /// The caller proved review coverage of the pinned head.
-    Proved { reference: String },
     /// The chair accepts a delta no review covers.
     Accepted { reason: String },
 }
@@ -335,16 +333,11 @@ impl Owner<'_> {
                 )
             })
             .collect();
-        let proofs: BTreeMap<u64, Proof> = members
+        let acceptances: BTreeMap<u64, String> = members
             .iter()
             .filter_map(|member| match &member.review_proof {
                 ReviewProof::Policy => None,
-                ReviewProof::Proved { reference } => {
-                    Some((member.pr, Proof::Proved(reference.clone())))
-                }
-                ReviewProof::Accepted { reason } => {
-                    Some((member.pr, Proof::Accepted(reason.clone())))
-                }
+                ReviewProof::Accepted { reason } => Some((member.pr, reason.clone())),
             })
             .collect();
         let result = driver::run(
@@ -360,7 +353,7 @@ impl Owner<'_> {
                 gate: self.gate,
                 shadow: self.shadow,
                 state: self.state,
-                approvals: self.approvals.with_proofs(&proofs),
+                approvals: self.approvals.with_acceptances(&acceptances),
                 pins: &pins,
             },
         );
@@ -432,7 +425,7 @@ impl LandingOwner for Owner<'_> {
             }
             other.is_none()
         });
-        // The latest submission's authority and proofs decide this pass.
+        // The latest submission's authority and owner acceptances decide this pass.
         record.request.authority = request.authority;
         for member in &mut todo {
             if let Some(fresh) = request.members.iter().find(|fresh| fresh.pr == member.pr) {
@@ -560,15 +553,14 @@ mod tests {
     }
 
     #[test]
-    fn a_graph_delivery_lands_its_proved_members_into_one_record()
+    fn explicit_owner_acceptance_lands_members_into_one_record()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut world = world(2)?;
-        // A graph proves its own review coverage; no forge approval exists.
         world.forge.approvals_at_head.clear();
         let mut members = members(&[1, 2]);
         for member in &mut members {
-            member.review_proof = ReviewProof::Proved {
-                reference: format!("graph:g/{}", member.pr),
+            member.review_proof = ReviewProof::Accepted {
+                reason: "owner accepts uncovered delta".into(),
             };
         }
         let (_, record) = submit(

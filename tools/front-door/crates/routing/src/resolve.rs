@@ -1889,7 +1889,8 @@ fn candidate(
         },
     })
 }
-/// Confidential work requires the catalogue privacy guarantee.
+/// Confidential work requires an explicit no-training guarantee. Unknown
+/// training treatment is excluded just like training-enabled treatment.
 fn privacy_allowed(model: &ModelId, confidential: bool, catalogue: &Catalogue) -> bool {
     !confidential
         || catalogue

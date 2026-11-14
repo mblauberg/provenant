@@ -4225,7 +4225,7 @@ pub(super) fn prepare_candidates(
             }
         }
         let sandboxed = sandbox.effective;
-        apply_sandbox_mode(sandbox, &mut spec.env, &mut provider);
+        apply_sandbox_mode(task, sandbox, &mut spec.env, &mut provider);
         return Ok(run::PreparedLaunch {
             limits,
             skipped_routes: reasons,

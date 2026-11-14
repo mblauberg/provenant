@@ -25,6 +25,8 @@ mod cancel;
 mod holder;
 mod key;
 mod launch;
+mod launch_policy;
+pub use launch_policy::seal_launch_policy;
 mod output;
 mod provider;
 mod reconcile;

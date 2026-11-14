@@ -202,6 +202,60 @@ mod tests {
     use provenant_records::PathWire;
 
     #[test]
+    fn approval_sources_are_typed_overridable_and_sourced() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use provenant_cli::domains::ApprovalSource;
+        let mut settings = LandSettings::default();
+        let policy = LandPolicy::resolve(
+            &settings,
+            &BTreeMap::new(),
+            None,
+            None,
+            &LandOverride::default(),
+        )?;
+        assert_eq!(
+            settings.approval_sources,
+            vec![ApprovalSource::ProvenantReview, ApprovalSource::Forge]
+        );
+        let field = &policy.fields["approval_sources"];
+        assert_eq!(
+            field.value,
+            serde_json::to_value(&settings.approval_sources)?
+        );
+        assert_eq!(field.source.layer, "bundled");
+        settings.projects.insert(
+            "p".into(),
+            LandOverride {
+                approval_sources: Some(vec![ApprovalSource::Forge]),
+                ..LandOverride::default()
+            },
+        );
+        let policy = LandPolicy::resolve(
+            &settings,
+            &BTreeMap::new(),
+            Some("p"),
+            None,
+            &LandOverride::default(),
+        )?;
+        assert_eq!(
+            policy.fields["approval_sources"].value,
+            serde_json::json!(["forge"])
+        );
+        assert_eq!(policy.fields["approval_sources"].source.layer, "project");
+        assert!(
+            serde_json::from_value::<LandSettings>(
+                serde_json::json!({"approval_sources":["receipt"]})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<LandSettings>(serde_json::json!({"approval":"forge"}))
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn budget_rate_micros_per_minute_merge_per_key_with_independent_sources()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut settings = LandSettings::default();

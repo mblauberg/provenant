@@ -69,62 +69,64 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
 
 #[test]
 fn confidential_pool_excludes_training_models() -> Result<(), Box<dyn std::error::Error>> {
-    let mut catalogue = Catalogue::bundled()?;
-    catalogue.pools.insert(
-        "free-check".into(),
-        vec![
-            RoutePoolMember {
-                model: ModelId::parse("codex/gpt-6-luna")?,
-                weight: 1,
-                effort: Some("low".into()),
-                efforts: vec!["low".into()],
-                free: false,
-            },
-            RoutePoolMember {
-                model: ModelId::parse("opencode/opencode/deepseek-v4.1-flash-free")?,
-                weight: 1,
-                effort: None,
-                efforts: vec![],
-                free: true,
-            },
-        ],
-    );
-    catalogue
-        .models
-        .iter_mut()
-        .find(|row| row.model.as_str() == "codex/gpt-6-luna")
-        .expect("codex member is catalogued")
-        .trains_on_prompts = Some(true);
-    let config = RoutingConfig::default();
-    let ctx = context(&catalogue, &config, now()?);
-    let mut query = request("codex/gpt-6-luna")?;
-    query.choice = RouteChoice::NamedRoute(RouteName::parse("free-check")?);
-    query.confidential = true;
-    let resolved = resolve(&query, &ctx)?;
-    let receipt = resolved.pool_selection.as_ref().ok_or("pool receipt")?;
-    assert_eq!(
-        receipt
+    for treatment in [None, Some(true)] {
+        let mut catalogue = Catalogue::bundled()?;
+        catalogue.pools.insert(
+            "free-check".into(),
+            vec![
+                RoutePoolMember {
+                    model: ModelId::parse("codex/gpt-6-luna")?,
+                    weight: 1,
+                    effort: Some("low".into()),
+                    efforts: vec!["low".into()],
+                    free: false,
+                },
+                RoutePoolMember {
+                    model: ModelId::parse("opencode/opencode/deepseek-v4.1-flash-free")?,
+                    weight: 1,
+                    effort: None,
+                    efforts: vec![],
+                    free: true,
+                },
+            ],
+        );
+        catalogue
+            .models
+            .iter_mut()
+            .find(|row| row.model.as_str() == "codex/gpt-6-luna")
+            .expect("codex member is catalogued")
+            .trains_on_prompts = treatment;
+        let config = RoutingConfig::default();
+        let ctx = context(&catalogue, &config, now()?);
+        let mut query = request("codex/gpt-6-luna")?;
+        query.choice = RouteChoice::NamedRoute(RouteName::parse("free-check")?);
+        query.confidential = true;
+        let resolved = resolve(&query, &ctx)?;
+        let receipt = resolved.pool_selection.as_ref().ok_or("pool receipt")?;
+        assert_eq!(
+            receipt
+                .candidates
+                .iter()
+                .find(|candidate| candidate.model == "codex/gpt-6-luna")
+                .ok_or("training candidate")?
+                .exclusion
+                .as_deref(),
+            Some("confidential")
+        );
+        let free = receipt
             .candidates
             .iter()
-            .find(|candidate| candidate.model == "codex/gpt-6-luna")
-            .ok_or("training candidate")?
-            .exclusion
-            .as_deref(),
-        Some("confidential")
-    );
-    let free = receipt
-        .candidates
-        .iter()
-        .find(|candidate| candidate.model == "opencode/opencode/deepseek-v4.1-flash-free")
-        .ok_or("free candidate")?;
-    assert_eq!(free.exclusion, None);
-    assert!(matches!(
-        free.readiness,
-        Some(RouteReadiness::Unavailable {
-            reason: RouteExclusionReason::UnknownAvailability,
-            ..
-        })
-    ));
+            .find(|candidate| candidate.model == "opencode/opencode/deepseek-v4.1-flash-free")
+            .ok_or("free candidate")?;
+        assert_eq!(free.exclusion, None);
+        assert!(matches!(
+            free.readiness,
+            Some(RouteReadiness::Unavailable {
+                reason: RouteExclusionReason::UnknownAvailability,
+                ..
+            })
+        ));
+    }
     Ok(())
 }
 

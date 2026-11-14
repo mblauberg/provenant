@@ -41,7 +41,7 @@ fn fetch_target(repo: &mut dyn Repo, target: &str, shadow: bool) -> Result<Strin
 }
 
 /// The fetched target a review record or a pull request's paths are read
-/// against. A forge approval of a set tier is bound to the head alone and
+/// against. Exact-head approvals of a set tier are bound to the head alone and
 /// needs none.
 fn approval_target(repo: &mut dyn Repo, request: &Request<'_>) -> Result<String, LandingError> {
     if request.approvals.needs_target() {
@@ -263,7 +263,7 @@ fn run_inner(
                 number,
                 head: info.head,
                 approval: String::new(),
-                carried_paths: Vec::new(),
+                approval_evidence: None,
                 accepted: None,
                 base_branch: info.base_branch,
             };
@@ -1037,169 +1037,96 @@ pub(super) mod tests {
         Ok(())
     }
 
-    /// PR 1 was reviewed at its head, PR 2 at an older head it has since
-    /// merged the target into, and PR 3 at an older head before one more change.
+    /// Approval must be independent, passing and bound to the exact head;
+    /// either configured source suffices and its evidence survives publication.
     #[test]
-    fn receipt_approval_lands_reviewed_pull_requests_without_forge_approval()
+    fn landing_requires_exact_independent_approval_and_receipts_name_its_source()
     -> Result<(), Box<dyn std::error::Error>> {
         use super::super::{fakes::FakeReviews, ports::ReviewRecord};
-        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(3);
-        forge.approvals_at_head.clear();
-        let target = repo.target.clone();
-        let reviewed_base = "b".repeat(40);
-        repo.parents
-            .insert(target.clone(), vec![reviewed_base.clone()]);
-        let reviewed = |n: u64| format!("{:040x}", 0xa0 + n);
-        // PR 1's head is the reviewed head, on the reviewed base.
-        repo.parents
-            .insert(format!("{:040x}", 1), vec![reviewed_base.clone()]);
-        for n in [2, 3] {
-            let head = format!("{n:040x}");
-            repo.parents
-                .insert(head.clone(), vec![reviewed(n), target.clone()]);
-            let tree = format!("tree-{}-{target}", reviewed(n));
-            let tree = if n == 3 { format!("{tree}+line") } else { tree };
-            repo.trees.insert(head, tree);
+        use provenant_records::workflow::ReviewVerdict;
+        for (exact, independent, verdict, forge_approved, expected) in [
+            (
+                true,
+                true,
+                ReviewVerdict::Approve,
+                false,
+                Some(ApprovalSource::ProvenantReview),
+            ),
+            (false, true, ReviewVerdict::Approve, false, None),
+            (true, false, ReviewVerdict::Approve, false, None),
+            (true, true, ReviewVerdict::RequestChanges, false, None),
+            (
+                false,
+                true,
+                ReviewVerdict::Approve,
+                true,
+                Some(ApprovalSource::Forge),
+            ),
+        ] {
+            let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
+            let head = forge.pull_requests[&1].head.clone();
+            if !forge_approved {
+                forge.approvals_at_head.clear();
+            }
+            let reviews = FakeReviews::of(BTreeMap::from([(
+                1,
+                vec![ReviewRecord {
+                    reference: "review-attempt".into(),
+                    reviewer: "review-execution".into(),
+                    head: if exact { head.clone() } else { "b".repeat(40) },
+                    verdict,
+                    independent,
+                }],
+            )]));
+            let state = tempfile::tempdir()?;
+            let report = exercise_with(
+                &mut forge,
+                &mut repo,
+                &mut gate,
+                &settings,
+                &definition,
+                &[1],
+                false,
+                state.path(),
+                Approvals::new(&settings.approval_sources, &reviews),
+            )?;
+            if let Some(source) = expected {
+                assert_eq!(report.outcomes[&1], Outcome::Landed);
+                let pr = report
+                    .receipts
+                    .iter()
+                    .flat_map(|receipt| &receipt.pull_requests)
+                    .find(|pr| pr.number == 1)
+                    .ok_or("missing receipt")?;
+                let evidence = pr
+                    .approval_evidence
+                    .as_ref()
+                    .ok_or("missing approval evidence")?;
+                assert_eq!(evidence.source, source);
+                assert_eq!(evidence.head, head);
+                assert_eq!(evidence.reference, pr.approval);
+                assert!(!evidence.reviewer.is_empty());
+            } else {
+                assert_eq!(report.outcomes[&1], Outcome::Excluded);
+                assert!(forge.merges.is_empty() && repo.pushes.is_empty());
+            }
         }
-        let record = |n: u64, head: String| ReviewRecord {
-            reference: format!("delivery-{n}"),
-            reviewer: "reviewer".into(),
-            head,
-            base: reviewed_base.clone(),
-        };
-        let reviews = FakeReviews::of(BTreeMap::from([
-            (1, vec![record(1, format!("{:040x}", 1))]),
-            (2, vec![record(2, reviewed(2))]),
-            (3, vec![record(3, reviewed(3))]),
-        ]));
-        let state = tempfile::tempdir()?;
-        let report = exercise(
-            &mut forge,
-            &mut repo,
-            &mut gate,
-            &settings,
-            &definition,
-            &[1, 2, 3],
-            false,
-            state.path(),
-        )?;
-        assert!(
-            report
-                .outcomes
-                .values()
-                .all(|outcome| *outcome == Outcome::Excluded)
-        );
-        assert!(forge.merges.is_empty() && repo.pushes.is_empty());
-
-        settings.approval = ApprovalSource::Receipt;
-        let report = exercise_with(
-            &mut forge,
-            &mut repo,
-            &mut gate,
-            &settings,
-            &definition,
-            &[1, 2, 3],
-            false,
-            state.path(),
-            Approvals::new(ApprovalSource::Receipt, &reviews),
-        )?;
-        assert_eq!(report.outcomes[&1], Outcome::Landed);
-        assert_eq!(report.outcomes[&2], Outcome::Landed);
-        assert_eq!(report.outcomes[&3], Outcome::Excluded);
-        assert_eq!(
-            report.receipts[0]
-                .pull_requests
-                .iter()
-                .map(|pr| pr.approval.as_str())
-                .collect::<Vec<_>>(),
-            ["delivery-1", "delivery-2"]
-        );
         Ok(())
     }
 
-    /// PR 2's record names a head whose history this repository lacks, so
-    /// its proof cannot be read. That excludes PR 2 alone, with the reason.
     #[test]
-    fn an_unprovable_review_record_excludes_only_its_pull_request()
+    fn a_review_store_read_failure_fails_the_run_and_merges_nothing()
     -> Result<(), Box<dyn std::error::Error>> {
-        use super::super::{fakes::FakeReviews, ports::ReviewRecord};
-        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(3);
-        forge.approvals_at_head.clear();
-        let target = repo.target.clone();
-        let reviewed_base = "b".repeat(40);
-        repo.parents
-            .insert(target.clone(), vec![reviewed_base.clone()]);
-        let reviewed = format!("{:040x}", 0xa2);
-        // PR 2 merged the target into its reviewed head; its tree is unreadable.
-        repo.parents
-            .insert(format!("{:040x}", 2), vec![reviewed.clone(), target]);
-        for n in [1, 3] {
-            repo.parents
-                .insert(format!("{n:040x}"), vec![reviewed_base.clone()]);
-        }
-        let record = |n: u64, head: String| ReviewRecord {
-            reference: format!("delivery-{n}"),
-            reviewer: "reviewer".into(),
-            head,
-            base: reviewed_base.clone(),
-        };
-        let reviews = FakeReviews::of(BTreeMap::from([
-            (1, vec![record(1, format!("{:040x}", 1))]),
-            (2, vec![record(2, reviewed)]),
-            (3, vec![record(3, format!("{:040x}", 3))]),
-        ]));
-        settings.approval = ApprovalSource::Receipt;
-        let state = tempfile::tempdir()?;
-        let report = exercise_with(
-            &mut forge,
-            &mut repo,
-            &mut gate,
-            &settings,
-            &definition,
-            &[1, 2, 3],
-            false,
-            state.path(),
-            Approvals::new(ApprovalSource::Receipt, &reviews),
-        )?;
-        assert_eq!(report.outcomes[&1], Outcome::Landed);
-        assert_eq!(report.outcomes[&2], Outcome::Excluded);
-        assert_eq!(report.outcomes[&3], Outcome::Landed);
-        assert!(
-            report.exclusion_reasons[&2].starts_with("unprovable: delivery-2"),
-            "{}",
-            report.exclusion_reasons[&2]
-        );
-        Ok(())
-    }
-
-    /// PR 1 was reviewed at its current head against the head of the branch
-    /// below it, then retargeted past that branch. The head is unchanged but
-    /// the lower branch's changes were never reviewed, so the record does not
-    /// approve it.
-    #[test]
-    fn a_receipt_does_not_approve_its_head_once_the_base_leaves_the_reviewed_base()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use super::super::{fakes::FakeReviews, ports::ReviewRecord};
+        use super::super::fakes::FakeReviews;
         let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(1);
         forge.approvals_at_head.clear();
-        let fork = "b".repeat(40);
-        let lower = "c".repeat(40);
-        let head = forge.pull_requests[&1].head.clone();
-        repo.parents.insert(repo.target.clone(), vec![fork.clone()]);
-        repo.parents.insert(lower.clone(), vec![fork]);
-        repo.parents.insert(head.clone(), vec![lower.clone()]);
-        let reviews = FakeReviews::of(BTreeMap::from([(
-            1,
-            vec![ReviewRecord {
-                reference: "delivery-1".into(),
-                reviewer: "reviewer".into(),
-                head,
-                base: lower,
-            }],
-        )]));
-        settings.approval = ApprovalSource::Receipt;
+        settings.approval_sources = vec![ApprovalSource::ProvenantReview];
+        let reviews = FakeReviews {
+            failure: Some("store unreadable".into()),
+            ..FakeReviews::default()
+        };
         let state = tempfile::tempdir()?;
-        let report = exercise_with(
+        let result = exercise_with(
             &mut forge,
             &mut repo,
             &mut gate,
@@ -1208,90 +1135,10 @@ pub(super) mod tests {
             &[1],
             false,
             state.path(),
-            Approvals::new(ApprovalSource::Receipt, &reviews),
-        )?;
-        assert_eq!(report.outcomes[&1], Outcome::Excluded);
-        assert!(forge.merges.is_empty() && repo.pushes.is_empty());
-        Ok(())
-    }
-
-    /// An unreadable review store is not a missing approval: the run fails
-    /// with the reason and merges nothing.
-    #[test]
-    fn a_review_store_read_failure_fails_the_run_and_merges_nothing()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use super::super::fakes::FakeReviews;
-        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(2);
-        forge.approvals_at_head.clear();
-        let reviews = FakeReviews {
-            failure: Some("read review records: store unreadable".into()),
-            ..FakeReviews::default()
-        };
-        settings.approval = ApprovalSource::Receipt;
-        let state = tempfile::tempdir()?;
-        let result = exercise_with(
-            &mut forge,
-            &mut repo,
-            &mut gate,
-            &settings,
-            &definition,
-            &[1, 2],
-            false,
-            state.path(),
-            Approvals::new(ApprovalSource::Receipt, &reviews),
+            Approvals::new(&settings.approval_sources, &reviews),
         );
-        let error = result.err().ok_or("the run should fail")?;
-        assert!(error.to_string().contains("store unreadable"), "{error}");
+        assert!(result.is_err());
         assert!(forge.merges.is_empty() && repo.pushes.is_empty());
-        Ok(())
-    }
-
-    /// A retired receipt beside an accepted record that covers the head does
-    /// not block it; a pull request with only a retired receipt is excluded
-    /// with the remedy.
-    #[test]
-    fn an_accepted_record_lands_despite_a_retired_receipt() -> Result<(), Box<dyn std::error::Error>>
-    {
-        use super::super::{fakes::FakeReviews, ports::ReviewRecord};
-        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(2);
-        forge.approvals_at_head.clear();
-        let reviewed_base = "b".repeat(40);
-        repo.parents
-            .insert(repo.target.clone(), vec![reviewed_base.clone()]);
-        for n in [1u64, 2] {
-            repo.parents
-                .insert(format!("{n:040x}"), vec![reviewed_base.clone()]);
-        }
-        let retired = "receipt shape retired: save it again".to_owned();
-        let reviews = FakeReviews {
-            records: BTreeMap::from([(
-                1,
-                vec![ReviewRecord {
-                    reference: "delivery-1".into(),
-                    reviewer: "reviewer".into(),
-                    head: format!("{:040x}", 1),
-                    base: reviewed_base,
-                }],
-            )]),
-            unusable: BTreeMap::from([(1, vec![retired.clone()]), (2, vec![retired.clone()])]),
-            failure: None,
-        };
-        settings.approval = ApprovalSource::Receipt;
-        let state = tempfile::tempdir()?;
-        let report = exercise_with(
-            &mut forge,
-            &mut repo,
-            &mut gate,
-            &settings,
-            &definition,
-            &[1, 2],
-            false,
-            state.path(),
-            Approvals::new(ApprovalSource::Receipt, &reviews),
-        )?;
-        assert_eq!(report.outcomes[&1], Outcome::Landed);
-        assert_eq!(report.outcomes[&2], Outcome::Excluded);
-        assert_eq!(report.exclusion_reasons[&2], retired);
         Ok(())
     }
 
@@ -1993,7 +1840,7 @@ pub(super) mod tests {
                         number: 1,
                         head: pr.head.clone(),
                         approval: "approval-1".into(),
-                        carried_paths: Vec::new(),
+                        approval_evidence: None,
                         accepted: None,
                         base_branch: "main".into(),
                     },
@@ -2073,7 +1920,7 @@ pub(super) mod tests {
                         number: 1,
                         head: pr.head.clone(),
                         approval: "approval-1".into(),
-                        carried_paths: Vec::new(),
+                        approval_evidence: None,
                         accepted: None,
                         base_branch: "main".into(),
                     },
@@ -2155,7 +2002,7 @@ pub(super) mod tests {
                     number: 1,
                     head: head.clone(),
                     approval: "approval-1".into(),
-                    carried_paths: Vec::new(),
+                    approval_evidence: None,
                     accepted: None,
                     base_branch: "main".into(),
                 },
@@ -2282,7 +2129,7 @@ pub(super) mod tests {
                         number,
                         head: forge.pull_requests[&number].head.clone(),
                         approval: format!("approval-{number}"),
-                        carried_paths: Vec::new(),
+                        approval_evidence: None,
                         accepted: None,
                         base_branch: "main".into(),
                     },
@@ -2375,7 +2222,7 @@ pub(super) mod tests {
                     number: 1,
                     head: head.clone(),
                     approval: "approval-1".into(),
-                    carried_paths: Vec::new(),
+                    approval_evidence: None,
                     accepted: None,
                     base_branch: "main".into(),
                 },
@@ -2449,7 +2296,7 @@ pub(super) mod tests {
                 number: 1,
                 head: forge.pull_requests[&1].head.clone(),
                 approval: "revoked".into(),
-                carried_paths: Vec::new(),
+                approval_evidence: None,
                 accepted: None,
                 base_branch: "main".into(),
             },
@@ -2526,7 +2373,7 @@ pub(super) mod tests {
                     number: n,
                     head: forge.pull_requests[&n].head.clone(),
                     approval: format!("approval-{n}"),
-                    carried_paths: Vec::new(),
+                    approval_evidence: None,
                     accepted: None,
                     base_branch: "main".into(),
                 },
@@ -2585,7 +2432,7 @@ pub(super) mod tests {
                     number: n,
                     head: forge.pull_requests[&n].head.clone(),
                     approval: format!("approval-{n}"),
-                    carried_paths: Vec::new(),
+                    approval_evidence: None,
                     accepted: None,
                     base_branch: "main".into(),
                 },
@@ -2659,7 +2506,7 @@ pub(super) mod tests {
                     number: n,
                     head: forge.pull_requests[&n].head.clone(),
                     approval: format!("approval-{n}"),
-                    carried_paths: Vec::new(),
+                    approval_evidence: None,
                     accepted: None,
                     base_branch: "main".into(),
                 },
@@ -2750,7 +2597,7 @@ pub(super) mod tests {
                     number: n,
                     head: forge.pull_requests[&n].head.clone(),
                     approval: format!("approval-{n}"),
-                    carried_paths: Vec::new(),
+                    approval_evidence: None,
                     accepted: None,
                     base_branch: "main".into(),
                 },
@@ -2858,7 +2705,7 @@ pub(super) mod tests {
                         number,
                         head: pr.head.clone(),
                         approval: format!("approval-{number}"),
-                        carried_paths: Vec::new(),
+                        approval_evidence: None,
                         accepted: None,
                         base_branch: "main".into(),
                     },

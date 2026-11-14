@@ -1145,63 +1145,46 @@ impl Repo for GitRepo<'_> {
 
 // ----- ReviewRecords -----------------------------------------------------
 
-/// Accepted delivery receipts in the project's workflow state for pull
-/// requests of the forge repository. A receipt is accepted only once its
-/// review coverage passes, so its reviewers are independent of the authors.
-/// Each names the head its review read and the base it read that head
-/// against, both recorded by the edge from the forge.
-pub struct DeliveryReviews {
+/// Typed review-lane settlements in the registered project's graph journal.
+pub struct ProvenantReviews {
     root: provenant_core::StateRoot,
-    scope: Result<(provenant_core::ProjectId, provenant_core::RepoId), String>,
+    project: Option<provenant_core::ProjectId>,
 }
-impl DeliveryReviews {
+impl ProvenantReviews {
     pub fn new(
         root: provenant_core::StateRoot,
-        scope: Result<(provenant_core::ProjectId, provenant_core::RepoId), String>,
+        project: Option<provenant_core::ProjectId>,
     ) -> Self {
-        Self { root, scope }
+        Self { root, project }
     }
 }
-impl ReviewRecords for DeliveryReviews {
-    fn reviews(&self, number: u64) -> Result<Reviews, LandingError> {
-        use provenant_records::workflow::{DecisionStatus, Subject};
-        let (project, repository) = self
-            .scope
-            .clone()
-            .map_err(|error| LandingError::Failed(format!("receipt approval: {error}")))?;
-        let found = provenant_workflow::store::pull_request_receipts(
-            &self.root, project, repository, number,
-        )
-        .map_err(|error| LandingError::Failed(format!("read review records: {error}")))?;
+impl ReviewRecords for ProvenantReviews {
+    fn reviews(&self, _number: u64, head: &str) -> Result<Reviews, LandingError> {
+        let Some(project) = self.project else {
+            return Ok(Reviews {
+                unusable: vec!["provenant_review needs a registered project".to_owned()],
+                ..Reviews::default()
+            });
+        };
+        let head = head
+            .parse::<provenant_core::GitOid>()
+            .map_err(|error| LandingError::Failed(error.to_string()))?;
+        let found = provenant_fabric_runtime::graph::landing_reviews(&self.root, project, head)
+            .map_err(|error| LandingError::Failed(format!("read review records: {error}")))?;
         Ok(Reviews {
             records: found
-                .receipts
-                .iter()
-                .filter(|receipt| receipt.decision().status() == DecisionStatus::Accepted)
-                .filter_map(|receipt| {
-                    let Subject::Pr { head, base, .. } = receipt.subject() else {
-                        return None;
-                    };
-                    Some(ReviewRecord {
-                        reference: format!("delivery {} at {head}", receipt.delivery_id()),
-                        reviewer: receipt.decision().actor_id()?.to_string(),
-                        head: head.to_string(),
-                        base: base.to_string(),
-                    })
+                .into_iter()
+                .map(|record| ReviewRecord {
+                    reference: record.attempt_id.to_string(),
+                    reviewer: record.attempt_id.to_string(),
+                    head: record.head.to_string(),
+                    verdict: record.verdict,
+                    independent: record.independent,
                 })
                 .collect(),
-            unusable: found.retired.iter().map(ToString::to_string).collect(),
+            unusable: Vec::new(),
         })
     }
-}
-
-/// The subject repository ID of the forge repository a lander drives.
-pub fn repository_id(forge: &mut dyn Forge) -> Result<provenant_core::RepoId, LandingError> {
-    let identity = forge.repository_identity()?;
-    identity
-        .get(..32)
-        .and_then(|prefix| provenant_core::RepoId::parse(prefix).ok())
-        .ok_or_else(|| LandingError::Failed("repository identity is not a digest".into()))
 }
 
 // ----- GateRunner --------------------------------------------------------

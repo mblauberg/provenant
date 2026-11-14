@@ -285,22 +285,22 @@ fn review_exempt(state: &std::path::Path, project: Option<&str>) -> ReviewExempt
     })
 }
 
-/// The approval source of a run: receipts need a registered project and the
-/// forge's repository.
+/// Provenant review records need a registered project.
 fn review_records(
-    forge: &mut dyn ports::Forge,
     effective: &provenant_cli::domains::LandSettings,
     state: &provenant_core::StateRoot,
     project: Option<&str>,
-) -> Result<adapters::DeliveryReviews, Box<dyn std::error::Error>> {
+) -> Result<adapters::ProvenantReviews, Box<dyn std::error::Error>> {
     use provenant_cli::domains::ApprovalSource;
-    let project_id = project.map(provenant_core::ProjectId::parse).transpose()?;
-    let scope = match (effective.approval, project_id) {
-        (ApprovalSource::Receipt, Some(project)) => Ok((project, adapters::repository_id(forge)?)),
-        (ApprovalSource::Receipt, None) => Err("needs a registered project".to_owned()),
-        (ApprovalSource::Forge, _) => Err("approval source is the forge".to_owned()),
+    let scope = if effective
+        .approval_sources
+        .contains(&ApprovalSource::ProvenantReview)
+    {
+        project.map(provenant_core::ProjectId::parse).transpose()?
+    } else {
+        None
     };
-    Ok(adapters::DeliveryReviews::new(state.clone(), scope))
+    Ok(adapters::ProvenantReviews::new(state.clone(), scope))
 }
 
 /// The landing policy one adapter call resolved for a checkout.
@@ -430,12 +430,7 @@ pub(crate) fn submit(
         workers,
         tracking,
     )?;
-    let reviews = review_records(
-        &mut *forge,
-        &settings,
-        &resolved.roots.state,
-        project.as_deref(),
-    )?;
+    let reviews = review_records(&settings, &resolved.roots.state, project.as_deref())?;
     let exempt = review_exempt(resolved.roots.state.as_path(), project.as_deref());
     let mut owner = owner::Owner {
         forge: &mut *forge,
@@ -446,7 +441,7 @@ pub(crate) fn submit(
         settings: &settings,
         policy,
         gate: &definition,
-        approvals: approval::Approvals::new(settings.approval, &reviews).governed(
+        approvals: approval::Approvals::new(&settings.approval_sources, &reviews).governed(
             settings.approval_tier,
             &exempt,
             None,
