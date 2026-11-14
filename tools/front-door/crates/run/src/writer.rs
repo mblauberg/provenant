@@ -2501,8 +2501,9 @@ impl crate::RunStore {
             ));
         }
         if let Some(retained) = retained_scope {
-            let admission =
-                provenant_supervisor::custody::CustodyError::ImportRetained { fence: retained };
+            let admission = provenant_supervisor::custody::CustodyError::ImportRetained {
+                fence: Box::new(retained),
+            };
             lease
                 .withdraw_unlaunched()
                 .map_err(|release| WriterCustodyError::Withdrawal {

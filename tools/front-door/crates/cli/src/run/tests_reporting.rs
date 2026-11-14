@@ -211,8 +211,8 @@ fn output_retains_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Erro
             _: &str,
             _: &run::LaunchPaths,
             _: Option<&run::AttemptRecord>,
-        ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
-            Err(run::PrepareRefusal {
+        ) -> Result<run::PreparedLaunch, Box<run::PrepareRefusal>> {
+            Err(Box::new(run::PrepareRefusal {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 policy_code: None,
                 resource: None,
@@ -221,7 +221,7 @@ fn output_retains_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Erro
                 message: "PROVIDER_SENTINEL must not become a public diagnostic".into(),
                 skipped_routes: Vec::new(),
                 fallback_outcome: None,
-            })
+            }))
         }
         fn decode(
             &self,

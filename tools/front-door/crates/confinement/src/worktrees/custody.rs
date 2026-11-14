@@ -729,7 +729,9 @@ fn retained_import(slot: &Directory) -> Result<(), String> {
         Ok(None) => Ok(()),
         Ok(Some(fence)) => Err(format!(
             "unresolved retained import fence: {}",
-            provenant_supervisor::custody::CustodyError::ImportRetained { fence }
+            provenant_supervisor::custody::CustodyError::ImportRetained {
+                fence: Box::new(fence)
+            }
         )),
         Err(error) => Err(format!(
             "retained import fence could not be checked: {error}"

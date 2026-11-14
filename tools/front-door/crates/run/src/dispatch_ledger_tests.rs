@@ -19,7 +19,7 @@ fn write_grant_warning_threshold_does_not_refuse_large_terminal_ledger() -> Test
             prompt: &str,
             paths: &LaunchPaths,
             resume: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
+        ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
             self.0.prepare(task, prompt, paths, resume)
         }
         fn decode(

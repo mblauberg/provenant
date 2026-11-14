@@ -838,7 +838,8 @@ impl provenant_run::Providers for WriterProvider {
         _prompt: &str,
         paths: &provenant_run::LaunchPaths,
         resume: Option<&provenant_run::AttemptRecord>,
-    ) -> std::result::Result<provenant_run::PreparedLaunch, provenant_run::PrepareRefusal> {
+    ) -> std::result::Result<provenant_run::PreparedLaunch, Box<provenant_run::PrepareRefusal>>
+    {
         (|| -> std::result::Result<provenant_run::PreparedLaunch, Box<dyn std::error::Error>> {
             if resume.is_some() {
                 return Err("writer fixture does not resume".into());
@@ -953,7 +954,7 @@ impl provenant_run::Providers for WriterProvider {
             })
         })()
         .map_err(|error| {
-            provenant_run::PrepareRefusal::new(
+            provenant_run::PrepareRefusal::boxed(
                 provenant_records::run::TerminalCause::HandoffRefused,
                 error.to_string(),
             )

@@ -85,7 +85,9 @@ fn advance_receiver(
         cancel,
         &factory.clock,
     )?;
-    let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None,
+    let mut owner = BoundGraphOwner {
+        writer_launch_budget: None,
+        admission_timeout: None,
         repo_facts: Default::default(),
         launch_warnings: Vec::new(),
         factory,
@@ -657,7 +659,10 @@ fn peer_hosted_lane_collection_preserves_origin_status() -> TestResult {
     );
     let fields = super::super::peer::peer_graph_fields(&factory, parent)?;
     assert_eq!(fields["peer_graph_collected"], true);
-    assert!(super::super::peer::peer_origin_matches(&fields, &origin_key()));
+    assert!(super::super::peer::peer_origin_matches(
+        &fields,
+        &origin_key()
+    ));
     assert_eq!(fields["peer_graph"], receipt.extra["peer_graph"]);
     let mut record = store.record(parent, &call)?;
     record.extra.extend(fields);
@@ -706,7 +711,7 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
             _: &str,
             _: &provenant_run::LaunchPaths,
             _: Option<&provenant_run::AttemptRecord>,
-        ) -> Result<provenant_run::PreparedLaunch, provenant_run::PrepareRefusal> {
+        ) -> Result<provenant_run::PreparedLaunch, Box<provenant_run::PrepareRefusal>> {
             let mut route = provenant_records::run::SkippedRoute {
                 extra: Default::default(),
                 route: "fixture/model".into(),
@@ -715,7 +720,10 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
                 detail: "PRIVATE_PACING_SENTINEL".into(),
             };
             route.set_guard_facts(None, Some(self.0)).unwrap();
-            let mut refusal = provenant_run::PrepareRefusal::new(provenant_records::run::TerminalCause::RouteResolutionRefused, "PRIVATE_PACING_SENTINEL");
+            let mut refusal = provenant_run::PrepareRefusal::boxed(
+                provenant_records::run::TerminalCause::RouteResolutionRefused,
+                "PRIVATE_PACING_SENTINEL",
+            );
             refusal.skipped_routes.push(route);
             Err(refusal)
         }
@@ -761,10 +769,12 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
         setting: PacingReserveSetting::AdapterFiveHour,
         origin: PacingSettingSource::Configuration,
     };
-    let started =
-        session
-            .store
-            .start(record.attempt_id, &Pacing(fact), &|_, _| Ok(Vec::new()), &call)?;
+    let started = session.store.start(
+        record.attempt_id,
+        &Pacing(fact),
+        &|_, _| Ok(Vec::new()),
+        &call,
+    )?;
     let first = owner
         .receipt(&session, operation.clone(), &record, &started, &call)
         .unwrap_err();
@@ -835,18 +845,20 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
             _: &str,
             _: &provenant_run::LaunchPaths,
             _: Option<&provenant_run::AttemptRecord>,
-        ) -> Result<provenant_run::PreparedLaunch, provenant_run::PrepareRefusal> {
-            let mut refusal = provenant_run::PrepareRefusal::new(
+        ) -> Result<provenant_run::PreparedLaunch, Box<provenant_run::PrepareRefusal>> {
+            let mut refusal = provenant_run::PrepareRefusal::boxed(
                 provenant_records::run::TerminalCause::RouteResolutionRefused,
                 "allowance spent",
             );
-            refusal.skipped_routes.push(provenant_records::run::SkippedRoute {
-                extra: Default::default(),
-                route: "codex/gpt".into(),
-                kind: provenant_records::run::SkipKind::Unavailable,
-                cause: None,
-                detail: "allowance spent".into(),
-            });
+            refusal
+                .skipped_routes
+                .push(provenant_records::run::SkippedRoute {
+                    extra: Default::default(),
+                    route: "codex/gpt".into(),
+                    kind: provenant_records::run::SkipKind::Unavailable,
+                    cause: None,
+                    detail: "allowance spent".into(),
+                });
             Err(refusal)
         }
         fn decode(
@@ -899,6 +911,14 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
     let message = result["checkpoint"]["nodes"][0]["advance_error"]
         .as_str()
         .ok_or("advance_error")?;
-    assert!(message.contains("codex/gpt: allowance spent"), "{message}");
+    let route = provenant_records::run::SkippedRoute {
+        extra: Default::default(),
+        route: "codex/gpt".into(),
+        kind: provenant_records::run::SkipKind::Unavailable,
+        cause: None,
+        detail: "allowance spent".into(),
+    };
+    assert!(message.contains(&route.describe()), "{message}");
+    assert!(!message.contains(&route.detail), "{message}");
     Ok(())
 }

@@ -10,7 +10,7 @@ fn rejected_resume_remains_visible_and_addressable() -> TestResult {
             _: &str,
             _: &LaunchPaths,
             prior: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
+        ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
             assert!(prior.is_some());
             Err(crate::fixture_refusal(
                 "route differs from the prior attempt's provider, model or account",

@@ -308,7 +308,7 @@ pub(super) struct PreparedProvider<'a> {
 }
 
 impl PreparedProvider<'_> {
-    fn identity_refusal(&self, task: &run::TaskRequest, detail: &str) -> run::PrepareRefusal {
+    fn identity_refusal(&self, task: &run::TaskRequest, detail: &str) -> Box<run::PrepareRefusal> {
         let project = task
             .profile
             .extra
@@ -329,7 +329,7 @@ impl PreparedProvider<'_> {
         let mut refusal = policy.boundary_error(
             code,
             provenant_records::policy::Facts::violation(detail),
-            run::PrepareRefusal::new(
+            run::PrepareRefusal::boxed(
                 provenant_records::run::TerminalCause::HandoffRefused,
                 detail,
             ),
@@ -350,7 +350,7 @@ impl run::Providers for PreparedProvider<'_> {
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
         self.fallback.priority(task)
     }
-    fn check_policy(&self, task: &run::TaskRequest) -> Result<(), run::PrepareRefusal> {
+    fn check_policy(&self, task: &run::TaskRequest) -> Result<(), Box<run::PrepareRefusal>> {
         if let Some(ready) = self.ready {
             if ready.task != *task {
                 return Err(
@@ -367,7 +367,7 @@ impl run::Providers for PreparedProvider<'_> {
         prompt: &str,
         paths: &run::LaunchPaths,
         resume: Option<&run::AttemptRecord>,
-    ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
+    ) -> Result<run::PreparedLaunch, Box<run::PrepareRefusal>> {
         if let Some(ready) = self.ready {
             if ready.attempt != paths.attempt_id || ready.task != *task || resume.is_some() {
                 return Err(

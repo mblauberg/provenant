@@ -39,9 +39,9 @@ fn refused_provider_continuation_keeps_a_durable_attempt() -> Result<(), Box<dyn
             _: &str,
             _: &run::LaunchPaths,
             resume: Option<&run::AttemptRecord>,
-        ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
+        ) -> Result<run::PreparedLaunch, Box<run::PrepareRefusal>> {
             assert_eq!(resume.map(|prior| prior.attempt_id), self.prior);
-            Err(run::PrepareRefusal::new(
+            Err(run::PrepareRefusal::boxed(
                 provenant_records::run::TerminalCause::HandoffRefused,
                 "fixture continuation refused; run provenant run",
             ))

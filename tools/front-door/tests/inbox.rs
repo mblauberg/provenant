@@ -472,7 +472,8 @@ impl provenant_run::Providers for Indexed {
         _: &str,
         _: &provenant_run::LaunchPaths,
         _: Option<&provenant_run::AttemptRecord>,
-    ) -> std::result::Result<provenant_run::PreparedLaunch, provenant_run::PrepareRefusal> {
+    ) -> std::result::Result<provenant_run::PreparedLaunch, Box<provenant_run::PrepareRefusal>>
+    {
         Ok(provenant_run::PreparedLaunch {
             limits: Default::default(),
             argv: vec!["fixture".into()],
@@ -489,7 +490,7 @@ impl provenant_run::Providers for Indexed {
             },
             repository: Some(self.0.clone()),
             observed_head: Some(provenant_core::GitOid::parse(&"a".repeat(40)).map_err(|e| {
-                provenant_run::PrepareRefusal::new(
+                provenant_run::PrepareRefusal::boxed(
                     provenant_records::run::TerminalCause::HandoffRefused,
                     e.to_string(),
                 )

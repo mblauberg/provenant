@@ -226,13 +226,13 @@ pub struct PrepareRefusal {
 }
 /// A refusal for test fixtures that do not care about its cause.
 #[cfg(test)]
-pub(crate) fn fixture_refusal(message: impl Into<String>) -> PrepareRefusal {
-    PrepareRefusal::new(TerminalCause::HandoffRefused, message)
+pub(crate) fn fixture_refusal(message: impl Into<String>) -> Box<PrepareRefusal> {
+    PrepareRefusal::boxed(TerminalCause::HandoffRefused, message)
 }
 
 impl PrepareRefusal {
-    pub fn new(cause: TerminalCause, message: impl Into<String>) -> Self {
-        Self {
+    pub fn boxed(cause: TerminalCause, message: impl Into<String>) -> Box<Self> {
+        Box::new(Self {
             boundary_class: provenant_records::diagnostic::BoundaryClass::None,
             policy_code: None,
             resource: None,
@@ -241,7 +241,7 @@ impl PrepareRefusal {
             message: message.into(),
             skipped_routes: Vec::new(),
             fallback_outcome: None,
-        }
+        })
     }
 
     fn kind(&self) -> RefusalKind {
@@ -291,7 +291,7 @@ fn pacing_refusal_retains_the_selected_reserve_fact() {
         detail: "opaque source".into(),
     };
     skipped.set_guard_facts(None, Some(fact)).unwrap();
-    let mut refusal = PrepareRefusal::new(TerminalCause::RouteResolutionRefused, "opaque source");
+    let mut refusal = PrepareRefusal::boxed(TerminalCause::RouteResolutionRefused, "opaque source");
     refusal.skipped_routes.push(skipped);
     let kind = refusal.kind();
     assert!(matches!(kind, RefusalKind::PacingReserveResource(value) if value == fact));
@@ -382,7 +382,7 @@ fn check_launch_policy(
     providers: &dyn Providers,
     task: &TaskRequest,
     policy: &provenant_records::policy::Policy,
-) -> std::result::Result<(), PrepareRefusal> {
+) -> std::result::Result<(), Box<PrepareRefusal>> {
     use provenant_records::policy::{Effect, Facts};
     let Err(refusal) = providers.check_policy(task) else {
         return Ok(());
@@ -433,8 +433,8 @@ fn check_launch_policy(
 
 fn check_preparation_refusal(
     policy: &provenant_records::policy::Policy,
-    refusal: PrepareRefusal,
-) -> PrepareRefusal {
+    refusal: Box<PrepareRefusal>,
+) -> Box<PrepareRefusal> {
     use provenant_records::diagnostic::BoundaryClass;
     let class = refusal.boundary_class;
     if class == BoundaryClass::None {
@@ -678,7 +678,7 @@ pub trait Providers {
     }
     /// Host policy checks before provider preparation. A refusal is task-local;
     /// no provider is prepared and siblings remain eligible to launch.
-    fn check_policy(&self, _task: &TaskRequest) -> std::result::Result<(), PrepareRefusal> {
+    fn check_policy(&self, _task: &TaskRequest) -> std::result::Result<(), Box<PrepareRefusal>> {
         Ok(())
     }
     /// Prepare one task. An error is a
@@ -691,7 +691,7 @@ pub trait Providers {
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, PrepareRefusal>;
+    ) -> std::result::Result<PreparedLaunch, Box<PrepareRefusal>>;
     /// A recognised diagnostic from the sealed stderr of a failed provider.
     fn failure_diagnostic(&self, _route: &RouteRecord, _stderr: &[u8]) -> Option<String> {
         None
@@ -740,7 +740,7 @@ enum HandOff {
     /// No guardian was contacted, but custody remains protected.
     Protected(String),
     RetainedImport {
-        fence: provenant_supervisor::custody::PendingImport,
+        fence: Box<provenant_supervisor::custody::PendingImport>,
         worktree: std::path::PathBuf,
     },
     /// The guardian may have received the launch.
@@ -1222,7 +1222,7 @@ impl RunStore {
                     } else {
                         RefusalKind::Policy
                     };
-                    (kind, Box::new(refusal))
+                    (kind, refusal)
                 })
                 .and_then(|priority| {
                     providers
@@ -1230,7 +1230,7 @@ impl RunStore {
                         .map(|plan| (plan, priority))
                         .map_err(|reason| {
                             let refusal = check_preparation_refusal(&policy, reason);
-                            (refusal.kind(), Box::new(refusal))
+                            (refusal.kind(), refusal)
                         })
                 });
             let (mut plan, priority) = match prepared {
@@ -1419,11 +1419,14 @@ impl RunStore {
                             ),
                             HandOff::RetainedImport { fence, worktree } => (
                                 RunError::RetainedWriterImport {
-                                    fence: Box::new(fence.clone()),
+                                    fence: fence.clone(),
                                     worktree: worktree.clone(),
                                 }
                                 .to_string(),
-                                RefusalKind::RetainedImport { fence, worktree },
+                                RefusalKind::RetainedImport {
+                                    fence: *fence,
+                                    worktree,
+                                },
                             ),
                             _ => unreachable!(),
                         };
@@ -1697,7 +1700,7 @@ mod policy_reporting_tests {
                 _: &str,
                 _: &LaunchPaths,
                 prior: Option<&AttemptRecord>,
-            ) -> std::result::Result<PreparedLaunch, PrepareRefusal> {
+            ) -> std::result::Result<PreparedLaunch, Box<PrepareRefusal>> {
                 assert_eq!(prior.map(|record| record.attempt_id), self.prior);
                 assert_eq!(
                     task.extra
@@ -1725,7 +1728,7 @@ mod policy_reporting_tests {
                         (false, true)
                     }
                 );
-                Err(PrepareRefusal::new(
+                Err(PrepareRefusal::boxed(
                     TerminalCause::RouteResolutionRefused,
                     "fixture inspected admission",
                 ))
@@ -1940,8 +1943,8 @@ mod resource_status_tests {
             _: &str,
             _: &LaunchPaths,
             _: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, PrepareRefusal> {
-            let mut refusal = PrepareRefusal::new(
+        ) -> std::result::Result<PreparedLaunch, Box<PrepareRefusal>> {
+            let mut refusal = PrepareRefusal::boxed(
                 TerminalCause::RouteResolutionRefused,
                 "DEPENDENCY_OUTPUT_SECRET",
             );

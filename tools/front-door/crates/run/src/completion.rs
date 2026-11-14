@@ -463,7 +463,7 @@ mod tests {
             _: &str,
             _: &LaunchPaths,
             _: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
+        ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
             Err(crate::fixture_refusal(
                 "holder-only fixture does not launch",
             ))

@@ -65,7 +65,7 @@ pub enum CustodyError {
     #[error("writer reservation requires recovery")]
     Fenced,
     #[error("writer import retained for lane {} at {}; run `{}` or `{}`", fence.lane, fence.fence.display(), fence.reconcile(), fence.abandon())]
-    ImportRetained { fence: PendingImport },
+    ImportRetained { fence: Box<PendingImport> },
     #[error("custody identity is unknown")]
     UnknownIdentity,
     #[error("record is invalid or belongs to another generation")]
@@ -728,7 +728,9 @@ fn ensure_no_exclusive_reservation(directory: &Directory) -> Result<()> {
             .map_err(|_| CustodyError::Fenced)?
         {
             Some(CustodyDecision::Pending(fence)) => {
-                return Err(CustodyError::ImportRetained { fence });
+                return Err(CustodyError::ImportRetained {
+                    fence: Box::new(fence),
+                });
             }
             Some(CustodyDecision::Settled(scope)) => {
                 // The writer lease is held. Finish only the verified interrupted

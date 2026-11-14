@@ -130,8 +130,8 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
             _: &str,
             _: &LaunchPaths,
             _: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
-            Err(crate::PrepareRefusal {
+        ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
+            Err(Box::new(crate::PrepareRefusal {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 policy_code: None,
                 resource: None,
@@ -153,7 +153,7 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
                     detail: "opaque candidate detail".into(),
                 })
                 .collect(),
-            })
+            }))
         }
         fn decode(
             &self,
@@ -224,8 +224,8 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
             _: &str,
             _: &LaunchPaths,
             _: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
-            Err(crate::PrepareRefusal {
+        ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
+            Err(Box::new(crate::PrepareRefusal {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 policy_code: None,
                 resource: None,
@@ -247,7 +247,7 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
                         detail: "sign-in required".into(),
                     })
                     .to_vec(),
-            })
+            }))
         }
         fn decode(
             &self,

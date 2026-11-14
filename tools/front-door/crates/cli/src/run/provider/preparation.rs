@@ -495,7 +495,7 @@ pub(crate) fn prepare(
     paths: &run::LaunchPaths,
     resume: Option<&run::AttemptRecord>,
     wait: Option<u64>,
-) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
+) -> Result<run::PreparedLaunch, Box<run::PrepareRefusal>> {
     prepare_with_wait(
         registry,
         task,
@@ -685,7 +685,7 @@ fn policy_code_for_resource(
     }
 }
 impl PrepareError {
-    pub(super) fn into_refusal(self) -> run::PrepareRefusal {
+    pub(super) fn into_refusal(self) -> Box<run::PrepareRefusal> {
         match self {
             Self::RouteResolution { error, checks } => {
                 let mut refusal = route_resolution_refusal(error).into_refusal();
@@ -698,7 +698,7 @@ impl PrepareError {
                 message,
                 cause,
                 note,
-            } => run::PrepareRefusal {
+            } => Box::new(run::PrepareRefusal {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 policy_code: None,
                 resource: None,
@@ -713,7 +713,7 @@ impl PrepareError {
                         | provenant_records::run::TerminalCause::HostNativeUnconfigured
                 )
                 .then_some(provenant_records::run::PreparationFailure::AdapterUnavailable),
-            },
+            }),
             Self::Candidates {
                 message,
                 skipped_routes,
@@ -746,7 +746,7 @@ impl PrepareError {
                     .or_else(|| policy_code_for_resource(candidate_resource));
                 let message =
                     candidate_refusal_message(&skipped_routes, fallback_outcome).unwrap_or(message);
-                let mut refusal = run::PrepareRefusal {
+                let mut refusal = Box::new(run::PrepareRefusal {
                     boundary_class,
                     policy_code,
                     resource: candidate_resource,
@@ -755,7 +755,7 @@ impl PrepareError {
                     message,
                     skipped_routes,
                     fallback_outcome,
-                };
+                });
                 if refusal.auth_required() {
                     refusal.terminal_cause =
                         provenant_records::run::TerminalCause::AccountLoginRequired;
@@ -763,7 +763,7 @@ impl PrepareError {
                 refusal
             }
             Self::SourceRoots(error) => {
-                let mut refusal = run::PrepareRefusal::new(
+                let mut refusal = run::PrepareRefusal::boxed(
                     provenant_records::run::TerminalCause::AccessPolicyRefused,
                     error.to_string(),
                 );
@@ -773,7 +773,7 @@ impl PrepareError {
                 refusal
             }
             Self::SourceCwd(error) => {
-                let mut refusal = run::PrepareRefusal::new(
+                let mut refusal = run::PrepareRefusal::boxed(
                     provenant_records::run::TerminalCause::AccessPolicyRefused,
                     error.to_string(),
                 );
@@ -789,7 +789,7 @@ impl PrepareError {
             }
             Self::Permission(error) => PlanCheckError::Permission(error).into_refusal(),
             Self::Unsupported(error) => {
-                let mut refusal = run::PrepareRefusal::new(
+                let mut refusal = run::PrepareRefusal::boxed(
                     provenant_records::run::TerminalCause::AccessPolicyRefused,
                     error.to_string(),
                 );
@@ -798,7 +798,7 @@ impl PrepareError {
                 refusal
             }
             Self::ContinuationRequest(error) => {
-                let mut refusal = run::PrepareRefusal::new(
+                let mut refusal = run::PrepareRefusal::boxed(
                     provenant_records::run::TerminalCause::AccessPolicyRefused,
                     error.to_string(),
                 );
@@ -807,7 +807,7 @@ impl PrepareError {
                 refusal
             }
             Self::SourceHead(error) => {
-                let mut refusal = run::PrepareRefusal::new(
+                let mut refusal = run::PrepareRefusal::boxed(
                     provenant_records::run::TerminalCause::AccessPolicyRefused,
                     error.to_string(),
                 );
@@ -822,7 +822,7 @@ impl PrepareError {
             Self::Run(run::RunError::Plan(error)) => PlanCheckError::Plan(error).into_refusal(),
             Self::Run(error) => {
                 let boundary_class = error.boundary_class();
-                let mut refusal = run::PrepareRefusal::new(
+                let mut refusal = run::PrepareRefusal::boxed(
                     provenant_records::run::TerminalCause::HandoffRefused,
                     error.to_string(),
                 );
@@ -837,7 +837,7 @@ impl PrepareError {
                 } else {
                     error.boundary_class()
                 };
-                let mut refusal = run::PrepareRefusal::new(
+                let mut refusal = run::PrepareRefusal::boxed(
                     provenant_records::run::TerminalCause::HandoffRefused,
                     error.to_string(),
                 );
@@ -848,7 +848,7 @@ impl PrepareError {
                 refusal
             }
             Self::Prompt(error) => {
-                let mut refusal = run::PrepareRefusal::new(
+                let mut refusal = run::PrepareRefusal::boxed(
                     provenant_records::run::TerminalCause::StoredPromptUnreadable,
                     error.to_string(),
                 );
@@ -875,7 +875,7 @@ impl PrepareError {
                 refusal
             }
             error @ (Self::HostIndexOverlap | Self::TargetSeedOverlap) => {
-                let mut refusal = run::PrepareRefusal::new(
+                let mut refusal = run::PrepareRefusal::boxed(
                     provenant_records::run::TerminalCause::AccessPolicyRefused,
                     error.to_string(),
                 );
@@ -898,7 +898,7 @@ impl PrepareError {
             | Self::SourceProfileIsolated(_)
             | Self::SourceViewReadOnly(_)
             | Self::WriterContinuation(_)) => {
-                let mut refusal = run::PrepareRefusal::new(
+                let mut refusal = run::PrepareRefusal::boxed(
                     provenant_records::run::TerminalCause::AccessPolicyRefused,
                     error.to_string(),
                 );
@@ -923,7 +923,7 @@ impl PrepareError {
                 );
                 refusal
             }
-            other => run::PrepareRefusal::new(
+            other => run::PrepareRefusal::boxed(
                 provenant_records::run::TerminalCause::HandoffRefused,
                 other.to_string(),
             ),
@@ -1296,9 +1296,9 @@ impl PlanCheckError {
         skipped
     }
 
-    fn into_refusal(self) -> run::PrepareRefusal {
+    fn into_refusal(self) -> Box<run::PrepareRefusal> {
         let skipped = self.skipped("preparation");
-        let mut refusal = run::PrepareRefusal::new(
+        let mut refusal = run::PrepareRefusal::boxed(
             provenant_records::run::TerminalCause::AccessPolicyRefused,
             skipped.detail.clone(),
         );

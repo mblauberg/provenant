@@ -46,7 +46,7 @@ impl Providers for Ready {
         _: &str,
         _: &LaunchPaths,
         _: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
+    ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
         Ok(PreparedLaunch {
             limits: Default::default(),
             argv: vec!["fixture".into()],
@@ -83,7 +83,7 @@ impl Providers for PriorityFailure {
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
+    ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
         Ready.prepare(task, prompt, paths, resume)
     }
     fn decode(
@@ -109,7 +109,7 @@ impl Providers for Confined {
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
+    ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
         use provenant_confinement::permissions::{
             AccessMode, NetworkAccess, PlanPermissions, ProviderProfile, ProviderProfileSpec,
             WorktreeWriteAuthority,
@@ -226,9 +226,9 @@ impl Providers for Fake {
         self.failure_note.clone()
     }
 
-    fn check_policy(&self, _: &TaskRequest) -> std::result::Result<(), PrepareRefusal> {
+    fn check_policy(&self, _: &TaskRequest) -> std::result::Result<(), Box<PrepareRefusal>> {
         if self.refuse_policy {
-            let mut refusal = crate::PrepareRefusal::new(
+            let mut refusal = crate::PrepareRefusal::boxed(
                 TerminalCause::DiskFloor,
                 "insufficient disk space; run `provenant gc`",
             );
@@ -244,7 +244,7 @@ impl Providers for Fake {
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
+    ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
         self.network
             .set(Some(task.access.network(task.writer.is_some())));
         self.prepared.set(self.prepared.get() + 1);
@@ -253,7 +253,7 @@ impl Providers for Fake {
         self.prompt.replace(prompt.into());
         self.resumed.set(resume.map(|r| r.attempt_id));
         if self.refuse {
-            return Err(crate::PrepareRefusal::new(
+            return Err(crate::PrepareRefusal::boxed(
                 TerminalCause::RouteResolutionRefused,
                 "fixture adapter is disabled",
             ));
@@ -1349,7 +1349,7 @@ impl Providers for RefusesAfterAlias {
         _: &str,
         paths: &LaunchPaths,
         _: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
+    ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
         self.0.set(Some(paths.temporary_alias.is_some()));
         Err(crate::fixture_refusal("provider unavailable"))
     }

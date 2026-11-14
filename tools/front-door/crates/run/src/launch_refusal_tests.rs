@@ -18,9 +18,9 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         source_overlap: bool,
     }
     impl Providers for Refused {
-        fn check_policy(&self, _: &TaskRequest) -> std::result::Result<(), PrepareRefusal> {
+        fn check_policy(&self, _: &TaskRequest) -> std::result::Result<(), Box<PrepareRefusal>> {
             if self.disk {
-                return Err(PrepareRefusal {
+                return Err(Box::new(PrepareRefusal {
                     boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                     policy_code: None,
                     resource: None,
@@ -29,7 +29,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
                     message: "HOST_DISK_ERROR_SENTINEL".into(),
                     skipped_routes: Vec::new(),
                     fallback_outcome: None,
-                });
+                }));
             }
             Ok(())
         }
@@ -39,8 +39,8 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             _: &str,
             _: &LaunchPaths,
             _: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, PrepareRefusal> {
-            let mut refusal = PrepareRefusal::new(
+        ) -> std::result::Result<PreparedLaunch, Box<PrepareRefusal>> {
+            let mut refusal = PrepareRefusal::boxed(
                 TerminalCause::RouteResolutionRefused,
                 format!("PROVIDER_SECRET_SENTINEL {PROVIDER_TOKEN}"),
             );

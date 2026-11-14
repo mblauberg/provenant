@@ -722,7 +722,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
             prompt: &str,
             paths: &LaunchPaths,
             resume: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
+        ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
             use provenant_confinement::permissions::{
                 AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions, ProviderProfile,
                 ProviderProfileSpec, WorktreeWriteAuthority,

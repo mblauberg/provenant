@@ -288,7 +288,7 @@ impl Registry<'_> {
         paths: &run::LaunchPaths,
         resume: Option<&run::AttemptRecord>,
         wait: Option<u64>,
-    ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
+    ) -> Result<run::PreparedLaunch, Box<run::PrepareRefusal>> {
         let prepared = provider::prepare(self, task, prompt, paths, resume, wait)?;
         #[cfg(feature = "fixture")]
         let prepared = {
@@ -339,7 +339,7 @@ fn writer_gc_settings(
     })
 }
 
-fn disk_policy_refusal(error: DiskCheck) -> run::PrepareRefusal {
+fn disk_policy_refusal(error: DiskCheck) -> Box<run::PrepareRefusal> {
     let resource = match &error {
         DiskCheck::Low {
             available,
@@ -363,7 +363,7 @@ fn disk_policy_refusal(error: DiskCheck) -> run::PrepareRefusal {
         DiskCheck::Low { .. } => "LAUNCH_DISK",
         DiskCheck::Unobserved(_) => "SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE",
     };
-    let mut refusal = run::PrepareRefusal::new(cause, String::from(error));
+    let mut refusal = run::PrepareRefusal::boxed(cause, String::from(error));
     refusal.policy_code = Some(policy_code.into());
     refusal.resource = resource;
     refusal
@@ -419,7 +419,7 @@ impl run::Providers for Registry<'_> {
             task.build_heavy,
         ))
     }
-    fn check_policy(&self, task: &run::TaskRequest) -> Result<(), run::PrepareRefusal> {
+    fn check_policy(&self, task: &run::TaskRequest) -> Result<(), Box<run::PrepareRefusal>> {
         let Some(writer) = &task.writer else {
             return Ok(());
         };
@@ -541,7 +541,7 @@ impl run::Providers for Registry<'_> {
         prompt: &str,
         paths: &run::LaunchPaths,
         resume: Option<&run::AttemptRecord>,
-    ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
+    ) -> Result<run::PreparedLaunch, Box<run::PrepareRefusal>> {
         self.prepare_with_wait(task, prompt, paths, resume, None)
     }
 
