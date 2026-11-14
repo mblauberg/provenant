@@ -45,7 +45,8 @@ impl crate::Settings {
         for record in records {
             if !provenant_records::AdapterSpec::get(&record.account.adapter).is_some_and(|spec| {
                 spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
-            }) || record.account.account_key == "zen"
+            }) || provenant_records::AdapterSpec::get(&record.account.adapter)
+                .is_some_and(|spec| spec.is_free_account(&record.account.account_key))
             {
                 continue;
             }

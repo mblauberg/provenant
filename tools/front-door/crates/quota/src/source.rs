@@ -189,16 +189,3 @@ pub struct QuotaSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<QuotaDetails>,
 }
-pub trait QuotaSource: Sync {
-    fn adapter_id(&self) -> &'static str;
-    fn probe(
-        &self,
-        account: &AccountScope,
-        input: &QuotaProbeInput,
-    ) -> Result<QuotaProbePlan, crate::QuotaError>;
-    fn decode(
-        &self,
-        plan: &QuotaProbePlan,
-        capture: &ProbeCapture,
-    ) -> Result<QuotaSnapshot, crate::QuotaError>;
-}

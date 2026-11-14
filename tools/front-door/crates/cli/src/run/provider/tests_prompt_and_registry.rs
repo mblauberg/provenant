@@ -455,7 +455,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
             provenant_providers::command::Command.validate_provenance(provenance)
         }
     }
-    impl provenant_quota::QuotaSource for Fixture {
+    impl provenant_providers::QuotaSource for Fixture {
         fn adapter_id(&self) -> &'static str {
             self.0
         }
@@ -469,6 +469,14 @@ fn registry_provider_resolves_prepares_and_reports_quota(
                 account: account.clone(),
                 input: input.clone(),
             })
+        }
+        fn capture(
+            &self,
+            _: &provenant_providers::quota_live::LiveQuota,
+            _: &provenant_quota::QuotaProbePlan,
+            _: Option<&provenant_quota::AccountRecord>,
+        ) -> Result<provenant_quota::ProbeCapture, provenant_quota::ProbeFailure> {
+            Err(provenant_quota::ProbeFailure::Disabled)
         }
         fn decode(
             &self,

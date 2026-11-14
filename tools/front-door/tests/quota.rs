@@ -918,7 +918,12 @@ fn registered_accounts_have_distinct_quota_keys() -> Result {
         };
         for account in &known {
             let plan = provenant_providers::quota::plan(provider, account, &input)?;
-            let snapshot = provenant_providers::quota::decode(
+            let source = provenant_providers::REGISTRY
+                .iter()
+                .filter_map(|registration| registration.quota_source)
+                .find(|source| source.adapter_id() == provider)
+                .expect("provider quota source is registered");
+            let snapshot = source.decode(
                 &plan,
                 &ProbeCapture {
                     stdout: fixture.as_bytes().to_vec(),

@@ -1,3 +1,5 @@
+use super::{Account, LiveQuota};
+use provenant_quota::{AccountRecord, ProbeCapture, QuotaDetails, QuotaProbePlan};
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
@@ -424,4 +426,31 @@ fn limit_errors(db: &Connection, now_ms: i64, providers: &[String]) -> HashMap<&
         latest.entry(pool).or_insert(created);
     }
     latest
+}
+
+pub(crate) fn capture_source(
+    live: &LiveQuota,
+    plan: &QuotaProbePlan,
+    previous: Option<&AccountRecord>,
+) -> Result<ProbeCapture, ProbeFailure> {
+    live.capture_source(plan, previous, None, |live, account, _deadline, details| {
+        let free_account = provenant_records::AdapterSpec::get(&account.scope.adapter)
+            .is_some_and(|spec| spec.is_free_account(&account.scope.account_key));
+        if free_account {
+            details.note =
+                Some("Observed free-limit refusals only; allowance and daily reset unknown".into());
+            Ok(json!({}))
+        } else {
+            details.note = Some(
+                "Local estimate, this machine only; calibrated Go caps, other hosts not counted"
+                    .into(),
+            );
+            capture(
+                &account.identity_dir,
+                &account.options,
+                live.now(),
+                plan.input.deadline_unix_seconds,
+            )
+        }
+    })
 }

@@ -4612,7 +4612,7 @@ mod tests {
     fn registry_only_quota_source_is_probed_and_reported() -> Result<(), Box<dyn std::error::Error>>
     {
         struct Source;
-        impl QuotaSource for Source {
+        impl provenant_providers::QuotaSource for Source {
             fn adapter_id(&self) -> &'static str {
                 "fixture-provider"
             }
@@ -4626,6 +4626,14 @@ mod tests {
                     account: account.clone(),
                     input: input.clone(),
                 })
+            }
+            fn capture(
+                &self,
+                _: &provenant_providers::quota_live::LiveQuota,
+                _: &QuotaProbePlan,
+                _: Option<&AccountRecord>,
+            ) -> Result<ProbeCapture, ProbeFailure> {
+                Err(ProbeFailure::Disabled)
             }
             fn decode(
                 &self,

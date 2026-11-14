@@ -34,7 +34,25 @@ pub use launch::{
 };
 pub use stream::*;
 
-use provenant_quota::QuotaSource;
+pub trait QuotaSource: Sync {
+    fn adapter_id(&self) -> &'static str;
+    fn probe(
+        &self,
+        account: &provenant_quota::AccountScope,
+        input: &provenant_quota::QuotaProbeInput,
+    ) -> Result<provenant_quota::QuotaProbePlan, provenant_quota::QuotaError>;
+    fn capture(
+        &self,
+        live: &quota_live::LiveQuota,
+        plan: &provenant_quota::QuotaProbePlan,
+        previous: Option<&provenant_quota::AccountRecord>,
+    ) -> Result<provenant_quota::ProbeCapture, provenant_quota::ProbeFailure>;
+    fn decode(
+        &self,
+        plan: &provenant_quota::QuotaProbePlan,
+        capture: &provenant_quota::ProbeCapture,
+    ) -> Result<provenant_quota::QuotaSnapshot, provenant_quota::QuotaError>;
+}
 
 #[derive(Clone, Copy)]
 pub struct Registration {
@@ -179,8 +197,8 @@ macro_rules! adapter {
 pub(crate) use adapter;
 
 macro_rules! quota_source {
-    ($ty:ty, $id:literal) => {
-        impl provenant_quota::QuotaSource for $ty {
+    ($ty:ty, $id:literal, $capture:path, $decode:path) => {
+        impl crate::QuotaSource for $ty {
             fn adapter_id(&self) -> &'static str {
                 $id
             }
@@ -191,12 +209,20 @@ macro_rules! quota_source {
             ) -> Result<provenant_quota::QuotaProbePlan, provenant_quota::QuotaError> {
                 crate::quota::plan($id, account, input)
             }
+            fn capture(
+                &self,
+                live: &crate::quota_live::LiveQuota,
+                plan: &provenant_quota::QuotaProbePlan,
+                previous: Option<&provenant_quota::AccountRecord>,
+            ) -> Result<provenant_quota::ProbeCapture, provenant_quota::ProbeFailure> {
+                $capture(live, plan, previous)
+            }
             fn decode(
                 &self,
                 plan: &provenant_quota::QuotaProbePlan,
                 capture: &provenant_quota::ProbeCapture,
             ) -> Result<provenant_quota::QuotaSnapshot, provenant_quota::QuotaError> {
-                crate::quota::decode(plan, capture)
+                $decode(plan, capture)
             }
         }
     };
