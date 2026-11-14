@@ -87,7 +87,9 @@ For each exact model, account selection ranks ready accounts by usable headroom
 per second until reset, divided by one plus their live lane count. The limiting
 applicable fresh quota window supplies headroom and reset time. Missing inputs
 stay unknown in the receipt and use neutral ranking defaults. Authentication,
-identity and measured exhaustion still refuse; reserve levels, unknown partial
+identity and measured exhaustion still refuse. Partial estimates remain advisory
+at 100 percent, including expired calibration or reset observations; explicit
+scoped provider refusals remain binding. Reserve levels, unknown partial
 headroom and the Go allowance floor apply positive ranking penalties with sourced
 warnings. They also pass the pre-launch admission check. Account keys break ties,
 so registration order cannot decide the chosen identity. The route and pool

@@ -501,8 +501,6 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
         }
     };
     let calibrated = apply(&raw);
-    // Calibration and its expiry only change a preference. Across both knob
-    // values, only measured exhaustion may refuse selection or launch.
     let mut expired_for_table = duplicate(&calibrated);
     expired_for_table
         .snapshot
@@ -510,8 +508,40 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
         .as_mut()
         .unwrap()
         .calibration_expires_unix_seconds = Some(100);
-    let mut exhausted_for_table = duplicate(&raw);
-    exhausted_for_table.snapshot.windows[0].used_basis_points = 10_000;
+
+    let mut unknown_partial_at_limit = duplicate(&raw);
+    unknown_partial_at_limit.snapshot.status = QuotaStatus::Unknown;
+    unknown_partial_at_limit.snapshot.windows[0].used_basis_points = 10_000;
+    unknown_partial_at_limit.snapshot.windows[0].resets_unix_seconds = Some(99);
+    let mut exhausted_partial_at_limit = duplicate(&raw);
+    exhausted_partial_at_limit.snapshot.status = QuotaStatus::Exhausted;
+    exhausted_partial_at_limit.snapshot.windows[0].used_basis_points = 10_000;
+    exhausted_partial_at_limit.snapshot.windows[0].resets_unix_seconds = Some(200);
+
+    let mut full_calibration = settings.clone();
+    let full = full_calibration.calibration.get_mut("go").unwrap();
+    full.five_hour = Some(100);
+    full.seven_day = Some(100);
+    full.thirty_day = Some(100);
+    let mut full_record = AccountRecord::empty(raw.snapshot.account.clone());
+    full_record.snapshot = Some(raw.snapshot.clone());
+    let mut full_records = [full_record];
+    full_calibration.apply_calibration(&mut full_records, 100);
+    let calibrated_at_limit = QuotaObservation {
+        snapshot: full_records[0].snapshot.clone().unwrap(),
+        ..duplicate(&raw)
+    };
+
+    let mut measured_exhaustion = duplicate(&raw);
+    measured_exhaustion
+        .snapshot
+        .details
+        .as_mut()
+        .unwrap()
+        .coverage = Some("complete".into());
+    measured_exhaustion.snapshot.windows[0].used_basis_points = 10_000;
+    measured_exhaustion.snapshot.windows[0].resets_unix_seconds = Some(200);
+
     let policy = [provenant_quota::QuotaPolicy {
         adapter: "opencode",
         timer_seconds: 300,
@@ -520,11 +550,26 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
         low_power: true,
         solo: false,
     }];
-    for (name, observation, exhausted) in [
-        ("partial", duplicate(&raw), false),
-        ("exhausted", exhausted_for_table, true),
-        ("calibrated", duplicate(&calibrated), false),
-        ("calibration expired", expired_for_table, false),
+    for (name, observation, expected_ready) in [
+        ("partial", duplicate(&raw), true),
+        (
+            "partial unknown at 100 percent after reset",
+            unknown_partial_at_limit,
+            true,
+        ),
+        (
+            "partial exhausted at 100 percent",
+            exhausted_partial_at_limit,
+            true,
+        ),
+        ("calibrated partial", duplicate(&calibrated), true),
+        (
+            "calibrated partial at 100 percent",
+            calibrated_at_limit,
+            true,
+        ),
+        ("expired partial calibration", expired_for_table, true),
+        ("complete measured exhaustion", measured_exhaustion, false),
     ] {
         for opt_in in [false, true] {
             let mut row_config = config.clone();
@@ -534,11 +579,31 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
             ctx.availability = &availability;
             ctx.access = &access;
             ctx.quota = &observations;
+
             let selected = resolve(&explicit, &ctx)?;
             let ready = matches!(selected.readiness, RouteReadiness::Ready { .. });
-            let mut admitted_route = selected.clone();
-            // Check the independent admission policy with a fresh readiness grant,
-            // so an earlier selection refusal cannot mask a headroom disagreement.
+            let pooled_ready = match resolve(&query, &ctx) {
+                Ok(pooled) => matches!(pooled.readiness, RouteReadiness::Ready { .. }),
+                Err(RoutingError::NoEligiblePoolMember { .. }) if !expected_ready => false,
+                Err(error) => return Err(error.into()),
+            };
+            if !expected_ready {
+                assert!(matches!(
+                    selected.readiness,
+                    RouteReadiness::Unavailable {
+                        reason: provenant_records::RouteExclusionReason::Exhausted,
+                        ..
+                    }
+                ));
+            }
+            assert_eq!(
+                (ready, pooled_ready),
+                (expected_ready, expected_ready),
+                "{name}, allow_unknown={opt_in}"
+            );
+
+            let mut admitted_route = selected;
+            // Check admission independently with a fresh readiness grant.
             admitted_route.readiness = RouteReadiness::Ready {
                 extra: Default::default(),
                 availability_ref: "fixture".into(),
@@ -556,8 +621,8 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
             }
             .check(&admitted_route);
             assert_eq!(
-                (ready, admission.is_ok()),
-                (!exhausted, !exhausted),
+                admission.is_ok(),
+                expected_ready,
                 "{name}, allow_unknown={opt_in}: {admission:?}"
             );
         }

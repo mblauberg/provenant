@@ -1,6 +1,6 @@
 //! Expiring dashboard floors are applied to copies of raw ledger observations.
 //! Never persist the adjusted windows: expiry must reveal the original ledger.
-use crate::{AccountRecord, QuotaStatus, QuotaWindow};
+use crate::{AccountRecord, QuotaWindow};
 use provenant_core::WallTime;
 use serde::{Deserialize, Serialize};
 
@@ -95,16 +95,6 @@ impl crate::Settings {
                     });
                 }
             }
-            if matches!(
-                snapshot.status,
-                QuotaStatus::Available | QuotaStatus::Unknown
-            ) && snapshot
-                .windows
-                .iter()
-                .any(|w| w.used_basis_points >= 10_000)
-            {
-                snapshot.status = QuotaStatus::Exhausted;
-            }
         }
     }
 }
@@ -112,6 +102,7 @@ impl crate::Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::QuotaStatus;
     use provenant_config::DomainConfig;
 
     fn settings(expires: &str) -> crate::Settings {
@@ -199,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn calibration_is_validated_and_cannot_hide_exhaustion() {
+    fn calibration_does_not_promote_partial_usage_to_exhaustion() {
         assert!(settings("2026-11-04T00:00:00Z").validate().is_empty());
         let mut settings = settings("2026-11-04T00:00:00Z");
         settings.calibration.get_mut("go").unwrap().five_hour = Some(101);
@@ -207,9 +198,20 @@ mod tests {
         settings.calibration.get_mut("go").unwrap().five_hour = Some(100);
         let mut records = vec![ledger("go")];
         settings.apply_calibration(&mut records, 1);
+        let snapshot = records[0].snapshot.as_ref().unwrap();
+        assert_eq!(snapshot.status, QuotaStatus::Available);
         assert_eq!(
-            records[0].snapshot.as_ref().unwrap().status,
-            QuotaStatus::Exhausted
+            snapshot
+                .windows
+                .iter()
+                .find(|window| window.pool == "five_hour")
+                .unwrap()
+                .used_basis_points,
+            10_000
+        );
+        assert_eq!(
+            snapshot.details.as_ref().unwrap().coverage.as_deref(),
+            Some("partial")
         );
     }
 

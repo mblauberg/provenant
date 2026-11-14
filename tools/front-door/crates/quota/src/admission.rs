@@ -268,7 +268,7 @@ impl Admission<'_> {
 
     /// Check provider readiness, current allowance and the account record's
     /// persisted refusals.
-    /// Unknown partial coverage is advisory; confirmed exhaustion remains binding.
+    /// Partial coverage is advisory; explicit provider refusals are checked separately.
     pub fn check(&self, route: &ResolvedRoute) -> Result<(), QuotaError> {
         match route.readiness {
             RouteReadiness::Ready {
@@ -318,7 +318,7 @@ pub enum PartialHeadroom {
     Exhausted,
 }
 
-/// Apply the same window and calibration rules during selection and launch.
+/// Partial coverage can inform pacing but cannot establish exhausted headroom.
 pub fn partial_headroom(
     snapshot: &QuotaSnapshot,
     adapter: &str,
@@ -342,14 +342,14 @@ pub fn partial_headroom(
         .details
         .as_ref()
         .is_some_and(|d| d.coverage.as_deref() == Some("partial"));
-    if (matches!(
-        snapshot.status,
-        QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
-    ) || (snapshot.status == QuotaStatus::Unknown && partial))
+    if !partial
+        && matches!(
+            snapshot.status,
+            QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
+        )
         && snapshot.windows.iter().filter(relevant).any(|w| {
             w.used_basis_points >= 10000
-                && (partial
-                    || w.resets_unix_seconds.is_none_or(|r| r > now)
+                && (w.resets_unix_seconds.is_none_or(|r| r > now)
                     || snapshot
                         .details
                         .as_ref()
@@ -703,37 +703,44 @@ mod admission_tests {
         settings.apply_calibration(&mut active, 1000);
         assert!(check(&active, 1000).is_ok());
         assert!(check(&active, 1100).is_ok());
-        let mut partial = raw.clone();
-        settings.apply_calibration(&mut partial, 1100);
-        partial[0]
-            .snapshot
-            .as_mut()
-            .unwrap()
-            .windows
-            .push(QuotaWindow {
+        // Partial estimates stay advisory even at the reported limit, across
+        // status labels and expired or unknown reset times.
+        for (status, reset) in [
+            (QuotaStatus::Unknown, None),
+            (QuotaStatus::Unknown, Some(1099)),
+            (QuotaStatus::Exhausted, Some(1200)),
+        ] {
+            let mut partial = raw.clone();
+            settings.apply_calibration(&mut partial, 1100);
+            let snapshot = partial[0].snapshot.as_mut().unwrap();
+            snapshot.status = status;
+            snapshot.windows.push(QuotaWindow {
                 pool: "five_hour".into(),
                 window_seconds: None,
-                used_basis_points: 9999,
-                resets_unix_seconds: None,
+                used_basis_points: 10000,
+                resets_unix_seconds: reset,
             });
-        assert!(check(&partial, 1100).is_ok());
-        partial[0].snapshot.as_mut().unwrap().windows[0].used_basis_points = 10000;
-        partial[0].snapshot.as_mut().unwrap().status = QuotaStatus::Unknown;
-        assert!(matches!(
-            check(&partial, 1100),
-            Err(QuotaError::AllowanceExhausted)
-        ));
-        partial[0].snapshot.as_mut().unwrap().windows[0].resets_unix_seconds = Some(1099);
-        assert!(matches!(
-            check(&partial, 1100),
-            Err(QuotaError::AllowanceExhausted)
-        ));
+            assert!(check(&partial, 1100).is_ok());
+        }
         settings.calibration.get_mut("go").unwrap().five_hour = Some(100);
-        let mut exhausted = raw.clone();
-        settings.apply_calibration(&mut exhausted, 1000);
-        exhausted[0].snapshot.as_mut().unwrap().windows[0].resets_unix_seconds = Some(999);
+        let mut calibrated = raw.clone();
+        settings.apply_calibration(&mut calibrated, 1000);
+        assert!(check(&calibrated, 1000).is_ok());
+
+        // A complete measurement still enforces the selected model's window,
+        // independently of advertised free-pool membership.
+        let mut measured = raw;
+        let snapshot = measured[0].snapshot.as_mut().unwrap();
+        snapshot.status = QuotaStatus::Exhausted;
+        snapshot.details.get_or_insert_default().coverage = Some("complete".into());
+        snapshot.windows.push(QuotaWindow {
+            pool: "five_hour".into(),
+            window_seconds: None,
+            used_basis_points: 10000,
+            resets_unix_seconds: Some(1200),
+        });
         assert!(matches!(
-            check(&exhausted, 1000),
+            check(&measured, 1100),
             Err(QuotaError::AllowanceExhausted)
         ));
     }

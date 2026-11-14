@@ -1373,13 +1373,21 @@ fn reading_exhausted(
 /// The one rule for a spent account, whatever its pacing policy: an exhausted
 /// snapshot whose full windows serving `model` have not all reset, or a
 /// grouped pool serving it at its limit. `model_pool` is the catalogue's quota
-/// pool for the model. Freshness is the caller's concern.
+/// pool for the model. Partial quota readings are advisory; provider refusals
+/// use the separate typed evidence path. Freshness is the caller's concern.
 pub fn quota_reading_spent(
     snapshot: &provenant_quota::QuotaSnapshot,
     model: &ModelId,
     model_pool: Option<&str>,
     now_seconds: i64,
 ) -> bool {
+    if snapshot
+        .details
+        .as_ref()
+        .is_some_and(|details| details.coverage.as_deref() == Some("partial"))
+    {
+        return false;
+    }
     match snapshot.status {
         QuotaStatus::Exhausted => !exhaustion_lapsed(snapshot, now_seconds, model_pool),
         QuotaStatus::Available | QuotaStatus::CreditOnly => {
