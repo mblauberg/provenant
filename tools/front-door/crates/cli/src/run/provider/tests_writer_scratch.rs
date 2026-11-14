@@ -280,6 +280,9 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             &pool_paths,
             None,
             |adapter| {
+                if adapter == "gh" {
+                    return Err("fixture GitHub CLI unavailable".into());
+                }
                 assert_eq!(adapter, "cursor", "updating provider was probed");
                 Ok(executable.clone())
             },
@@ -465,7 +468,10 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             assert!(skipped.cause.is_some(), "{skipped:?}");
             if skipped.route.starts_with("cursor/") {
                 assert_eq!(skipped.kind, SkipKind::Setup, "{skipped:?}");
-                assert_eq!(skipped.cause, Some(provenant_records::RouteExclusionReason::SetupFailed));
+                assert_eq!(
+                    skipped.cause,
+                    Some(provenant_records::RouteExclusionReason::SetupFailed)
+                );
             } else {
                 assert!(skipped.cause.is_some(), "{skipped:?}");
             }
@@ -1014,6 +1020,9 @@ printf 'agy 1.0.0\n'
         &paths,
         None,
         |adapter| {
+            if adapter == "gh" {
+                return Err("fixture GitHub CLI unavailable".into());
+            }
             assert_eq!(adapter, "cursor", "unrelated adapter was probed");
             Ok(executable.clone())
         },
@@ -1028,7 +1037,12 @@ printf 'agy 1.0.0\n'
         };
         assert!(permissions.write_roots.contains(&lock_grant));
         let mandatory = permissions.policy.as_ref().ok_or("policy")?.mandatory();
-        assert!(mandatory.protected().iter().any(|root| root.path == project));
+        assert!(
+            mandatory
+                .protected()
+                .iter()
+                .any(|root| root.path == project)
+        );
         assert!(mandatory.host_writes().contains(&lock_grant));
         host_writer_roots_inside_other_checkouts(
             binding.project_id(),
@@ -1633,6 +1647,9 @@ printf 'agy 1.0.0\n'
         &redraw_paths,
         None,
         |adapter| {
+            if adapter == "gh" {
+                return Err("fixture GitHub CLI unavailable".into());
+            }
             assert_eq!(adapter, "cursor");
             let count = lookup_count.get() + 1;
             lookup_count.set(count);
@@ -1851,6 +1868,9 @@ printf 'agy 1.0.0\n'
         &continued_paths,
         Some(&prior),
         |adapter| {
+            if adapter == "gh" {
+                return Err("fixture GitHub CLI unavailable".into());
+            }
             assert_eq!(adapter, "cursor", "resume probed a different provider");
             Ok(executable.clone())
         },
@@ -2049,7 +2069,12 @@ fn host_writer_roots_inside_other_checkouts(
         .as_ref()
         .ok_or("policy")?
         .mandatory();
-    assert!(mandatory.protected().iter().any(|root| root.path == primary));
+    assert!(
+        mandatory
+            .protected()
+            .iter()
+            .any(|root| root.path == primary)
+    );
     assert!(mandatory.host_writes().contains(&lock_grant));
     provenant_confinement::ConfinedPlan::new(launched)?;
     // A read-only lane receives no writer roots and no exception.
@@ -2079,7 +2104,11 @@ fn host_writer_roots_inside_other_checkouts(
     ] {
         assert!(
             matches!(
-                request(Some(writer), &run::LaneAccess::default(), &config(vec![path.clone()])),
+                request(
+                    Some(writer),
+                    &run::LaneAccess::default(),
+                    &config(vec![path.clone()])
+                ),
                 Err(PermissionError::ProtectedOverlap)
             ),
             "{}",
