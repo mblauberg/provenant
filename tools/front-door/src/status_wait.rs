@@ -8,6 +8,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
+    os::unix::fs::MetadataExt,
+    path::Path,
     sync::{Condvar, Mutex, mpsc},
     time::{Duration, Instant},
 };
@@ -94,6 +96,7 @@ impl Snapshot {
     fn read(
         target: &Target,
         edge: &provenant_cli::run::Edge<'_>,
+        session: &mut Option<provenant_cli::fabric::Context>,
         left: Duration,
         pr_read_timeout: Duration,
         cancel: &CancelToken,
@@ -177,12 +180,14 @@ impl Snapshot {
                 })
             }
             Target::Graph(id) | Target::Auto(id) => {
-                let rows = crate::fabric::read_status_rows(id, edge).map_err(ReadFailure::from)?;
+                let rows = crate::fabric::read_status_rows(id, edge, session)
+                    .map_err(ReadFailure::from)?;
                 let Some(rows) = rows else {
                     if matches!(target, Target::Auto(_)) {
                         return Self::read(
                             &Target::Lane(id.parse().map_err(str::to_owned)?),
                             edge,
+                            session,
                             left,
                             pr_read_timeout,
                             cancel,
@@ -298,6 +303,63 @@ fn graph_rows_terminal(rows: &[Value]) -> bool {
     })
 }
 
+/// Longest a local target goes without a full read while its files look
+/// untouched. The read samples sources a file stamp cannot see: peer hosts and
+/// process liveness.
+const IDLE_REFRESH: Duration = Duration::from_secs(10);
+
+/// Size and modification time of one file a read depends on.
+type FileStamp = Option<(u64, u64, i64, i64)>;
+
+/// Cheap change hint for a local target: the metadata of the files its read
+/// derives from. Interval ticks compare stamps and skip the full read, which
+/// opens the repository, the Run store and the graph checkpoint, while nothing
+/// has been written. `None` means the target has no file hint (a PR).
+fn stamp(target: &Target, state: &Path) -> Option<Vec<FileStamp>> {
+    let mut files = vec![state.join("run.sqlite3"), state.join("run.sqlite3-wal")];
+    match target {
+        Target::Lane(_) => {}
+        Target::Graph(id) | Target::Auto(id) => {
+            let graphs = state.join("fabric").join("graphs");
+            let projects = std::fs::read_dir(&graphs).into_iter().flatten().flatten();
+            for project in projects {
+                files.push(project.path().join(format!("graph-{id}.json")));
+                files.push(project.path());
+            }
+        }
+        Target::Operation(_) | Target::Pr(_) => return None,
+    }
+    Some(
+        files
+            .iter()
+            .map(|path| {
+                let meta = std::fs::metadata(path).ok()?;
+                Some((meta.ino(), meta.size(), meta.mtime(), meta.mtime_nsec()))
+            })
+            .collect(),
+    )
+}
+
+/// Decides when a waiter pays for a full read. The stamp is taken before the
+/// read, so a write that lands during it is seen on the next tick.
+#[derive(Default)]
+struct Reads {
+    seen: Option<(Vec<FileStamp>, Instant)>,
+}
+impl Reads {
+    fn due(&self, now: Instant, stamp: Option<&Vec<FileStamp>>) -> bool {
+        match (&self.seen, stamp) {
+            (Some((seen, at)), Some(stamp)) => {
+                seen != stamp || now.duration_since(*at) >= IDLE_REFRESH
+            }
+            _ => true,
+        }
+    }
+    fn record(&mut self, now: Instant, stamp: Option<Vec<FileStamp>>, read_ok: bool) {
+        self.seen = stamp.filter(|_| read_ok).map(|stamp| (stamp, now));
+    }
+}
+
 struct Update {
     target: String,
     snapshot: Result<Snapshot>,
@@ -400,14 +462,31 @@ pub(crate) fn run(command: provenant_cli::Status, globals: &Globals) -> u8 {
                 });
                 scope.spawn(move || {
                     let mut last = None;
+                    let mut reads = Reads::default();
+                    let mut session = None;
                     loop {
                         let left = deadline.saturating_duration_since(Instant::now());
                         if left.is_zero() || stop.cancel.is_cancelled() {
                             break;
                         }
+                        let stamped = stamp(target, edge.roots.state.as_path());
+                        if !once && !reads.due(Instant::now(), stamped.as_ref()) {
+                            if !stop.pause(interval.min(left)) {
+                                break;
+                            }
+                            continue;
+                        }
                         let snapshot = provenant_sqlite::with_busy_timeout(Duration::ZERO, || {
-                            Snapshot::read(target, edge, left, pr_read_timeout, &stop.cancel)
+                            Snapshot::read(
+                                target,
+                                edge,
+                                &mut session,
+                                left,
+                                pr_read_timeout,
+                                &stop.cancel,
+                            )
                         });
+                        reads.record(Instant::now(), stamped, snapshot.is_ok());
                         // Keep the last good row across read failures, as pr status does.
                         if snapshot
                             .as_ref()
@@ -525,6 +604,25 @@ fn write_event(event: &Value, json: bool) -> Result<()> {
 #[allow(dead_code)] // Also included by the worktree driver without libtest.
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_target_skips_reads_until_its_files_change_or_the_refresh_lapses() {
+        let now = Instant::now();
+        let stamp = vec![Some((1, 10, 5, 0))];
+        let mut reads = Reads::default();
+        assert!(reads.due(now, Some(&stamp)), "first read is always due");
+        reads.record(now, Some(stamp.clone()), true);
+        let soon = now + IDLE_REFRESH / 2;
+        assert!(!reads.due(soon, Some(&stamp)));
+        assert!(reads.due(soon, Some(&vec![Some((1, 11, 6, 0))])));
+        assert!(reads.due(now + IDLE_REFRESH, Some(&stamp)));
+        assert!(
+            reads.due(soon, None),
+            "targets without a file hint always read"
+        );
+        reads.record(soon, Some(stamp.clone()), false);
+        assert!(reads.due(soon, Some(&stamp)), "a failed read is retried");
+    }
     #[test]
     fn busy_graph_read_is_retried_while_other_targets_run() {
         use provenant_fabric_runtime::coordination::facade::FacadeError;

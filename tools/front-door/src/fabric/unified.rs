@@ -1750,9 +1750,12 @@ fn triple_mismatch(
     }))
 }
 
+/// `session` is opened on first use; a caller that polls keeps it, because
+/// opening resolves the repository and runs git.
 pub(crate) fn read_status_rows(
     selector: &str,
     edge: &provenant_cli::run::Edge<'_>,
+    session: &mut Option<Context>,
 ) -> Result<Option<Vec<Value>>, FacadeError> {
     if provenant_cli::fabric::in_lane() {
         let value = provenant_cli::fabric::graph_relay::from_lane(
@@ -1770,10 +1773,13 @@ pub(crate) fn read_status_rows(
                 .clone(),
         ));
     }
-    let context = match Context::open_read_only(edge.roots.clone(), edge.home, edge.cwd) {
-        Ok(context) => context,
-        Err(provenant_cli::fabric::EdgeError::Invalid) => return Ok(None),
-        Err(_) => return Err(FacadeError::io("open graph context")),
+    let context = match session {
+        Some(context) => context,
+        None => match Context::open_read_only(edge.roots.clone(), edge.home, edge.cwd) {
+            Ok(context) => session.insert(context),
+            Err(provenant_cli::fabric::EdgeError::Invalid) => return Ok(None),
+            Err(_) => return Err(FacadeError::io("open graph context")),
+        },
     };
     let Some(target) = resolve_target(&context.roots.state, context.identity.project, selector)?
     else {
@@ -1787,12 +1793,7 @@ pub(crate) fn read_status_rows(
     .map_err(graph_journal_error)?
     .ok_or(FacadeError::NotFound)?;
     let mut rows = status_rows(&graph_snapshot(checkpoint), &target);
-    enrich_status_rows(
-        &mut rows,
-        &context,
-        &SystemClock::new(),
-        &CancelToken::new(),
-    )?;
+    enrich_status_rows(&mut rows, context, &SystemClock::new(), &CancelToken::new())?;
     Ok(Some(rows))
 }
 
