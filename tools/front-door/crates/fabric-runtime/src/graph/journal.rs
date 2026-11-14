@@ -789,6 +789,14 @@ impl FileJournal {
             Err(error) if error.is_not_found() => return Ok(false),
             Err(error) => return Err(error.into()),
         };
+        // A readable checkpoint needs no retirement. Inspect the atomic
+        // snapshot first so an ordinary stop never waits on a live graph writer
+        // before it can persist its independent cancellation request.
+        match load_checkpoint(&directory, graph_id) {
+            Ok(_) => return Ok(false),
+            Err(error) if !error.is_unreadable() => return Err(error.into()),
+            Err(_) => {}
+        }
         let lock_name = format!("graph-{graph_id}.lock");
         let _lock = directory.lock(
             OsStr::new(&lock_name),
