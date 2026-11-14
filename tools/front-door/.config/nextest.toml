@@ -57,7 +57,6 @@ not (
         test(=permissions::tests::grants::linked_worktree_grants_derive_from_verified_git_paths_and_ref) |
         test(=permissions::tests::escape::native_sandbox_blocks_path_escape_probes)
     )) |
-    (package(=provenant-fabric-runtime) & test(=fetch::tests::cleanup_refuses_hard_links)) |
     (package(=provenant-os) & (
         test(=disk::tests::measurement_counts_hard_links_once_and_sizes_target_contents) |
         test(=fs::tests::owner_lock_refuses_cancelled_requests_hardlinks_and_writable_anchors)

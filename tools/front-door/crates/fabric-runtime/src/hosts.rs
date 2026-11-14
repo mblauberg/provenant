@@ -15,24 +15,46 @@ use std::{
 };
 
 pub const PROTOCOL: u64 = 13;
-pub const CONSOLE_PROTOCOL: u64 = 7;
-pub const INBOX_PROTOCOL: u64 = 8;
-pub const DOCTOR_PROTOCOL: u64 = 12;
-pub const CONSOLE_DETAIL_PROTOCOL: u64 = 10;
-pub const CONSOLE_INBOX_PROTOCOL: u64 = 11;
 pub const MAX_FRAME: usize = 1_048_576;
 
-/// The newest feature protocol level this release speaks. `PROTOCOL` is the
-/// base wire fence shared with every peer release; feature actions negotiate
-/// their independently versioned level per call, up to this ceiling. The local
-/// `hosts` row reports both; a base payload change can raise the base above the
-/// feature ceiling without changing the feature payloads.
-pub fn newest_feature_protocol() -> u64 {
-    CONSOLE_PROTOCOL
-        .max(INBOX_PROTOCOL)
-        .max(DOCTOR_PROTOCOL)
-        .max(CONSOLE_DETAIL_PROTOCOL)
-        .max(CONSOLE_INBOX_PROTOCOL)
+macro_rules! peer_feature_protocols {
+    (
+        $(
+            $constant:ident = $protocol:literal => [
+                $(($variant:ident, $wire_name:literal, $sample:expr)),+ $(,)?
+            ]
+        ),+ $(,)?
+    ) => {
+        $(pub const $constant: u64 = $protocol;)+
+
+        /// Highest feature fence declared by this peer release.
+        pub fn newest_feature_protocol() -> u64 {
+            [$($protocol),+].into_iter().fold(0, u64::max)
+        }
+
+        fn action_fence(action: &PeerAction) -> u64 {
+            match action {
+                $($(PeerAction::$variant { .. } => $protocol,)+)+
+                _ => PROTOCOL,
+            }
+        }
+
+        fn feature_protocol_for_wire_name(action: &str) -> u64 {
+            match action {
+                $($($wire_name => $protocol,)+)+
+                _ => PROTOCOL,
+            }
+        }
+
+        #[cfg(test)]
+        fn declared_feature_actions() -> Vec<(&'static str, u64, PeerAction)> {
+            vec![
+                $(
+                    $(($wire_name, $protocol, $sample),)+
+                )+
+            ]
+        }
+    };
 }
 
 /// Render a protocol mismatch with the requested protocol level.
@@ -409,6 +431,40 @@ pub enum PeerAction {
         budget_seconds: u64,
     },
 }
+
+peer_feature_protocols! {
+    CONSOLE_PROTOCOL = 7 => [
+        (ConsoleBoard, "console_board", PeerAction::ConsoleBoard {
+            extra: Default::default(), all: false, limit: 50, selected: false,
+        }),
+        (ConsoleTree, "console_tree", PeerAction::ConsoleTree {
+            extra: Default::default(), max_depth: 8, max_nodes: 100, detail: false, selected: false,
+        }),
+    ],
+    INBOX_PROTOCOL = 8 => [
+        (Inbox, "inbox", PeerAction::Inbox {
+            extra: Default::default(),
+            input: crate::inbox::InboxInput::List {
+                extra: Default::default(), id: None, session: None,
+                state: Default::default(), limit: 50, cursor: None,
+            },
+        }),
+    ],
+    DOCTOR_PROTOCOL = 12 => [
+        (Doctor, "doctor", PeerAction::Doctor { extra: Default::default() }),
+    ],
+    CONSOLE_DETAIL_PROTOCOL = 10 => [
+        (ConsoleDetail, "console_detail", PeerAction::ConsoleDetail {
+            extra: Default::default(), id: "attempt".into(),
+        }),
+    ],
+    CONSOLE_INBOX_PROTOCOL = 11 => [
+        (ConsoleInbox, "console_inbox", PeerAction::ConsoleInbox {
+            extra: Default::default(), state: crate::inbox::InboxFilter::Open, limit: 50,
+        }),
+    ],
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerRequest<A = PeerAction> {
     #[serde(flatten)]
@@ -423,26 +479,6 @@ pub struct PeerRequest<A = PeerAction> {
     /// Who sent this and for which operation, for correlation on the peer.
     #[serde(default)]
     pub trace: Trace,
-}
-/// The protocol fence an action negotiates. Feature actions carry their own
-/// fence above the base; everything else sits at `PROTOCOL`.
-fn action_fence(action: &PeerAction) -> u64 {
-    if matches!(action, PeerAction::ConsoleInbox { .. }) {
-        CONSOLE_INBOX_PROTOCOL
-    } else if matches!(action, PeerAction::ConsoleDetail { .. }) {
-        CONSOLE_DETAIL_PROTOCOL
-    } else if matches!(action, PeerAction::Inbox { .. }) {
-        INBOX_PROTOCOL
-    } else if matches!(
-        action,
-        PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. }
-    ) {
-        CONSOLE_PROTOCOL
-    } else if matches!(action, PeerAction::Doctor { .. }) {
-        DOCTOR_PROTOCOL
-    } else {
-        PROTOCOL
-    }
 }
 impl PeerRequest {
     /// A request from this host: the trace names the sending host, the acting
@@ -730,37 +766,18 @@ pub struct PeerResponse<R = PeerResult> {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     pub version: u64,
-    #[serde(default = "baseline_protocol")]
     pub protocol: u64,
     pub host: HostId,
     pub project: CrossHostProjectKey,
     pub result: R,
-}
-fn baseline_protocol() -> u64 {
-    1
 }
 /// Inspect the envelope before decoding an action that another protocol may
 /// have changed. A refusal always names this host's protocol.
 pub fn protocol_refusal(bytes: &[u8]) -> Result<Option<PeerResponse>, PeerError> {
     let request: PeerRequest<serde_json::Value> =
         provenant_records::decode(bytes, Limits::CONFIG).map_err(|_| PeerError::Frame)?;
-    let console = matches!(
-        request.action["action"].as_str(),
-        Some("console_board" | "console_tree")
-    );
-    let expected = if request.action["action"] == "console_inbox" {
-        CONSOLE_INBOX_PROTOCOL
-    } else if request.action["action"] == "console_detail" {
-        CONSOLE_DETAIL_PROTOCOL
-    } else if request.action["action"] == "inbox" {
-        INBOX_PROTOCOL
-    } else if console {
-        CONSOLE_PROTOCOL
-    } else if request.action["action"] == "doctor" {
-        DOCTOR_PROTOCOL
-    } else {
-        PROTOCOL
-    };
+    let expected =
+        feature_protocol_for_wire_name(request.action["action"].as_str().unwrap_or_default());
     Ok((request.protocol != expected).then_some(PeerResponse {
         extra: Default::default(),
         version: 1,
@@ -816,13 +833,6 @@ fn stderr_line(bytes: &[u8]) -> String {
         .find(|line| !line.is_empty())
         .map(|line| plain_text(line, 200))
         .unwrap_or_default()
-}
-/// Whether stderr contains an exact trimmed line, after removing controls.
-fn stderr_has_line(bytes: &[u8], expected: &str) -> bool {
-    String::from_utf8_lossy(bytes)
-        .lines()
-        .map(str::trim)
-        .any(|line| plain_text(line, 200) == expected)
 }
 /// The one federation port: how a request reaches a peer host and its reply
 /// comes back. SSH is the only production implementation; the trait is the seam where a
@@ -987,112 +997,6 @@ impl SshTransport<'_> {
         if let Termination::Exit(code) = outcome.termination {
             if code != 0 {
                 let line = stderr_line(&outcome.stderr.bytes);
-                if matches!(
-                    request.action,
-                    PeerAction::ConsoleBoard { .. }
-                        | PeerAction::ConsoleTree { .. }
-                        | PeerAction::ConsoleDetail { .. }
-                        | PeerAction::ConsoleInbox { .. }
-                        | PeerAction::Inbox { .. }
-                        | PeerAction::Doctor { .. }
-                ) && stderr_has_line(
-                    &outcome.stderr.bytes,
-                    "provenant: fabric peer: invalid peer frame",
-                ) {
-                    return Err(PeerError::ProtocolMismatch {
-                        peer: peer.destination.clone(),
-                        remote: 1,
-                        expected: request.protocol,
-                    });
-                }
-                if code == 3
-                    && stderr_has_line(
-                        &outcome.stderr.bytes,
-                        "provenant: fabric peer: invalid peer frame",
-                    )
-                {
-                    return Err(PeerError::ProtocolMismatch {
-                        peer: peer.destination.clone(),
-                        remote: 1,
-                        expected: request.protocol,
-                    });
-                }
-                if code == 3
-                    && !matches!(
-                        request.action,
-                        PeerAction::ConsoleBoard { .. }
-                            | PeerAction::ConsoleTree { .. }
-                            | PeerAction::ConsoleDetail { .. }
-                            | PeerAction::ConsoleInbox { .. }
-                            | PeerAction::Inbox { .. }
-                            | PeerAction::Doctor { .. }
-                    )
-                    && String::from_utf8_lossy(&outcome.stderr.bytes)
-                        .lines()
-                        .any(|line| {
-                            line.trim().starts_with(
-                                "provenant: fabric peer: peer agent closed without a reply; see ",
-                            )
-                        })
-                {
-                    // The v1 agent hides decode refusals, but this can also be
-                    // a lost mutation reply. Probe health, never repeat the
-                    // operation, and reclassify only a proven version mismatch.
-                    // Omit protocol and trace so v1 can decode the probe.
-                    let probe_value = serde_json::json!({
-                        "version": 1,
-                        "target_host": request.target_host,
-                        "source_host": request.source_host,
-                        "agent": request.agent,
-                        "project": request.project,
-                        "action": {"action": "health"},
-                    });
-                    let mut probe =
-                        serde_json::to_vec(&probe_value).map_err(|_| PeerError::Frame)?;
-                    probe.push(b'\n');
-                    let remaining = timeout
-                        .saturating_sub(Duration::from_micros(outcome.elapsed_micros))
-                        .min(Duration::from_micros(
-                            budget.remaining(self.clock.mono_now()).as_micros(),
-                        ));
-                    if !remaining.is_zero() && !cancel.is_cancelled() {
-                        let mut options = ExecOptions::new(&argv, self.cwd, remaining);
-                        options.env = Some(&env);
-                        options.stdin = Some(&probe);
-                        options.stdout = StreamPolicy::Capture { limit: MAX_FRAME };
-                        options.stderr = StreamPolicy::Capture { limit: 4096 };
-                        options.cancel = Some(cancel);
-                        options.stop_on_output_limit = true;
-                        if let Some((terminate_grace, reap_timeout)) = cleanup {
-                            options.terminate_grace = terminate_grace;
-                            options.reap_timeout = reap_timeout;
-                        }
-                        if let Ok(reply) = self.executor.execute(options)
-                            && reply.termination == Termination::Exit(0)
-                            && !reply.timed_out
-                            && !reply.cancelled
-                            && !reply.stdout.truncated
-                            && !reply.stdout.read_failed
-                            && !reply.drain_truncated
-                            && let Ok(response) =
-                                provenant_records::decode::<PeerResponse<serde_json::Value>, _>(
-                                    reply.stdout.bytes.as_slice(),
-                                    Limits::CONFIG,
-                                )
-                            && response.version == 1
-                            && response.host == peer.host
-                            && response.project == request.project.key
-                            && response.protocol != PROTOCOL
-                        {
-                            return Err(PeerError::ProtocolMismatch {
-                                peer: peer.destination.clone(),
-                                remote: response.protocol,
-                                // The probe speaks the base fence only.
-                                expected: PROTOCOL,
-                            });
-                        }
-                    }
-                }
                 return Err(uncertain(if line.is_empty() {
                     format!("ssh exited with status {code}")
                 } else {
@@ -1211,20 +1115,6 @@ mod tests {
             decode_recorded_response(&serde_json::to_vec(&response).unwrap()),
             Err(PeerError::Version)
         ));
-    }
-
-    #[test]
-    fn hosts_report_a_feature_ceiling_beside_the_base_fence() {
-        for fence in [
-            CONSOLE_PROTOCOL,
-            INBOX_PROTOCOL,
-            DOCTOR_PROTOCOL,
-            CONSOLE_DETAIL_PROTOCOL,
-            CONSOLE_INBOX_PROTOCOL,
-        ] {
-            assert!(newest_feature_protocol() >= fence);
-        }
-        assert_eq!(newest_feature_protocol(), DOCTOR_PROTOCOL);
     }
 
     #[test]
@@ -1643,11 +1533,6 @@ mod tests {
     struct Canned(Mutex<Option<Result<ExecOutcome, ExecError>>>);
     impl Executor for Canned {
         fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
-            let wire: serde_json::Value = serde_json::from_slice(options.stdin.unwrap()).unwrap();
-            if wire.get("protocol").is_none() {
-                assert_eq!(wire["action"], serde_json::json!({"action":"health"}));
-                return Err(ExecError::Busy);
-            }
             let request = decode_request(options.stdin.unwrap()).unwrap();
             let expected = action_fence(&request.action);
             assert_eq!(request.protocol, expected);
@@ -1736,7 +1621,7 @@ mod tests {
             .unwrap_err()
     }
     #[test]
-    fn console_peer_unsupported_and_unreachable() {
+    fn console_peer_invalid_frames_fail_and_unreachable() {
         for action in [
             PeerAction::ConsoleBoard {
                 extra: Default::default(),
@@ -1759,7 +1644,7 @@ mod tests {
             )))));
             assert!(matches!(
                 exchange_action_error(&old, action.clone()),
-                PeerError::ProtocolMismatch { .. }
+                PeerError::Failed(_)
             ));
             let offline = Canned(Mutex::new(Some(Ok(outcome(
                 255,
@@ -1773,13 +1658,12 @@ mod tests {
         }
     }
     #[test]
-    fn console_inbox_peer_without_its_fence_is_unsupported() {
+    fn console_inbox_invalid_frame_fails_closed() {
         let action = PeerAction::ConsoleInbox {
             extra: Default::default(),
             state: crate::inbox::InboxFilter::Open,
             limit: 50,
         };
-        // An old peer rejects the unknown frame; the caller reads it as unsupported.
         let old = Canned(Mutex::new(Some(Ok(outcome(
             3,
             "provenant: fabric peer: invalid peer frame\n",
@@ -1787,10 +1671,7 @@ mod tests {
         )))));
         assert!(matches!(
             exchange_action_error(&old, action.clone()),
-            PeerError::ProtocolMismatch {
-                expected: CONSOLE_INBOX_PROTOCOL,
-                ..
-            }
+            PeerError::Failed(_)
         ));
         let offline = Canned(Mutex::new(Some(Ok(outcome(
             255,
@@ -1803,49 +1684,17 @@ mod tests {
         ));
     }
     #[test]
-    fn feature_actions_use_their_protocol_fences() {
-        let cases = [
-            (
-                "console inbox",
-                PeerAction::ConsoleInbox {
-                    extra: Default::default(),
-                    state: crate::inbox::InboxFilter::Open,
-                    limit: 50,
-                },
-                CONSOLE_INBOX_PROTOCOL,
-                CONSOLE_DETAIL_PROTOCOL,
-            ),
-            (
-                "console board",
-                PeerAction::ConsoleBoard {
-                    extra: Default::default(),
-                    all: false,
-                    limit: 50,
-                    selected: false,
-                },
-                CONSOLE_PROTOCOL,
-                PROTOCOL,
-            ),
-            (
-                "doctor",
-                PeerAction::Doctor {
-                    extra: Default::default(),
-                },
-                DOCTOR_PROTOCOL,
-                PROTOCOL,
-            ),
-            (
-                "console detail",
-                PeerAction::ConsoleDetail {
-                    extra: Default::default(),
-                    id: "attempt".into(),
-                },
-                CONSOLE_DETAIL_PROTOCOL,
-                CONSOLE_PROTOCOL,
-            ),
-        ];
+    fn peer_feature_declaration_drives_every_protocol_fence() {
+        let features = declared_feature_actions();
+        let newest = features
+            .iter()
+            .map(|(_, protocol, _)| *protocol)
+            .max()
+            .unwrap();
+        assert_eq!(newest_feature_protocol(), newest);
 
-        for (case, action, expected_protocol, old_protocol) in cases {
+        for (wire_name, protocol, action) in features {
+            assert_eq!(action_fence(&action), protocol, "{wire_name}");
             let request = PeerRequest::new(
                 HostId::from_bytes([2; 16]),
                 HostId::from_bytes([1; 16]),
@@ -1857,35 +1706,23 @@ mod tests {
                 },
                 action,
             );
-            assert_eq!(request.protocol, expected_protocol, "{case}");
-            assert!(request.operation().is_none(), "{case}");
+            assert_eq!(request.protocol, protocol, "{wire_name}");
+            let mut value = serde_json::to_value(request).unwrap();
+            assert_eq!(value["action"]["action"], wire_name);
             assert!(
-                protocol_refusal(&serde_json::to_vec(&request).unwrap())
+                protocol_refusal(&serde_json::to_vec(&value).unwrap())
                     .unwrap()
                     .is_none(),
-                "{case} at its own protocol"
+                "{wire_name} at its declared fence"
             );
 
-            let mut old = serde_json::to_value(request).unwrap();
-            old["protocol"] = old_protocol.into();
-            let refusal = protocol_refusal(&serde_json::to_vec(&old).unwrap())
+            value["protocol"] = PROTOCOL.into();
+            let refusal = protocol_refusal(&serde_json::to_vec(&value).unwrap())
                 .unwrap()
                 .unwrap();
-            assert_eq!(refusal.protocol, expected_protocol, "{case}");
-            assert!(
-                matches!(
-                    refusal.result,
-                    PeerResult::Error {
-                        data: crate::hosts::PeerResultError {
-                            error: facade::FacadeError::PeerVersion,
-                            ..
-                        },
-                        ..
-                    }
-                ),
-                "{case}"
-            );
+            assert_eq!(refusal.protocol, protocol, "{wire_name}");
         }
+        assert_eq!(feature_protocol_for_wire_name("health"), PROTOCOL);
     }
     #[test]
     fn read_only_failures_name_their_cause_on_the_same_wire_code() {
@@ -1914,152 +1751,70 @@ mod tests {
     }
 
     #[test]
-    fn opaque_agent_failure_preserves_mutation_uncertainty() {
-        for mutation in [false, true] {
-            // The released v1 relay hides a decode refusal this way, but the
-            // same diagnostic can also follow execution and a lost reply.
-            let error = exchange_failure(
+    fn missing_peer_protocol_fields_are_rejected() {
+        let host = HostId::from_bytes([2; 16]);
+        let mut request = serde_json::to_value(PeerRequest::new(
+            host,
+            HostId::from_bytes([1; 16]),
+            "chair".into(),
+            ProjectLocator {
+                extra: Default::default(),
+                key: project_key(Path::new("/home/a")),
+                common_dir: "repo/.git".into(),
+            },
+            PeerAction::Health {
+                extra: Default::default(),
+            },
+        ))
+        .unwrap();
+        request.as_object_mut().unwrap().remove("protocol");
+        assert!(matches!(
+            decode_request(&serde_json::to_vec(&request).unwrap()),
+            Err(PeerError::Frame)
+        ));
+
+        let mut response = serde_json::json!({
+            "version": 1,
+            "protocol": PROTOCOL,
+            "host": host,
+            "project": project_key(Path::new("/home/a")),
+            "result": {"result": "health", "data": {"host": host}},
+        });
+        response.as_object_mut().unwrap().remove("protocol");
+        assert!(
+            provenant_records::decode::<PeerResponse<serde_json::Value>, _>(
+                &serde_json::to_vec(&response).unwrap(),
+                Limits::CONFIG,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn closed_peer_reply_is_uncertain_and_never_retried() {
+        struct ClosedPeer(AtomicUsize);
+        impl Executor for ClosedPeer {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                let request = decode_request(options.stdin.unwrap()).unwrap();
+                assert_eq!(request.protocol, PROTOCOL);
                 Ok(outcome(
                     3,
-                    "provenant: fabric peer: peer agent closed without a reply; see /home/a/peer-agent/agent.log\n",
+                    "provenant: fabric peer: peer agent closed without a reply; see peer.log\n",
                     false,
-                )),
-                mutation,
-            );
+                ))
+            }
+        }
+
+        for mutation in [false, true] {
+            let peer = ClosedPeer(AtomicUsize::new(0));
+            let error = exchange_error(&peer, mutation);
             if mutation {
                 assert!(matches!(error, PeerError::Unknown { .. }), "{error}");
             } else {
                 assert!(matches!(error, PeerError::Failed(_)), "{error}");
             }
-        }
-    }
-
-    #[test]
-    fn agent_socket_closure_requires_a_confirmed_protocol_mismatch() {
-        use std::io::{Read, Write};
-        use std::os::unix::net::UnixStream;
-
-        // SSH's remote entrypoint forwards to the agent socket. The
-        // protocol-1 wire fixture reproduces the old relay dropping a child's
-        // decode refusal, then answering a legacy health request.
-        struct AgentSsh(Mutex<std::collections::VecDeque<UnixStream>>);
-        impl Executor for AgentSsh {
-            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
-                let request: serde_json::Value =
-                    serde_json::from_slice(options.stdin.unwrap()).unwrap();
-                let probe = request.get("protocol").is_none();
-                assert_eq!(
-                    options.timeout,
-                    Duration::from_secs(if probe { 3 } else { 5 })
-                );
-                let mut stream = self.0.lock().unwrap().pop_front().unwrap();
-                stream.write_all(options.stdin.unwrap()).unwrap();
-                stream.shutdown(std::net::Shutdown::Write).unwrap();
-                let mut bytes = Vec::new();
-                stream.read_to_end(&mut bytes).unwrap();
-                Ok(if bytes.is_empty() {
-                    let mut reply = outcome(
-                        3,
-                        "provenant: fabric peer: peer agent closed without a reply; see /home/a/peer-agent/agent.log\n",
-                        false,
-                    );
-                    reply.elapsed_micros = 2_000_000;
-                    reply
-                } else {
-                    let mut reply = outcome(0, "", false);
-                    reply.stdout.bytes = bytes;
-                    reply
-                })
-            }
-        }
-        for (protocol, wrong_identity) in [
-            (None, false),
-            (Some(4), false),
-            (Some(PROTOCOL), false),
-            (None, true),
-        ] {
-            for mutation in [false, true] {
-                let (client, server) = UnixStream::pair().unwrap();
-                let (probe, health) = UnixStream::pair().unwrap();
-                let server = std::thread::spawn(move || {
-                    for (index, mut stream) in [server, health].into_iter().enumerate() {
-                        let mut bytes = Vec::new();
-                        stream.read_to_end(&mut bytes).unwrap();
-                        if bytes.is_empty() {
-                            return;
-                        }
-                        let request: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-                        if index == 0 {
-                            assert_eq!(request["protocol"], PROTOCOL);
-                        } else {
-                            assert!(request.get("protocol").is_none());
-                            assert!(request.get("trace").is_none());
-                            assert_eq!(request["action"], serde_json::json!({"action":"health"}));
-                            let mut reply = serde_json::json!({
-                                "version":1, "host":request["target_host"],
-                                "project":request["project"]["key"],
-                                "result":{"result":"health","data":{
-                                    "host":request["target_host"],"available":true,"execution":true,
-                                }},
-                            });
-                            if let Some(protocol) = protocol {
-                                reply["protocol"] = protocol.into();
-                            }
-                            if wrong_identity {
-                                reply["host"] =
-                                    serde_json::to_value(HostId::from_bytes([9; 16])).unwrap();
-                            }
-                            stream
-                                .write_all(&serde_json::to_vec(&reply).unwrap())
-                                .unwrap();
-                        }
-                    }
-                });
-                let error = exchange_error(&AgentSsh(Mutex::new([client, probe].into())), mutation);
-                if protocol != Some(PROTOCOL) && !wrong_identity {
-                    assert!(
-                        matches!(error, PeerError::ProtocolMismatch { remote, .. }
-                    if remote == protocol.unwrap_or(1)),
-                        "{error}"
-                    );
-                } else if mutation {
-                    assert!(matches!(error, PeerError::Unknown { .. }), "{error}");
-                } else {
-                    assert!(matches!(error, PeerError::Failed(_)), "{error}");
-                }
-                server.join().unwrap();
-            }
-        }
-    }
-
-    #[test]
-    fn released_v1_health_and_decode_refusal_report_protocol_one() {
-        // v1 omits protocol from both the envelope and the health data.
-        let host = HostId::from_bytes([2; 16]);
-        let project = project_key(Path::new("/home/a"));
-        let mut reply = outcome(0, "", false);
-        reply.stdout.bytes = serde_json::to_vec(&serde_json::json!({
-            "version": 1, "host": host, "project": project,
-            "result": {"result": "health", "data": {
-                "host": host, "available": true, "execution": true,
-            }},
-        }))
-        .unwrap();
-        for mutation in [false, true] {
-            for reply in [
-                reply.clone(),
-                outcome(
-                    3,
-                    "SSH login banner\nprovenant: fabric peer: invalid peer frame\n",
-                    false,
-                ),
-            ] {
-                let error = exchange_failure(Ok(reply), mutation);
-                assert!(
-                    matches!(error, PeerError::ProtocolMismatch { remote: 1, .. }),
-                    "{error}"
-                );
-            }
+            assert_eq!(peer.0.load(Ordering::SeqCst), 1);
         }
     }
 
@@ -2239,7 +1994,7 @@ mod tests {
         // A protocol mismatch remains distinct from a transport failure.
         let mismatch = Err(PeerError::ProtocolMismatch {
             peer: "workshop".into(),
-            remote: 1,
+            remote: PROTOCOL - 1,
             expected: PROTOCOL,
         });
         assert_eq!(reason(&mismatch), unknown("unsupported_peer_version"));
