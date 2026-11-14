@@ -209,9 +209,8 @@ pub fn serve_with_read(
             }
             let library = template_library(&context.home, &context.cwd)
                 .map_err(|error| refused("invalid_template", error))?;
-            let config =
-                provenant_config::read_with_domains(&context.roots, &crate::domains::SECTIONS)
-                    .map_err(|error| refused("invalid_config", error.to_string()))?;
+            let config = crate::config_reads::read_for(&context.roots, "run")
+                .map_err(|error| refused("invalid_config", error.to_string()))?;
             let resolvers = launch_resolvers_at_roots(
                 &context.roots,
                 &config.domains.routing.review,
@@ -373,9 +372,8 @@ pub fn serve_with_read(
             }
             let library = template_library(&context.home, &context.cwd)
                 .map_err(|error| refused("invalid_template", error))?;
-            let config =
-                provenant_config::read_with_domains(&context.roots, &crate::domains::SECTIONS)
-                    .map_err(|error| refused("invalid_config", error.to_string()))?;
+            let config = crate::config_reads::read_for(&context.roots, "run")
+                .map_err(|error| refused("invalid_config", error.to_string()))?;
             let resolvers = launch_resolvers_at_roots(
                 &context.roots,
                 &config.domains.routing.review,
@@ -1029,6 +1027,7 @@ pub fn provision_writer(
     cancel: &CancelToken,
 ) -> Result<(), ServiceError> {
     provision_writer_checked(context, path, branch, source, budget, cancel)
+        .map(|_| ())
         .map_err(provisioning_refusal)
 }
 
@@ -1080,6 +1079,24 @@ pub fn writer_launch_budget(
     WaitBudget::up_to(now, floor)
 }
 
+/// Resolve a validated checkpoint path against the project root that owns it.
+fn resolve_managed_writer_path(
+    project_root: &std::path::Path,
+    path: &str,
+    branch: &str,
+) -> Result<std::path::PathBuf, provenant_confinement::worktrees::WorktreeError> {
+    use provenant_confinement::worktrees::{self, WorktreeError};
+    if !project_root.is_absolute() {
+        return Err(WorktreeError::InvalidRequest);
+    }
+    let expected = worktrees::managed_writer_relative_path(branch)?;
+    if std::path::Path::new(path) == expected.as_path() {
+        Ok(project_root.join(expected))
+    } else {
+        Err(WorktreeError::InvalidRequest)
+    }
+}
+
 /// Preserve the typed worktree failure for the graph launch owner.
 pub fn provision_writer_checked(
     context: &Context,
@@ -1088,7 +1105,7 @@ pub fn provision_writer_checked(
     source: &str,
     budget: WaitBudget,
     cancel: &CancelToken,
-) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
+) -> Result<std::path::PathBuf, provenant_confinement::worktrees::WorktreeError> {
     use provenant_confinement::worktrees;
     let clock = provenant_os::clock::SystemClock::new();
     if budget.remaining(clock.mono_now()).as_micros() == 0 {
@@ -1108,7 +1125,10 @@ pub fn provision_writer_checked(
                 lock_budget: budget,
                 ..*worktree_context
             };
-            provision_in_context(&worktree_context, path, branch, source, cancel)
+            let expected =
+                resolve_managed_writer_path(worktree_context.repo.root_path(), path, branch)?;
+            provision_in_context(&worktree_context, path, branch, source, cancel)?;
+            Ok(expected)
         },
     )
 }
@@ -1121,10 +1141,7 @@ fn provision_in_context(
     cancel: &CancelToken,
 ) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
     use provenant_confinement::worktrees::{self, WorktreeCreate, WorktreeError};
-    if path != format!(".worktrees/{}", branch.replace('/', "-")) {
-        return Err(WorktreeError::InvalidRequest);
-    }
-    let expected = context.repo.root_path().join(path);
+    let expected = resolve_managed_writer_path(context.repo.root_path(), path, branch)?;
     // Inspect registration and custody without holding sibling worktrees open
     // for unrelated Git probes. The selected target's cleanliness is checked
     // below, under its writer lease.

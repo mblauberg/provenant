@@ -894,6 +894,15 @@ knob = "policy.LANE_LAUNCHSPEC_CONFIGURE_BUILD_SLOTS_NONE"
 justification = "Unrepresentable optional build-slot shim configuration leaves the launch ungated and emits a warning."
 
 [[rule]]
+code = "GRAPH_CONCURRENCY_CAP"
+site = "fabric-runtime/src/graph/transitions.rs#admit_attempt"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.GRAPH_CONCURRENCY_CAP"
+justification = "A configured graph concurrency cap is advisory; warn and continue unless policy explicitly selects refusal."
+
+[[rule]]
 code = "IDENTITY_REGISTEREDACCOUNT_VALIDATE_ROUTE_AUTHORITY"
 site = "providers/src/identity.rs#RegisteredAccount::validate_route"
 boundary = "authority"

@@ -284,11 +284,8 @@ impl BoundGraphOwner<'_> {
             clock: &self.factory.clock,
             cancel: self.cancel,
         };
-        let config = provenant_config::read_with_domains(
-            &self.factory.context.roots,
-            &provenant_cli::domains::SECTIONS,
-        )
-        .map_err(|_| FacadeError::io("refusal notice configuration"))?;
+        let config = provenant_cli::config_reads::read_for(&self.factory.context.roots, "run")
+            .map_err(|_| FacadeError::io("refusal notice configuration"))?;
         let notice = config
             .knobs
             .get("chair.refusal_notice")
@@ -1365,13 +1362,30 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         self.factory.context.graph_prompt_limit_source
     }
 
+    fn graph_admission_policy(&self) -> provenant_records::policy::Policy {
+        let project = self.factory.context.identity.project.to_string();
+        match provenant_cli::config_reads::read_for(&self.factory.context.roots, "run admission") {
+            Ok(config) => config.domains.policy.resolve_with_knobs(
+                &project,
+                &config.knobs,
+                &Default::default(),
+            ),
+            Err(error) => {
+                let error = provenant_records::diagnostic::safe_text(&error.to_string());
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: graph admission policy unavailable ({error}); using compiled defaults"
+                );
+                provenant_records::policy::Policy::default()
+            }
+        }
+    }
+
     fn launch_retry_policy(&self) -> provenant_fabric_runtime::graph::LaunchRetryPolicy {
         use provenant_config::KnobSource;
         let mut policy = provenant_fabric_runtime::graph::LaunchRetryPolicy::default();
-        let config = match provenant_config::read_with_domains(
-            &self.factory.context.roots,
-            &provenant_cli::domains::SECTIONS,
-        ) {
+        let config = match provenant_cli::config_reads::read_for(&self.factory.context.roots, "run")
+        {
             Ok(config) => config,
             Err(error) => {
                 use std::io::Write;
@@ -1827,7 +1841,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         branch: &str,
         base: &str,
     ) -> Result<Option<provenant_fabric_runtime::graph::WriterWorktreeBinding>, Self::Error> {
-        provenant_cli::fabric::graph_relay::provision_writer_checked(
+        let provisioned = provenant_cli::fabric::graph_relay::provision_writer_checked(
             &self.factory.context,
             path,
             branch,
@@ -1836,6 +1850,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             self.cancel,
         )
         .map_err(|error| run_error(error.into()))?;
+        let path = provisioned
+            .to_str()
+            .ok_or(FacadeError::InvalidInput { detail: None })?;
         self.bind_writer_worktree(path)
     }
 
@@ -3289,11 +3306,9 @@ impl BoundGraphOwner<'_> {
             let mut grants = if accepted {
                 accepted_access.ok_or(FacadeError::StateCorrupt)?
             } else {
-                let configured = provenant_config::read_with_domains(
-                    &self.factory.context.roots,
-                    &provenant_cli::domains::SECTIONS,
-                )
-                .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+                let configured =
+                    provenant_cli::config_reads::read_for(&self.factory.context.roots, "run")
+                        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
                 let default_capabilities = configured
                     .domains
                     .lanes
@@ -3837,7 +3852,7 @@ pub(crate) fn graph_retry_allowance(
     };
     let node_retry = read(node, "retry");
     let preset_retry = read(node, "preset_retry").or_else(|| read(graph, "retry"));
-    let host = match provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS) {
+    let host = match provenant_cli::config_reads::read_for(roots, "run") {
         Ok(config) => matches!(
             config.origins.get("domains.routing.settlement_retries"),
             Some(provenant_config::Origin::User { .. })

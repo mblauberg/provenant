@@ -417,7 +417,7 @@ pub(super) fn with_context<T>(
         &provenant_providers::accounts::Settings,
     ) -> Result<T, EdgeError>,
 ) -> Result<T, EdgeError> {
-    let resolved_config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?;
+    let resolved_config = crate::config_reads::read_for(roots, "route")?;
     let partial_headroom_source = resolved_config
         .knobs
         .get("routing.allow_unknown_partial_headroom")
@@ -1115,7 +1115,7 @@ pub(crate) fn check_dispatch_candidate(
 ) -> Result<(), EdgeError> {
     let catalogue = Catalogue::bundled()?;
     let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
-    let resolved_config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?;
+    let resolved_config = crate::config_reads::read_for(roots, "route")?;
     let domains = resolved_config.domains;
     let pools = catalogue.admission_pools(&model);
     let now = SystemClock::new().unix_seconds();
@@ -1302,8 +1302,7 @@ pub fn depletion_facts(
 ) -> Result<provenant_fabric_runtime::graph::DepletionFacts, String> {
     use provenant_routing::{HostNativeRoute, Stopped, Target};
     let text = |error: &dyn std::fmt::Display| error.to_string();
-    let resolved = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-        .map_err(|error| text(&error))?;
+    let resolved = crate::config_reads::read_for(roots, "route").map_err(|error| text(&error))?;
     let catalogue = Catalogue::bundled().map_err(|error| text(&error))?;
     let route = stopped
         .applied_route
@@ -1416,7 +1415,6 @@ pub fn depletion_facts(
     )
     .map_err(|error| text(&error))?;
     Ok(provenant_fabric_runtime::graph::DepletionFacts {
-        wait_bound_seconds: provenant_routing::depletion_wait_bound(&resolved.knobs),
         config: resolved.domains.routing,
         catalogue,
         stopped: stopped_route,
