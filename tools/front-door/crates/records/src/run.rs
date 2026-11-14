@@ -1049,6 +1049,29 @@ impl SkippedRoute {
         Ok(())
     }
 
+    /// Describe a refused route for public output without provider or OS text.
+    pub fn describe(&self) -> String {
+        let diagnostic = self.diagnostic();
+        let mut reason = format!(
+            "{}: {}",
+            crate::diagnostic::safe_text(&self.route),
+            diagnostic
+                .detail
+                .as_deref()
+                .unwrap_or("the route was refused")
+        );
+        if let Some(next) = diagnostic.next {
+            reason.push_str("; ");
+            reason.push_str(&next);
+        }
+        let accounts = crate::SkippedAccount::read(&self.extra);
+        if !accounts.is_empty() {
+            reason.push_str("; accounts skipped: ");
+            reason.push_str(&crate::SkippedAccount::describe(&accounts));
+        }
+        reason
+    }
+
     /// Project typed facts only; `detail` may contain provider or OS text.
     pub fn diagnostic(&self) -> crate::diagnostic::Diagnostic {
         let mut diagnostic = self

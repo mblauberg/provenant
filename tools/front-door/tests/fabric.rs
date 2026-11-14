@@ -163,7 +163,7 @@ fn ownership_and_expired_fences_are_refused() -> Result {
         &[
             "fabric", "events", "read", "--after", &cursor, "--wait", "0",
         ],
-        0,
+        124,
     )?;
     assert_eq!(immediate["data"]["timed_out"], true);
     call(

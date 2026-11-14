@@ -59,7 +59,7 @@ impl Factory {
         let routes: Vec<String> = record
             .skipped_routes
             .iter()
-            .map(|route| format!("{}: {}", route.route, route.detail))
+            .map(provenant_records::SkippedRoute::describe)
             .collect();
         if !routes.is_empty() {
             return Some(routes.join("; "));
