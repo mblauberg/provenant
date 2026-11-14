@@ -1596,6 +1596,13 @@ fn every_adapter_finalises_missing_lane_environment() -> Result<(), ProviderErro
             input.host_var = &host_var;
             crate::launch::finalise_provider_env(&input, &mut spec);
             assert_bindings(&spec);
+            spec.env.retain(|(key, _)| key != "HOME");
+            crate::launch::finalise_provider_env(&input, &mut spec);
+            let homes: Vec<_> = spec.env.iter()
+                .filter(|(key, _)| key == "HOME")
+                .map(|(_, value)| value.as_os_str())
+                .collect();
+            assert_eq!(homes, [input.home.as_os_str()]);
         }
     }
     Ok(())

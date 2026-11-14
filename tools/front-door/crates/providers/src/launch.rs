@@ -938,8 +938,12 @@ pub(crate) fn finalise_provider_env(input: &PrepareInput<'_>, spec: &mut LaunchS
         provenant_confinement::permissions::AccessMode::WorktreeWrite(_) => Access::WorktreeWrite,
     };
     let cache = lane_cache(input);
-    spec.setup
-        .push(SetupStep::CreateDir(cache.join("cargo-home")));
+    // Writer caches are host-owned and prepared under writer custody. Provider
+    // setup may create only the read-only lane's attempt-owned Cargo home.
+    if access == Access::ReadOnly {
+        spec.setup
+            .push(SetupStep::CreateDir(cache.join("cargo-home")));
+    }
     cargo_environment(input.home, cache, access, !input.sandboxed(), &mut spec.env);
 }
 
