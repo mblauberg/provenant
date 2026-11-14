@@ -33,7 +33,7 @@ Durable home (the doc that absorbs any settled rule, or "none"). These are a
 default shape, not a form; `scope` owns how criteria are written and amended.
 `provenant tracker lint --file ISSUE.md` gives advice, never a gate.
 
-The [GitHub workflow](../../docs/runbooks/github-workflow.md#status) owns project Status.
+The GitHub workflow runbook owns project Status.
 
 ## File without sprawl
 
@@ -51,7 +51,7 @@ Parentage is the native sub-issue link and ordering a blocked-by edge. Pass
 gh issue create --parent 123 --blocked-by 120 --title T --body-file B.md
 ```
 
-Follow the [GitHub workflow](../../docs/runbooks/github-workflow.md#branch-commit-pull-request)
+Follow the GitHub workflow runbook
 for closing links. Close with evidence: completed (merge link), not planned (reason and
 successor), or duplicate-of. An epic closes on its `Done when`, not its child
 count. Staleness comes from changed evidence, never age.

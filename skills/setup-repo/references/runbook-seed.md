@@ -8,7 +8,7 @@ This repository's own runbook is the worked example.
 
 ## Statuses
 
-Use this repository's [GitHub workflow](../../../docs/runbooks/github-workflow.md#status)
+Use this repository's GitHub workflow runbook
 as a starting point; document the target's Status choices in its runbook. Labels
 describe content or gates, not progress.
 
@@ -19,7 +19,7 @@ Document the target's branch conventions.
 ## Closing links
 
 Document the target's closing-link conventions. This repository's
-[GitHub workflow](../../../docs/runbooks/github-workflow.md#branch-commit-pull-request)
+GitHub workflow runbook
 is a worked example.
 
 ## Merge authority
