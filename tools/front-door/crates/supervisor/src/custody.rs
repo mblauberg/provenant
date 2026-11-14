@@ -1031,7 +1031,7 @@ impl CustodyHandle {
 }
 #[derive(Debug)]
 pub struct LaunchFailure {
-    pub error: CustodyError,
+    pub error: Box<CustodyError>,
     pub custody: PublicationReservation,
     pending_exit: Option<Box<ProcessExit>>,
 }
@@ -1102,7 +1102,7 @@ pub fn launch(
     publication: PublicationReservation,
 ) -> std::result::Result<CustodyHandle, LaunchFailure> {
     let failure = |error, custody| LaunchFailure {
-        error,
+        error: Box::new(error),
         custody,
         pending_exit: None,
     };
@@ -1150,7 +1150,7 @@ pub fn launch(
             Ok(()) => CustodyError::InvalidRecord,
         };
         return Err(LaunchFailure {
-            error,
+            error: Box::new(error),
             custody: publication,
             pending_exit: Some(Box::new(record)),
         });

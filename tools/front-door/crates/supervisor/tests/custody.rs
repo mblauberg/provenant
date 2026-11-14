@@ -1389,7 +1389,7 @@ fn never_spawned_cancel_is_published(root: &Path) -> Result<()> {
     )
     .err()
     .ok_or_else(|| io::Error::other("cancelled launch unexpectedly succeeded"))?;
-    assert!(matches!(failure.error, CustodyError::Cancelled));
+    assert!(matches!(failure.error.as_ref(), CustodyError::Cancelled));
     let record: serde_json::Value =
         serde_json::from_slice(&std::fs::read(attempt_path.join("process-exit.json"))?)?;
     assert_eq!(record["never_spawned"], true);
