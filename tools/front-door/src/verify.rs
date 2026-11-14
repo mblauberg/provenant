@@ -126,7 +126,12 @@ pub fn run(tier: Option<&str>, globals: &Globals) -> u8 {
                 timeout,
                 &cancel,
             ) {
-                Ok(execution) => ("builtin", declaration.source, execution, false),
+                Ok(mut execution) => {
+                    if execution.disposition == PortCommandDisposition::Refused {
+                        execution.disposition = PortCommandDisposition::Failed;
+                    }
+                    ("builtin", declaration.source, execution, false)
+                }
                 Err(error) => {
                     return fail(
                         COMMAND,
@@ -296,7 +301,7 @@ fn failure_message(disposition: PortCommandDisposition) -> Option<(&'static str,
             "verify command exceeded its execution time limit",
         ),
         PortCommandDisposition::Cancelled => ("VERIFY_CANCELLED", "verify command was cancelled"),
-        PortCommandDisposition::Failed => ("VERIFY_FAILED", "verify command could not complete"),
+        PortCommandDisposition::Failed => ("VERIFY_FAILED", "verification failed"),
     };
     Some((code, message.into()))
 }

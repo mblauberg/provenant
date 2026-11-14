@@ -28,7 +28,7 @@ pub(super) struct Git {
     >,
 }
 impl Git {
-    pub(super) fn new() -> Result<Self> {
+    pub(super) fn new(host_state: &Path) -> Result<Self> {
         let git = provenant_os::git::git_executable().ok_or("Git executable is unavailable")?;
         let executable = git
             .to_str()
@@ -37,7 +37,7 @@ impl Git {
         Ok(Self {
             executable,
             facts: provenant_confinement::worktrees::RepoFacts::default(),
-            utility: provenant_confinement::utility::UtilityRuntime::read_only(git)?,
+            utility: provenant_confinement::utility::UtilityRuntime::read_only(git, host_state)?,
             executor: provenant_os::exec::SystemExecutor::new(1)?,
             budget: provenant_confinement::utility::UtilityBudget::bounded(GIT_TIMEOUT)?,
             cancel: provenant_core::CancelToken::new(),
@@ -308,7 +308,9 @@ mod resolve_commit_tests {
     #[test]
     fn head_resolves_an_unambiguous_name_and_refuses_an_ambiguous_one() {
         let (temp, commits) = crowded_repository(3000);
-        let git = Git::new().unwrap();
+        let state = temp.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        let git = Git::new(&state).unwrap();
         let tip = commits[0].clone();
         let resolved = git.resolve_commit(temp.path(), &tip[..20]).unwrap();
         assert_eq!(resolved.to_string(), tip);

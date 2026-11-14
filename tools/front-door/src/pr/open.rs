@@ -127,7 +127,7 @@ fn plan(
     if !plain_ref(&branch) || !plain_ref(&base) {
         return Err("branch names must be plain Git names".into());
     }
-    let git = Git::new()?;
+    let git = Git::new(resolved.roots.state.as_path())?;
     let remote = git.remote_of(project, &base)?;
     let base_sha = base_commit(&git, project, &remote, &base)?;
     if !command.dry_run {
@@ -279,7 +279,9 @@ mod tests {
     #[test]
     fn base_commit_uses_bounded_repository_facts() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let git = Git::new()?;
+        let state = temp.path().join("state");
+        std::fs::create_dir(&state)?;
+        let git = Git::new(&state)?;
         let project = temp.path().join("project");
         std::fs::create_dir_all(&project)?;
         provenant_os::fixture::run_git(&project, &["init", "-q"])?;

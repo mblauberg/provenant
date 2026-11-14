@@ -527,6 +527,8 @@ impl RunStore {
         drop(guard);
         if committed {
             self.settle_cleanup(&record, None, call);
+        } else {
+            self.release_admission(&record, call);
         }
         self.record(id, call)
     }
@@ -611,10 +613,18 @@ impl RunStore {
             let mut decision = current.clone();
             decision.settlement_receipts = None;
             decision.custody_pending = None;
-            // Delivery is a post-commit receipt projected by record(), not a
-            // replacement of the immutable decision's delivery snapshot.
+            // Delivery and the admission command phase are post-commit receipts;
+            // the frozen command identity remains part of the terminal decision.
             decision.delivery = pending.delivery.clone();
-            return if decision == pending {
+            let changed_phase = crate::launch::ignore_admission_phase(&mut decision);
+            let mut pending_decision = pending.clone();
+            let pending_has_phase = crate::launch::ignore_admission_phase(&mut pending_decision);
+            if changed_phase && pending_has_phase {
+                // A terminal admission-phase receipt advances the row revision
+                // without changing the sealed terminal decision.
+                decision.revision = pending_decision.revision;
+            }
+            return if decision == pending_decision {
                 Ok((current, false))
             } else {
                 Err(RunError::Conflict)
@@ -1233,13 +1243,83 @@ impl RunStore {
         self.record(expected.attempt_id, call)
     }
 
+    pub(crate) fn record_admission_phase(
+        &self,
+        expected: &AttemptRecord,
+        phase: crate::launch::AdmissionPhase,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        let value = expected
+            .extra
+            .get(crate::launch::ADMISSION_PORT_BINDING_FIELD)
+            .cloned()
+            .ok_or(RunError::Conflict)?;
+        let mut binding: crate::launch::AdmissionPortBinding = serde_json::from_value(value)
+            .map_err(|_| RunError::Validation("stored repository admission binding"))?;
+        if !binding.valid() {
+            return Err(RunError::Validation(
+                "stored repository admission binding digest",
+            ));
+        }
+        if binding.phase == phase {
+            return Ok(expected.clone());
+        }
+        let queued = matches!(&expected.state, AttemptState::Queued { .. });
+        if !binding.can_transition_to(phase, queued) {
+            return Err(RunError::Conflict);
+        }
+        if binding.phase == crate::launch::AdmissionPhase::Released
+            && phase == crate::launch::AdmissionPhase::AcquirePending
+        {
+            binding.lease_epoch = binding
+                .lease_epoch
+                .checked_add(1)
+                .ok_or(RunError::Conflict)?;
+        }
+        binding.phase = phase;
+        let mut next = expected.clone();
+        next.revision = expected.revision.checked_add(1).ok_or(RunError::Conflict)?;
+        // These terminal projections have independent durable owners.
+        next.settlement_receipts = None;
+        next.custody_pending = None;
+        next.extra.insert(
+            crate::launch::ADMISSION_PORT_BINDING_FIELD.into(),
+            serde_json::to_value(binding)
+                .map_err(|_| RunError::Validation("repository admission binding"))?,
+        );
+        super::reader::validate_attempt(&next)?;
+        let terminal = matches!(&expected.state, AttemptState::Terminal { .. });
+        self.write(call, |tx| {
+            let changed = tx.execute(
+                "UPDATE attempts SET revision=?1,record=?2 WHERE id=?3 AND project=?4 AND revision=?5 AND terminal=?6",
+                params![
+                    sql_int(next.revision)?,
+                    crate::db::attempt_bytes(&next)?,
+                    next.attempt_id.to_string(),
+                    self.context.project_id.to_string(),
+                    sql_int(expected.revision)?,
+                    terminal,
+                ],
+            )?;
+            if changed != 1 {
+                return Err(RunError::Conflict);
+            }
+            insert_event(tx, &next)?;
+            Ok(())
+        })?;
+        self.record(expected.attempt_id, call)
+    }
+
     pub(crate) fn settle_cleanup(
         &self,
         record: &AttemptRecord,
         recovery: Option<&provenant_supervisor::custody::Recovery>,
         call: &Request<'_>,
     ) {
-        self.release_admission(record, call);
+        if !self.release_admission(record, call) {
+            let _ = self.set_temporary_retained(record.attempt_id, true, call);
+            return;
+        }
         let Ok(attempt_dir) = self.attempt_dir(record.attempt_id, false) else {
             return;
         };
@@ -1327,6 +1407,7 @@ impl RunStore {
         }
         let mut next = old.clone();
         next.revision = expected_revision.checked_add(1).ok_or(RunError::Conflict)?;
+        crate::launch::mark_admission_release_pending(&mut next)?;
         next.started_at = publication.started_at;
         next.provider_launched = Some(launched);
         next.provider_ms = publication.provider_ms;
@@ -1592,6 +1673,7 @@ impl RunStore {
         }
         let mut next = old.clone();
         next.revision = old.revision.checked_add(1).ok_or(RunError::Conflict)?;
+        crate::launch::mark_admission_release_pending(&mut next)?;
         next.schema_version = 2;
         next.terminal_evidence = Some(TerminalEvidence::Lost {
             reason: reason.into(),
@@ -1691,6 +1773,10 @@ impl RunStore {
         recovery: Option<&provenant_supervisor::custody::Recovery>,
         call: &Request<'_>,
     ) -> Result<SettlementReceipts> {
+        if !self.release_admission(record, call) {
+            self.set_temporary_retained(record.attempt_id, true, call)?;
+            return Err(RunError::Conflict);
+        }
         if !self.import_release_permitted(record, call)? {
             return Err(RunError::Conflict);
         }

@@ -6,7 +6,8 @@ pub fn preview_project_id(roots: &Roots, cwd: &Path) -> Option<provenant_core::P
         return project_id_for_lane_gitdir(roots, &gitdir);
     }
     let git = provenant_os::git::git_executable()?;
-    let runtime = provenant_confinement::UtilityRuntime::read_only(git).ok()?;
+    let runtime =
+        provenant_confinement::UtilityRuntime::read_only(git, roots.state.as_path()).ok()?;
     let executor = provenant_os::exec::SystemExecutor::new(1).ok()?;
     let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5)).ok()?;
     let location = runtime

@@ -43,7 +43,7 @@ pub(super) fn connect<'a>(
     Ok((
         Box::new(GhForge::new(project, state)),
         Box::new(GitRepo::with_follow_up(
-            project, globals, workers, tracking,
+            project, state, globals, workers, tracking,
         )?),
         Box::new(CheckGate::new(project, state)),
         Box::new(ChairAlarms::new(project)),
@@ -859,21 +859,22 @@ struct LocalFollowUp<'a> {
     tracking: std::collections::BTreeMap<u64, crate::pr::land::BatchTracking>,
 }
 impl<'a> GitRepo<'a> {
-    pub fn new(project: &Path) -> Result<Self, LandingError> {
+    pub fn new(project: &Path, host_state: &Path) -> Result<Self, LandingError> {
         Ok(Self {
             project: project.to_owned(),
-            git: Git::new().map_err(failed)?,
+            git: Git::new(host_state).map_err(failed)?,
             remote: None,
             local: None,
         })
     }
     fn with_follow_up(
         project: &Path,
+        host_state: &Path,
         globals: &provenant_cli::Globals,
         workers: &'a dyn provenant_confinement::worktrees::WorkerObserver,
         tracking: std::collections::BTreeMap<u64, crate::pr::land::BatchTracking>,
     ) -> Result<Self, LandingError> {
-        let mut repo = Self::new(project)?;
+        let mut repo = Self::new(project, host_state)?;
         repo.local = Some(LocalFollowUp {
             globals: provenant_cli::Globals {
                 json: globals.json,
@@ -1824,7 +1825,9 @@ esac
         git(&work, &["remote", "add", "origin", bare.to_str().unwrap()]);
         commit_file(&work, "a", "a\n");
         git(&work, &["push", "-q", "origin", "main"]);
-        let repo = GitRepo::new(&work).unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        let repo = GitRepo::new(&work, &state).unwrap();
         Rig {
             _dir: dir,
             work,

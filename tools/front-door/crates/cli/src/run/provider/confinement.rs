@@ -604,8 +604,9 @@ pub(super) fn protected_worktrees(
 ) -> Result<Vec<PathGrant>, String> {
     let roots = registry.roots.ok_or("routing context is unavailable")?;
     let utility_home = host_git_home(roots.state.as_path())?;
-    let utility = provenant_confinement::UtilityRuntime::new(git, utility_home.path())
-        .map_err(|error| error.to_string())?;
+    let utility =
+        provenant_confinement::UtilityRuntime::new(git, utility_home.path(), roots.state.as_path())
+            .map_err(|error| error.to_string())?;
     let executor = provenant_os::exec::SystemExecutor::new(1).map_err(|error| error.to_string())?;
     let budget = provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))
         .map_err(|error| error.to_string())?;
@@ -996,8 +997,8 @@ pub(super) fn read_only_plan(
     let result = (|| {
         // The host-pinned Git, the same one the lane receives as PROVENANT_GIT.
         let utility_home = host_git_home(roots.state.as_path())?;
-        let utility =
-            UtilityRuntime::new(git, utility_home.path()).map_err(|error| error.to_string())?;
+        let utility = UtilityRuntime::new(git, utility_home.path(), roots.state.as_path())
+            .map_err(|error| error.to_string())?;
         let executor = SystemExecutor::new(1).map_err(|error| error.to_string())?;
         let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5))
             .map_err(|error| error.to_string())?;
@@ -1133,7 +1134,7 @@ pub(in crate::run) fn read_only_checkout_warning(state: &Path, source: &Path) ->
 
     let git = provenant_os::git::git_executable()?;
     let utility_home = host_git_home(state).ok()?;
-    let utility = UtilityRuntime::new(&git, utility_home.path()).ok()?;
+    let utility = UtilityRuntime::new(&git, utility_home.path(), state).ok()?;
     let executor = SystemExecutor::new(1).ok()?;
     let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5)).ok()?;
     let cancel = provenant_core::CancelToken::new();

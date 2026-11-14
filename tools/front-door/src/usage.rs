@@ -20,7 +20,9 @@ pub fn project_id(resolved: &Resolved) -> Option<ProjectId> {
     }
     use std::time::Duration;
     let git = provenant_os::git::git_executable()?;
-    let runtime = provenant_confinement::UtilityRuntime::read_only(git).ok()?;
+    let runtime =
+        provenant_confinement::UtilityRuntime::read_only(git, resolved.roots.state.as_path())
+            .ok()?;
     let executor = provenant_os::exec::SystemExecutor::new(1).ok()?;
     let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(1)).ok()?;
     let location = runtime

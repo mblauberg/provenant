@@ -51,9 +51,20 @@ def config(root, effective_config_json=None):
     return verify
 
 
+BRIDGE_ENV = (
+    "PROVENANT_VERIFY_EFFECTIVE_CONFIG_JSON",
+    "PROVENANT_VERIFY_PROJECT_ROOT",
+    "PROVENANT_VERIFY_TIER",
+)
+
+
+def child_environment():
+    return {name: value for name, value in os.environ.items() if name not in BRIDGE_ENV}
+
+
 def changed_paths(root, base):
     def git(*args):
-        return subprocess.check_output(["git", *args], cwd=root, text=True).splitlines()
+        return subprocess.check_output(["git", *args], cwd=root, env=child_environment(), text=True).splitlines()
     paths = set(git("diff", "--name-only", f"{base}...HEAD"))
     paths.update(git("diff", "--name-only", "HEAD"))
     paths.update(git("ls-files", "--others", "--exclude-standard"))
@@ -99,17 +110,17 @@ def main():
     if args.tier not in cfg["tiers"]:
         parser.error(f"no verification tier named {args.tier}")
     workspace = root / cfg["workspace"]
-    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, env=child_environment(), text=True).strip()
     if args.host != "local":
         runner = cfg["runners"].get(args.host)
         if not runner:
             parser.error(f"no runner configured for {args.host}")
-        refs = subprocess.check_output(["git", "ls-remote", "--heads", cfg["remote"]], cwd=root, text=True)
+        refs = subprocess.check_output(["git", "ls-remote", "--heads", cfg["remote"]], cwd=root, env=child_environment(), text=True)
         if not any(line.split()[0] == commit for line in refs.splitlines() if line.split()):
             parser.error("commit is not the tip of a pushed branch")
         command = [part.replace("{commit}", commit).replace("{tier}", args.tier).replace("{remote}", cfg["remote"]) for part in runner]
         print(f"tier {args.tier} on {args.host}, commit {commit}: {shlex.join(command)}", flush=True)
-        result = subprocess.run(command, cwd=root, capture_output=True, text=True)
+        result = subprocess.run(command, cwd=root, env=child_environment(), capture_output=True, text=True)
         if result.stderr:
             print(result.stderr, file=sys.stderr, end="")
         lines = result.stdout.splitlines()
@@ -136,7 +147,7 @@ def main():
     selection = tier["selection"]
     touched, integrations = [], []
     if selection in ("packages", "integrations"):
-        metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=workspace, text=True))
+        metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=workspace, env=child_environment(), text=True))
         packages = [{"name": p["name"], "manifest_path": str(Path(p["manifest_path"]).relative_to(root))} for p in metadata["packages"] if p["id"] in metadata["workspace_members"]]
         paths = changed_paths(root, cfg["base"])
         touched, integrations = select(
@@ -152,12 +163,7 @@ def main():
     if not templates:
         print(f"{args.tier} has no configured commands", file=sys.stderr)
         return 2
-    env = os.environ.copy()
-    for name in (
-            "PROVENANT_VERIFY_EFFECTIVE_CONFIG_JSON",
-            "PROVENANT_VERIFY_PROJECT_ROOT",
-            "PROVENANT_VERIFY_TIER"):
-        env.pop(name, None)
+    env = child_environment()
     threads = cfg.get("test_threads")
     if threads is not None:
         if type(threads) is not int or threads < 1:
@@ -169,7 +175,7 @@ def main():
     if any("{quarantine_args}" in template for template in templates):
         command = cfg.get("quarantine_command") or ["true"]
         try:
-            quarantine = subprocess.check_output(command, cwd=root, text=True).strip()
+            quarantine = subprocess.check_output(command, cwd=root, env=child_environment(), text=True).strip()
         except (OSError, subprocess.CalledProcessError) as error:
             print(f"quarantine command failed: {error}", file=sys.stderr)
             return 2

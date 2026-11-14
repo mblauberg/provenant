@@ -736,7 +736,8 @@ pub fn session_actor(
 fn read_session(cmd: Workflow, roots: &Roots, cwd: &Path) -> Result<Value, Error> {
     use provenant_confinement::{UtilityBudget, UtilityRuntime};
     let git = provenant_os::git::git_executable().ok_or_else(|| invalid("Git unavailable"))?;
-    let runtime = UtilityRuntime::read_only(git).map_err(|e| invalid(e.to_string()))?;
+    let runtime = UtilityRuntime::read_only(git, roots.state.as_path())
+        .map_err(|e| invalid(e.to_string()))?;
     let executor =
         provenant_os::exec::SystemExecutor::new(1).map_err(|error| invalid(error.to_string()))?;
     let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5))
@@ -853,6 +854,7 @@ fn repository_of_url(url: &str) -> Result<provenant_core::RepoId, Error> {
 /// Run `read` against the checkout's repository through the read-only Git utility.
 fn with_git_reads<T>(
     cwd: &Path,
+    host_state: &Path,
     cancel: &CancelToken,
     read: impl FnOnce(
         &mut dyn FnMut(provenant_confinement::GitRead) -> Result<Vec<u8>, Error>,
@@ -862,7 +864,7 @@ fn with_git_reads<T>(
     use provenant_os::exec::{SystemExecutor, Termination};
     let executor = SystemExecutor::new(1).map_err(|e| invalid(e.to_string()))?;
     let git = provenant_os::git::git_executable().ok_or_else(|| invalid("Git unavailable"))?;
-    let runtime = UtilityRuntime::read_only(git).map_err(|e| invalid(e.to_string()))?;
+    let runtime = UtilityRuntime::read_only(git, host_state).map_err(|e| invalid(e.to_string()))?;
     let budget = UtilityBudget::bounded(std::time::Duration::from_secs(30))
         .map_err(|e| invalid(e.to_string()))?;
     let repo = runtime
@@ -888,6 +890,7 @@ fn with_git_reads<T>(
 /// same head was resolved by an earlier save and is kept.
 fn resolve_subject(
     cwd: &Path,
+    host_state: &Path,
     request: SubjectRequest,
     stored: Option<&DeliveryReceipt>,
     cancel: &CancelToken,
@@ -923,8 +926,10 @@ fn resolve_subject(
     }
     let base = match delta_from {
         Some(from) => from,
-        None => with_git_reads(cwd, cancel, |read| reviewed_base(pull.base_tip, head, read))
-            .map_err(|e| invalid(format!("cannot establish the PR's base: {e}")))?,
+        None => with_git_reads(cwd, host_state, cancel, |read| {
+            reviewed_base(pull.base_tip, head, read)
+        })
+        .map_err(|e| invalid(format!("cannot establish the PR's base: {e}")))?,
     };
     Ok(Subject::Pr {
         extra: Default::default(),
@@ -1017,7 +1022,13 @@ fn save(
         Err(provenant_workflow::store::StoreError::Retired { .. }) => None,
         stored => stored?,
     };
-    let subject = resolve_subject(&edge.cwd, req.subject, stored.as_ref(), &edge.cancel)?;
+    let subject = resolve_subject(
+        &edge.cwd,
+        edge.roots.state.as_path(),
+        req.subject,
+        stored.as_ref(),
+        &edge.cancel,
+    )?;
     let initial_policy = config.domains.routing.review.workflow_risk_policy(&[]);
     let is_downgrade = req.risk.tier < risk::minimum(&req.risk.factors, &initial_policy);
     let (changed_paths, warnings) = save_changed_paths(
@@ -1026,9 +1037,12 @@ fn save(
         is_downgrade,
         stored.as_ref(),
         || match &subject {
-            Subject::Pr { base, head, .. } => with_git_reads(&edge.cwd, &edge.cancel, |read| {
-                diff_paths(*base, *head, read)
-            }),
+            Subject::Pr { base, head, .. } => with_git_reads(
+                &edge.cwd,
+                edge.roots.state.as_path(),
+                &edge.cancel,
+                |read| diff_paths(*base, *head, read),
+            ),
             Subject::Document { .. } => Ok(Vec::new()),
         },
     )?;

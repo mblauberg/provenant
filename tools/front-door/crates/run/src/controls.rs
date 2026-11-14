@@ -3404,6 +3404,20 @@ impl RunStore {
             return Ok(Some(Reconciled::uncertain(UncertainReason::HostStalled)));
         }
         if matches!(record.state, AttemptState::Terminal { .. }) {
+            if !self.release_admission(&record, call) {
+                self.set_temporary_retained(id, true, call)?;
+                return Ok(Some(Reconciled::TemporaryRetained {
+                    path: self
+                        .context
+                        .state_root
+                        .as_path()
+                        .join(format!("attempts/{id}/tmp")),
+                    reason: TemporaryReason::new(
+                        TemporaryReasonKind::Error,
+                        "repository admission release remains pending",
+                    ),
+                }));
+            }
             if !self.import_release_permitted(&record, call)?
                 && let Some(state) = self.settle_rebooted(&record, call, observer)?
             {

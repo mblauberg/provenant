@@ -100,7 +100,7 @@ fn runtime(state: &Path) -> Result<UtilityRuntime> {
         Err(e) => return Err(anchored_error(e, state)),
     }
     let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
-    UtilityRuntime::new(&git, home.clone())
+    UtilityRuntime::new(&git, home.clone(), state)
         .map(|runtime| {
             runtime.with_lane_roots(provenant_confinement::utility::lane_state_roots(state))
         })

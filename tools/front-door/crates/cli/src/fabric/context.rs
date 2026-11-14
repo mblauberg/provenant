@@ -192,11 +192,11 @@ pub fn acquire_custody(
         )),
     }
 }
-pub fn checkout_branch(path: &Path) -> Result<Option<String>, EdgeError> {
+pub fn checkout_branch(roots: &Roots, path: &Path) -> Result<Option<String>, EdgeError> {
     use provenant_confinement::repo::GitRevision;
     use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime};
     let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
-    let runtime = UtilityRuntime::read_only(git)?;
+    let runtime = UtilityRuntime::read_only(git, roots.state.as_path())?;
     let executor = SystemExecutor::new(1)?;
     let cancel = CancelToken::new();
     let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
@@ -266,10 +266,11 @@ impl Context {
         private_dir(utility_anchor, &utility_home)?;
         let lane = in_lane();
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
-        let runtime = provenant_confinement::UtilityRuntime::new(&git, &utility_home)?
-            .with_lane_roots(provenant_confinement::utility::lane_state_roots(
-                roots.state.as_path(),
-            ));
+        let runtime =
+            provenant_confinement::UtilityRuntime::new(&git, &utility_home, roots.state.as_path())?
+                .with_lane_roots(provenant_confinement::utility::lane_state_roots(
+                    roots.state.as_path(),
+                ));
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
@@ -326,7 +327,7 @@ impl Context {
         let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
         let config = resolved.domains.fabric;
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
-        let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+        let runtime = provenant_confinement::UtilityRuntime::read_only(git, roots.state.as_path())?;
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
@@ -379,7 +380,7 @@ impl Context {
         let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
         let config = resolved.domains.fabric;
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
-        let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+        let runtime = provenant_confinement::UtilityRuntime::read_only(git, roots.state.as_path())?;
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;

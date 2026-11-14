@@ -1263,6 +1263,7 @@ fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBu
     let runtime = UtilityRuntime::new(
         fs::canonicalize(provenant_os::git::git_executable().ok_or("Git executable unavailable")?)?,
         rig.state.join("utility-home"),
+        &rig.state,
     )?;
     let executor = SystemExecutor::new(1)?;
     let repo = runtime.open_repo(

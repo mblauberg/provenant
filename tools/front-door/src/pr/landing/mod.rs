@@ -331,7 +331,8 @@ pub(crate) fn prepare(
     )?;
     let config = provenant_cli::config_reads::read_for(&resolved.roots, "land policy")?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+    let runtime =
+        provenant_confinement::UtilityRuntime::read_only(git, resolved.roots.state.as_path())?;
     let project = project_id(
         &resolved.roots,
         &runtime,
@@ -593,7 +594,10 @@ fn run_inner(
     let head = options
         .head
         .as_deref()
-        .map(|name| super::git::Git::new()?.resolve_commit(&prepared.resolved.project, name))
+        .map(|name| {
+            super::git::Git::new(prepared.resolved.roots.state.as_path())?
+                .resolve_commit(&prepared.resolved.project, name)
+        })
         .transpose()?;
     let review_proof = options
         .accept_delta

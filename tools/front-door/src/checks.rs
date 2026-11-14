@@ -463,7 +463,7 @@ fn git_page(
         let git = provenant_os::git::git_executable()
             .ok_or(CheckError::Evidence("Git executable unavailable"))?;
         let git = fs::canonicalize(&git)?;
-        let runtime = provenant_confinement::UtilityRuntime::new(git, home)?;
+        let runtime = provenant_confinement::UtilityRuntime::new(git, home, host_state)?;
         let executor = SystemExecutor::new(1)?;
         let cancel = CancelToken::new();
         let repo = runtime.open_read_repo(

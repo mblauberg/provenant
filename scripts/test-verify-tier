@@ -51,6 +51,47 @@ class Selection(unittest.TestCase):
         self.assertEqual(crates, ["provenant"])
         self.assertEqual(targets, [])
 
+    def test_effective_verify_owner_uses_project_and_host_overlay_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "selected-project"
+            workspace = root / "host-workspace"
+            workspace.mkdir(parents=True)
+            ambient_project = Path(tmp) / "ambient-project"
+            ambient_project.mkdir()
+            effective = copy.deepcopy(verify.DEFAULTS)
+            effective.update({
+                "source": "host",
+                "workspace": "host-workspace",
+                "default_tier": "host/default",
+                "tiers": {
+                    "host/default": {"commands": ["default-check"], "selection": "all", "warn_for_host_load": False},
+                    "host/custom": {"commands": ["host-check"], "selection": "all", "warn_for_host_load": False},
+                },
+            })
+            with self.assertRaises(ValueError):
+                verify.config(root, json.dumps({
+                    "schema_version": 2,
+                    "verify": effective,
+                    "tracker": {"backend": "private-host-command"},
+                }))
+            environment = {
+                "PROVENANT_VERIFY_PROJECT_ROOT": str(ambient_project),
+                "PROVENANT_VERIFY_EFFECTIVE_CONFIG_JSON": json.dumps(effective),
+                "PROVENANT_VERIFY_TIER": "host/custom",
+            }
+            with mock.patch.dict(os.environ, environment, clear=False), \
+                 mock.patch.object(verify.subprocess, "check_output", return_value="fixture-commit\n") as check_output, \
+                 mock.patch.object(verify.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
+                 mock.patch.object(verify.sys, "argv", ["verify-tier", "--project", str(root)]), \
+                 mock.patch.object(verify.sys, "stdout", new_callable=io.StringIO), \
+                 mock.patch.object(verify.sys, "stderr", new_callable=io.StringIO):
+                self.assertEqual(verify.main(), 0)
+            self.assertEqual(run.call_args.args[0], ["host-check"])
+            self.assertEqual(run.call_args.kwargs["cwd"], workspace)
+            self.assertEqual(check_output.call_args.kwargs["cwd"], root)
+            for call in check_output.call_args_list + run.call_args_list:
+                self.assertFalse(set(verify.BRIDGE_ENV).intersection(call.kwargs["env"]))
+
     def test_free_form_tiers_do_not_inject_builtin_tier_names(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -222,13 +263,16 @@ class Selection(unittest.TestCase):
         cfg = dict(verify.DEFAULTS, workspace=".", test_threads=2,
                    quarantine_command=["quarantine"],
                    tiers={"2": {"commands": ["verify-nextest --profile ci {quarantine_args}"], "selection": "all", "warn_for_host_load": True}})
-        with mock.patch.object(verify, "config", return_value=cfg), \
-             mock.patch.object(verify.subprocess, "check_output", side_effect=["abc\n", "test(=flaky)\n"]), \
+        with mock.patch.dict(os.environ, {name: "private-bridge" for name in verify.BRIDGE_ENV}), \
+             mock.patch.object(verify, "config", return_value=cfg), \
+             mock.patch.object(verify.subprocess, "check_output", side_effect=["abc\n", "test(=flaky)\n"]) as query, \
              mock.patch.object(verify.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
-             mock.patch.object(verify.sys, "argv", ["verify-tier", "--tier", "2"]), \
+             mock.patch.object(verify.sys, "argv", ["verify-tier", "--project", str(verify.ROOT), "--tier", "2"]), \
              mock.patch.object(verify.sys, "stdout", new_callable=io.StringIO), \
              mock.patch.object(verify.sys, "stderr", new_callable=io.StringIO):
             self.assertEqual(verify.main(), 0)
+        for call in query.call_args_list + run.call_args_list:
+            self.assertFalse(set(verify.BRIDGE_ENV).intersection(call.kwargs["env"]))
         args = run.call_args.args[0][1:]
         self.assertEqual(args[-2:], ["-E", "not (test(=flaky))"])
         nextest = load_script("nextest_filter", "verify-nextest")

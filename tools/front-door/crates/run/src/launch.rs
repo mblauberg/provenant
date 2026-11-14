@@ -816,13 +816,36 @@ pub enum Started {
 
 pub(crate) const ADMISSION_PORT_BINDING_FIELD: &str = "repository_admission_binding";
 
-/// The command and source acquired for one attempt stay frozen across retries,
-/// config rotation and terminal release.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AdmissionPhase {
+    AcquirePending,
+    Acquired,
+    ReleasePending,
+    Released,
+}
+
+impl AdmissionPhase {
+    fn command(self) -> Option<&'static str> {
+        match self {
+            Self::AcquirePending => Some("acquire"),
+            Self::ReleasePending => Some("release"),
+            Self::Acquired | Self::Released => None,
+        }
+    }
+}
+
+/// The command, source and lifecycle phase stay frozen with the attempt across
+/// config rotation and recovery. Repository commands key their idempotent
+/// acquire/release operations by attempt ID and lease epoch; release fences late
+/// acquire work for that epoch.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct AdmissionPortBinding {
-    source: provenant_config::PortSource,
-    command: provenant_config::PortCommand,
-    command_digest: provenant_records::FileDigest,
+pub(crate) struct AdmissionPortBinding {
+    pub(crate) source: provenant_config::PortSource,
+    pub(crate) command: provenant_config::PortCommand,
+    pub(crate) command_digest: provenant_records::FileDigest,
+    pub(crate) lease_epoch: u64,
+    pub(crate) phase: AdmissionPhase,
 }
 
 impl AdmissionPortBinding {
@@ -831,12 +854,60 @@ impl AdmissionPortBinding {
             source,
             command: command.clone(),
             command_digest: command.digest(),
+            lease_epoch: 1,
+            phase: AdmissionPhase::AcquirePending,
         }
     }
 
-    fn valid(&self) -> bool {
-        self.command_digest == self.command.digest()
+    pub(crate) fn valid(&self) -> bool {
+        self.lease_epoch != 0 && self.command_digest == self.command.digest()
     }
+
+    pub(crate) fn can_transition_to(&self, next: AdmissionPhase, queued: bool) -> bool {
+        matches!(
+            (self.phase, next),
+            (AdmissionPhase::AcquirePending, AdmissionPhase::Acquired)
+                | (
+                    AdmissionPhase::AcquirePending,
+                    AdmissionPhase::ReleasePending
+                )
+                | (AdmissionPhase::Acquired, AdmissionPhase::ReleasePending)
+                | (AdmissionPhase::ReleasePending, AdmissionPhase::Released)
+        ) || (queued
+            && self.phase == AdmissionPhase::Released
+            && next == AdmissionPhase::AcquirePending)
+    }
+}
+
+pub(crate) fn mark_admission_release_pending(record: &mut AttemptRecord) -> Result<()> {
+    let Some(value) = record.extra.get(ADMISSION_PORT_BINDING_FIELD).cloned() else {
+        return Ok(());
+    };
+    let mut binding: AdmissionPortBinding = serde_json::from_value(value)
+        .map_err(|_| RunError::Validation("stored repository admission binding"))?;
+    if !binding.valid() {
+        return Err(RunError::Validation(
+            "stored repository admission binding digest",
+        ));
+    }
+    if binding.phase != AdmissionPhase::Released {
+        binding.phase = AdmissionPhase::ReleasePending;
+        record.extra.insert(
+            ADMISSION_PORT_BINDING_FIELD.into(),
+            serde_json::to_value(binding)
+                .map_err(|_| RunError::Validation("repository admission binding"))?,
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn ignore_admission_phase(record: &mut AttemptRecord) -> bool {
+    if let Some(value) = record.extra.get_mut(ADMISSION_PORT_BINDING_FIELD)
+        && let Some(binding) = value.as_object_mut()
+    {
+        return binding.remove("phase").is_some();
+    }
+    false
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RefusalKind {
@@ -1139,15 +1210,33 @@ impl RunStore {
         request: &CanonicalRequest,
         attempt: AttemptId,
         binding: &AdmissionPortBinding,
-        phase: &str,
+        phase: AdmissionPhase,
         cancel: &provenant_core::CancelToken,
+    ) -> bool {
+        let Ok(executor) = provenant_os::exec::SystemExecutor::new(1) else {
+            return false;
+        };
+        self.run_admission_phase_with_executor(request, attempt, binding, phase, cancel, &executor)
+    }
+
+    fn run_admission_phase_with_executor(
+        &self,
+        request: &CanonicalRequest,
+        attempt: AttemptId,
+        binding: &AdmissionPortBinding,
+        phase: AdmissionPhase,
+        cancel: &provenant_core::CancelToken,
+        executor: &dyn provenant_os::exec::Executor,
     ) -> bool {
         let Some(writer) = request.task.writer.as_ref() else {
             return false;
         };
+        let Some(command_phase) = phase.command() else {
+            return false;
+        };
         let execution = if binding.valid() {
             let environment = [
-                ("PROVENANT_PORT_PHASE".into(), phase.into()),
+                ("PROVENANT_PORT_PHASE".into(), command_phase.into()),
                 (
                     "PROVENANT_ADMISSION_ATTEMPT".into(),
                     attempt.to_string().into(),
@@ -1164,34 +1253,32 @@ impl RunStore {
                     "PROVENANT_ADMISSION_OWNER_PID".into(),
                     std::process::id().to_string().into(),
                 ),
+                (
+                    "PROVENANT_ADMISSION_EPOCH".into(),
+                    binding.lease_epoch.to_string().into(),
+                ),
             ];
             let timeout =
                 std::time::Duration::from_secs(request.task.provider_timeout_seconds.max(1));
-            match provenant_os::exec::SystemExecutor::new(1) {
-                Ok(executor) => provenant_config::execute_port_command(
-                    &executor,
-                    &binding.command,
-                    &writer.project,
-                    &[],
-                    &environment,
-                    timeout,
-                    cancel,
-                ),
-                Err(_) => provenant_config::PortCommandExecution::failed(&binding.command),
-            }
+            provenant_config::execute_port_command(
+                executor,
+                &binding.command,
+                &writer.project,
+                &[],
+                &environment,
+                timeout,
+                cancel,
+            )
         } else {
-            provenant_config::PortCommandExecution {
-                command_digest: binding.command_digest,
-                disposition: provenant_config::PortCommandDisposition::Failed,
-                outcome: None,
-            }
+            provenant_config::PortCommandExecution::failed(&binding.command)
         };
+        let request_key = format!("{attempt}:{}", binding.lease_epoch);
         let evidence = provenant_config::record_port_command(
             &self.writer_registry,
             "admission",
             binding.source,
-            phase,
-            &attempt.to_string(),
+            command_phase,
+            &request_key,
             &execution,
         );
         execution.disposition == provenant_config::PortCommandDisposition::Succeeded
@@ -1204,7 +1291,30 @@ impl RunStore {
         record: &AttemptRecord,
         call: &Request<'_>,
     ) -> (AttemptRecord, Option<String>) {
-        let (record, binding) = match self.admission_binding(request, record, call) {
+        self.admission_skip_with_phase(
+            request,
+            record,
+            call,
+            &mut |request, attempt, binding, phase, cancel| {
+                self.run_admission_phase(request, attempt, binding, phase, cancel)
+            },
+        )
+    }
+
+    fn admission_skip_with_phase(
+        &self,
+        request: &CanonicalRequest,
+        record: &AttemptRecord,
+        call: &Request<'_>,
+        run_phase: &mut dyn FnMut(
+            &CanonicalRequest,
+            AttemptId,
+            &AdmissionPortBinding,
+            AdmissionPhase,
+            &provenant_core::CancelToken,
+        ) -> bool,
+    ) -> (AttemptRecord, Option<String>) {
+        let (mut record, binding) = match self.admission_binding(request, record, call) {
             Ok(value) => value,
             Err(_) => {
                 return (
@@ -1213,19 +1323,99 @@ impl RunStore {
                 );
             }
         };
-        let Some(binding) = binding else {
+        let Some(mut binding) = binding else {
             return (record, None);
         };
-        if self.run_admission_phase(request, record.attempt_id, &binding, "acquire", call.cancel) {
+        if !matches!(record.state, AttemptState::Queued { .. }) {
+            return (
+                record,
+                Some("attempt state changed during repository admission".into()),
+            );
+        }
+        if binding.phase == AdmissionPhase::Released {
+            match self.record_admission_phase(&record, AdmissionPhase::AcquirePending, call) {
+                Ok(updated) => {
+                    record = updated;
+                    binding = match self.admission_binding(request, &record, call) {
+                        Ok((_, Some(binding))) => binding,
+                        _ => {
+                            return (
+                                record,
+                                Some("repository admission binding could not be reloaded".into()),
+                            );
+                        }
+                    };
+                }
+                Err(_) => {
+                    record = self.record(record.attempt_id, call).unwrap_or(record);
+                    return (
+                        record,
+                        Some("repository admission state changed; attempt remains queued".into()),
+                    );
+                }
+            }
+        }
+        if binding.phase == AdmissionPhase::Acquired {
             return (record, None);
         }
-        let released = self.run_admission_phase(
+        if binding.phase == AdmissionPhase::ReleasePending {
+            let released = self.release_admission_with_phase(&record, call, run_phase);
+            if !released {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: repository admission release remains pending; attempt remains queued"
+                );
+            }
+            return (
+                self.record(record.attempt_id, call).unwrap_or(record),
+                Some("repository admission cleanup is pending; attempt remains queued".into()),
+            );
+        }
+
+        let acquired = run_phase(
             request,
             record.attempt_id,
             &binding,
-            "release",
-            &provenant_core::CancelToken::new(),
+            AdmissionPhase::AcquirePending,
+            call.cancel,
         );
+        let current = if acquired {
+            match self.record_admission_phase(&record, AdmissionPhase::Acquired, call) {
+                Ok(updated) => return (updated, None),
+                Err(_) => self.record(record.attempt_id, call).unwrap_or(record),
+            }
+        } else {
+            self.record(record.attempt_id, call).unwrap_or(record)
+        };
+        let current_phase = current
+            .extra
+            .get(ADMISSION_PORT_BINDING_FIELD)
+            .and_then(|value| serde_json::from_value::<AdmissionPortBinding>(value.clone()).ok())
+            .map(|binding| binding.phase);
+        if current_phase == Some(AdmissionPhase::Acquired)
+            && matches!(current.state, AttemptState::Queued { .. })
+        {
+            return (current, None);
+        }
+        if acquired {
+            let released = self.release_admission_with_phase(&current, call, run_phase);
+            if !released {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: repository admission release failed after a concurrent terminal change"
+                );
+            }
+            return (
+                self.record(current.attempt_id, call).unwrap_or(current),
+                Some("attempt state changed during repository admission".into()),
+            );
+        }
+        let current =
+            match self.record_admission_phase(&current, AdmissionPhase::ReleasePending, call) {
+                Ok(updated) => updated,
+                Err(_) => self.record(current.attempt_id, call).unwrap_or(current),
+            };
+        let released = self.release_admission_with_phase(&current, call, run_phase);
         if !released {
             let _ = writeln!(
                 std::io::stderr().lock(),
@@ -1233,27 +1423,94 @@ impl RunStore {
             );
         }
         (
-            record,
+            self.record(current.attempt_id, call).unwrap_or(current),
             Some("repository admission port skipped this attempt; it remains queued".into()),
         )
     }
 
-    /// Release the attempt-keyed repository lease after terminal publication.
-    /// The exact command and source are read from the sealed attempt binding.
-    pub(crate) fn release_admission(&self, record: &AttemptRecord, call: &Request<'_>) {
+    /// Release a frozen attempt binding after terminal publication. Failed
+    /// release leaves the existing terminal retention marker set for reconcile.
+    pub(crate) fn release_admission(&self, record: &AttemptRecord, call: &Request<'_>) -> bool {
+        let released = self.release_admission_with_phase(
+            record,
+            call,
+            &mut |request, attempt, binding, phase, cancel| {
+                self.run_admission_phase(request, attempt, binding, phase, cancel)
+            },
+        );
+        if !released && matches!(record.state, AttemptState::Terminal { .. }) {
+            let _ = self.set_temporary_retained(record.attempt_id, true, call);
+        }
+        released
+    }
+
+    fn release_admission_with_phase(
+        &self,
+        record: &AttemptRecord,
+        call: &Request<'_>,
+        run_phase: &mut dyn FnMut(
+            &CanonicalRequest,
+            AttemptId,
+            &AdmissionPortBinding,
+            AdmissionPhase,
+            &provenant_core::CancelToken,
+        ) -> bool,
+    ) -> bool {
         let Some(value) = record.extra.get(ADMISSION_PORT_BINDING_FIELD) else {
-            return;
+            return true;
         };
-        let binding: AdmissionPortBinding = match serde_json::from_value(value.clone()) {
+        let mut binding: AdmissionPortBinding = match serde_json::from_value(value.clone()) {
             Ok(binding) if binding.valid() => binding,
             _ => {
                 let _ = writeln!(
                     std::io::stderr().lock(),
                     "warning: stored repository admission binding is invalid; release was not run"
                 );
-                return;
+                return false;
             }
         };
+        if binding.phase == AdmissionPhase::Released {
+            return true;
+        }
+        let mut current = match self.record(record.attempt_id, call) {
+            Ok(current) => current,
+            Err(_) => return false,
+        };
+        let Some(current_value) = current.extra.get(ADMISSION_PORT_BINDING_FIELD) else {
+            return false;
+        };
+        binding = match serde_json::from_value(current_value.clone()) {
+            Ok(binding) if binding.valid() => binding,
+            _ => return false,
+        };
+        if binding.phase == AdmissionPhase::Released {
+            return true;
+        }
+        if binding.phase != AdmissionPhase::ReleasePending {
+            match self.record_admission_phase(&current, AdmissionPhase::ReleasePending, call) {
+                Ok(updated) => current = updated,
+                Err(_) => {
+                    current = match self.record(record.attempt_id, call) {
+                        Ok(current) => current,
+                        Err(_) => return false,
+                    };
+                    let Some(value) = current.extra.get(ADMISSION_PORT_BINDING_FIELD) else {
+                        return false;
+                    };
+                    binding = match serde_json::from_value(value.clone()) {
+                        Ok(binding) if binding.valid() => binding,
+                        _ => return false,
+                    };
+                    if binding.phase == AdmissionPhase::Released {
+                        return true;
+                    }
+                    if binding.phase != AdmissionPhase::ReleasePending {
+                        return false;
+                    }
+                }
+            }
+            binding.phase = AdmissionPhase::ReleasePending;
+        }
         let request = match self.request(record.attempt_id, call) {
             Ok(request) => request,
             Err(_) => {
@@ -1261,20 +1518,32 @@ impl RunStore {
                     std::io::stderr().lock(),
                     "warning: repository admission release could not read the stored request"
                 );
-                return;
+                return false;
             }
         };
-        if !self.run_admission_phase(
+        if !run_phase(
             &request,
             record.attempt_id,
             &binding,
-            "release",
+            AdmissionPhase::ReleasePending,
             &provenant_core::CancelToken::new(),
         ) {
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "warning: repository admission release failed; the repository command should retry idempotently"
+                "warning: repository admission release failed; reconcile will retry the idempotent command"
             );
+            return false;
+        }
+        match self.record_admission_phase(&current, AdmissionPhase::Released, call) {
+            Ok(_) => true,
+            Err(_) => self
+                .record(record.attempt_id, call)
+                .ok()
+                .and_then(|current| current.extra.get(ADMISSION_PORT_BINDING_FIELD).cloned())
+                .and_then(|value| serde_json::from_value::<AdmissionPortBinding>(value).ok())
+                .is_some_and(|binding| {
+                    binding.valid() && binding.phase == AdmissionPhase::Released
+                }),
         }
     }
 
@@ -1383,6 +1652,9 @@ impl RunStore {
             let (admitted_record, skipped) = self.admission_skip(&request, &record, call);
             record = admitted_record;
             if let Some(reason) = skipped {
+                if !matches!(record.state, AttemptState::Queued { .. }) {
+                    continue;
+                }
                 use std::io::Write as _;
                 let _ = writeln!(
                     std::io::stderr().lock(),
@@ -2342,6 +2614,263 @@ mod resource_status_tests {
             );
             assert!(!reason.contains("DEPENDENCY_OUTPUT_SECRET"));
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod admission_port_lifecycle_tests {
+    use super::*;
+    use crate::tests::{call, clock, context, input};
+    use provenant_core::CancelToken;
+    use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor, Termination};
+    use std::{collections::VecDeque, sync::Mutex};
+
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    struct GateExecutor {
+        exits: Mutex<VecDeque<i64>>,
+        calls: Mutex<Vec<(String, String, String)>>,
+    }
+
+    impl GateExecutor {
+        fn new(exits: impl IntoIterator<Item = i64>) -> Self {
+            Self {
+                exits: Mutex::new(exits.into_iter().collect()),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Executor for GateExecutor {
+        fn execute(&self, options: ExecOptions<'_>) -> std::result::Result<ExecOutcome, ExecError> {
+            let program = options
+                .argv
+                .first()
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let environment = options.env.unwrap_or(&[]);
+            let value = |name: &std::ffi::OsStr| {
+                environment
+                    .iter()
+                    .find(|(key, _)| key.as_os_str() == name)
+                    .map(|(_, value)| value.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            };
+            let phase = value(std::ffi::OsStr::new("PROVENANT_PORT_PHASE"));
+            let epoch = value(std::ffi::OsStr::new("PROVENANT_ADMISSION_EPOCH"));
+            self.calls
+                .lock()
+                .expect("gate calls mutex")
+                .push((program, phase, epoch));
+            let code = self
+                .exits
+                .lock()
+                .expect("gate exits mutex")
+                .pop_front()
+                .unwrap_or(0);
+            Ok(ExecOutcome {
+                termination: Termination::Exit(code),
+                stdout: Default::default(),
+                stderr: Default::default(),
+                timed_out: false,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 1,
+            })
+        }
+    }
+
+    fn declaration(program: &str, source: &str) -> String {
+        serde_json::json!({
+            "schema_version": 2,
+            "admission": {
+                "source": source,
+                "backend": {
+                    "kind": "command",
+                    "command": {
+                        "argv": [program],
+                        "exit_codes": {
+                            "success": [0],
+                            "unknown": [75],
+                            "other": "refused"
+                        }
+                    }
+                }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn admission_binding_retries_busy_release_and_survives_config_rotation() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let project = temp.path().join("project");
+        let project_ports = project.join(".provenant/ports.json");
+        std::fs::create_dir_all(
+            project_ports
+                .parent()
+                .ok_or_else(|| std::io::Error::other("ports parent missing"))?,
+        )?;
+        std::fs::create_dir_all(context.state_root.as_path())?;
+        std::fs::write(&project_ports, declaration("repo-gate-old", "project"))?;
+        std::fs::write(
+            context.state_root.as_path().join("ports.json"),
+            r#"{"schema_version":2}"#,
+        )?;
+
+        let mut prepared = input();
+        let attempt = prepared.attempt_id;
+        prepared.request.task.writer = Some(provenant_records::run::WriterRequest {
+            extra: crate::tests::writer_extra(),
+            project: project.clone(),
+            worktree: project.join("lane"),
+        });
+        crate::tests::rekey(&mut prepared);
+        store.create(&prepared, &call)?;
+        let request = store.request(attempt, &call)?;
+        let record = store.record(attempt, &call)?;
+        let (record, binding) = store
+            .admission_binding(&request, &record, &call)
+            .map_err(|error| std::io::Error::other(error.to_owned()))?;
+        let binding = binding
+            .ok_or_else(|| std::io::Error::other("project admission command was not bound"))?;
+        assert_eq!(binding.source, provenant_config::PortSource::Project);
+        assert_eq!(binding.phase, AdmissionPhase::AcquirePending);
+        assert!(record.extra.contains_key(ADMISSION_PORT_BINDING_FIELD));
+
+        // Busy acquisition is followed by a failed release. Both remain durable
+        // in the same attempt binding and the attempt stays queued for retry.
+        let executor = GateExecutor::new([1, 1, 0, 0, 0]);
+        let (record, skipped) = store.admission_skip_with_phase(
+            &request,
+            &record,
+            &call,
+            &mut |request, id, binding, phase, cancel| {
+                store.run_admission_phase_with_executor(
+                    request, id, binding, phase, cancel, &executor,
+                )
+            },
+        );
+        assert!(skipped.is_some());
+        assert!(matches!(record.state, AttemptState::Queued { .. }));
+        let stored: AdmissionPortBinding =
+            serde_json::from_value(record.extra[ADMISSION_PORT_BINDING_FIELD].clone())?;
+        assert_eq!(stored.phase, AdmissionPhase::ReleasePending);
+
+        // The release retry and the next acquisition still use the bound project
+        // command after the effective source rotates to the host declaration.
+        std::fs::write(&project_ports, r#"{"schema_version":2}"#)?;
+        std::fs::write(
+            context.state_root.as_path().join("ports.json"),
+            declaration("repo-gate-new", "host"),
+        )?;
+        let effective =
+            provenant_config::PortTable::read_for(Some(&project), context.state_root.as_path())?;
+        assert_eq!(
+            effective.admission.source,
+            provenant_config::PortSource::Host
+        );
+        let rotated_program = match effective.admission.backend {
+            provenant_config::PortBackend::Command { command } => command.argv[0].clone(),
+            _ => return Err(std::io::Error::other("host admission command was not active").into()),
+        };
+        assert_eq!(rotated_program, "repo-gate-new");
+
+        let (record, skipped) = store.admission_skip_with_phase(
+            &request,
+            &record,
+            &call,
+            &mut |request, id, binding, phase, cancel| {
+                store.run_admission_phase_with_executor(
+                    request, id, binding, phase, cancel, &executor,
+                )
+            },
+        );
+        assert!(skipped.is_some());
+        assert!(matches!(record.state, AttemptState::Queued { .. }));
+        let (record, skipped) = store.admission_skip_with_phase(
+            &request,
+            &record,
+            &call,
+            &mut |request, id, binding, phase, cancel| {
+                store.run_admission_phase_with_executor(
+                    request, id, binding, phase, cancel, &executor,
+                )
+            },
+        );
+        assert!(skipped.is_none());
+        let mut terminal_intent = record.clone();
+        mark_admission_release_pending(&mut terminal_intent)?;
+        let terminal_binding: AdmissionPortBinding =
+            serde_json::from_value(terminal_intent.extra[ADMISSION_PORT_BINDING_FIELD].clone())?;
+        assert_eq!(terminal_binding.phase, AdmissionPhase::ReleasePending);
+        let record =
+            store.record_admission_phase(&record, AdmissionPhase::ReleasePending, &call)?;
+        assert!(store.release_admission_with_phase(
+            &record,
+            &call,
+            &mut |request, id, binding, phase, cancel| {
+                store.run_admission_phase_with_executor(
+                    request, id, binding, phase, cancel, &executor,
+                )
+            },
+        ));
+        let final_record = store.record(attempt, &call)?;
+        let binding: AdmissionPortBinding =
+            serde_json::from_value(final_record.extra[ADMISSION_PORT_BINDING_FIELD].clone())?;
+        assert_eq!(binding.phase, AdmissionPhase::Released);
+        assert_eq!(binding.lease_epoch, 2);
+        assert!(matches!(final_record.state, AttemptState::Queued { .. }));
+        let calls = executor.calls.lock().expect("gate calls mutex");
+        assert!(
+            calls
+                .iter()
+                .all(|(program, _, _)| program == "repo-gate-old")
+        );
+        for (phase, epoch) in [
+            ("acquire", "1"),
+            ("release", "1"),
+            ("acquire", "2"),
+            ("release", "2"),
+        ] {
+            assert!(
+                calls
+                    .iter()
+                    .any(|(_, observed, key)| observed == phase && key == epoch)
+            );
+        }
+        drop(calls);
+
+        // A release fence published while acquisition is in flight must win
+        // over the late successful acquire result.
+        let mut observed = Vec::new();
+        let (record, skipped) = store.admission_skip_with_phase(
+            &request,
+            &final_record,
+            &call,
+            &mut |_, id, binding, phase, _| {
+                observed.push((phase, binding.lease_epoch));
+                if phase == AdmissionPhase::AcquirePending {
+                    let current = store.record(id, &call).expect("acquiring record");
+                    store
+                        .record_admission_phase(&current, AdmissionPhase::ReleasePending, &call)
+                        .expect("concurrent release fence");
+                }
+                true
+            },
+        );
+        assert!(skipped.is_some());
+        let fenced: AdmissionPortBinding =
+            serde_json::from_value(record.extra[ADMISSION_PORT_BINDING_FIELD].clone())?;
+        assert_eq!(fenced.phase, AdmissionPhase::Released);
+        assert!(observed.contains(&(AdmissionPhase::ReleasePending, fenced.lease_epoch)));
         Ok(())
     }
 }

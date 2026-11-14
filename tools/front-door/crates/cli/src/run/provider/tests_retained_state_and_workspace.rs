@@ -1341,7 +1341,11 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         ..provenant_core::RootInputs::new(home.clone(), project.clone())
     }
     .resolve(&provenant_os::fs::SystemPathResolver)?;
-    let utility = provenant_confinement::UtilityRuntime::new(&git, &git_home)?;
+    let utility = provenant_confinement::UtilityRuntime::new(
+        &git,
+        &git_home,
+        roots.state.as_path(),
+    )?;
     let budget = provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))?;
     let cancel = provenant_core::CancelToken::new();
     let repo = utility.open_repo(&executor, &project, budget, &cancel)?;

@@ -33,7 +33,11 @@ impl SourceViewFixture {
             ..provenant_core::RootInputs::new(home.clone(), project.clone())
         }
         .resolve(&provenant_os::fs::SystemPathResolver)?;
-        let utility = provenant_confinement::UtilityRuntime::new(&git, &git_home)?;
+        let utility = provenant_confinement::UtilityRuntime::new(
+            &git,
+            &git_home,
+            roots.state.as_path(),
+        )?;
         let cancel = provenant_core::CancelToken::new();
         let repo = utility.open_repo(
             &executor,

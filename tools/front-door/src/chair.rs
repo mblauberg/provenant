@@ -568,7 +568,10 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
         match command {
             ChairSummary::Show { ref session } | ChairSummary::Diff { ref session, .. } => {
                 let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-                let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+                let runtime = provenant_confinement::UtilityRuntime::read_only(
+                    git,
+                    resolved.roots.state.as_path(),
+                )?;
                 let executor = SystemExecutor::new(1)?;
                 let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
                 let location = runtime
@@ -803,7 +806,10 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                 limit,
             } => {
                 let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-                let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+                let runtime = provenant_confinement::UtilityRuntime::read_only(
+                    git,
+                    resolved.roots.state.as_path(),
+                )?;
                 let executor = SystemExecutor::new(1)?;
                 let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
                 let location = runtime

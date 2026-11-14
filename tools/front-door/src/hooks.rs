@@ -573,14 +573,17 @@ fn project_id(
         crate::roots::Product::Required,
     )?;
     let roots = resolved.roots;
-    let id = with_git(|runtime, executor, budget, cancel| {
-        let location = runtime
-            .project_location(executor, &project, budget, cancel)?
-            .location;
-        let binding =
-            provenant_config::lookup_project(&roots, &location)?.ok_or("project not bound")?;
-        Ok(binding.project_id())
-    })?;
+    let id = with_git(
+        roots.state.as_path(),
+        |runtime, executor, budget, cancel| {
+            let location = runtime
+                .project_location(executor, &project, budget, cancel)?
+                .location;
+            let binding =
+                provenant_config::lookup_project(&roots, &location)?.ok_or("project not bound")?;
+            Ok(binding.project_id())
+        },
+    )?;
     Ok((roots, resolved.home, id))
 }
 #[allow(clippy::disallowed_methods)] // The hook must reserve wall time for its response.
@@ -791,6 +794,7 @@ fn autosave(
     ))
 }
 pub(crate) fn with_git<T>(
+    host_state: &Path,
     operation: impl FnOnce(
         &UtilityRuntime,
         &SystemExecutor,
@@ -805,7 +809,7 @@ pub(crate) fn with_git<T>(
     let result = (|| {
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
         let git = std::fs::canonicalize(git)?;
-        let runtime = UtilityRuntime::new(git, temp.join(&name))?;
+        let runtime = UtilityRuntime::new(git, temp.join(&name), host_state)?;
         let executor = SystemExecutor::new(1)?;
         let budget = UtilityBudget::bounded(Duration::from_secs(1))?;
         operation(&runtime, &executor, budget, &CancelToken::new())
@@ -815,15 +819,8 @@ pub(crate) fn with_git<T>(
 }
 /// Unreadable config keeps the literal conflict-marker check on. The check is
 /// advisory; the Git boundary and every other pre-push refusal are unchanged.
-fn push_conflict_markers(globals: &Globals, cwd: &Path) -> bool {
-    let Ok(resolved) = crate::roots::resolve(
-        globals,
-        crate::roots::Workspace::At(cwd),
-        crate::roots::Product::Optional,
-    ) else {
-        return true;
-    };
-    provenant_cli::config_reads::show_for(&resolved.roots, "hook")
+fn push_conflict_markers(roots: &provenant_core::Roots) -> bool {
+    provenant_cli::config_reads::show_for(roots, "hook")
         .map(|read| read.domains.run.push_conflict_markers)
         .unwrap_or(true)
 }
@@ -854,25 +851,33 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
         });
     }
     let project = crate::roots::selected_project(globals.project.as_deref(), true)?;
-    let check_conflict_markers = push_conflict_markers(globals, &project);
-    with_git(|runtime, executor, budget, cancel| {
-        let repo = runtime.open_read_repo(executor, &project, budget, cancel)?;
-        // The default-branch check contacts the remote and needs a network budget.
-        let budget = UtilityBudget::bounded(Duration::from_secs(30))?;
-        PushContext {
-            repo: &repo,
-            runtime,
-            executor,
-            budget,
-            cancel,
-            check_conflict_markers,
-        }
-        .check(remote, &updates)
-        .map_err(|error| {
-            diagnostic(&format!("pre-push: refused: {error}"));
-            error.into()
-        })
-    })?;
+    let resolved = crate::roots::resolve(
+        globals,
+        crate::roots::Workspace::At(&project),
+        crate::roots::Product::Optional,
+    )?;
+    let check_conflict_markers = push_conflict_markers(&resolved.roots);
+    with_git(
+        resolved.roots.state.as_path(),
+        |runtime, executor, budget, cancel| {
+            let repo = runtime.open_read_repo(executor, &project, budget, cancel)?;
+            // The default-branch check contacts the remote and needs a network budget.
+            let budget = UtilityBudget::bounded(Duration::from_secs(30))?;
+            PushContext {
+                repo: &repo,
+                runtime,
+                executor,
+                budget,
+                cancel,
+                check_conflict_markers,
+            }
+            .check(remote, &updates)
+            .map_err(|error| {
+                diagnostic(&format!("pre-push: refused: {error}"));
+                error.into()
+            })
+        },
+    )?;
     if let Some(settings) = local_gate_settings(globals, &project)? {
         run_local_gate(&settings, &project)?;
     }
@@ -906,9 +911,19 @@ fn local_gate_settings(
     {
         return Ok(Some(land.local_gate.clone()));
     }
-    let id = match with_git(|runtime, executor, budget, cancel| {
-        crate::pr::landing::project_id(&resolved.roots, runtime, executor, project, budget, cancel)
-    }) {
+    let id = match with_git(
+        resolved.roots.state.as_path(),
+        |runtime, executor, budget, cancel| {
+            crate::pr::landing::project_id(
+                &resolved.roots,
+                runtime,
+                executor,
+                project,
+                budget,
+                cancel,
+            )
+        },
+    ) {
         Ok(id) => id,
         Err(_) if land.local_gate.mode == LocalGateMode::Enforce => {
             return Err("local gate settings unavailable".into());

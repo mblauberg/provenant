@@ -36,7 +36,11 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         ..provenant_core::RootInputs::new(home.clone(), project.clone())
     }
     .resolve(&provenant_os::fs::SystemPathResolver)?;
-    let utility = UtilityRuntime::new(&git, &git_home)?;
+    let utility = UtilityRuntime::new(
+        &git,
+        &git_home,
+        roots.state.as_path(),
+    )?;
     let cancel = CancelToken::new();
     let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
     let repo = utility.open_repo(&executor, &project, budget, &cancel)?;
