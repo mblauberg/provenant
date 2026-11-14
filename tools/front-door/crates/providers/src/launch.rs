@@ -935,6 +935,14 @@ fn grant_exec_path(git: &Path, spec: &mut LaunchSpec) {
 
 /// Resolve all exact executable requirements in the profile once, then use
 /// those same facts both to add exact read grants and to report preparation.
+fn extend_unique(grants: &mut Vec<PathGrant>, additions: Vec<PathGrant>) {
+    for grant in additions {
+        if !grants.contains(&grant) {
+            grants.push(grant);
+        }
+    }
+}
+
 pub(crate) fn prepare_tool_requirements(
     input: &PrepareInput<'_>,
     spec: &mut LaunchSpec,
@@ -1164,9 +1172,12 @@ impl LaunchSpec {
                     format!("omitted {omitted_writes} optional tool write grant(s)"),
                 )?;
             }
-            spec.profile.spec.runtime_reads.extend(reads);
-            spec.profile.spec.tool_exec_roots.extend(exec);
-            spec.profile.spec.tool_writes.extend(writes);
+            // Applying is idempotent: a later stage (host Cargo, private Git
+            // objects) reopens the requirements, and each grant lands once.
+            let profile = &mut spec.profile.spec;
+            extend_unique(&mut profile.runtime_reads, reads);
+            extend_unique(&mut profile.tool_exec_roots, exec);
+            extend_unique(&mut profile.tool_writes, writes);
             spec.tool_requirements.omitted = spec.omitted_discovery[omitted_before..].to_vec();
             spec.tool_requirements.applied = true;
         }

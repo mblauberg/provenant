@@ -1603,7 +1603,16 @@ mod tests {
         let prompt = crate::Prompt::new("fixture".into());
         let mut input = crate::tests::fixture_input(&route, &plan, &prompt, &cwd, None);
         input.home = &home;
-        input.credential_roots = provenant_core::CredentialRoots::for_home(&home);
+        // Credential stores are declared paths; the host's store is declared
+        // here as host configuration would declare it.
+        let mut credential_roots = provenant_core::CredentialRoots::for_home(&home);
+        credential_roots.add(
+            root.join("host/.ssh"),
+            provenant_core::CredentialScope::Subtree,
+            "fixture host declaration",
+            provenant_core::CredentialKind::Store,
+        );
+        input.credential_roots = credential_roots;
         let host_var = |name: &str| (name == "PATH").then(|| host_bin.clone().into_os_string());
         input.host_var = &host_var;
         let spec = prepare(

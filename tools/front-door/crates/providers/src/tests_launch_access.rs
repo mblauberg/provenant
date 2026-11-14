@@ -765,8 +765,11 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                 .any(|name| path == Path::new(prefix).join(name))
             })
         };
+        // Every lane reads the declared host Cargo binding (spec "Host Cargo home").
+        let cargo_reads: Vec<_> = spec.cargo_home().expect("Cargo binding").reads().collect();
         assert!(spec.profile.spec.runtime_reads.iter().all(|grant| {
             grant.path == package
+                || cargo_reads.contains(grant)
                 || homebrew_node(&grant.path)
                 || (id == "codex"
                     && (grant.path.starts_with("/fixture/home")
@@ -980,7 +983,16 @@ fn agy_writers_exec_what_codex_writers_exec() -> Result<(), ProviderError> {
                     crate::launch::subtree("/fixture/scratch/read-only-git")
                 ]
             );
-            assert!(spec.profile.spec.tool_writes.is_empty());
+            // A reader writes only the declared Cargo tracking files (spec
+            // "Host Cargo home"); its worktree stays read-only.
+            let declared: Vec<_> = spec.cargo_home().expect("Cargo binding").writes().collect();
+            assert!(
+                spec.profile
+                    .spec
+                    .tool_writes
+                    .iter()
+                    .all(|grant| declared.contains(grant))
+            );
             assert!(plan.permissions().write_roots.is_empty());
             for (key, value) in [
                 ("PATH", "/fixture/scratch/read-only-git:/usr/bin:/bin"),

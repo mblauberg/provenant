@@ -1271,17 +1271,31 @@ fn claude_network_on_without_complete_rust_keeps_public_system_tools()
                 .tool_exec_roots
                 .contains(&crate::launch::subtree("/fixture/repo"))
         );
-        assert!(launch.profile.spec.tool_writes.is_empty());
+        // Only the declared Cargo writes (checked above) reach a reader.
+        let declared: Vec<_> = launch.cargo_home().expect("Cargo binding").writes().collect();
+        assert!(
+            launch
+                .profile
+                .spec
+                .tool_writes
+                .iter()
+                .all(|grant| declared.contains(grant))
+        );
+        // An incomplete Rust install grants no toolchain: beyond the declared
+        // Cargo binding nothing under the Cargo or rustup homes is reachable.
+        let binding_reads: Vec<_> = launch.cargo_home().expect("Cargo binding").reads().collect();
         for grant in launch
             .profile
             .spec
             .runtime_reads
             .iter()
+            .filter(|grant| !binding_reads.contains(grant))
             .chain(&launch.profile.spec.tool_exec_roots)
         {
             assert!(
                 !grant.path.starts_with(home.join(".cargo"))
-                    && !grant.path.starts_with(home.join(".rustup"))
+                    && !grant.path.starts_with(home.join(".rustup")),
+                "{grant:?}"
             );
         }
         #[cfg(target_os = "macos")]

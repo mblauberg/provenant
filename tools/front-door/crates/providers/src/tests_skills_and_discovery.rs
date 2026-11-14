@@ -328,10 +328,13 @@ fn discovered_grants_in_credential_roots_are_omitted() -> Result<(), Box<dyn std
     input.home = &home;
     input.credential_roots = provenant_core::CredentialRoots::for_home(&home);
     let mut spec = crate::codex::Codex.prepare(input)?;
+    // A toolchain grant that resolves into a declared store is omitted.
     assert!(
         spec.omitted_discovery
             .iter()
-            .any(|entry| entry.path == credential)
+            .any(|entry| entry.path.starts_with(&credential)),
+        "{:?}",
+        spec.omitted_discovery
     );
     assert!(
         spec.profile

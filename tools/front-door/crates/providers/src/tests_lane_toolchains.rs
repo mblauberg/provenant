@@ -789,6 +789,7 @@ fn agy_runs_in_a_private_home_that_links_only_the_login_keychain() -> Result<(),
             link: "/fixture/state/Library/Keychains/login.keychain-db".into(),
             target: keychain.into(),
         }));
+        let cargo_reads: Vec<_> = spec.cargo_home().expect("Cargo binding").reads().collect();
         // Nothing of the user's Gemini state is granted, and the keychain is read-only.
         let spec = &spec.profile.spec;
         assert_eq!(spec.authentication.len(), 1);
@@ -798,8 +799,13 @@ fn agy_runs_in_a_private_home_that_links_only_the_login_keychain() -> Result<(),
         );
         assert!(spec.authentication[0].in_place_writes.is_empty());
         assert!(spec.state_writes.is_empty());
-        // Writers read only the shared toolchains their commands run.
-        assert_eq!(spec.runtime_reads.is_empty(), !edits);
+        // Readers read only the declared host Cargo binding; writers also
+        // read the shared toolchains their commands run.
+        let beyond_cargo = spec
+            .runtime_reads
+            .iter()
+            .any(|grant| !cargo_reads.contains(grant));
+        assert_eq!(beyond_cargo, edits);
         assert!(
             spec.runtime_reads
                 .iter()
