@@ -60,7 +60,7 @@ fn cargo_source_setting_controls_host_binding_grants_and_offline_mode() -> Resul
                 == "true",
             offline
         );
-        for grant in spec.cargo_home().source_writes() {
+        for grant in spec.cargo_home().unwrap().source_writes() {
             assert!(
                 spec.profile.spec.tool_writes.contains(&grant),
                 "configured source grant: {grant:?}"

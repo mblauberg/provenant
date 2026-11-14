@@ -1130,7 +1130,7 @@ impl LaunchConfinement {
         if !self.cargo_target_seed {
             return Outcome::skipped("disabled");
         }
-        let build = match crate::target_seed::cargo_build_directory(worktree, &self.writer_registry)
+        let build = match crate::target_seed::cargo_build_directory(worktree, &self.state_root)
         {
             Ok(Some(build)) => build,
             Ok(None) => return Outcome::skipped("non_cargo_project"),
@@ -1282,6 +1282,7 @@ fn prepare_writer_git(
             worktree: path.clone(),
         },
         repo.private_git_dir(),
+        state,
         cancel,
         &writer.facts,
     )?;

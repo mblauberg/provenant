@@ -942,23 +942,22 @@ pub(crate) fn finalise_provider_env(
         provenant_confinement::permissions::AccessMode::WorktreeWrite(_) => Access::WorktreeWrite,
     };
     let cache = lane_cache(input);
-    if spec.tool_requirements.cargo_home.is_none() {
-        let binding = provenant_confinement::cargo::CargoHome::resolve(input.home, input.host_var)
-            .map_err(|_| ProviderError::InvalidPath)?;
-        if input.sandboxed() {
-            spec.tool_requirements.reads.extend(binding.reads());
-            spec.tool_requirements.writes.extend(binding.writes());
-            spec.tool_requirements.applied = false;
+    let binding = match spec.tool_requirements.cargo_home.take() {
+        Some(binding) => binding,
+        None => {
+            let binding =
+                provenant_confinement::cargo::CargoHome::resolve(input.home, input.host_var)
+                    .map_err(|_| ProviderError::InvalidPath)?;
+            if input.sandboxed() {
+                spec.tool_requirements.reads.extend(binding.reads());
+                spec.tool_requirements.writes.extend(binding.writes());
+                spec.tool_requirements.applied = false;
+            }
+            binding
         }
-        spec.tool_requirements.cargo_home = Some(binding);
-    }
-    let binding = spec
-        .tool_requirements
-        .cargo_home
-        .as_ref()
-        .expect("host Cargo binding");
+    };
     cargo_environment(
-        binding,
+        &binding,
         input.home,
         cache,
         access,
@@ -966,6 +965,7 @@ pub(crate) fn finalise_provider_env(
         &mut spec.env,
     );
     binding.source_environment(input.confined.permissions().network, &mut spec.env);
+    spec.tool_requirements.cargo_home = Some(binding);
     Ok(())
 }
 
@@ -976,16 +976,14 @@ impl LaunchSpec {
         })
     }
 
-    pub fn cargo_home(&self) -> &provenant_confinement::cargo::CargoHome {
-        self.tool_requirements
-            .cargo_home
-            .as_ref()
-            .expect("host finalises Cargo before handoff")
+    /// The host Cargo binding, present once the host has finalised Cargo.
+    pub fn cargo_home(&self) -> Option<&provenant_confinement::cargo::CargoHome> {
+        self.tool_requirements.cargo_home.as_ref()
     }
 
     /// Effective host Cargo identity and source-write setting, for launch evidence.
     pub fn cargo_home_receipt(&self) -> serde_json::Value {
-        serde_json::to_value(self.cargo_home()).expect("Cargo binding is serialisable")
+        serde_json::to_value(self.cargo_home()).unwrap_or_default()
     }
 
     pub fn configure_cargo_sources(
@@ -993,11 +991,9 @@ impl LaunchSpec {
         setting: Option<bool>,
         network: provenant_confinement::permissions::NetworkAccess,
     ) {
-        let binding = self
-            .tool_requirements
-            .cargo_home
-            .as_mut()
-            .expect("host finalises Cargo before source configuration");
+        let Some(binding) = self.tool_requirements.cargo_home.as_mut() else {
+            return;
+        };
         let sources: Vec<_> = {
             let mut widened = binding.clone();
             widened.configure_source_writes(Some(true));
@@ -1017,12 +1013,9 @@ impl LaunchSpec {
                 self.profile.spec.tool_writes.extend(sources);
             }
         }
-        let binding = self
-            .tool_requirements
-            .cargo_home
-            .as_ref()
-            .expect("host Cargo binding");
-        binding.source_environment(network, &mut self.env);
+        if let Some(binding) = self.tool_requirements.cargo_home.as_ref() {
+            binding.source_environment(network, &mut self.env);
+        }
     }
 
     /// Resolve any additional exact executables added by launch configuration.

@@ -9,6 +9,7 @@ use provenant_supervisor::custody::{
 use rusqlite::params;
 use std::{
     ffi::OsString,
+    io::Write as _,
     path::{Path, PathBuf},
 };
 
@@ -1498,7 +1499,7 @@ impl RunStore {
         let Some(value) = record.extra.get(ADMISSION_PORT_BINDING_FIELD) else {
             return true;
         };
-        let mut binding: AdmissionPortBinding = match serde_json::from_value(value.clone()) {
+        let mut binding = match serde_json::from_value::<AdmissionPortBinding>(value.clone()) {
             Ok(binding) if binding.valid() => binding,
             _ => {
                 let _ = writeln!(
@@ -1518,7 +1519,7 @@ impl RunStore {
         let Some(current_value) = current.extra.get(ADMISSION_PORT_BINDING_FIELD) else {
             return false;
         };
-        binding = match serde_json::from_value(current_value.clone()) {
+        binding = match serde_json::from_value::<AdmissionPortBinding>(current_value.clone()) {
             Ok(binding) if binding.valid() => binding,
             _ => return false,
         };
@@ -1542,7 +1543,7 @@ impl RunStore {
                     let Some(value) = current.extra.get(ADMISSION_PORT_BINDING_FIELD) else {
                         return false;
                     };
-                    binding = match serde_json::from_value(value.clone()) {
+                    binding = match serde_json::from_value::<AdmissionPortBinding>(value.clone()) {
                         Ok(binding) if binding.valid() => binding,
                         _ => return false,
                     };
@@ -1596,7 +1597,7 @@ impl RunStore {
                     return false;
                 };
                 let latest_binding: AdmissionPortBinding =
-                    match serde_json::from_value(value.clone()) {
+                    match serde_json::from_value::<AdmissionPortBinding>(value.clone()) {
                         Ok(binding) if binding.valid() => binding,
                         _ => return false,
                     };
@@ -2908,7 +2909,7 @@ pub(crate) mod hand_off;
 mod resource_status_tests {
     use super::*;
     use crate::tests::{call, clock, context, input};
-    use provenant_core::{CancelToken, Clock as _};
+    use provenant_core::CancelToken;
     use provenant_records::diagnostic::{
         LaneLimit, PressureLevel, PressureThreshold, ResourceFact, SettingSource,
     };
@@ -3009,7 +3010,7 @@ mod resource_status_tests {
 mod admission_port_lifecycle_tests {
     use super::*;
     use crate::tests::{call, clock, context, input};
-    use provenant_core::CancelToken;
+    use provenant_core::{CancelToken, Clock as _};
     use provenant_os::exec::{
         CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
     };

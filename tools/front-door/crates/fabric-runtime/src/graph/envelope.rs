@@ -459,6 +459,7 @@ fn node_bound(
             session,
             u64::MAX,
             None,
+            asks::WORST_DECIDE_TIMEOUT,
             Some(""),
         );
         bytes += ask_bound(&ask)

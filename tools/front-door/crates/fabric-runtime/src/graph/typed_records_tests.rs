@@ -145,7 +145,7 @@ fn a_review_decision_without_a_reviewed_base_fails_closed_at_the_landing_check()
     let limits = crate::config::GraphLimits::default();
     let (plan, positions) = validation::validate_flat_plan(&document, &limits).unwrap();
     let mut checkpoint =
-        transitions::initial_checkpoint(&document, &plan, "digest".into(), None, None, None, None);
+        transitions::initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
     let head = "a".repeat(40);
     let base = "b".repeat(40);
 

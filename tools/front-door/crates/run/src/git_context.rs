@@ -243,7 +243,7 @@ fn lane_roots(
     };
     let run_state = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).map(PathBuf::from);
     let host_state = run_state.as_deref().unwrap_or(cwd);
-    let extra = transport::LaneRoots::new(run_state);
+    let extra = transport::LaneRoots::new(run_state.clone());
     match (get("GIT_DIR"), get("GIT_COMMON_DIR")) {
         (Some(private), Some(common)) => {
             transport::LaneRoots::for_repository(cwd, &private, &common, &extra, host_state)

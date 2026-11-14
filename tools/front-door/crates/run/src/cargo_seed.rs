@@ -150,6 +150,7 @@ pub(crate) fn seed_target(
         let (version, triple) = match crate::target_seed::lane_rustc_metadata_cancellable(
             worktree,
             home,
+            state,
             environment,
             Some(cancel),
         ) {

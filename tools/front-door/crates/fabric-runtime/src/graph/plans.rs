@@ -1101,6 +1101,7 @@ pub(super) fn bundled_templates() -> &'static super::template::TemplateLibrary {
 }
 
 /// A planner's fragment is a patch, admitted through the one patch path.
+#[allow(clippy::too_many_arguments)]
 fn fragment(
     node: &PlannedNode,
     source: &GraphDocument,

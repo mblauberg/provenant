@@ -33,6 +33,10 @@ pub struct HostDeliveryContext {
     cancellation: Option<provenant_core::CancelToken>,
     #[serde(skip)]
     facts: provenant_confinement::worktrees::RepoFacts,
+    /// Host state root whose port declarations name lane worktree roots. When
+    /// unset, the captured PROVENANT_STATE_DIR or the default root is used.
+    #[serde(skip)]
+    host_state: Option<PathBuf>,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct BoundDelivery {
@@ -124,6 +128,7 @@ impl Clone for HostDeliveryContext {
             lane_roots: self.lane_roots.clone(),
             cancellation: self.cancellation.clone(),
             facts: self.facts.clone(),
+            host_state: self.host_state.clone(),
         }
     }
 }
@@ -206,6 +211,26 @@ impl HostDeliveryContext {
         let mut context = self.clone();
         context.cancellation = Some(cancel.clone());
         context
+    }
+    /// Read host port declarations from this state root.
+    pub fn with_host_state(mut self, state: &Path) -> Self {
+        self.host_state = Some(state.to_path_buf());
+        self
+    }
+    /// The explicit state root, else the captured PROVENANT_STATE_DIR, else
+    /// the default root under the captured HOME.
+    fn host_state(&self) -> Option<PathBuf> {
+        let captured = |name: &str| {
+            self.environment
+                .iter()
+                .find(|(key, _)| key.as_slice() == name.as_bytes())
+                .map(|(_, value)| PathBuf::from(OsString::from_vec(value.clone())))
+                .filter(|path| path.is_absolute())
+        };
+        self.host_state
+            .clone()
+            .or_else(|| captured(provenant_core::STATE_DIRECTORY_ENV))
+            .or_else(|| captured("HOME").map(|home| home.join(provenant_core::DEFAULT_STATE_SUFFIX)))
     }
     /// Share the command-scoped repository fact limits with host delivery.
     pub fn with_repo_facts(mut self, facts: &provenant_confinement::worktrees::RepoFacts) -> Self {
@@ -542,6 +567,7 @@ impl HostDeliveryContext {
             lane_roots: Vec::new(),
             cancellation: None,
             facts: Default::default(),
+            host_state: None,
         }
     }
     /// Preserve normal host credential/config discovery without Git's ambient
@@ -565,6 +591,7 @@ impl HostDeliveryContext {
             "GIT_SSH_VARIANT",
             "GIT_TERMINAL_PROMPT",
             "PROVENANT_GIT",
+            "PROVENANT_STATE_DIR",
             "GIT_CONFIG_GLOBAL",
             "GIT_CONFIG_SYSTEM",
             "GIT_CONFIG_NOSYSTEM",
@@ -734,10 +761,13 @@ impl HostDeliveryContext {
     pub(crate) fn refresh_origin(
         writer: &WriterRequest,
         git_dir: &Path,
+        host_state: &Path,
         cancel: &provenant_core::CancelToken,
         facts: &provenant_confinement::worktrees::RepoFacts,
     ) -> Result<()> {
-        let mut host = Self::capture().with_repo_facts(facts);
+        let mut host = Self::capture()
+            .with_repo_facts(facts)
+            .with_host_state(host_state);
         host.cancellation = Some(cancel.clone());
         host.refresh_origin_with(writer, git_dir)
     }
@@ -1067,12 +1097,13 @@ impl HostDeliveryContext {
     fn host_environment(&mut self, writer: &WriterRequest) -> Result<()> {
         // A graph delivery runs in the project checkout itself, which is not a
         // lane.
-        self.lane_roots = provenant_confinement::transport::LaneRoots::project(
-            &writer.project,
-            &self.writer_registry,
-        )
-        .map_err(|error| prepare_error("lane roots", error))?
-        .into_paths();
+        let host_state = self
+            .host_state()
+            .ok_or_else(|| prepare_error("lane roots", "host state root unknown"))?;
+        self.lane_roots =
+            provenant_confinement::transport::LaneRoots::project(&writer.project, &host_state)
+                .map_err(|error| prepare_error("lane roots", error))?
+                .into_paths();
         if writer.worktree != writer.project {
             self.lane_roots.push(writer.worktree.clone());
         }
@@ -2848,6 +2879,7 @@ impl crate::RunStore {
         })?;
         let host = host
             .with_repo_facts(self.repo_facts())
+            .with_host_state(&self.writer_registry)
             .prepare(&writer, &request)?;
         host.clean(&writer)?;
         if host.head(&writer)? != head {

@@ -1488,7 +1488,9 @@ fn child_writer_admission_uses_the_declared_worktree_template() {
     for attempt in &mut parent_node.attempts {
         attempt.state = AttemptState::Terminal;
     }
-    let historical_parent = relay::historical_parent_of_attempt(&checkpoint, "attempt-a").unwrap();
+    let historical_parent = relay::historical_parent_of_attempt(&checkpoint, "attempt-a")
+        .unwrap()
+        .to_owned();
     assert_eq!(historical_parent, "a");
     let before = checkpoint.clone();
 
@@ -1507,7 +1509,7 @@ fn child_writer_admission_uses_the_declared_worktree_template() {
             document: &document,
             checkpoint: &mut checkpoint,
         },
-        historical_parent,
+        &historical_parent,
         &request,
         &changed_context,
     )

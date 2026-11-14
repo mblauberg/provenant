@@ -210,6 +210,7 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<AskLink> {
                 session,
                 u64::MAX,
                 None,
+                asks::WORST_DECIDE_TIMEOUT,
                 Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
             );
             // A node raised again after a retry carries the generation.

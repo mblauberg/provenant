@@ -124,7 +124,7 @@ fn an_unmet_condition_is_a_skipped_row_that_names_it() {
     let submitted = submitted("f0-v0-s0");
     let (plan, _) = validation::validate_plan(&submitted).unwrap();
     let checkpoint =
-        transitions::initial_checkpoint(&submitted, &plan, "digest".into(), None, None, None, None);
+        transitions::initial_checkpoint(&submitted, &plan, "digest".into(), None, None, None);
     let row = checkpoint
         .nodes
         .iter()

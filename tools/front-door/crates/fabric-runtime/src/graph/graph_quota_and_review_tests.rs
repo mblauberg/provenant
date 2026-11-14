@@ -532,7 +532,7 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
                 .unwrap()
                 .to_string();
             let mut checkpoint =
-                transitions::initial_checkpoint(&document, &plan, digest, None, None, None, None);
+                transitions::initial_checkpoint(&document, &plan, digest, None, None, None);
             transitions::record_provisioning(
                 &plan.nodes[0],
                 &mut checkpoint,

@@ -343,7 +343,10 @@ pub(super) fn prepare_command(
         ..Default::default()
     };
     apply_sandbox_mode(task, sandbox.clone(), &mut spec.env, &mut route);
-    let cargo_home = spec.cargo_home().clone();
+    let cargo_home = spec
+        .cargo_home()
+        .cloned()
+        .ok_or_else(|| unavailable("host Cargo binding was not finalised".into()))?;
     Ok(run::PreparedLaunch {
         limits,
         skipped_routes: Vec::new(),

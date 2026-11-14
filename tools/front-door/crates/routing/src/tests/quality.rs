@@ -115,6 +115,7 @@ fn outcome_priors_and_exploration_rank_eligible_members() -> Result<(), Box<dyn 
     Ok(())
 }
 
+#[test]
 fn account_ranking_uses_reset_adjusted_headroom_and_live_load_independent_of_order()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;

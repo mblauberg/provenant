@@ -8,7 +8,7 @@ use crate::{
 use provenant_confinement::valid_read_only_writable;
 use provenant_core::{AttemptId, CancelToken, Clock, DurationMicros, GitOid, WallTime};
 use provenant_os::{
-    fs::Directory,
+    fs::{Directory, LockMode},
     sys::resources::{self, MemorySample},
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -653,6 +653,7 @@ impl RunStore {
         )
     }
 
+    #[cfg(any(test, feature = "fixture"))]
     #[expect(clippy::too_many_arguments, reason = "priority is launch evidence")]
     pub(crate) fn mark_starting_with_priority(
         &self,

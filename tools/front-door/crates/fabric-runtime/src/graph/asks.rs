@@ -255,6 +255,12 @@ fn unanswered_disposition_text(disposition: UnansweredDisposition) -> &'static s
     }
 }
 
+/// The longest rendered timeout, for byte bounds computed before a deadline.
+pub(super) const WORST_DECIDE_TIMEOUT: DecideTimeout = DecideTimeout {
+    seconds: u64::MAX,
+    source: DecideTimeoutSource::Configured,
+};
+
 fn timeout_source_text(source: DecideTimeoutSource) -> &'static str {
     match source {
         DecideTimeoutSource::Graph => "the decide declaration",
@@ -332,6 +338,7 @@ fn decide_sequence(ask_id: &str, node_id: &str) -> Option<u64> {
     sequence.parse().ok().filter(|sequence| *sequence > 0)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn decide_ask(
     graph_id: &str,
     node: &PlannedNode,

@@ -180,10 +180,10 @@ impl HostLaunchContext {
         .into_iter()
         .filter_map(|name| {
             std::env::var_os(name).map(|value| {
+                // A relative CARGO_HOME resolves against the host cwd, as Cargo does.
                 let value = if name == "CARGO_HOME" && !value.is_empty() {
-                    std::path::absolute(PathBuf::from(value))
-                        .expect("host cwd resolves CARGO_HOME")
-                        .into_os_string()
+                    std::path::absolute(PathBuf::from(&value))
+                        .map_or(value, PathBuf::into_os_string)
                 } else {
                     value
                 };
@@ -1376,7 +1376,8 @@ impl RunStore {
                     } => Ok((*host).clone()),
                     _ => {
                         let host = crate::HostDeliveryContext::capture()
-                            .with_repo_facts(self.repo_facts());
+                            .with_repo_facts(self.repo_facts())
+                            .with_host_state(self.context.state_root.as_path());
                         let evidence = ["delivery.json", "delivery-cancelled.json"]
                             .iter()
                             .try_fold(false, |found, name| -> Result<bool> {
@@ -2144,7 +2145,7 @@ impl RunStore {
                         let run_config = provenant_confinement::run_config::RunConfig::read(
                             self.context.state_root.as_path(),
                         )?;
-                        let custody_project = crate::writer_project_id(writer)?;
+                        let custody_project = crate::writer::writer_project_id(writer)?;
                         let review_exempt = run_config.review_exempt(&custody_project.to_string());
                         crate::settlement::with_cancellation(attempt, exit.scope, &cancel, || {
                             launch.uncommitted(

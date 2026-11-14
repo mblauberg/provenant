@@ -19,7 +19,7 @@ fn skipped_required_inputs_are_recorded_in_the_plan() {
     assert!(pruned.nodes[0].extra.contains_key("removed_requirements"));
     let (plan, _) = validate_flat_plan(&document, &crate::config::GraphLimits::default()).unwrap();
     let checkpoint =
-        transitions::initial_checkpoint(&document, &plan, "digest".into(), None, None, None, None);
+        transitions::initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
     assert!(
         checkpoint.nodes[0]
             .extra
@@ -37,7 +37,7 @@ fn chair_bound_depletion_reads_facts_once_across_passes() {
     let limits = crate::config::GraphLimits::default();
     let (plan, _) = validate_flat_plan(&document, &limits).unwrap();
     let mut checkpoint =
-        transitions::initial_checkpoint(&document, &plan, "digest".into(), None, None, None, None);
+        transitions::initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
     checkpoint.nodes[0].state = NodeState::Failed;
     checkpoint.nodes[0].attempts.push(GraphAttempt {
         extra: Default::default(),

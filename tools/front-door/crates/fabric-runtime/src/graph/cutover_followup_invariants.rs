@@ -243,7 +243,7 @@ fn depletion_keeps_the_pinned_account_and_refuses_a_higher_tier_candidate() {
     let limits = crate::config::GraphLimits::default();
     let (plan, _) = validate_flat_plan(&document, &limits).unwrap();
     let mut checkpoint =
-        transitions::initial_checkpoint(&document, &plan, "digest".into(), None, None, None, None);
+        transitions::initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
     checkpoint.nodes[0].state = NodeState::Failed;
     checkpoint.nodes[0].attempts.push(GraphAttempt {
         extra: Default::default(),

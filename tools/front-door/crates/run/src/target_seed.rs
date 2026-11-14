@@ -124,13 +124,14 @@ pub(crate) fn lane_rustc_metadata(
     home: &Path,
     environment: &[(std::ffi::OsString, std::ffi::OsString)],
 ) -> Result<(String, String), &'static str> {
-    lane_rustc_metadata_cancellable(worktree, home, environment, None)
+    lane_rustc_metadata_cancellable(worktree, home, home, environment, None)
 }
 
 #[cfg(any(unix, test))]
 pub(crate) fn lane_rustc_metadata_cancellable(
     worktree: &Path,
     home: &Path,
+    host_state: &Path,
     environment: &[(std::ffi::OsString, std::ffi::OsString)],
     cancel: Option<&provenant_core::CancelToken>,
 ) -> Result<(String, String), &'static str> {
@@ -154,7 +155,7 @@ pub(crate) fn lane_rustc_metadata_cancellable(
     if !saw_home {
         return Err(codes::RUSTUP_HOME_MISSING);
     }
-    let channel = lane_release_pin(worktree, home)?;
+    let channel = lane_release_pin(worktree, home, host_state)?;
     let toolchains = home.join(".rustup/toolchains");
     let mut candidates = std::fs::read_dir(&toolchains)
         .map_err(|_| codes::TOOLCHAIN_DIR_UNREADABLE)?
@@ -227,7 +228,11 @@ pub(crate) fn lane_rustc_metadata_cancellable(
 }
 
 #[cfg(any(unix, test))]
-fn lane_release_pin(worktree: &Path, home: &Path) -> Result<String, &'static str> {
+fn lane_release_pin(
+    worktree: &Path,
+    home: &Path,
+    host_state: &Path,
+) -> Result<String, &'static str> {
     fn read(path: &Path, unreadable: &'static str) -> Result<String, &'static str> {
         use std::io::Read;
         let mut bytes = Vec::new();
@@ -367,16 +372,16 @@ mod lane_probe_tests {
         std::fs::write(&settings, "[overrides]\n").unwrap();
         let modern = front.join("rust-toolchain.toml");
         std::fs::write(&modern, "[toolchain]\nchannel = '1.99.1'\n").unwrap();
-        assert_eq!(lane_release_pin(&worktree, &home).unwrap(), "1.99.1");
+        assert_eq!(lane_release_pin(&worktree, &home, &home).unwrap(), "1.99.1");
         let plain = front.join("rust-toolchain");
         std::fs::remove_file(&modern).unwrap();
         std::fs::write(&plain, "1.99.1\n").unwrap();
-        assert!(lane_release_pin(&worktree, &home).is_err());
+        assert!(lane_release_pin(&worktree, &home, &home).is_err());
         std::fs::write(&modern, "[toolchain]\nchannel = '1.99.1'\n").unwrap();
-        assert!(lane_release_pin(&worktree, &home).is_err());
+        assert!(lane_release_pin(&worktree, &home, &home).is_err());
         std::fs::remove_file(&plain).unwrap();
         std::fs::write(&settings, "[overrides]\n'/writer' = 'custom'\n").unwrap();
-        assert!(lane_release_pin(&worktree, &home).is_err());
+        assert!(lane_release_pin(&worktree, &home, &home).is_err());
         std::fs::write(&settings, "[overrides]\n").unwrap();
         std::fs::write(
             &modern,
@@ -386,7 +391,7 @@ mod lane_probe_tests {
         let env = [("RUSTUP_HOME".into(), home.join(".rustup").into_os_string())];
         assert!(lane_rustc_metadata(&worktree, &home, &env).is_err());
         std::fs::remove_file(&modern).unwrap();
-        assert!(lane_release_pin(&worktree, &home).is_err());
+        assert!(lane_release_pin(&worktree, &home, &home).is_err());
         std::fs::write(&modern, "[toolchain]\nchannel = 'nightly'\n").unwrap();
         assert!(lane_rustc_metadata(&worktree, &home, &env).is_err());
     }

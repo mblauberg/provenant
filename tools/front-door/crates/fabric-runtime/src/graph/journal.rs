@@ -4,7 +4,7 @@ use super::*;
 pub(super) const CHECKPOINT_SCHEMA_VERSION: u64 = 2;
 
 #[path = "events.rs"]
-mod events;
+pub(super) mod events;
 pub use events::{GraphEvent, GraphEventKind};
 
 #[cfg(test)]
