@@ -748,6 +748,7 @@ pub(super) fn gc_foreign_retains_a_process_with_cwd_inside_the_worktree()
         Some(&Occupancy::Observed { process: None })
     );
     context.workers = &worker;
+    let retirement = HostRetirementFixture::new(&test_context)?;
     let report = collect(
         &context,
         &lanes,
@@ -760,8 +761,8 @@ pub(super) fn gc_foreign_retains_a_process_with_cwd_inside_the_worktree()
             written_before_ns: i128::MAX,
             dry_run: false,
             include_foreign: true,
-            retirement_port: None,
-            retirement_feeds: None,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
             mode: CollectionMode::Worktrees,
             proof: None,
             upstream_reference: None,
