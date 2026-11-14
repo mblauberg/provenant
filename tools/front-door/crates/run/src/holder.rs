@@ -2281,43 +2281,34 @@ impl RunStore {
             decoded.complete = false;
         }
         if matches!(decoded.outcome, Outcome::Succeeded | Outcome::Uncommitted) {
-            let refusal = if exit.termination != Some(Termination::Exit(0)) {
-                Some("provider exited unsuccessfully")
+            if exit.termination != Some(Termination::Exit(0)) {
+                decoded.outcome = Outcome::Failed;
+                decoded.reason = Some("provider exited unsuccessfully".into());
             } else if !decoded.complete {
-                Some("provider result is empty or incomplete")
-            } else if !crate::reader::verified_route(
+                decoded.outcome = Outcome::Failed;
+                decoded.reason = Some("provider result is empty or incomplete".into());
+            }
+        }
+        if matches!(
+            decoded.outcome,
+            Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
+        ) {
+            match crate::reader::route_identity(
                 record.resolved_route.as_ref(),
                 record.applied_route.as_ref(),
                 decoded.observed_route.as_ref(),
             ) {
-                Some("provider identity was not observed")
-            } else {
-                None
-            };
-            if let Some(reason) = refusal {
-                decoded.outcome = Outcome::Failed;
-                if reason == "provider identity was not observed" {
-                    decoded.terminal_cause = Some(TerminalCause::IdentityUnobserved);
+                crate::reader::RouteIdentity::Observed => {}
+                crate::reader::RouteIdentity::Unobserved => {
+                    decoded
+                        .partial_signals
+                        .push(PartialSignal::IdentityUnobserved);
                 }
-                // Keep the decoder's typed identity evidence error, if any.
-                decoded.reason = Some(match decoded.reason.take() {
-                    detail if reason == "provider identity was not observed" => {
-                        format!(
-                            "{reason}: requested model {}; observed model {}",
-                            record
-                                .resolved_route
-                                .as_ref()
-                                .and_then(|route| route.model.as_deref())
-                                .unwrap_or("unknown"),
-                            decoded
-                                .observed_route
-                                .as_ref()
-                                .and_then(|route| route.model.as_deref())
-                                .unwrap_or("unknown"),
-                        ) + &detail.map(|value| format!("; {value}")).unwrap_or_default()
-                    }
-                    _ => reason.into(),
-                });
+                crate::reader::RouteIdentity::Mismatch => {
+                    decoded.outcome = Outcome::Failed;
+                    decoded.terminal_cause = Some(TerminalCause::IdentityMismatch);
+                    decoded.reason = Some(TerminalCause::IdentityMismatch.detail().into());
+                }
             }
         }
         let mut terminal_note = if exit.never_spawned && !cancelled {

@@ -51,7 +51,13 @@ impl CommitSourcePreparation {
         )?;
         let executable = assets.join("cursor/bin/agent");
         std::fs::create_dir_all(executable.parent().ok_or("provider parent")?)?;
-        std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = status ]; then printf 'Logged in successfully\\n'; else printf 'fixture-cursor 1.0\\n'; fi\n")?;
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = status ]; then printf '%s' '{}'; else printf 'fixture-cursor 1.0\\n'; fi\n",
+                include_str!("../../../../../tests/fixtures/providers/cursor/status.stdout")
+            ),
+        )?;
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
         let attempt_id = AttemptId::from_bytes([72; 16]);
         let attempt = state.join(format!("attempts/{attempt_id}"));

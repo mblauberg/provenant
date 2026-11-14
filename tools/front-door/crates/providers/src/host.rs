@@ -70,9 +70,13 @@ pub fn local_signin(
     }
     Some(
         if out.termination == Termination::Exit(0)
-            && (strategy == LoginReprobe::Codex
-                || output.contains("logged in")
-                || output.contains("login successful"))
+            && match strategy {
+                LoginReprobe::Codex => true,
+                LoginReprobe::Cursor => crate::cursor::status_account(&out.stdout.bytes)
+                    .or_else(|| crate::cursor::status_account(&out.stderr.bytes))
+                    .is_some(),
+                _ => false,
+            }
         {
             LocalSignin::SignedIn
         } else {

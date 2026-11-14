@@ -706,9 +706,12 @@ or an existing settlement owner; the supervisor owns this work after return.
 
 ## Success needs proof
 
-Success needs a supervisor-observed exit 0, a matching provider identity and
-a complete, validated, non-empty result; capture bytes are never completion
-evidence. A dead owner is not a failed provider. A writer with only uncommitted edits ends `uncommitted` and does not deliver,
+Success needs a supervisor-observed exit 0 and a complete, validated,
+non-empty result; capture bytes are never completion evidence. Missing identity
+observations add the typed `identity_unobserved` partial signal and keep usage
+attributed to the requested account, without inventing observed evidence.
+An observed provider, model, effort or selected-account mismatch fails with the
+pinned `identity_mismatch` authority stop. A dead owner is not a failed provider. A writer with only uncommitted edits ends `uncommitted` and does not deliver,
 unless those paths are review-exempt. Paths in the project's
 `[domains.run] review_exempt` list (release-note fragments, specs, lock files
 and `.tracker-input` by default) never count toward either, and Git metadata,
@@ -722,7 +725,8 @@ requires the same exact thread, including after recovery. A read-only lane (no
 `writer`) whose complete, validated, non-empty answer is present settles
 `succeeded` without a handoff; only a writer must also report one.
 - Why (default): a crash, truncation or impostor must never read as success.
-- Test: `crates/run/src/dispatch_custody_tests.rs::publication_holder_commits_decoded_success_only_with_exit_zero_and_observed_identity`;
+- Test: `crates/run/src/dispatch_custody_tests.rs::publication_holder_commits_decoded_success_only_with_exit_zero`;
+  `crates/run/src/dispatch_settlement_tests.rs::identity_observations_warn_when_missing_and_hold_when_contradictory`;
   `crates/run/src/dispatch_settlement_tests.rs::a_read_only_answer_without_handoff_settles_succeeded`;
   `crates/run/src/tests.rs::protected_review_retains_candidate_and_paths_without_delivery`;
   `crates/confinement/src/git_evidence.rs::exempt_paths_left_uncommitted_do_not_count`
@@ -780,8 +784,8 @@ Only human `status` rows use short labels pointing to
 `provenant output ID`. Pre-launch causes distinguish an
 unsupported platform, an unknown pacing account, an unregistered selected
 account, a credential-helper failure at delivery Prepare, a configured command
-that cannot be resolved, an unconfigured host-native route and a provider
-identity that was not observed. A terminal record may also carry a
+that cannot be resolved, an unconfigured host-native route and an observed provider
+identity mismatch. A terminal record may also carry a
 `terminal_note`, a bounded sentence Provenant composes from fixed text and typed
 values: the configured executable of an unresolved command, or a policy retry
 decision such as "retrying this session (attempt 2 of 2)". Structured listings,
@@ -1896,7 +1900,7 @@ else returns to the chair.
 | `model_unavailable` | `new_route` | no | 0 |
 | `adapter_unavailable` | `new_route` | no | 0 |
 | `permission_denied` | `chair` | no | 0 |
-| `identity_unobserved` | `chair` | no | 0 |
+| `identity_mismatch` | `chair` | yes | 0 |
 | `lane_token_lost` | `new_route` | no | 0 |
 | `source_view_refused` | `chair` | no | 0 |
 | `route_refused` | `chair` | no | 0 |

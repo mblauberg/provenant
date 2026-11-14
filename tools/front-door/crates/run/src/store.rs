@@ -1275,11 +1275,12 @@ impl RunStore {
             Outcome::Succeeded | Outcome::ReviewRequired
         ) && (!publication.complete
             || publication.result.is_empty()
-            || !super::reader::verified_route(
+            || !super::reader::route_identity(
                 publication.resolved_route.as_ref(),
                 publication.applied_route.as_ref(),
                 publication.observed_route.as_ref(),
-            ))
+            )
+            .permits_success(&publication.partial_signals))
         {
             return Err(RunError::Validation(
                 "success lacks complete result or verified provider identity",

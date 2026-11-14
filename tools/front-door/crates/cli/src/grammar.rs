@@ -1203,12 +1203,22 @@ fn span_seconds(value: &str) -> Option<u64> {
     if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    digits.parse::<u64>().ok()?.checked_mul(multiplier)
+    let seconds = digits.bytes().fold(0_u64, |n, digit| {
+        n.saturating_mul(10).saturating_add(u64::from(digit - b'0'))
+    });
+    Some(seconds.saturating_mul(multiplier))
 }
 pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
-    span_seconds(value)
-        .filter(|n| (1..=provenant_core::MAX_LANE_RUNTIME_SECONDS).contains(n))
-        .ok_or("duration must be 1s to 4h; run `provenant help` for examples")
+    let seconds = span_seconds(value)
+        .filter(|n| *n > 0)
+        .ok_or("duration must be a positive span; run `provenant help` for examples")?;
+    let maximum = provenant_core::MAX_LANE_RUNTIME_SECONDS;
+    if seconds > maximum {
+        eprintln!(
+            "warning: wait budget clamped to maximum {maximum}s (source: provenant_core::MAX_LANE_RUNTIME_SECONDS)"
+        );
+    }
+    Ok(seconds.min(maximum))
 }
 pub(crate) fn observation_wait_seconds(value: &str) -> Result<u64, &'static str> {
     span_seconds(value)

@@ -1848,13 +1848,16 @@ mod tests {
         valid(&["land", "2199", "--wait"]);
         valid(&["land", "--wait=30m", "2199"]);
         invalid(&["land", "2199", "--wait=0"]);
-        invalid(&["land", "2199", "--wait=5h"]);
+        let Command::Land { wait, .. } = valid(&["land", "2199", "--wait=5h"]).command else {
+            panic!("land command")
+        };
+        assert_eq!(wait, Some(provenant_core::MAX_LANE_RUNTIME_SECONDS));
         valid(&["output", "fix-login", "--json"]);
         invalid(&["output", "fix-login", "--summary"]);
     }
     #[test]
     fn common_usage_errors_name_the_correct_invocation() {
-        let ParseOutcome::Invalid { error, .. } = parsed(&["wait", "--timeout", "5h"]) else {
+        let ParseOutcome::Invalid { error, .. } = parsed(&["wait", "--timeout", "0"]) else {
             panic!("expected duration error");
         };
         assert!(error.to_string().contains("--timeout"), "{error}");
@@ -1913,18 +1916,12 @@ mod tests {
     fn invalid_invocations_across_command_groups_name_field_and_correction() {
         for (words, expected_field, expected_repair) in [
             (
-                vec!["land", "2199", "--wait=5h"],
+                vec!["land", "2199", "--wait=0"],
                 "--wait",
                 "provenant land 2199 --wait=30m",
             ),
             (
-                vec![
-                    "--project",
-                    "/path with spaces",
-                    "land",
-                    "2199",
-                    "--wait=5h",
-                ],
+                vec!["--project", "/path with spaces", "land", "2199", "--wait=0"],
                 "--wait",
                 "provenant --project '/path with spaces' land 2199 --wait=30m",
             ),
@@ -2303,7 +2300,20 @@ mod tests {
         for timeout in ["1", "4h", "14400"] {
             valid(&["wait", "fix-login", "--timeout", timeout]);
         }
-        for timeout in ["0", "14401", "5h", "-1", "1.5"] {
+        for timeout in [
+            "14401",
+            "5h",
+            "99d",
+            "18446744073709551615d",
+            "999999999999999999999999999999h",
+        ] {
+            let Command::Wait(wait) = valid(&["wait", "fix-login", "--timeout", timeout]).command
+            else {
+                panic!("wait command")
+            };
+            assert_eq!(wait.timeout, Some(provenant_core::MAX_LANE_RUNTIME_SECONDS));
+        }
+        for timeout in ["0", "-1", "1.5"] {
             invalid(&["wait", "fix-login", "--timeout", timeout]);
         }
         invalid(&["wait", "--pr", "0"]);

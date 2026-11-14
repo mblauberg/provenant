@@ -229,7 +229,9 @@ partially running graph form the starting snapshot, so they do not satisfy a
 new wait on that graph. `--pr NUMBER` is satisfied when the pull
 request's required checks on its current head reach a verdict, or when it is
 merged or closed. `--timeout` takes a span, defaults to
-`domains.wait.timeout_seconds` and is at most four hours. `--follow` prints
+`domains.wait.timeout_seconds` and is at most four hours. Explicit CLI wait
+budgets above the maximum clamp to it with a warning naming the maximum and
+its source, `provenant_core::MAX_LANE_RUNTIME_SECONDS`. `--follow` prints
 one line per transition before the result. With or without `--follow`, each
 target emits a `settled` event as it settles, so early completion is visible
 while other targets continue. A graph's individual node settlements emit

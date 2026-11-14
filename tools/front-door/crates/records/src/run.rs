@@ -774,7 +774,7 @@ pub enum TerminalCause {
     FreePoolQuota,
     CommandUnavailable,
     HostNativeUnconfigured,
-    IdentityUnobserved,
+    IdentityMismatch,
     /// A writer declared unfinished work and its pinned head equals its base.
     StoppedNoWork,
     /// A writer finished without a final message.
@@ -819,7 +819,7 @@ impl TerminalCause {
             Self::FreePoolQuota => "free-pool quota exhausted; provenant output ID",
             Self::CommandUnavailable => "command unavailable; provenant output ID",
             Self::HostNativeUnconfigured => "host-native unconfigured; provenant output ID",
-            Self::IdentityUnobserved => "provider identity unobserved; provenant output ID",
+            Self::IdentityMismatch => "provider identity mismatch; provenant output ID",
             Self::StoppedNoWork => "stopped with no work (no new commit); provenant output ID",
             Self::EmptyWriterResult => "empty final message; review writer commit",
             Self::ContextHandoff => "context handoff threshold; provenant output ID",
@@ -899,8 +899,8 @@ impl TerminalCause {
             Self::HostNativeUnconfigured => {
                 "the requested host-native route is not configured in domains.fabric.host_native; select a configured route"
             }
-            Self::IdentityUnobserved => {
-                "provider identity was not observed; inspect the local session evidence"
+            Self::IdentityMismatch => {
+                "observed provider identity differs from the requested route; inspect the local session evidence"
             }
             Self::StoppedNoWork => {
                 "the writer stopped with no work: its branch has no new commit; acceptance remains unmet"
@@ -1510,6 +1510,8 @@ pub fn provider_silence_reason(silent_for_ms: u64) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PartialSignal {
+    /// Identity evidence is incomplete; usage stays attributed to the requested account.
+    IdentityUnobserved,
     /// A successful final answer did not include a valid final handoff.
     HandoffMissing,
     /// The final answer ends with a valid `handoff` block whose status is
@@ -1523,6 +1525,7 @@ pub enum PartialSignal {
 impl PartialSignal {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::IdentityUnobserved => "identity_unobserved",
             Self::HandoffMissing => "handoff_missing",
             Self::DeclaredStop => "declared_stop",
             Self::ProviderStop => "provider_stop",
