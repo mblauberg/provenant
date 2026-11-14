@@ -53,8 +53,9 @@ generation as unknown and re-read.
 ### Strict, bounded records
 
 Unsupported versions fail before mutation. The reader rejects ambiguous or
-unbounded input and never echoes the rejected value. Unknown fields survive round
-trips. Edge-built facts are `Serialize` only.
+unbounded input and never echoes the rejected value. Closed codecs reject or
+discard unknown fields; records with explicit extension maps preserve their
+extensions. Edge-built facts are `Serialize` only.
 - Why: a forged file must not become evidence.
 - Test: `crates/records/tests/contracts.rs::bounded_decode_fails_closed_for_duplicates_utf8_trailing_and_integer_overflow`;
   `crates/records/tests/contracts.rs::typed_decode_errors_do_not_disclose_rejected_values`

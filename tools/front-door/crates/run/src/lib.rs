@@ -84,8 +84,9 @@ pub use retention::{
     ProviderStateIssue, TOMBSTONE, payload_totals,
 };
 pub use writer::{
-    LaunchConfinement, WriterFence, WriterLaunch, equivalent_writer, prepare_writer,
-    prepare_writer_with_facts, resolve_reader_source, resolve_writer, resolve_writer_proposal,
+    BoundSandboxBackend, LaunchConfinement, WriterFence, WriterLaunch, equivalent_writer,
+    prepare_writer, prepare_writer_with_facts, resolve_reader_source, resolve_writer,
+    resolve_writer_proposal,
 };
 
 pub use db::{ExecutionContext, Request, RunStore};

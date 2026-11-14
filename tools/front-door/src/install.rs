@@ -1077,8 +1077,8 @@ fn apply_install(
             });
         }
         Some(plan) => {
-            // Two versions never run agents at once: the 1.x agents stop
-            // first, and a failed stop copies nothing.
+            // Preflight and stage all handoff inputs before stopping 1.x.
+            // A failed preflight stops nothing; a failed stop publishes nothing.
             let home = environment.home.clone();
             match crate::state_handoff::run(&plan, || reporter.stop_legacy_agents(&plan.to, &home))
             {

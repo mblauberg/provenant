@@ -378,8 +378,8 @@ impl RunStore {
                     &error
                 )));
             }
-            if confinement.sandboxed {
-                match confinement.command(&plan.argv, &id, call.cancel, &policy) {
+            if confinement.backend.is_some() {
+                match confinement.command(&plan.argv, &id) {
                     Ok(command) => {
                         plan.argv = command.argv;
                         profile_file = Some(command.profile);

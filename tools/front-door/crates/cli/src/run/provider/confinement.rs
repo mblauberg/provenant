@@ -255,7 +255,7 @@ pub(super) fn confinement_request(
                 policy
                     .optional()
                     .network_for(access.network(writer.is_some())),
-                writer.is_none(),
+                policy.optional(),
             )
             .effective
         }
@@ -400,7 +400,11 @@ pub(super) fn sandbox_mode(
         route,
         task,
         permissions.network,
-        matches!(permissions.mode, AccessMode::ReadOnly),
+        permissions
+            .policy
+            .as_ref()
+            .map(|p| p.optional())
+            .unwrap_or(&Default::default()),
     );
     if let Some(warning) = &mode.warning {
         use std::io::Write as _;
@@ -414,9 +418,9 @@ fn sandbox_mode_for_access(
     route: &str,
     task: &run::TaskRequest,
     network: NetworkAccess,
-    read_only: bool,
+    policy: &provenant_confinement::permissions::OptionalPolicy,
 ) -> provenant_confinement::run_config::SandboxMode {
-    use provenant_confinement::run_config::SandboxInputs;
+    use provenant_confinement::run_config::{SandboxInputs, SandboxRestriction};
     let sandbox = task
         .profile
         .knobs
@@ -435,12 +439,12 @@ fn sandbox_mode_for_access(
             .unwrap_or(false)
     });
     let (floor, warn) = provenant_records::run::admission_floor(parent, sandbox, strength);
+    let restrictions = SandboxRestriction::for_policy(network, policy);
     let mut mode = host.sandbox_for(SandboxInputs {
         route,
         knob: if floor { Some("on") } else { sandbox },
         parent_sandboxed: floor,
-        network_narrowed: network != NetworkAccess::Open,
-        read_only,
+        restrictions: &restrictions,
         os_sandboxed: provenant_confinement::run_config::current_process_is_sandboxed(),
         platform_supported: cfg!(target_os = "macos"),
     });
@@ -500,7 +504,7 @@ fn admission_policy_is_independent_of_primary_or_fallback_adapter()
                 route,
                 &task,
                 NetworkAccess::Open,
-                false,
+                &Default::default(),
             );
             if !provenant_confinement::run_config::current_process_is_sandboxed() {
                 assert_eq!(mode.effective, strength == "strict");

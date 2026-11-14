@@ -2,7 +2,7 @@
 //! fresh default root and copies only the owner's configuration out of the
 //! 1.x root, which it reads and never writes, moves or deletes. Rollback is
 //! reinstalling 1.x, whose root is still intact.
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
@@ -106,19 +106,110 @@ pub(crate) fn plan(state: &Path, home: &Path) -> io::Result<Option<Handoff>> {
     }))
 }
 
-/// Stops the 1.x agents, then copies. A failed stop copies nothing, so two
-/// versions never run agents at once and the copy is a quiet snapshot.
+/// This view exists only at the one-way root handoff. Read ownership and
+/// selections from the released v1 receipt; ignore retired, unrelated fields.
+#[derive(Deserialize)]
+struct V1Receipt {
+    source_digest: provenant_records::SourceDigest,
+    manifest_digest: provenant_records::FileDigest,
+    asset_digest: provenant_records::SourceDigest,
+    target: String,
+    toolchain: String,
+    bin_dir: provenant_records::AbsolutePath,
+    harnesses: Vec<provenant_records::Harness>,
+    harness_targets: Vec<V1Target>,
+    entries: Vec<provenant_records::OwnedEntry>,
+}
+
+#[derive(Deserialize)]
+struct V1Target {
+    harness: provenant_records::Harness,
+    skills_dir: provenant_records::AbsolutePath,
+    mcp_file: provenant_records::AbsolutePath,
+    hook_file: Option<provenant_records::AbsolutePath>,
+    instruction: Option<provenant_records::AbsolutePath>,
+    #[serde(default)]
+    hooks_relinquished: bool,
+}
+
+fn transfer_receipt(path: &Path) -> io::Result<()> {
+    let old: V1Receipt = provenant_records::decode_v1(
+        std::fs::File::open(path)?,
+        provenant_records::Limits::CONFIG,
+    )
+    .map_err(io::Error::other)?;
+    let receipt = provenant_records::InstallReceipt {
+        extra: Default::default(),
+        schema_version: 1,
+        state_format_version: provenant_records::STATE_FORMAT_VERSION,
+        source_digest: old.source_digest,
+        manifest_digest: old.manifest_digest,
+        asset_digest: old.asset_digest,
+        target: old.target,
+        toolchain: old.toolchain,
+        bin_dir: old.bin_dir,
+        harnesses: old.harnesses,
+        harness_targets: old
+            .harness_targets
+            .into_iter()
+            .map(|target| provenant_records::ResolvedHarnessTarget {
+                extra: Default::default(),
+                harness: target.harness,
+                skills_dir: target.skills_dir,
+                config_file: target.mcp_file,
+                hook_file: target.hook_file,
+                instruction: target.instruction,
+                hooks_relinquished: target.hooks_relinquished,
+            })
+            .collect(),
+        entries: old
+            .entries
+            .into_iter()
+            .filter(|entry| {
+                !matches!(
+                    entry.selector.as_str(),
+                    "toml:mcp_servers.fabric"
+                        | "json:/mcp/fabric"
+                        | "json:/mcpServers/fabric"
+                        | "disk-guard-agent"
+                        | "gc-agent"
+                )
+            })
+            .collect(),
+    };
+    std::fs::write(
+        path,
+        provenant_records::encode(&receipt).map_err(io::Error::other)?,
+    )
+}
+
+/// Validate the staged bytes with their runtime owners before stopping anything.
+/// Config remains TOML at the same schema version; host-id remains 32 hex bytes.
+/// Neither needs a legacy codec. Invalid input is a preflight error.
+fn validate_stage(plan: &Handoff, stage: &Path) -> io::Result<()> {
+    let home = provenant_core::default_state_home(&plan.to)
+        .ok_or_else(|| io::Error::other("handoff destination is not the default root"))?;
+    let mut inputs = provenant_core::RootInputs::new(home.to_path_buf(), home.to_path_buf());
+    inputs.state_dir = Some(stage.to_path_buf());
+    let roots = inputs
+        .resolve(&provenant_os::fs::SystemPathResolver)
+        .map_err(io::Error::other)?;
+    provenant_config::config_show(&roots, &provenant_cli::domains::SECTIONS)
+        .map_err(io::Error::other)?;
+    provenant_config::lookup_host(&roots).map_err(io::Error::other)?;
+    let targets = provenant_config::Targets::new(roots, home, &[]);
+    // This invokes the complete install ownership validator, including selectors.
+    provenant_config::installed_binary(&targets).map_err(io::Error::other)?;
+    Ok(())
+}
+
+/// Read, transform, validate and durably stage every input before stopping the
+/// agents. A preflight failure stops nothing. A failed stop publishes nothing.
+/// Nothing under `plan.from` is written.
 pub(crate) fn run(
     plan: &Handoff,
     stop_agents: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<Handoff> {
-    stop_agents()?;
-    copy(plan)
-}
-
-/// Builds the new root beside it and renames it into place, so the root is
-/// either absent or complete. Nothing under `plan.from` is written.
-fn copy(plan: &Handoff) -> io::Result<Handoff> {
     let parent = plan
         .to
         .parent()
@@ -152,16 +243,9 @@ fn copy(plan: &Handoff) -> io::Result<Handoff> {
             // Keeps the mode, which the receipt and host identity readers check.
             std::fs::copy(plan.from.join(file), &target)?;
             if file == Path::new("install/receipt.json") {
-                let mut receipt: provenant_records::InstallReceipt = provenant_records::decode(
-                    std::fs::File::open(&target)?,
-                    provenant_records::Limits::default(),
-                )
-                .map_err(io::Error::other)?;
-                receipt.state_format_version = provenant_records::STATE_FORMAT_VERSION;
-                std::fs::write(
-                    &target,
-                    provenant_records::encode(&receipt).map_err(io::Error::other)?,
-                )?;
+                transfer_receipt(&target).map_err(|error| {
+                    io::Error::other(format!("handoff install/receipt.json: {error}"))
+                })?;
             }
             std::fs::File::open(&target)?.sync_all()?;
         }
@@ -172,6 +256,17 @@ fn copy(plan: &Handoff) -> io::Result<Handoff> {
         ) {
             std::fs::File::open(directory)?.sync_all()?;
         }
+        validate_stage(plan, &stage).map_err(|error| {
+            io::Error::other(format!(
+                "handoff preflight failed; agents left running: {error}"
+            ))
+        })?;
+        if !absent_or_empty(&plan.to)? {
+            return Err(io::Error::other(
+                "handoff destination gained entries; agents left running",
+            ));
+        }
+        stop_agents()?;
         // Replaces only an absent or empty root; a root that gained entries
         // since the plan refuses with ENOTEMPTY and keeps them.
         std::fs::rename(&stage, &plan.to)
@@ -232,24 +327,16 @@ mod tests {
         std::fs::create_dir_all(legacy.join("runs/run"))?;
         std::fs::write(legacy.join("config.toml"), b"schema_version = 1\n")?;
         std::fs::write(legacy.join("host-id"), [b'a'; 32])?;
-        let receipt = provenant_records::InstallReceipt {
-            extra: Default::default(),
-            schema_version: 1,
-            state_format_version: 1,
-            source_digest: provenant_records::SourceDigest::from_bytes([1; 32]),
-            manifest_digest: provenant_records::FileDigest::from_bytes([2; 32]),
-            asset_digest: provenant_records::SourceDigest::from_bytes([3; 32]),
-            target: "fixture".into(),
-            toolchain: "fixture".into(),
-            bin_dir: provenant_records::AbsolutePath::new(&home.join("bin"))?,
-            harnesses: vec![],
-            harness_targets: vec![],
-            entries: vec![],
-        };
-        std::fs::write(
-            legacy.join("install/receipt.json"),
-            provenant_records::encode(&receipt)?,
-        )?;
+        // Shape from v1.11.2 crates/records/src/install.rs, including mcp_file.
+        let fixture = include_str!("../tests/fixtures/install/v1-receipt.json").replace(
+            "fixture/home",
+            home.strip_prefix("/")?.to_str().ok_or("UTF-8 home")?,
+        );
+        std::fs::write(legacy.join("install/receipt.json"), fixture)?;
+        use std::os::unix::fs::PermissionsExt;
+        for file in ["host-id", "install/receipt.json"] {
+            std::fs::set_permissions(legacy.join(file), std::fs::Permissions::from_mode(0o600))?;
+        }
         std::fs::write(legacy.join("run.sqlite3"), b"run state")?;
         std::fs::write(legacy.join("runs/run/result.md"), b"result")?;
         Ok((
@@ -284,20 +371,62 @@ mod tests {
             assert!(OWNER_FILES.iter().any(|name| Path::new(name) == path));
             if path == Path::new("install/receipt.json") {
                 let copied: provenant_records::InstallReceipt = serde_json::from_slice(&bytes)?;
-                let mut original: provenant_records::InstallReceipt =
+                let original: serde_json::Value =
                     serde_json::from_slice(&std::fs::read(legacy.join(&path))?)?;
                 assert_eq!(
                     copied.state_format_version,
                     provenant_records::STATE_FORMAT_VERSION
                 );
-                original.state_format_version = copied.state_format_version;
-                assert_eq!(copied, original);
+                assert_eq!(
+                    copied.harness_targets[0].config_file,
+                    serde_json::from_value(original["harness_targets"][0]["mcp_file"].clone())?
+                );
+                assert!(
+                    copied
+                        .entries
+                        .iter()
+                        .any(|entry| entry.selector == "binary")
+                );
+                assert!(
+                    !copied
+                        .entries
+                        .iter()
+                        .any(|entry| entry.selector == "json:/mcpServers/fabric")
+                );
             } else {
                 assert_eq!(bytes, std::fs::read(legacy.join(&path))?);
             }
         }
         // An existing root is left alone: a second install copies nothing.
         assert!(super::plan(&state, &home)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_owner_input_never_stops_agents_or_publishes_state() -> Result {
+        for (file, invalid) in [
+            ("config.toml", "not valid TOML ["),
+            ("host-id", "invalid host identity"),
+            ("install/receipt.json", "{}"),
+            ("install/receipt.json", "invalid JSON"),
+        ] {
+            let (_temp, home, state) = legacy_home()?;
+            let legacy = home.join(provenant_core::LEGACY_V1_STATE_SUFFIX);
+            std::fs::write(legacy.join(file), invalid)?;
+            let before = tree(&legacy)?;
+            let plan = plan(&state, &home)?.ok_or("hand-off planned")?;
+            let mut stopped = false;
+            assert!(
+                run(&plan, || {
+                    stopped = true;
+                    Ok(())
+                })
+                .is_err()
+            );
+            assert!(!stopped);
+            assert!(!state.exists());
+            assert_eq!(tree(&legacy)?, before);
+        }
         Ok(())
     }
 
