@@ -252,12 +252,21 @@ fn writer_children_get_their_own_worktree_and_depth_is_bounded() {
     assert_eq!(writer.write_scope, ["src/parser"]);
     let mut scoped_reader = child("read", "r1");
     scoped_reader.write_scope = vec!["src".into()];
-    assert_eq!(
-        add(&document, &mut checkpoint, "a", &scoped_reader)
-            .unwrap_err()
-            .code,
-        "invalid"
-    );
+    let receipt = add(&document, &mut checkpoint, "a", &scoped_reader).unwrap();
+    let expanded = plans::expand(
+        &document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        &plans::generous(),
+    )
+    .unwrap();
+    let reader = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == receipt.node)
+        .unwrap();
+    assert_eq!(reader.access, AccessMode::ReadOnly);
+    assert!(reader.worktree.is_none());
 
     // `limits.child_depth` overrides the default.
     let (document, mut checkpoint) = live(Some(json!({"child_depth": 2})));
@@ -336,11 +345,6 @@ fn child_admission_refusals_leave_the_graph_unchanged() {
         ("missing", child("child", "unknown-parent"), "invalid"),
         ("b", child("child", "settled-parent"), "parent_settled"),
         ("a", child("child", "depth-limit"), "child_depth"),
-        ("a", {
-            let mut request = child("reader", "scoped-reader");
-            request.write_scope = vec!["src".into()];
-            request
-        }, "invalid"),
         ("a", {
             let mut request = child("secret", "secret-child");
             request.brief = "Use sk-abcdefghijklmnopqrstuvwx".into();

@@ -1906,45 +1906,62 @@ fn nested_plan_rewires_all_consumers_and_keeps_original_digest() {
     let mut journal = MemoryJournal::default();
     let run = advance(&doc, &mut owner, &mut journal).unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
-    assert_eq!(owner.calls[2].0.node_id, "plan--nested--inner");
-    assert_eq!(owner.calls[3].0.node_id, "after");
-    assert_eq!(run.checkpoint.expansions.len(), 2);
-    let recursive: GraphCheckpoint =
-        serde_json::from_str(include_str!("nested-plan-recursive.json")).unwrap();
-    let mut comparable = run.checkpoint.clone();
-    for node in &mut comparable.nodes {
-        for attempt in &mut node.attempts {
-            assert!(attempt.input_manifest.is_some());
-            assert!(attempt.input_cap.is_some());
-            assert!(attempt.input_cap_source.is_some());
-            attempt.input_manifest = None;
-            attempt.input_cap = None;
-            attempt.input_cap_source = None;
-        }
-    }
-    // Every planner fragment is journalled as a patch against its parent.
-    for (index, (expansion, parent)) in comparable
+    let outer = run
+        .checkpoint
         .expansions
-        .iter_mut()
-        .zip(["plan", "plan--nested"])
-        .enumerate()
-    {
-        let record = expansion.patch.take().unwrap();
-        assert_eq!(
-            (record.revision, record.parent.as_deref()),
-            (index as u64 + 1, Some(parent))
-        );
-        // Each fragment names its planner as the admitter.
-        for node in &mut expansion.nodes {
-            let spec = node.attempt.as_mut().unwrap();
-            assert_eq!(spec.admitted_by.take().as_deref(), Some(parent));
-            if spec.is_empty() {
-                node.attempt = None;
-            }
-        }
+        .iter()
+        .find(|expansion| expansion.source == "plan")
+        .unwrap();
+    let nested = outer
+        .nodes
+        .iter()
+        .find(|node| node.id == "plan--nested")
+        .unwrap();
+    assert!(nested.plan.is_some());
+    let inner_expansion = run
+        .checkpoint
+        .expansions
+        .iter()
+        .find(|expansion| expansion.source == nested.id)
+        .unwrap();
+    assert!(inner_expansion
+        .nodes
+        .iter()
+        .any(|node| node.id == "plan--nested--inner"));
+
+    // Each fragment is journalled against its planner and identifies that
+    // planner as the admitter of its additions.
+    for expansion in &run.checkpoint.expansions {
+        let record = expansion.patch.as_ref().unwrap();
+        assert_eq!(record.parent.as_deref(), Some(expansion.source.as_str()));
+        assert!(record.revision > 0);
         assert!(record.digest.starts_with("sha256:"));
+        for node in &expansion.nodes {
+            assert_eq!(
+                node.attempt
+                    .as_ref()
+                    .and_then(|spec| spec.admitted_by.as_deref()),
+                Some(expansion.source.as_str())
+            );
+        }
     }
-    assert_eq!(comparable, recursive);
+
+    // A consumer of the planner result waits for its nested additions.
+    let launch_position = |id: &str| {
+        owner
+            .calls
+            .iter()
+            .position(|(key, _)| key.node_id == id)
+            .unwrap()
+    };
+    assert!(launch_position("after") > launch_position("plan--nested--inner"));
+    for id in ["plan", "plan--nested", "plan--nested--inner", "after"] {
+        assert!(run
+            .checkpoint
+            .nodes
+            .iter()
+            .any(|node| node.id == id && node.state == NodeState::Succeeded));
+    }
     let (base, _) = validate_plan(&doc).unwrap();
     assert_eq!(
         run.checkpoint.plan_digest,

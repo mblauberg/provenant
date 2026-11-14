@@ -309,6 +309,7 @@ mod tests {
             "state": {"state":"running"},
             "usage": {},
             "read_only_writable": [],
+            "protected_paths": [], "trace": {},
             "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"},"digest":CanonicalV1::file_digest(b""),"bytes":0,"complete":true,"redacted":false}
         }))
         .unwrap()

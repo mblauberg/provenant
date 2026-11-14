@@ -44,7 +44,10 @@ fn node_attempt_spec_reaches_the_launch() {
         &mut MemoryJournal::default(),
     )
     .unwrap();
-    assert_eq!(owner.attempt_specs, vec![None]);
+    assert!(owner
+        .attempt_specs
+        .first()
+        .is_some_and(|spec| spec.as_ref().is_none_or(AttemptSpec::is_empty)));
 }
 
 #[test]

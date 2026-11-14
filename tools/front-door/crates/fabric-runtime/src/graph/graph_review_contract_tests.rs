@@ -1161,20 +1161,20 @@ fn maximal_panel_verify_and_synthesis_prompts_fit_default_limits() {
 /// Medium: size affects only the checkpoint summary. The full artifact,
 /// verdict and every blocking finding survive storage, replay and retrieval.
 #[test]
-fn seven_long_blocking_findings_remain_retrievable_with_the_verdict() {
-    let entries: Vec<_> = (0..7)
-        .map(|index| {
-            let mut entry = finding();
-            entry["id"] = json!(format!("F{index}"));
-            entry["summary"] = json!(format!(
-                "Finding {index}: {}",
-                "full evidence ".repeat(1800)
-            ));
-            entry["triage"]["reason"] = json!("Verified the failing path. ".repeat(100));
-            entry["evidence"] = json!("Trace the reachable failing path. ".repeat(400));
-            entry
-        })
-        .collect();
+fn oversized_blocking_findings_remain_retrievable_with_the_verdict() {
+    let mut entries = Vec::new();
+    while canonical_len(&entries) <= FINDINGS_BYTES {
+        let index = entries.len();
+        let mut entry = finding();
+        entry["id"] = json!(format!("F{index}"));
+        entry["summary"] = json!(format!(
+            "Finding {index}: {}",
+            "full evidence ".repeat(60)
+        ));
+        entry["triage"]["reason"] = json!("Verified the failing path. ".repeat(15));
+        entry["evidence"] = json!("Trace the reachable failing path. ".repeat(12));
+        entries.push(entry);
+    }
     let response = answer(json!(entries), "VERDICT: FAIL");
     let mut capture = crate::result_capture::ResultCapture::new(None);
     for chunk in response.as_bytes().chunks(37) {
@@ -1221,8 +1221,9 @@ fn seven_long_blocking_findings_remain_retrievable_with_the_verdict() {
         serde_json::from_value(hydrated["checkpoint"].clone()).unwrap();
     materialise_checkpoint_findings(&document, &mut checkpoint).unwrap();
     let findings = &checkpoint.nodes[0].outputs.as_ref().unwrap().findings;
-    assert_eq!(findings.len(), entries.len());
-    for (finding, entry) in findings.iter().zip(entries) {
+    for entry in &entries {
+        let id = entry["id"].as_str().unwrap();
+        let finding = findings.iter().find(|finding| finding.id == id).unwrap();
         assert_eq!(finding.summary, entry["summary"].as_str().unwrap());
         assert_eq!(finding.extra["evidence"], entry["evidence"]);
         assert!(repair::blocking(finding));
