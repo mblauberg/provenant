@@ -42,8 +42,18 @@ pub enum PermissionError {
     BroadRoot,
     #[error("credential root requires a selected fixture-backed mechanism")]
     CredentialRoot,
-    #[error("credential root guard refused {path}: {guard}")]
-    CredentialRootAt { path: String, guard: &'static str },
+    #[error("credential root guard refused {path}: {guard} (source: {declaration_source})")]
+    CredentialRootAt {
+        path: String,
+        guard: &'static str,
+        declaration_source: String,
+    },
+    #[error("credential grant at {path} overlaps {root} (source: {declaration_source})")]
+    CredentialStore {
+        path: PathBuf,
+        root: PathBuf,
+        declaration_source: String,
+    },
     #[error("credential root refused for {access} grant at {}", .path.display())]
     CredentialGrant { path: PathBuf, access: &'static str },
     #[error("permission root overlaps a protected path")]
@@ -120,9 +130,10 @@ impl PermissionError {
         use provenant_records::diagnostic::BoundaryClass as B;
         match self {
             Self::ConfigOrigin { source, .. } => source.boundary_class(),
-            Self::CredentialRoot | Self::CredentialRootAt { .. } | Self::CredentialGrant { .. } => {
-                B::Credentials
-            }
+            Self::CredentialRoot
+            | Self::CredentialRootAt { .. }
+            | Self::CredentialGrant { .. }
+            | Self::CredentialStore { .. } => B::Credentials,
             Self::GitControlEntriesExceeded { .. } => B::Integrity,
             Self::GitControlHardLinked(_)
             | Self::GitWriteAuthorityMissing
@@ -167,15 +178,22 @@ impl PermissionError {
     /// Add the refused path to a credential guard error.
     pub fn with_credential_path(self, path: &Path, home: Option<&Path>) -> Self {
         if matches!(self, Self::CredentialRoot) {
-            let env_home = std::env::var_os("HOME").map(PathBuf::from);
-            Self::credential_root_at(path, home.or(env_home.as_deref()))
+            Self::credential_root_at(path, home, "declared credential root")
         } else {
             self
         }
     }
 
+    pub fn credential_store(path: &Path, root: &provenant_core::CredentialRoot) -> Self {
+        Self::CredentialStore {
+            path: path.to_owned(),
+            root: root.path.clone(),
+            declaration_source: root.source.clone(),
+        }
+    }
+
     /// Preserve the requested path and identify the guard in user-facing refusals.
-    pub fn credential_root_at(path: &Path, home: Option<&Path>) -> Self {
+    pub fn credential_root_at(path: &Path, home: Option<&Path>, source: impl Into<String>) -> Self {
         let path = home
             .and_then(|home| path.strip_prefix(home).ok())
             .map(|relative| {
@@ -189,6 +207,7 @@ impl PermissionError {
         Self::CredentialRootAt {
             path,
             guard: "credential root",
+            declaration_source: source.into(),
         }
     }
 }
@@ -374,11 +393,12 @@ impl WorktreeWriteAuthority {
         worktree: &VerifiedWorktree,
         selected_ref: &GitRefName,
         home: &Path,
+        credentials: &provenant_core::CredentialRoots,
     ) -> Result<Self, PermissionError> {
         worktree.repo().revalidate()?;
         let grants = WorktreeWriteGrants::derive(worktree, selected_ref);
-        grants.validate()?;
-        let cargo_cache = worktree_cargo_cache(home, worktree)?;
+        grants.validate(credentials)?;
+        let cargo_cache = worktree_cargo_cache(home, worktree, credentials)?;
         Ok(Self {
             git_grants_digest: grants.digest(&cargo_cache),
             cargo_cache,
@@ -390,6 +410,8 @@ impl WorktreeWriteAuthority {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlanPermissions {
+    /// Complete host-declared credential boundaries for every grant check.
+    pub credential_roots: provenant_core::CredentialRoots,
     /// Host-resolved ambient policy; never decoded from lane input.
     pub policy: Option<LanePolicy>,
     pub read_only: Option<crate::plan::ReadOnlyGrants>,

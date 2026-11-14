@@ -485,7 +485,7 @@ adapter_specs! { $;
             suffix: "skills",
         }),
         skill_install_roots: SKILL_INSTALL_ROOTS,
-        default_account_directory: Some(("CODEX_HOME", ".codex")),
+        default_account_directory: Some(provenant_core::CODEX_ACCOUNT_DIRECTORY),
         registered_account: true,
         account_config_dir: true,
         account_directory_prefix: None,

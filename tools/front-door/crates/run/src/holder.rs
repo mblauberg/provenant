@@ -1,7 +1,6 @@
 //! The attempt holder: Run's admission and terminal transaction, composed into
 //! the same-binary guardian. It runs while the guardian still holds custody.
 use crate::{artifacts::read_sealed, launch::Providers, *};
-use provenant_confinement::permissions::PathGrant;
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, ProjectId, RootInputs};
 use provenant_os::{clock::SystemClock, exec::Termination, fs::Directory};
 use provenant_supervisor::{
@@ -155,7 +154,7 @@ pub struct HostLaunchContext {
     /// Host-resolved relocated credential stores, inherited unchanged by children.
     /// Required on the handoff pipe: an older host must not silently omit the
     /// inventory needed by the ambient renderer.
-    pub credential_roots: Vec<PathGrant>,
+    pub credential_roots: Vec<provenant_core::CredentialRoot>,
     pub github_roots: Vec<PathBuf>,
     /// Trusted path overrides needed to select the same host authentication
     /// mechanism after the guardian clears its process environment.
@@ -195,7 +194,7 @@ impl HostLaunchContext {
     pub fn github_roots() -> Vec<PathBuf> {
         provenant_confinement::permissions::host_github_roots(|name| std::env::var_os(name))
     }
-    pub fn credential_roots() -> Vec<PathGrant> {
+    pub fn credential_roots() -> Vec<provenant_core::CredentialRoot> {
         provenant_confinement::permissions::host_credential_roots(|name| std::env::var_os(name))
     }
     pub fn default_account_directories() -> std::collections::BTreeMap<String, PathBuf> {
@@ -2936,20 +2935,21 @@ mod host_clock_tests {
 
     #[test]
     fn credential_environment_seals_an_exact_ssh_agent_socket() {
-        use provenant_confinement::permissions::{PathScope, host_credential_roots};
+        use provenant_confinement::permissions::host_credential_roots;
+        use provenant_core::CredentialScope;
         let roots = host_credential_roots(|name| match name {
             "SSH_AUTH_SOCK" => Some("/private/tmp/fixture-agent/socket".into()),
             "XDG_CONFIG_HOME" => Some("/fixture/config".into()),
             _ => None,
         });
-        assert!(roots.contains(&PathGrant {
-            path: "/private/tmp/fixture-agent/socket".into(),
-            scope: PathScope::Exact
-        }));
-        assert!(roots.contains(&PathGrant {
-            path: "/fixture/config/opencode".into(),
-            scope: PathScope::Subtree
-        }));
+        for (path, scope) in [
+            ("/private/tmp/fixture-agent/socket", CredentialScope::Exact),
+            ("/fixture/config/opencode", CredentialScope::Subtree),
+        ] {
+            assert!(roots.iter().any(|root| root.path == Path::new(path)
+                && root.scope == scope
+                && !root.source.is_empty()));
+        }
         assert!(
             !roots
                 .iter()

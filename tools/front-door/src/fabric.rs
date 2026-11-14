@@ -162,6 +162,24 @@ pub(crate) struct Factory {
     pub(crate) workers: &'static dyn WorkerObserver,
 }
 impl Factory {
+    /// Freeze the same declared credential inventory used by provider preparation.
+    fn credential_roots(&self) -> Result<provenant_core::CredentialRoots, FacadeError> {
+        provenant_cli::run::declared_credentials(&provenant_cli::run::Registry {
+            roots: Some(&self.context.roots),
+            home: Some(&self.home),
+            assets: Some(&self.assets),
+            cwd: Some(&self.cwd),
+            state_root: Some(self.context.roots.state.as_path()),
+            host: self.host_launch.as_ref(),
+            ..Default::default()
+        })
+        .map_err(|reason| FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason,
+        })
+    }
+
     /// Resolve against the selected checkout with this command's caps. The
     /// read-only resolver preserves separate Git directories, bare-linked
     /// checkouts and native alternates without granting mutation authority.

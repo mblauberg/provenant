@@ -115,7 +115,7 @@ fn bind_child_directory(
     grants: &mut provenant_records::run::LaneAccess,
     directory: &str,
     state: &Path,
-    home: &Path,
+    credentials: &provenant_core::CredentialRoots,
     network: Option<provenant_cli::Switch>,
 ) -> Result<(), FacadeError> {
     let directory = PathBuf::from(directory);
@@ -136,7 +136,7 @@ fn bind_child_directory(
             no_capability: Vec::new(),
         },
         state,
-        home,
+        credentials,
     )
     .map_err(dispatch_refused)?;
     let source = checked
@@ -185,7 +185,7 @@ fn selected_writer_project(
             .to_str()
             .ok_or(FacadeError::InvalidInput { detail: None })?,
         factory.context.roots.state.as_path(),
-        &factory.home,
+        &factory.credential_roots()?,
         None,
     )?;
     let directory = checked.source_root.ok_or(FacadeError::StateCorrupt)?;
@@ -3416,7 +3416,7 @@ impl BoundGraphOwner<'_> {
                         no_capability: Vec::new(),
                     },
                     self.factory.context.roots.state.as_path(),
-                    &self.factory.home,
+                    &self.factory.credential_roots()?,
                 )
                 .map_err(dispatch_refused)?;
                 if !capabilities.is_empty() {
@@ -3441,7 +3441,7 @@ impl BoundGraphOwner<'_> {
                         &mut grants,
                         directory,
                         self.factory.context.roots.state.as_path(),
-                        &self.factory.home,
+                        &self.factory.credential_roots()?,
                         self.network,
                     )?;
                 }
@@ -4250,11 +4250,12 @@ mod journal_error_tests {
             std::fs::create_dir_all(path)?;
         }
         let mut grants = provenant_records::run::LaneAccess::default();
+        let declared = provenant_core::CredentialRoots::for_home(&home);
         bind_child_directory(
             &mut grants,
             scratch.to_str().ok_or("scratch")?,
             &state,
-            &home,
+            &declared,
             None,
         )?;
         assert_eq!(
@@ -4268,7 +4269,7 @@ mod journal_error_tests {
                     &mut grants,
                     path.to_str().ok_or("root")?,
                     &state,
-                    &home,
+                    &declared,
                     None
                 )
                 .is_err()

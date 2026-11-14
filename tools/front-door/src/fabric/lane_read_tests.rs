@@ -678,7 +678,12 @@ fn native_lane(
             .values()
             .flat_map(|entry| std::iter::once(&entry.directory).chain(&entry.directories))
             .filter(|path| path.as_path() != rig.home)
-            .map(|path| grant(path.clone(), PathScope::Subtree)),
+            .map(|path| provenant_core::CredentialRoot {
+                path: path.clone(),
+                scope: provenant_core::CredentialScope::Subtree,
+                source: "account registry fixture".into(),
+                kind: provenant_core::CredentialKind::Store,
+            }),
     );
     let github: Vec<_> = host_github_roots(lookup)
         .into_iter()
@@ -690,6 +695,7 @@ fn native_lane(
         .policy_for_launch(roots.state.as_path(), mandatory);
     policy.resolve_optional_aliases(resolve_boundary_path)?;
     let plan = PlanPermissions {
+        credential_roots: policy.mandatory().credential_roots().clone(),
         policy: Some(policy),
         read_only: None,
         mode: AccessMode::ReadOnly,

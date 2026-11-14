@@ -605,6 +605,21 @@ impl RunError {
                     ))
                     .fact(DiagnosticFact::CredentialGrant { access });
             }
+            Self::Confinement(PermissionError::CredentialStore {
+                path,
+                root,
+                declaration_source,
+            }) => {
+                let overlap = match (safe_path(path, destination), safe_path(root, destination)) {
+                    (Some(path), Some(root)) => {
+                        format!("credential grant at {path} overlaps {root}")
+                    }
+                    _ => "credential grant overlaps a declared store".into(),
+                };
+                diagnostic = diagnostic
+                    .detail(format!("{overlap} (source: {declaration_source})"))
+                    .next("select a root clear of the declared credential store");
+            }
             Self::Confinement(error) => {
                 if let Some(fact) = error.resource_fact() {
                     diagnostic = fact

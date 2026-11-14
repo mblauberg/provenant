@@ -180,7 +180,7 @@ fn explicit_write_root_keeps_read_only_git_authority() -> Result<(), Box<dyn std
             cwd: &source,
             home: &root,
             state: Path::new("/fixture-host-state"),
-            credential_roots: &[],
+            credential_roots: &provenant_core::CredentialRoots::default(),
             github_roots: &[],
             protected_worktrees: &[],
             scratch: &root,
@@ -211,6 +211,13 @@ fn launch_policy_binds_mandatory_aliases_and_all_network_ceilings()
     let relocated = root.join("relocated-identity");
     let gh = root.join("relocated-gh");
     let credential_target = root.join("credential-target");
+    let mut credential_roots = provenant_core::CredentialRoots::for_home(&home);
+    credential_roots.add(
+        relocated.clone(),
+        provenant_core::CredentialScope::Subtree,
+        "fixture relocated account",
+        provenant_core::CredentialKind::Store,
+    );
     for path in [&home, &source, &state, &relocated, &gh, &credential_target] {
         std::fs::create_dir(path)?;
     }
@@ -247,7 +254,7 @@ fn launch_policy_binds_mandatory_aliases_and_all_network_ceilings()
                     cwd: &source,
                     home: &home,
                     state: &state,
-                    credential_roots: &[subtree(&relocated)],
+                    credential_roots: &credential_roots,
                     github_roots: &[subtree(&gh)],
                     protected_worktrees: &[],
                     scratch: &root.join("scratch"),
@@ -327,13 +334,17 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         "/usr/bin/git".into(),
     );
     host.credential_roots = vec![
-        PathGrant {
+        provenant_core::CredentialRoot {
             path: root.join("relocated-xdg/opencode"),
-            scope: PathScope::Subtree,
+            scope: provenant_core::CredentialScope::Subtree,
+            source: "fixture XDG_DATA_HOME".into(),
+            kind: provenant_core::CredentialKind::Store,
         },
-        PathGrant {
+        provenant_core::CredentialRoot {
             path: root.join("agent/socket"),
-            scope: PathScope::Exact,
+            scope: provenant_core::CredentialScope::Exact,
+            source: "fixture SSH_AUTH_SOCK".into(),
+            kind: provenant_core::CredentialKind::Store,
         },
     ];
     host.default_account_directories = [("codex".into(), root.join("default-codex"))].into();
@@ -350,12 +361,13 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         ..Default::default()
     };
     let inventory = credential_roots(&registry, &home, &settings)?;
-    assert!(inventory.contains(&PathGrant {
-        path: root.join("agent/socket"),
-        scope: PathScope::Exact
+    assert!(inventory.entries().iter().any(|entry| {
+        entry.path == root.join("agent/socket")
+            && entry.scope == provenant_core::CredentialScope::Exact
     }));
     assert!(
         !inventory
+            .entries()
             .iter()
             .any(|entry| entry.path == root.join("agent"))
     );
@@ -365,7 +377,7 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         root.join("default-codex"),
         root.join("relocated-xdg/opencode"),
     ] {
-        assert!(inventory.iter().any(|root| root.path == path));
+        assert!(inventory.entries().iter().any(|root| root.path == path));
     }
     assert_eq!(
         host_provider_var(&registry, "XDG_DATA_HOME"),
@@ -508,7 +520,7 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
             cwd: &source,
             home: &home,
             state: &state,
-            credential_roots: &[],
+            credential_roots: &provenant_core::CredentialRoots::default(),
             github_roots: &[],
             protected_worktrees: &protected,
             scratch: &root.join("scratch"),
@@ -593,7 +605,7 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
             cwd: &cwd,
             home: &home,
             state: &state,
-            credential_roots: &[],
+            credential_roots: &provenant_core::CredentialRoots::default(),
             github_roots: &[],
             protected_worktrees: &[],
             scratch: &scratch,
@@ -633,6 +645,7 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
     let prompt = Prompt::new("describe".into());
     let launch_policy = provenant_records::policy::Policy::default();
     let launch = provenant_providers::codex::Codex.prepare(PrepareInput {
+        credential_roots: plan.permissions().credential_roots.clone(),
         images: &access.attachments,
         policy: &launch_policy,
         command: None,
@@ -701,7 +714,7 @@ fn attachment_read_grant_is_exact() -> Result<(), Box<dyn std::error::Error>> {
             cwd: &cwd,
             home: &home,
             state: &state,
-            credential_roots: &[],
+            credential_roots: &provenant_core::CredentialRoots::default(),
             github_roots: &[],
             protected_worktrees: &[],
             scratch: &scratch,
@@ -757,7 +770,7 @@ fn lane_plan_reads_the_active_release_root() -> Result<(), Box<dyn std::error::E
                 cwd: &cwd,
                 home: &home,
                 state: &state,
-                credential_roots: &[],
+                credential_roots: &provenant_core::CredentialRoots::default(),
                 github_roots: &[],
                 protected_worktrees: &[],
                 scratch: &scratch,
@@ -1231,8 +1244,11 @@ fn live_child_source_uses_its_selected_directory_and_rechecks_authority()
     for path in [&home, &state, &project, &scratch] {
         std::fs::create_dir(path)?;
     }
+    let mut root_input = provenant_core::RootInputs::new(home.clone(), project.clone());
+    root_input.state_dir = Some(state.clone());
+    let roots = root_input.resolve(&provenant_os::fs::SystemPathResolver)?;
     let registry = Registry {
-        roots: None,
+        roots: Some(&roots),
         home: Some(&home),
         assets: None,
         cwd: Some(&project),
@@ -1270,6 +1286,137 @@ fn live_child_source_uses_its_selected_directory_and_rechecks_authority()
         denied.access.source_identity = Some(source_identity(root)?);
         assert!(source_cwd(&registry, &denied).is_err());
     }
+    Ok(())
+}
+
+#[test]
+fn source_cwd_matches_declared_admission_for_registered_worktree_locations()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{AttemptId, WallTime};
+    use provenant_os::exec::{ExecOptions, Executor, Termination};
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let state = base.join("state");
+    let project = base.join("repo");
+    let git_home = base.join("git-home");
+    for directory in [&home, &state, &project, &git_home] {
+        std::fs::create_dir(directory)?;
+    }
+    let executor = provenant_os::exec::SystemExecutor::new(1)?;
+    let git = init_fixture_repository(&executor, &project, &git_home)?;
+    std::fs::write(project.join("subject"), "registered source")?;
+    for args in [vec!["add", "subject"], vec!["commit", "-qm", "subject"]] {
+        let argv: Vec<std::ffi::OsString> = std::iter::once(git.clone().into_os_string())
+            .chain(args.into_iter().map(Into::into))
+            .collect();
+        let env = provenant_os::fixture::git_env();
+        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
+        options.env = Some(&env);
+        assert_eq!(executor.execute(options)?.termination, Termination::Exit(0));
+    }
+    let head = run::resolve_git_base(&git, &project, "HEAD")?;
+    let mut input = provenant_core::RootInputs::new(home.clone(), project.clone());
+    input.state_dir = Some(state.clone());
+    let roots = input.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let registry = Registry {
+        roots: Some(&roots),
+        home: Some(&home),
+        cwd: Some(&project),
+        state_root: Some(&state),
+        ..Default::default()
+    };
+    let credentials = crate::run::declared_credentials(&registry)?;
+    let mut task = super::super::tests::trace_run(
+        50,
+        AttemptId::from_bytes([81; 16]),
+        WallTime::from_micros(200)?,
+    )?
+    .request
+    .task;
+    task.writer = None;
+    task.head = Some(head.clone());
+    task.base = Some(head.clone());
+    task.access.source_live = false;
+
+    for source in [
+        project.join(".worktrees/x"),
+        project.join(".claude/worktrees/x"),
+        base.join("outside-worktree"),
+    ] {
+        std::fs::create_dir_all(source.parent().ok_or("worktree parent")?)?;
+        let argv: Vec<std::ffi::OsString> = [
+            git.clone().into_os_string(),
+            "worktree".into(),
+            "add".into(),
+            "--detach".into(),
+            "-q".into(),
+            source.clone().into_os_string(),
+            head.clone().into(),
+        ]
+        .into();
+        let env = provenant_os::fixture::git_env();
+        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
+        options.env = Some(&env);
+        assert_eq!(executor.execute(options)?.termination, Termination::Exit(0));
+
+        task.access.source_root = Some(source.clone());
+        task.access.source_identity = Some(source_identity(&source)?);
+        let admission = crate::run::admit_source_root(
+            &project,
+            &state,
+            &source,
+            &credentials,
+            crate::run::SourceAdmissionMode::Registered,
+        )?;
+        let prepared = source_cwd(&registry, &task)?;
+        assert_eq!(prepared, admission.path);
+        assert!(
+            !admission
+                .warnings
+                .iter()
+                .any(|warning| { warning.source.contains("credential root") })
+        );
+        if source.ends_with(".claude/worktrees/x") {
+            assert!(admission.warnings.iter().any(|warning| {
+                warning.path == project.join(".claude")
+                    && warning.source == "project-local agent configuration (.claude)"
+            }));
+        }
+    }
+
+    let protected = home.join(".ssh/worktree");
+    std::fs::create_dir_all(protected.parent().ok_or("credential parent")?)?;
+    let argv: Vec<std::ffi::OsString> = [
+        git.clone().into_os_string(),
+        "worktree".into(),
+        "add".into(),
+        "--detach".into(),
+        "-q".into(),
+        protected.clone().into_os_string(),
+        head.clone().into(),
+    ]
+    .into();
+    let env = provenant_os::fixture::git_env();
+    let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
+    options.env = Some(&env);
+    assert_eq!(executor.execute(options)?.termination, Termination::Exit(0));
+    task.access.source_root = Some(protected.clone());
+    task.access.source_identity = Some(source_identity(&protected)?);
+    let admission = crate::run::admit_source_root(
+        &project,
+        &state,
+        &protected,
+        &credentials,
+        crate::run::SourceAdmissionMode::Registered,
+    )
+    .unwrap_err();
+    let prepared = source_cwd(&registry, &task).unwrap_err();
+    assert_eq!(admission.code, "CONFINEMENT_SOURCE_CWD_AUTHORITY");
+    assert_eq!(admission.reason, prepared.to_string());
+    assert!(admission.reason.contains("built-in secret store"));
     Ok(())
 }
 
@@ -1341,11 +1488,8 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         ..provenant_core::RootInputs::new(home.clone(), project.clone())
     }
     .resolve(&provenant_os::fs::SystemPathResolver)?;
-    let utility = provenant_confinement::UtilityRuntime::new(
-        &git,
-        &git_home,
-        roots.state.as_path(),
-    )?;
+    let utility =
+        provenant_confinement::UtilityRuntime::new(&git, &git_home, roots.state.as_path())?;
     let budget = provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))?;
     let cancel = provenant_core::CancelToken::new();
     let repo = utility.open_repo(&executor, &project, budget, &cancel)?;

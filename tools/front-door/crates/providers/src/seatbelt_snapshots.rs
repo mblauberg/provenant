@@ -607,6 +607,7 @@ fn agy_read_only_compiled_profile_denies_read_root_write() -> Result<(), Box<dyn
     let mut input = PrepareInput {
         executable: &executable,
         home: &root,
+        credential_roots: provenant_core::CredentialRoots::for_home(&root),
         account: Some(&account),
         ..fixture_input(&route, &plan, &prompt, &repo, None)
     };
@@ -775,6 +776,7 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
     let mut input = PrepareInput {
         executable: &executable,
         home: &root,
+        credential_roots: provenant_core::CredentialRoots::for_home(&root),
         account: Some(&account),
         git_context: true,
         ..fixture_input(&route, &plan, &prompt, &worktree, None)

@@ -3,7 +3,7 @@ use super::{
     MandatoryRoots, PathGrant, PathScope, PermissionError, profile_path_representable,
     resolve_boundary_path,
 };
-use provenant_core::Roots;
+use provenant_core::{CredentialKind, CredentialRoot, CredentialScope, Roots};
 use provenant_os::fs::Directory;
 use std::{
     ffi::{OsStr, OsString},
@@ -11,39 +11,58 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub fn host_credential_roots(lookup: impl Fn(&str) -> Option<OsString>) -> Vec<PathGrant> {
-    let subtree = |path| PathGrant {
-        path,
-        scope: PathScope::Subtree,
-    };
-    let mut roots: Vec<_> = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "GH_CONFIG_DIR"]
-        .into_iter()
-        .filter_map(&lookup)
-        .map(PathBuf::from)
-        .map(subtree)
-        .collect();
+pub fn host_credential_roots(lookup: impl Fn(&str) -> Option<OsString>) -> Vec<CredentialRoot> {
+    let mut roots = Vec::new();
+    for name in ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "GH_CONFIG_DIR"] {
+        if let Some(path) = lookup(name) {
+            roots.push(CredentialRoot {
+                path: PathBuf::from(path),
+                scope: CredentialScope::Subtree,
+                source: format!("provider environment: {name}"),
+                kind: CredentialKind::Store,
+            });
+        }
+    }
     if let Some(directory) = lookup("CLAUDE_CONFIG_DIR").map(PathBuf::from) {
-        roots.push(PathGrant {
+        roots.push(CredentialRoot {
             path: directory.with_extension("json"),
-            scope: PathScope::Exact,
+            scope: CredentialScope::Exact,
+            source: "provider environment: CLAUDE_CONFIG_DIR credential file".into(),
+            kind: CredentialKind::Store,
         });
     }
     if let Some(config) = lookup("XDG_CONFIG_HOME").map(PathBuf::from) {
-        roots.extend(["gh", "gcloud", "cursor", "opencode"].map(|name| subtree(config.join(name))));
+        roots.extend(
+            ["gh", "gcloud", "cursor", "opencode"].map(|name| CredentialRoot {
+                path: config.join(name),
+                scope: CredentialScope::Subtree,
+                source: format!("provider environment: XDG_CONFIG_HOME/{name}"),
+                kind: CredentialKind::Store,
+            }),
+        );
     }
     if let Some(data) = lookup("XDG_DATA_HOME").map(PathBuf::from) {
-        roots.push(subtree(data.join("opencode")));
+        roots.push(CredentialRoot {
+            path: data.join("opencode"),
+            scope: CredentialScope::Subtree,
+            source: "provider environment: XDG_DATA_HOME/opencode".into(),
+            kind: CredentialKind::Store,
+        });
     }
     if let Some(directory) = lookup("ZDOTDIR").map(PathBuf::from) {
-        roots.extend(HOME_SHELL_STARTUP.iter().map(|name| PathGrant {
+        roots.extend(HOME_SHELL_STARTUP.iter().map(|name| CredentialRoot {
             path: directory.join(name),
-            scope: PathScope::Exact,
+            scope: CredentialScope::Exact,
+            source: "host environment: ZDOTDIR shell startup".into(),
+            kind: CredentialKind::Store,
         }));
     }
     if let Some(socket) = lookup("SSH_AUTH_SOCK").map(PathBuf::from) {
-        roots.push(PathGrant {
+        roots.push(CredentialRoot {
             path: socket,
-            scope: PathScope::Exact,
+            scope: CredentialScope::Exact,
+            source: "host environment: SSH_AUTH_SOCK".into(),
+            kind: CredentialKind::Store,
         });
     }
     // A relative CARGO_HOME resolves against the host cwd, as Cargo does.
@@ -51,10 +70,16 @@ pub fn host_credential_roots(lookup: impl Fn(&str) -> Option<OsString>) -> Vec<P
         .filter(|value| !value.is_empty())
         .and_then(|value| std::path::absolute(PathBuf::from(value)).ok())
     {
-        roots.extend(crate::cargo::CREDENTIAL_FILES.iter().map(|name| PathGrant {
-            path: path.join(name),
-            scope: PathScope::Exact,
-        }));
+        roots.extend(
+            provenant_core::CARGO_CREDENTIAL_FILES
+                .iter()
+                .map(|name| CredentialRoot {
+                    path: path.join(name),
+                    scope: CredentialScope::Exact,
+                    source: "host environment: CARGO_HOME credentials".into(),
+                    kind: CredentialKind::Store,
+                }),
+        );
     }
     roots.retain(|root| root.path.is_absolute());
     roots
@@ -328,7 +353,7 @@ impl MandatoryRoots {
         roots: &Roots,
         home: &Path,
         source: &Path,
-        credentials: &[PathGrant],
+        credentials: &[CredentialRoot],
         github: &[PathGrant],
         protected: &[PathGrant],
     ) -> Result<Self, PermissionError> {
@@ -349,7 +374,7 @@ impl MandatoryRoots {
         home: &Path,
         source: &Path,
         scratch: &Path,
-        credentials: &[PathGrant],
+        credentials: &[CredentialRoot],
         github: &[PathGrant],
         protected: &[PathGrant],
     ) -> Result<Self, PermissionError> {
@@ -373,7 +398,7 @@ impl MandatoryRoots {
         home: &Path,
         source: &Path,
         scratch: &Path,
-        credentials: &[PathGrant],
+        credentials: &[CredentialRoot],
         github: &[PathGrant],
         protected: &[PathGrant],
         sandboxed: bool,
@@ -383,37 +408,48 @@ impl MandatoryRoots {
             scope: PathScope::Subtree,
         };
         let mut mandatory = Self::new(home, roots.state.as_path(), source)?;
+        mandatory.credential_roots = roots.credential_roots().clone();
+        mandatory.credentials = mandatory
+            .credential_roots
+            .entries()
+            .iter()
+            .map(|root| PathGrant {
+                path: root.path.clone(),
+                scope: match root.scope {
+                    CredentialScope::Exact => PathScope::Exact,
+                    CredentialScope::Subtree => PathScope::Subtree,
+                },
+            })
+            .collect();
         for root in credentials {
-            mandatory.add_credentials(root.clone())?;
+            mandatory.add_declared_credential(
+                PathGrant {
+                    path: root.path.clone(),
+                    scope: match root.scope {
+                        CredentialScope::Exact => PathScope::Exact,
+                        CredentialScope::Subtree => PathScope::Subtree,
+                    },
+                },
+                root.source.clone(),
+                root.kind.clone(),
+            )?;
         }
         for path in SYSTEM_SHELL_STARTUP
             .iter()
             .map(PathBuf::from)
             .chain(HOME_SHELL_STARTUP.iter().map(|name| home.join(name)))
         {
-            mandatory.add_credentials(PathGrant {
-                path,
-                scope: PathScope::Exact,
-            })?;
+            mandatory.add_declared_credential(
+                PathGrant {
+                    path,
+                    scope: PathScope::Exact,
+                },
+                "built-in shell startup file",
+                CredentialKind::Store,
+            )?;
         }
-        if sandboxed {
-            let entries = match std::fs::read_dir(home) {
-                Ok(entries) => Some(entries),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(_) => return Err(inventory_error(home, "credential name inventory")),
-            };
-            for entry in entries.into_iter().flatten() {
-                let entry =
-                    entry.map_err(|_| inventory_error(home, "credential name inventory"))?;
-                if entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|name| name.starts_with(".agy-"))
-                {
-                    mandatory.add_credentials(subtree(&entry.path()))?;
-                }
-            }
-        }
+        // Registered account roots are supplied explicitly by the account
+        // registry. Directory-name scans would protect unregistered lookalikes.
         for root in github {
             mandatory.add_github(root.clone())?;
         }
@@ -624,7 +660,7 @@ mod tests {
         });
         let mandatory =
             MandatoryRoots::for_host(&roots, &home, &root.join("source"), &inventory, &[], &[])?;
-        for name in crate::cargo::CREDENTIAL_FILES {
+        for name in provenant_core::CARGO_CREDENTIAL_FILES {
             let credential = PathGrant {
                 path: cargo.join(name),
                 scope: PathScope::Exact,

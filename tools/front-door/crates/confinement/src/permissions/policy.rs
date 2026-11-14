@@ -3,12 +3,10 @@
 //! Host settings can add denials only. Mandatory roots come from the host's
 //! verified launch context and have no deserialisable override surface.
 mod host;
-use super::validation::{
-    CREDENTIAL_DIRECTORIES, NESTED_CREDENTIAL_DIRECTORIES, PROVIDER_CREDENTIAL_DIRECTORIES,
-    profile_path_representable, refuses_lane_root, validate_absolute,
-};
+use super::validation::{profile_path_representable, validate_absolute};
 use super::{NetworkAccess, PathGrant, PathScope, PermissionError};
 pub use host::{host_credential_roots, host_github_roots};
+use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -72,6 +70,7 @@ pub struct HostPolicySettings(Value);
 /// compilation separately revalidates them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MandatoryRoots {
+    credential_roots: CredentialRoots,
     credentials: Vec<PathGrant>,
     non_exempt: Vec<PathGrant>,
     state: PathGrant,
@@ -98,23 +97,20 @@ impl MandatoryRoots {
             path: path.to_owned(),
             scope: PathScope::Subtree,
         };
-        let mut credentials: Vec<_> = CREDENTIAL_DIRECTORIES
+        let credential_roots = CredentialRoots::for_home(home);
+        let credentials = credential_roots
+            .entries()
             .iter()
-            .chain(NESTED_CREDENTIAL_DIRECTORIES)
-            .chain(PROVIDER_CREDENTIAL_DIRECTORIES)
-            .map(|relative| subtree(&home.join(relative)))
+            .map(|root| PathGrant {
+                path: root.path.clone(),
+                scope: match root.scope {
+                    CredentialScope::Exact => PathScope::Exact,
+                    CredentialScope::Subtree => PathScope::Subtree,
+                },
+            })
             .collect();
-        credentials.extend(
-            crate::cargo::CREDENTIAL_FILES
-                .iter()
-                .map(|name| home.join(".cargo").join(name))
-                .chain([home.join(".claude.json")])
-                .map(|path| PathGrant {
-                    path,
-                    scope: PathScope::Exact,
-                }),
-        );
         let roots = Self {
+            credential_roots,
             non_exempt: [
                 subtree(&home.join("Library/Keychains")),
                 subtree(&home.join("Archives/git-preservation")),
@@ -154,9 +150,33 @@ impl MandatoryRoots {
     /// Add registered identity homes, relocated XDG stores and isolated Agy
     /// homes, including identities not selected by this attempt. Additive only.
     pub fn add_credentials(&mut self, root: PathGrant) -> Result<(), PermissionError> {
+        self.add_declared_credential(root, "provider or account registry", CredentialKind::Store)
+    }
+
+    pub fn add_declared_credential(
+        &mut self,
+        root: PathGrant,
+        source: impl Into<String>,
+        kind: CredentialKind,
+    ) -> Result<(), PermissionError> {
         root.validate()?;
-        self.credentials.push(root);
+        self.credential_roots.add(
+            root.path.clone(),
+            match root.scope {
+                PathScope::Exact => CredentialScope::Exact,
+                PathScope::Subtree => CredentialScope::Subtree,
+            },
+            source,
+            kind,
+        );
+        if !self.credentials.contains(&root) {
+            self.credentials.push(root);
+        }
         Ok(())
+    }
+
+    pub fn credential_roots(&self) -> &CredentialRoots {
+        &self.credential_roots
     }
 
     /// Preserve mandatory category when a public credential spelling is a link.
@@ -165,7 +185,17 @@ impl MandatoryRoots {
         original: &PathGrant,
         alias: PathGrant,
     ) -> Result<(), PermissionError> {
-        self.add_credentials(alias.clone())?;
+        let declaration = self.credential_roots.entries().iter().find(|entry| {
+            entry.path == original.path
+                && match original.scope {
+                    PathScope::Exact => entry.scope == CredentialScope::Exact,
+                    PathScope::Subtree => entry.scope == CredentialScope::Subtree,
+                }
+        });
+        let (source, kind) = declaration
+            .map(|entry| (entry.source.clone(), entry.kind.clone()))
+            .unwrap_or_else(|| ("credential alias".to_owned(), CredentialKind::Store));
+        self.add_declared_credential(alias.clone(), source, kind)?;
         if self.non_exempt.contains(original) {
             self.non_exempt.push(alias.clone());
         }
@@ -383,13 +413,15 @@ impl MandatoryRoots {
     /// checkout exceptions.
     pub fn validate_extra_write(&self, grant: &PathGrant) -> Result<(), PermissionError> {
         grant.validate()?;
-        if refuses_lane_root(&grant.path, false, Some(&self.home))
-            || self.credentials.iter().any(|root| root.overlaps(grant))
-        {
-            return Err(PermissionError::credential_root_at(
-                &grant.path,
-                Some(&self.home),
-            ));
+        if let Some(root) = self.credential_roots.refusal(
+            &grant.path,
+            match grant.scope {
+                PathScope::Exact => CredentialScope::Exact,
+                PathScope::Subtree => CredentialScope::Subtree,
+            },
+            false,
+        ) {
+            return Err(PermissionError::credential_store(&grant.path, root));
         }
         // A recorded host write is excepted from other checkouts only; Git,
         // state, source and credentials still refuse it.

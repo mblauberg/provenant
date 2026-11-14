@@ -1204,7 +1204,8 @@ impl PlanCheckError {
             return Some(match root(permission) {
                 PermissionError::CredentialRoot
                 | PermissionError::CredentialRootAt { .. }
-                | PermissionError::CredentialGrant { .. } => {
+                | PermissionError::CredentialGrant { .. }
+                | PermissionError::CredentialStore { .. } => {
                     "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_CREDENTIALS"
                 }
                 PermissionError::AnchorMismatch | PermissionError::AnchorMismatchAt { .. } => {
@@ -1257,7 +1258,8 @@ impl PlanCheckError {
                 PermissionError::InvalidPath(_) => PlanFailure::InvalidPath,
                 PermissionError::CredentialRoot
                 | PermissionError::CredentialRootAt { .. }
-                | PermissionError::CredentialGrant { .. } => PlanFailure::CredentialRoot,
+                | PermissionError::CredentialGrant { .. }
+                | PermissionError::CredentialStore { .. } => PlanFailure::CredentialRoot,
                 PermissionError::AnchorMismatch | PermissionError::AnchorMismatchAt { .. } => {
                     PlanFailure::AnchorMismatch
                 }
@@ -1326,7 +1328,8 @@ impl PlanCheckError {
                 PermissionError::BroadRoot => G::PermissionRootTooBroad,
                 PermissionError::CredentialRoot
                 | PermissionError::CredentialRootAt { .. }
-                | PermissionError::CredentialGrant { .. } => G::CredentialRootRefused,
+                | PermissionError::CredentialGrant { .. }
+                | PermissionError::CredentialStore { .. } => G::CredentialRootRefused,
                 PermissionError::ProtectedOverlap => G::ProtectedPathOverlap,
                 PermissionError::AnchorMismatch | PermissionError::AnchorMismatchAt { .. } => {
                     G::PathAnchorChanged
@@ -3582,6 +3585,7 @@ pub(super) fn prepare_candidates(
                 continue;
             }
         };
+        let credential_roots = plan.permissions().credential_roots.clone();
         let adapter_spec = AdapterSpec::get(adapter.id());
         let refresh_token = adapter_spec.is_some_and(|spec| spec.launch_token_refresh);
         let refreshed = if refresh_token && fixture_token.is_none() {
@@ -3669,6 +3673,7 @@ pub(super) fn prepare_candidates(
         );
         let prepare = |provider_route: &provenant_records::ResolvedRoute| {
             adapter.prepare(PrepareInput {
+                credential_roots: credential_roots.clone(),
                 images: &task.access.attachments,
                 policy: &launch_policy,
                 command: None,
@@ -3769,6 +3774,7 @@ pub(super) fn prepare_candidates(
             super::project_paths::Context {
                 cwd: &cwd,
                 home: &home,
+                credential_roots: &credential_roots,
                 common_git: common_git_path.as_deref(),
                 state_root: roots.state.as_path(),
                 worktree_gitdir: worktree_gitdir.as_deref(),
@@ -4191,11 +4197,17 @@ pub(super) fn prepare_candidates(
         );
         provider.extra.insert(
             "applied_access".into(),
-            spec.applied_access().receipt(&home),
+            spec.applied_access()
+                .receipt(&home, spec.credential_roots()),
         );
         provider.extra.insert(
             "discovery_warnings".into(),
-            serde_json::json!(discovery_warnings(&spec.omitted_discovery, &home, false)),
+            serde_json::json!(discovery_warnings(
+                &spec.omitted_discovery,
+                &home,
+                spec.credential_roots(),
+                false,
+            )),
         );
         let cargo_home = spec
             .cargo_home()
@@ -4500,7 +4512,11 @@ mod receipt_tests {
 }
 
 /// One warning line for an omitted grant, shown relative to the home directory.
-pub(super) fn omission_warning(entry: &provenant_providers::OmittedGrant, home: &Path) -> String {
+pub(super) fn omission_warning(
+    entry: &provenant_providers::OmittedGrant,
+    home: &Path,
+    credential_roots: &provenant_core::CredentialRoots,
+) -> String {
     let display = if entry
         .path
         .to_str()
@@ -4519,12 +4535,14 @@ pub(super) fn omission_warning(entry: &provenant_providers::OmittedGrant, home: 
             "omitted shared provider package grant {display}; using the executable only"
         );
     }
-    let guard = if provenant_confinement::refuses_lane_root(&entry.path, true, Some(home)) {
-        "credential root guard"
+    let guard = if let Some(root) =
+        credential_roots.refusal(&entry.path, provenant_core::CredentialScope::Subtree, true)
+    {
+        format!("credential root guard (source: {})", root.source)
     } else if !provenant_confinement::permissions::profile_path_representable(&entry.path) {
-        "path cannot be represented in the sandbox profile"
+        "path cannot be represented in the sandbox profile".to_owned()
     } else {
-        "protected root guard"
+        "protected root guard".to_owned()
     };
     format!("omitted discovered grant {display}: {guard}")
 }
@@ -4535,12 +4553,13 @@ pub(super) fn omission_warning(entry: &provenant_providers::OmittedGrant, home: 
 pub(super) fn discovery_warnings(
     omitted: &[provenant_providers::OmittedGrant],
     home: &Path,
+    credential_roots: &provenant_core::CredentialRoots,
     skills: bool,
 ) -> Vec<String> {
     omitted
         .iter()
         .filter(|entry| (entry.source == provenant_providers::OmissionSource::UserSkill) == skills)
-        .map(|entry| omission_warning(entry, home))
+        .map(|entry| omission_warning(entry, home, credential_roots))
         .collect()
 }
 
@@ -4640,6 +4659,7 @@ mod user_skills_tests {
                 extensions: ExtensionPolicy::Deny,
                 agy_state: None,
                 permissions: PlanPermissions {
+                    credential_roots: provenant_core::CredentialRoots::for_home(&home),
                     policy: None,
                     mode: AccessMode::ReadOnly,
                     read_only: None,
@@ -4708,6 +4728,7 @@ mod user_skills_tests {
                     route.set_user_skills(state != "off");
                     let launch_policy = provenant_records::policy::Policy::default();
                     let input = PrepareInput {
+                        credential_roots: provenant_core::CredentialRoots::for_home(&home),
                         route: &route,
                         policy: &launch_policy,
                         confined: &plan,
@@ -4786,7 +4807,8 @@ mod user_skills_tests {
             path: PathBuf::from("/usr/local"),
             source: provenant_providers::OmissionSource::ProviderPackage,
         };
-        let warnings = discovery_warnings(&[entry], Path::new("/fixture/home"), false);
+        let roots = provenant_core::CredentialRoots::for_home(Path::new("/fixture/home"));
+        let warnings = discovery_warnings(&[entry], Path::new("/fixture/home"), &roots, false);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("executable only"));
     }
@@ -4798,14 +4820,16 @@ mod user_skills_tests {
             path: PathBuf::from(std::ffi::OsString::from_vec(b"/fixture/tool-\xff".to_vec())),
             source: provenant_providers::OmissionSource::Toolchain,
         };
-        let warnings = discovery_warnings(&[entry], Path::new("/fixture/home"), false);
+        let roots = provenant_core::CredentialRoots::for_home(Path::new("/fixture/home"));
+        let warnings = discovery_warnings(&[entry], Path::new("/fixture/home"), &roots, false);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("cannot be represented"));
         let control = provenant_providers::OmittedGrant {
             path: PathBuf::from("/fixture/home/tool-\u{1}"),
             source: provenant_providers::OmissionSource::Toolchain,
         };
-        let warning = omission_warning(&control, Path::new("/fixture/home"));
+        let roots = provenant_core::CredentialRoots::for_home(Path::new("/fixture/home"));
+        let warning = omission_warning(&control, Path::new("/fixture/home"), &roots);
         assert!(warning.contains("unrepresentable path"));
         assert!(!warning.contains('\u{1}'));
     }

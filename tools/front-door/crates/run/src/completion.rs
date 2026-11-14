@@ -408,6 +408,9 @@ mod tests {
             extensions: ExtensionPolicy::Deny,
             agy_state: None,
             permissions: PlanPermissions {
+                credential_roots: provenant_core::CredentialRoots::for_home(
+                    &temp.path().join("home"),
+                ),
                 policy: None,
                 read_only: None,
                 mode: AccessMode::ReadOnly,

@@ -1970,9 +1970,15 @@ impl Factory {
                     }));
                 }
             }
-            return Ok(
-                json!({"document":document, "skipped":skipped, "writer_budgets":writer_budgets}),
-            );
+            let source_admission = self.explain_source_admission(&expanded.nodes)?;
+            let refused = source_admission
+                .iter()
+                .any(|row| row["status"] == "refused");
+            return Ok(json!({
+                "document":document, "skipped":skipped, "writer_budgets":writer_budgets,
+                "status": if refused { "refused" } else { "admitted" },
+                "source_admission": source_admission,
+            }));
         }
         let mut result = match self.launch_submission(document, input, budget, cancel, announce) {
             // A concurrent launch bound this name to other input between the
@@ -1990,6 +1996,109 @@ impl Factory {
             "requested": requested, "graph": id, "replayed": replayed, "taken": taken,
         });
         Ok(result)
+    }
+
+    /// Inspect the same root decision launch preparation will make, without
+    /// preparing a provider or creating an attempt or product state.
+    fn explain_source_admission(
+        &self,
+        nodes: &[provenant_fabric_runtime::graph::GraphNode],
+    ) -> Result<Vec<Value>, FacadeError> {
+        use provenant_cli::run::{SourceAdmissionMode, admit_source_root};
+        let credentials = self.credential_roots()?;
+        let mut rows = Vec::new();
+        for node in nodes {
+            if node.composite.is_some() || node.condition.is_some() || node.decide.is_some() {
+                continue;
+            }
+            let resolve = |path: &str| {
+                let path = Path::new(path);
+                if path.is_absolute() {
+                    path.to_owned()
+                } else {
+                    self.cwd.join(path)
+                }
+            };
+            let access = provenant_cli::Access {
+                mode: None,
+                worktree: (node.access
+                    == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite)
+                    .then(|| node.worktree.as_deref().map(resolve))
+                    .flatten(),
+                read_root: node.read_roots.iter().map(|path| resolve(path)).collect(),
+                write_root: node
+                    .attempt
+                    .iter()
+                    .flat_map(|attempt| &attempt.write_roots)
+                    .map(|path| resolve(path))
+                    .collect(),
+                attach: Vec::new(),
+                network: None,
+                capability: Vec::new(),
+                no_capability: Vec::new(),
+            };
+            if let Err(error) = provenant_cli::run::lane_access(
+                &access,
+                self.context.roots.state.as_path(),
+                &credentials,
+            ) {
+                rows.push(json!({"node":node.id,"status":"refused",
+                    "code":"dispatch_refused","reason":error.message}));
+                continue;
+            }
+            let selected = node.worktree.as_deref().or_else(|| {
+                node.attempt
+                    .as_ref()
+                    .and_then(|attempt| attempt.directory.as_deref())
+            });
+            let path = selected.map_or_else(
+                || self.cwd.clone(),
+                |path| {
+                    let path = Path::new(path);
+                    if path.is_absolute() {
+                        path.to_owned()
+                    } else {
+                        self.cwd.join(path)
+                    }
+                },
+            );
+            // A proposed writer does not yet have a registered worktree.
+            // Inspect its declared boundary now; registration is verified once
+            // the worktree owner provisions it at launch.
+            let proposed = node
+                .attempt
+                .as_ref()
+                .is_some_and(|attempt| attempt.new_worktree.is_some())
+                && !path.exists();
+            let mode = if proposed {
+                SourceAdmissionMode::Proposed
+            } else if node.source.is_none() {
+                SourceAdmissionMode::Live
+            } else {
+                SourceAdmissionMode::Registered
+            };
+            match admit_source_root(
+                &self.cwd,
+                self.context.roots.state.as_path(),
+                &path,
+                &credentials,
+                mode,
+            ) {
+                Ok(admission) => {
+                    let warnings: Vec<_> = admission
+                        .warnings
+                        .iter()
+                        .map(|warning| json!({"path":warning.path, "source":warning.source}))
+                        .collect();
+                    rows.push(json!({"node":node.id, "path":admission.path,
+                        "status":if proposed { "pending_registration" } else { "admitted" },
+                        "warnings":warnings}));
+                }
+                Err(error) => rows.push(json!({"node":node.id,"path":path,"status":"refused",
+                    "code":error.code,"reason":error.reason})),
+            }
+        }
+        Ok(rows)
     }
 
     /// Whether graph `id` now exists with a launch digest other than `digest`.
@@ -4943,6 +5052,88 @@ mod tests {
         let request = factory.child_request(&escaping)?;
         let launch = request.launch.ok_or("missing child launch")?;
         assert_eq!(launch.node["read_roots"], json!([rig.home]));
+        Ok(())
+    }
+
+    #[test]
+    fn explanation_and_preparation_share_worktree_admission() -> Result {
+        use provenant_cli::run::{SourceAdmissionMode, admit_source_root, declared_credentials};
+        let rig = crate::worktree_tests::repository()?;
+        let locations = [
+            rig.project.join(".worktrees/source"),
+            rig.project.join(".claude/worktrees/source"),
+            rig.root.join("external-source"),
+            rig.home.join(".claude/worktrees/credential-source"),
+        ];
+        for (index, path) in locations.iter().enumerate() {
+            crate::worktree_tests::git(
+                &rig,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    &format!("source-{index}"),
+                    path.to_str().ok_or("fixture path")?,
+                    "HEAD",
+                ],
+            )?;
+            let mut factory = factory(&rig)?;
+            factory.cwd = std::fs::canonicalize(path)?;
+            let registry = provenant_cli::run::Registry {
+                roots: Some(&factory.context.roots),
+                home: Some(&rig.home),
+                cwd: Some(&factory.cwd),
+                state_root: Some(&rig.state),
+                ..Default::default()
+            };
+            let credentials = declared_credentials(&registry)?;
+            let preparation = admit_source_root(
+                &factory.cwd,
+                &rig.state,
+                &factory.cwd,
+                &credentials,
+                SourceAdmissionMode::Registered,
+            );
+            let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+            let preview = factory.graph_document(
+                json!({"op":"run","brief":"Inspect source","explain":true}),
+                budget,
+                &CancelToken::new(),
+            )?;
+            let rows = preview["source_admission"]
+                .as_array()
+                .ok_or("admission rows")?;
+            assert!(!rows.is_empty());
+            match preparation {
+                Ok(admission) => {
+                    assert!(rows.iter().all(|row| row["status"] == "admitted"));
+                    assert!(rows.iter().all(|row| row["path"] == json!(admission.path)));
+                    assert_eq!(preview["status"], "admitted");
+                    if path.starts_with(rig.project.join(".claude")) {
+                        assert!(!admission.warnings.is_empty());
+                        assert!(
+                            rows.iter()
+                                .all(|row| row["warnings"].as_array().is_some_and(|warnings| {
+                                    warnings.iter().any(|warning| {
+                                        warning["source"]
+                                            .as_str()
+                                            .is_some_and(|source| !source.is_empty())
+                                    })
+                                }))
+                        );
+                    }
+                }
+                Err(error) => {
+                    assert!(path.starts_with(&rig.home));
+                    assert_eq!(preview["status"], "refused");
+                    assert!(
+                        rows.iter()
+                            .all(|row| row["code"] == error.code && row["reason"] == error.reason)
+                    );
+                }
+            }
+            assert!(!rig.state.join("writer-git-home").exists());
+        }
         Ok(())
     }
 

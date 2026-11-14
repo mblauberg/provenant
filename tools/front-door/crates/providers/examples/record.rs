@@ -26,7 +26,9 @@ use provenant_confinement::{
     CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest, UtilityBudget, UtilityRuntime,
     verify_worktree,
 };
-use provenant_core::{CancelToken, ProjectId, WorkScope};
+use provenant_core::{
+    CancelToken, CredentialKind, CredentialRoot, CredentialScope, ProjectId, WorkScope,
+};
 use provenant_os::{
     exec::{ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination},
     fs::Directory,
@@ -440,6 +442,7 @@ fn compile(
             selected_ref,
             authority,
             context.home,
+            &plan.permissions().credential_roots,
         )?;
     }
     let directories = required_anchors(plan.permissions(), profile, context.worktree)
@@ -1017,21 +1020,29 @@ fn main() -> Result<()> {
     let accounts: provenant_providers::accounts::Settings =
         provenant_config::read_domain(host_roots.state.as_path(), "accounts")?;
     let mut credentials = host_credential_roots(|name| std::env::var_os(name));
-    credentials.extend(
-        accounts
-            .entries
-            .values()
-            .flat_map(|entry| std::iter::once(&entry.directory).chain(&entry.directories))
+    credentials.extend(accounts.entries.iter().flat_map(|(_, entry)| {
+        std::iter::once(&entry.directory)
+            .chain(&entry.directories)
             .filter(|path| path.as_path() != home)
-            .map(|path| subtree(path)),
-    );
+            .map(|path| CredentialRoot {
+                path: path.clone(),
+                scope: CredentialScope::Subtree,
+                source: format!("account registry: {}", entry.label),
+                kind: CredentialKind::Store,
+            })
+    }));
     // The recorder's selected account can be outside the account registry.
     let directory = home.join(if args.adapter == "codex" {
         ".codex"
     } else {
         ".claude-pro"
     });
-    credentials.push(subtree(&directory));
+    credentials.push(CredentialRoot {
+        path: directory,
+        scope: CredentialScope::Subtree,
+        source: "provider declaration: recorder account".into(),
+        kind: CredentialKind::Store,
+    });
     let github: Vec<_> = host_github_roots(|name| std::env::var_os(name))
         .iter()
         .map(|path| subtree(path))
@@ -1093,9 +1104,14 @@ fn main() -> Result<()> {
     let plan_for = |scratch: &Path| -> Result<ConfinedPlan> {
         private_dir(scratch)?;
         let mode = match &worktree {
-            Some(tree) => AccessMode::WorktreeWrite(Box::new(
-                WorktreeWriteAuthority::for_worktree(tree, &selected_ref, &home)?,
-            )),
+            Some(tree) => {
+                AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority::for_worktree(
+                    tree,
+                    &selected_ref,
+                    &home,
+                    mandatory.credential_roots(),
+                )?))
+            }
             None => AccessMode::ReadOnly,
         };
         let mut policy =
@@ -1105,6 +1121,7 @@ fn main() -> Result<()> {
         Ok(ConfinedPlan::new(PlanRequest {
             scope: WorkScope::Project(ProjectId::from_bytes([7; 16])),
             permissions: PlanPermissions {
+                credential_roots: mandatory.credential_roots().clone(),
                 policy: Some(policy),
                 read_only: None,
                 mode,
@@ -1228,6 +1245,7 @@ fn main() -> Result<()> {
             continuation: continuation.as_ref(),
             grant_digest: "recording",
             policy: &provenant_records::policy::Policy::default(),
+            credential_roots: mandatory.credential_roots().clone(),
             executable: &args.executable,
             home: &home,
             user: &user,

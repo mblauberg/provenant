@@ -193,6 +193,7 @@ fn account_placement() -> Result {
             extensions: ExtensionPolicy::Deny,
             agy_state: None,
             permissions: PlanPermissions {
+                credential_roots: provenant_core::CredentialRoots::for_home(&rig.home),
                 policy: None,
                 read_only: None,
                 mode: AccessMode::ReadOnly,
@@ -233,6 +234,7 @@ fn account_placement() -> Result {
         let prompt = Prompt::new(address.to_string());
         let account = accounts.selected(&route)?;
         let spec = Codex.prepare(PrepareInput {
+            credential_roots: plan.permissions().credential_roots.clone(),
             images: &[],
             command: None,
             route: &route,

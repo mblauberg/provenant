@@ -104,9 +104,9 @@ pub(super) fn network_access(switch: Option<Switch>, postgres: bool) -> Option<r
 pub fn lane_access(
     access: &crate::Access,
     state_root: &Path,
-    home: &Path,
+    credentials: &provenant_core::CredentialRoots,
 ) -> Result<run::LaneAccess, Fail> {
-    lane_access_checked(access, state_root, home)
+    lane_access_checked(access, state_root, credentials)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))
 }
 
@@ -126,8 +126,13 @@ pub(super) enum AccessError {
     MissingDirectory { flag: &'static str, path: PathBuf },
     #[error("{flag} {} overlaps the Provenant state root", path.display())]
     StateOverlap { flag: &'static str, path: PathBuf },
-    #[error("{flag} {} is or encloses a credential root", path.display())]
-    CredentialRoot { flag: &'static str, path: PathBuf },
+    #[error("{flag} {} overlaps declared credential root {} (source: {declaration_source})", path.display(), root.display())]
+    CredentialRoot {
+        flag: &'static str,
+        path: PathBuf,
+        root: PathBuf,
+        declaration_source: String,
+    },
     #[error("--write-root {} overlaps the --worktree; worktree-write already grants the worktree", .0.display())]
     WorktreeOverlap(PathBuf),
 }
@@ -138,20 +143,26 @@ pub(super) fn refused_root(
     flag: &'static str,
     given: &Path,
     canonical: &Path,
-    home: &Path,
+    credentials: &provenant_core::CredentialRoots,
 ) -> Option<AccessError> {
-    provenant_confinement::refuses_lane_root(canonical, flag == "--read-root", Some(home)).then(
-        || AccessError::CredentialRoot {
+    credentials
+        .refusal(
+            canonical,
+            provenant_core::CredentialScope::Subtree,
+            flag == "--read-root",
+        )
+        .map(|root| AccessError::CredentialRoot {
             flag,
             path: given.to_path_buf(),
-        },
-    )
+            root: root.path.clone(),
+            declaration_source: root.source.clone(),
+        })
 }
 
 pub(super) fn lane_access_checked(
     access: &crate::Access,
     state_root: &Path,
-    home: &Path,
+    credentials: &provenant_core::CredentialRoots,
 ) -> Result<run::LaneAccess, AccessError> {
     let mut postgres = false;
     for name in &access.capability {
@@ -175,7 +186,7 @@ pub(super) fn lane_access_checked(
                         flag,
                         path: path.clone(),
                     })?;
-                if let Some(error) = refused_root(flag, path, &canonical, home) {
+                if let Some(error) = refused_root(flag, path, &canonical, credentials) {
                     return Err(error);
                 }
                 if !run::access_root_allowed(&canonical, &state, flag == "--read-root") {
@@ -213,7 +224,7 @@ pub(super) fn lane_access_checked(
                 continue;
             }
         };
-        if let Some(error) = refused_root("--read-root", path, &canonical, home) {
+        if let Some(error) = refused_root("--read-root", path, &canonical, credentials) {
             return Err(error);
         }
         if !run::access_root_allowed(&canonical, &state, true) {

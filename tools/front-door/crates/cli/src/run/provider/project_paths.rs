@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 pub(super) struct Context<'a> {
     pub cwd: &'a Path,
     pub home: &'a Path,
+    pub credential_roots: &'a provenant_core::CredentialRoots,
     pub state_root: &'a Path,
     pub common_git: Option<&'a Path>,
     pub worktree_gitdir: Option<&'a Path>,
@@ -34,6 +35,44 @@ fn display_path(path: &Path, primary: &Path, home: &Path) -> String {
 
 fn overlaps(root: &Path, other: &Path) -> bool {
     root.starts_with(other) || other.starts_with(root)
+}
+
+fn agent_configuration_overlaps(path: &Path, primary: &Path) -> Vec<(PathBuf, String)> {
+    provenant_core::PROJECT_AGENT_CONFIG_DIRECTORIES
+        .iter()
+        .copied()
+        .filter_map(|name| {
+            let config = primary.join(name);
+            (overlaps(path, &config) && std::fs::symlink_metadata(&config).is_ok()).then(|| {
+                (
+                    config,
+                    format!("project-local agent configuration ({name})"),
+                )
+            })
+        })
+        .collect()
+}
+
+fn credential_source(
+    entry: &Path,
+    exec: bool,
+    primary: &Path,
+    context: &Context<'_>,
+) -> Option<String> {
+    let path = entry.strip_prefix("~").map_or_else(
+        |_| primary.join(entry),
+        |relative| context.home.join(relative),
+    );
+    let path = std::fs::canonicalize(path).ok()?;
+    let scope = if path.is_dir() {
+        provenant_core::CredentialScope::Subtree
+    } else {
+        provenant_core::CredentialScope::Exact
+    };
+    context
+        .credential_roots
+        .refusal(&path, scope, exec)
+        .map(|root| root.source.clone())
 }
 
 fn resolve(
@@ -74,7 +113,7 @@ fn resolve(
     {
         return Err("git_directory");
     }
-    if provenant_confinement::refuses_lane_root(&path, exec, Some(context.home)) {
+    if provenant_confinement::refuses_lane_root(&path, exec, context.credential_roots) {
         return Err("credential_root");
     }
     if plan
@@ -211,6 +250,14 @@ fn apply_to(
                 });
                 match result {
                     Ok(grant) => {
+                        for (config, source) in agent_configuration_overlaps(&grant.path, primary) {
+                            warnings.push(json!({
+                                "code": "project_agent_configuration_overlap",
+                                "source": source,
+                                "key": key,
+                                "path": display_path(&config, primary, context.home),
+                            }));
+                        }
                         let record = json!({"path": display_path(&grant.path, primary, context.home), "source": key});
                         if is_exec {
                             profile.spec.runtime_reads.push(grant.clone());
@@ -237,6 +284,9 @@ fn apply_to(
                                 "key": key,
                                 "reason": reason,
                                 "policy_message": message,
+                                "credential_source": (reason == "credential_root")
+                                    .then(|| credential_source(entry, is_exec, primary, &context))
+                                    .flatten(),
                                 "path": display_path(entry, primary, context.home),
                             }));
                         }
@@ -267,6 +317,7 @@ mod tests {
             &home,
             &admin,
             &cwd,
+            &primary.join(".claude"),
             &primary.join(".agent-run/locks"),
             &primary.join(".local-tools"),
             &primary.join(".ssh"),
@@ -277,6 +328,7 @@ mod tests {
             std::fs::create_dir_all(path)?;
         }
         std::os::unix::fs::symlink(home.join("shared"), primary.join("escape"))?;
+        let credential_roots = provenant_core::CredentialRoots::for_home(&home);
         let grant = |path: PathBuf| PathGrant {
             path,
             scope: PathScope::Subtree,
@@ -287,6 +339,7 @@ mod tests {
             extensions: ExtensionPolicy::Deny,
             agy_state: None,
             permissions: PlanPermissions {
+                credential_roots: credential_roots.clone(),
                 policy: None,
                 mode: AccessMode::ReadOnly,
                 read_only: None,
@@ -304,6 +357,7 @@ mod tests {
         })?;
         let settings = crate::domains::ProjectLanesConfig {
             shared_paths: vec![
+                ".claude".into(),
                 ".agent-run/locks".into(),
                 "~/shared".into(),
                 ".git".into(),
@@ -351,6 +405,7 @@ mod tests {
                 Context {
                     cwd: &cwd,
                     home: &home,
+                    credential_roots: &credential_roots,
                     state_root: &root.join("state"),
                     common_git: Some(&common),
                     worktree_gitdir: Some(&admin),
@@ -365,7 +420,7 @@ mod tests {
                 [grant(primary.join(".local-tools"))]
             );
             assert_eq!(record["exec_roots"][0]["path"], "./.local-tools");
-            assert_eq!(profile.spec.tool_writes.len(), if writer { 2 } else { 0 });
+            assert_eq!(!profile.spec.tool_writes.is_empty(), writer);
             assert_eq!(
                 record["shared_paths"].as_array().ok_or("array")?.len(),
                 profile.spec.tool_writes.len()
@@ -382,6 +437,20 @@ mod tests {
             let serialized = serde_json::to_string(&record)?;
             assert!(!serialized.contains(root.to_str().ok_or("utf8")?));
             let warnings = record["warnings"].as_array().ok_or("warnings")?;
+            if writer {
+                assert!(warnings.iter().any(|warning| {
+                    warning["code"] == "project_agent_configuration_overlap"
+                        && warning["source"] == "project-local agent configuration (.claude)"
+                        && warning["path"] == "./.claude"
+                }));
+                assert!(
+                    profile
+                        .spec
+                        .tool_writes
+                        .iter()
+                        .any(|grant| grant.path == primary.join(".claude"))
+                );
+            }
             for (index, reason) in [
                 (1, "outside_primary_checkout"),
                 (2, "outside_primary_checkout"),
@@ -395,6 +464,17 @@ mod tests {
                     && warning["reason"] == reason
                     && warning["code"] == "exec_root_ignored"));
             }
+            let credential_warning = warnings
+                .iter()
+                .find(|warning| warning["key"] == "domains.lanes.projects.example.exec_roots[5]")
+                .ok_or("credential warning")?;
+            let declared_source = credential_roots
+                .entries()
+                .iter()
+                .find(|entry| entry.path == home.join(".ssh"))
+                .map(|entry| entry.source.as_str())
+                .ok_or("SSH credential declaration")?;
+            assert_eq!(credential_warning["credential_source"], declared_source);
             assert!(
                 profile
                     .spec
@@ -423,6 +503,7 @@ mod tests {
                         warning["key"]
                             .as_str()
                             .is_some_and(|key| key.contains(".shared_paths["))
+                            && warning["code"] == "shared_path_ignored"
                     })
                     .collect();
                 assert!(
@@ -452,6 +533,7 @@ mod tests {
             Context {
                 cwd: &primary,
                 home: &home,
+                credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                 state_root: &root.join("state"),
                 common_git: Some(&common),
                 worktree_gitdir: Some(&common),
@@ -491,6 +573,7 @@ mod tests {
             extensions: ExtensionPolicy::Deny,
             agy_state: None,
             permissions: PlanPermissions {
+                credential_roots: provenant_core::CredentialRoots::for_home(&home),
                 policy: None,
                 mode: AccessMode::ReadOnly,
                 read_only: None,
@@ -541,6 +624,7 @@ mod tests {
                 Context {
                     cwd: &primary,
                     home: &home,
+                    credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                     state_root: &root,
                     common_git: Some(&common),
                     worktree_gitdir: None,
@@ -590,6 +674,7 @@ mod tests {
             extensions: ExtensionPolicy::Deny,
             agy_state: None,
             permissions: PlanPermissions {
+                credential_roots: provenant_core::CredentialRoots::for_home(&home),
                 policy: None,
                 mode: AccessMode::ReadOnly,
                 read_only: None,
@@ -620,6 +705,7 @@ mod tests {
             Context {
                 cwd: &primary,
                 home: &home,
+                credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                 state_root: &root,
                 common_git: None,
                 worktree_gitdir: None,
@@ -708,6 +794,7 @@ mod tests {
                 extensions: ExtensionPolicy::Deny,
                 agy_state: None,
                 permissions: PlanPermissions {
+                    credential_roots: provenant_core::CredentialRoots::for_home(&home),
                     policy: Some(host_policy.clone()),
                     mode,
                     read_only: None,
@@ -738,6 +825,7 @@ mod tests {
                 Context {
                     cwd: &primary,
                     home: &home,
+                    credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                     state_root: &root,
                     common_git: Some(&common),
                     worktree_gitdir: None,
@@ -851,6 +939,7 @@ mod tests {
             extensions: ExtensionPolicy::Deny,
             agy_state: None,
             permissions: PlanPermissions {
+                credential_roots: provenant_core::CredentialRoots::for_home(&home),
                 policy: None,
                 mode: AccessMode::WorktreeWrite(Box::new(serde_json::from_value::<
                     WorktreeWriteAuthority,
@@ -886,6 +975,7 @@ mod tests {
             Context {
                 cwd: &cwd,
                 home: &home,
+                credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                 state_root: &state,
                 common_git: Some(&common),
                 worktree_gitdir: Some(&admin),

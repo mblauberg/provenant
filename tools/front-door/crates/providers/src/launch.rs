@@ -160,7 +160,7 @@ impl OmittedGrant {
 pub(crate) fn filter_optional_grants(
     grants: &mut Vec<PathGrant>,
     start: usize,
-    home: &Path,
+    credential_roots: &provenant_core::CredentialRoots,
     policy: &Policy,
     source: OmissionSource,
     omitted: &mut Vec<OmittedGrant>,
@@ -170,9 +170,14 @@ pub(crate) fn filter_optional_grants(
     while index < grants.len() {
         let candidate = &grants[index].path;
         let target = std::fs::canonicalize(candidate).ok();
-        let omitted_path = target
+        let credential_path = target
             .as_ref()
-            .filter(|path| provenant_confinement::refuses_lane_root(path, true, Some(home)))
+            .filter(|path| provenant_confinement::refuses_lane_root(path, true, credential_roots))
+            .or_else(|| {
+                provenant_confinement::refuses_lane_root(candidate, true, credential_roots)
+                    .then_some(candidate)
+            });
+        let omitted_path = credential_path
             .or_else(|| {
                 (!provenant_confinement::permissions::profile_path_representable(candidate))
                     .then_some(candidate)
@@ -227,6 +232,8 @@ pub struct LaunchSpec {
     pub(crate) git_wrapper: crate::lane::GitWrapper,
     /// The immutable effective policy snapshot used to prepare this launch.
     pub(crate) policy: Policy,
+    /// Declared host credential roots used to validate grants after preparation.
+    pub(crate) credential_roots: provenant_core::CredentialRoots,
     pub profile: ProviderProfile,
     /// Decoder state bound to any continuation identity.
     pub stream: StreamState,
@@ -244,7 +251,11 @@ pub struct AppliedAccess {
 impl AppliedAccess {
     /// Portable receipt projection; host paths outside HOME have no portable
     /// anchor, so only their final component is retained.
-    pub fn receipt(&self, home: &Path) -> serde_json::Value {
+    pub fn receipt(
+        &self,
+        home: &Path,
+        credential_roots: &provenant_core::CredentialRoots,
+    ) -> serde_json::Value {
         use sha2::{Digest, Sha256};
         use std::os::unix::ffi::OsStrExt;
         let display = |path: &Path| {
@@ -281,7 +292,10 @@ impl AppliedAccess {
             "toolchain_roots": self.toolchain_roots.iter().map(grant).collect::<Vec<_>>(),
             "omitted_grants": self.omitted_grants.iter().map(|entry| serde_json::json!({
                 "code": "discovered_grant_omitted",
-                "reason": if entry.source == OmissionSource::ProviderPackage { "shared_package_prefix" } else if provenant_confinement::refuses_lane_root(&entry.path, true, Some(home)) { "credential_root" } else if !provenant_confinement::permissions::profile_path_representable(&entry.path) { "unrepresentable_path" } else { "protected_root" },
+                "reason": if entry.source == OmissionSource::ProviderPackage { "shared_package_prefix" } else if provenant_confinement::refuses_lane_root(&entry.path, true, credential_roots) { "credential_root" } else if !provenant_confinement::permissions::profile_path_representable(&entry.path) { "unrepresentable_path" } else { "protected_root" },
+                "credential_source": credential_roots.refusal(
+                    &entry.path, provenant_core::CredentialScope::Subtree, true,
+                ).map(|root| &root.source),
                 "path": display(&entry.path),
                 "path_id": path_id(&entry.path),
                 "source": match entry.source { OmissionSource::UserSkill => "user_skill", OmissionSource::Toolchain => "toolchain", OmissionSource::ProviderConfig => "provider_config", OmissionSource::ProviderPackage => "provider_package" },
@@ -346,6 +360,11 @@ impl LaunchSpec {
             omitted_grants: self.omitted_discovery.clone(),
         }
     }
+
+    /// Credential declarations used to decide which prepared grants were omitted.
+    pub fn credential_roots(&self) -> &provenant_core::CredentialRoots {
+        &self.credential_roots
+    }
 }
 
 /// Frozen confinement policy and launch facts, compiled before launch by the
@@ -366,6 +385,8 @@ pub struct PrepareInput<'a> {
     pub executable: &'a Path,
     /// The user's home directory.
     pub home: &'a Path,
+    /// All declared host credential roots, including provider and account roots.
+    pub credential_roots: provenant_core::CredentialRoots,
     /// The user's login name.
     pub user: &'a OsStr,
     /// Reads one host environment variable. Production passes
@@ -477,7 +498,13 @@ impl PrepareInput<'_> {
         let mut name = name.to_os_string();
         name.push(format!("-skills-{}", provenant_core::hex(&self.nonce)));
         let destination = scratch.with_file_name(name);
-        crate::skill_stage::capture(&source, &destination, self.home, self.skill_stage_max_bytes)
+        crate::skill_stage::capture(
+            &source,
+            &destination,
+            self.home,
+            &self.credential_roots,
+            self.skill_stage_max_bytes,
+        )
     }
 }
 
@@ -1040,7 +1067,7 @@ impl LaunchSpec {
             filter_optional_grants(
                 &mut reads,
                 0,
-                home,
+                &spec.credential_roots,
                 &spec.policy,
                 OmissionSource::Toolchain,
                 &mut spec.omitted_discovery,
@@ -1052,7 +1079,7 @@ impl LaunchSpec {
                     filter_optional_grants(
                         &mut one,
                         0,
-                        home,
+                        &spec.credential_roots,
                         &spec.policy,
                         OmissionSource::Toolchain,
                         &mut spec.omitted_discovery,
@@ -1064,13 +1091,34 @@ impl LaunchSpec {
             for candidate in &spec.tool_requirements.writes {
                 match std::fs::canonicalize(&candidate.path) {
                     Ok(path)
-                        if provenant_confinement::refuses_lane_root(&path, false, Some(home)) =>
+                        if provenant_confinement::refuses_lane_root(
+                            &path,
+                            false,
+                            &spec.credential_roots,
+                        ) =>
                     {
                         if !spec.omitted_discovery.iter().any(|entry| {
                             entry.path == path && entry.source == OmissionSource::Toolchain
                         }) {
                             spec.omitted_discovery.push(OmittedGrant {
                                 path,
+                                source: OmissionSource::Toolchain,
+                            });
+                        }
+                    }
+                    Err(_)
+                        if provenant_confinement::refuses_lane_root(
+                            &candidate.path,
+                            false,
+                            &spec.credential_roots,
+                        ) =>
+                    {
+                        if !spec.omitted_discovery.iter().any(|entry| {
+                            entry.path == candidate.path
+                                && entry.source == OmissionSource::Toolchain
+                        }) {
+                            spec.omitted_discovery.push(OmittedGrant {
+                                path: candidate.path.clone(),
                                 source: OmissionSource::Toolchain,
                             });
                         }
@@ -1167,7 +1215,7 @@ impl LaunchSpec {
             }
             let closure = crate::dylib::dependency_closure(&executable, |path| {
                 use crate::dylib::LibraryAccess;
-                if provenant_confinement::refuses_lane_root(path, true, Some(home)) {
+                if provenant_confinement::refuses_lane_root(path, true, &spec.credential_roots) {
                     LibraryAccess::OmitCredential
                 } else if plan
                     .permissions()
@@ -1273,7 +1321,8 @@ mod git_tests {
             toolchain_roots: Vec::new(),
             omitted_grants: Vec::new(),
         };
-        let receipt = applied.receipt(Path::new("/home/fixture"));
+        let roots = provenant_core::CredentialRoots::for_home(Path::new("/home/fixture"));
+        let receipt = applied.receipt(Path::new("/home/fixture"), &roots);
         assert_eq!(
             receipt["libraries"][0]["path"],
             receipt["libraries"][1]["path"]

@@ -48,7 +48,7 @@ pub(super) struct ConfinementRoots<'a> {
     pub(super) cwd: &'a Path,
     pub(super) home: &'a Path,
     pub(super) state: &'a Path,
-    pub(super) credential_roots: &'a [PathGrant],
+    pub(super) credential_roots: &'a provenant_core::CredentialRoots,
     pub(super) github_roots: &'a [PathGrant],
     pub(super) protected_worktrees: &'a [PathGrant],
     pub(super) scratch: &'a Path,
@@ -208,8 +208,12 @@ pub(super) fn confinement_request(
 ) -> Result<PlanRequest, provenant_confinement::permissions::PermissionError> {
     let mode = match writer {
         Some(writer) => {
-            let mut authority =
-                WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch, roots.home)?;
+            let mut authority = WorktreeWriteAuthority::for_worktree(
+                &writer.worktree,
+                &writer.branch,
+                roots.home,
+                roots.credential_roots,
+            )?;
             authority.set_publishing(publishing);
             AccessMode::WorktreeWrite(Box::new(authority))
         }
@@ -264,7 +268,7 @@ pub(super) fn confinement_request(
             roots.home,
             roots.cwd,
             roots.scratch,
-            roots.credential_roots,
+            roots.credential_roots.entries(),
             roots.github_roots,
             roots.protected_worktrees,
             sandboxed,
@@ -342,6 +346,7 @@ pub(super) fn confinement_request(
     Ok(PlanRequest {
         scope: WorkScope::Project(project_id),
         permissions: PlanPermissions {
+            credential_roots: policy.mandatory().credential_roots().clone(),
             policy: Some(policy),
             read_only: None,
             mode,
@@ -651,49 +656,108 @@ pub(super) fn credential_roots(
     registry: &Registry<'_>,
     home: &Path,
     settings: &provenant_providers::accounts::Settings,
-) -> Result<Vec<PathGrant>, String> {
-    let mut paths: Vec<PathBuf> = settings
-        .entries
-        .values()
-        .flat_map(|entry| std::iter::once(&entry.directory).chain(&entry.directories))
-        .filter(|path| path.as_path() != home)
-        .cloned()
-        .collect();
-    if let Some(host) = registry.host {
-        paths.extend(host.default_account_directories.values().cloned());
+) -> Result<provenant_core::CredentialRoots, String> {
+    use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
+    let mut roots = CredentialRoots::for_home(home);
+    for entry in settings.entries.values() {
+        let source = format!("account registry: {}/{}", entry.adapter, entry.label);
+        for path in std::iter::once(&entry.directory).chain(&entry.directories) {
+            roots.add(
+                path.clone(),
+                CredentialScope::Subtree,
+                source.clone(),
+                CredentialKind::Store,
+            );
+        }
     }
-    paths.sort();
-    paths.dedup();
-    let mut grants: Vec<_> = paths
-        .into_iter()
-        .map(|path| PathGrant {
-            path,
-            scope: PathScope::Subtree,
-        })
-        .collect();
     // Claude declares a sibling JSON profile as well as files inside its
     // account directory. Keep this exact endpoint for every registered
     // spelling, including identities this attempt did not select.
     for entry in settings.entries.values() {
         if AdapterSpec::get(&entry.adapter).is_some_and(|spec| spec.credential_profile_sibling) {
-            grants.extend(
-                std::iter::once(&entry.directory)
-                    .chain(&entry.directories)
-                    .filter(|path| path.as_path() != home)
-                    .map(|path| PathGrant {
-                        path: path.with_extension("json"),
-                        scope: PathScope::Exact,
-                    }),
+            let source = format!(
+                "account registry: {}/{} credential file",
+                entry.adapter, entry.label
             );
+            roots.add(
+                entry.directory.with_extension("json"),
+                CredentialScope::Exact,
+                source.clone(),
+                CredentialKind::Store,
+            );
+            for directory in &entry.directories {
+                roots.add(
+                    directory.with_extension("json"),
+                    CredentialScope::Exact,
+                    source.clone(),
+                    CredentialKind::Store,
+                );
+            }
         }
     }
-    grants.extend(
-        registry
-            .host
-            .map(|host| host.credential_roots.clone())
-            .unwrap_or_else(run::HostLaunchContext::credential_roots),
-    );
-    Ok(grants)
+    let default_directories = registry
+        .host
+        .map(|host| host.default_account_directories.clone())
+        .unwrap_or_else(run::HostLaunchContext::default_account_directories);
+    for spec in ADAPTER_SPECS {
+        let Some((environment, fallback)) = spec.default_account_directory else {
+            continue;
+        };
+        let path = default_directories
+            .get(spec.name)
+            .cloned()
+            .or_else(|| host_provider_var(registry, environment).map(PathBuf::from))
+            .unwrap_or_else(|| home.join(fallback));
+        let source = if default_directories.contains_key(spec.name)
+            || host_provider_var(registry, environment).is_some()
+        {
+            format!("provider environment: {environment}")
+        } else {
+            format!(
+                "provider declaration: {} default account directory",
+                spec.name
+            )
+        };
+        let kind = if spec.name == "codex" && path == home.join(".codex") {
+            CredentialKind::CodexHome
+        } else {
+            CredentialKind::Store
+        };
+        roots.add(path, CredentialScope::Subtree, source, kind);
+    }
+    let host_roots = registry
+        .host
+        .map(|host| host.credential_roots.clone())
+        .unwrap_or_else(run::HostLaunchContext::credential_roots);
+    for root in host_roots {
+        roots.add(root.path, root.scope, root.source, root.kind);
+    }
+    // Keep both the declaration and its resolved alias. A candidate can use
+    // either spelling, and no credential file contents are opened here.
+    let declarations = roots.entries().to_vec();
+    for root in declarations {
+        let resolved = provenant_confinement::permissions::resolve_boundary_path(&root.path)
+            .map_err(|error| error.to_string())?;
+        if resolved != root.path {
+            roots.add(resolved, root.scope, root.source, root.kind);
+        }
+    }
+    Ok(roots)
+}
+
+pub fn declared_credentials(
+    registry: &Registry<'_>,
+) -> Result<provenant_core::CredentialRoots, String> {
+    let home = registry.home.ok_or("home directory is unavailable")?;
+    let roots = registry
+        .roots
+        .ok_or("host account registry is unavailable")?;
+    let settings = crate::config_reads::read_for(roots, "run")
+        .map_err(|error| error.to_string())?
+        .domains
+        .accounts
+        .unique_accounts();
+    credential_roots(registry, home, &settings)
 }
 
 pub(super) fn github_roots(registry: &Registry<'_>) -> Vec<PathGrant> {
@@ -796,6 +860,27 @@ fn source_cwd_authority(message: String) -> SourceCwdError {
     )
 }
 
+fn source_admission_error(error: crate::run::SourceAdmissionError) -> SourceCwdError {
+    provenant_records::policy::Policy::default().boundary_error(
+        error.code,
+        provenant_records::policy::Facts::violation(&error.reason),
+        SourceCwdError::Authority(error.reason),
+    )
+}
+
+fn report_source_warnings(admission: &crate::run::SourceAdmission) {
+    use std::io::Write;
+    let mut stderr = std::io::stderr().lock();
+    for warning in &admission.warnings {
+        let _ = writeln!(
+            stderr,
+            "warning: source overlaps {} (source: {})",
+            warning.path.display(),
+            warning.source,
+        );
+    }
+}
+
 pub(super) fn source_cwd(
     registry: &Registry<'_>,
     task: &run::TaskRequest,
@@ -803,53 +888,60 @@ pub(super) fn source_cwd(
     let cwd = registry
         .cwd
         .ok_or_else(|| SourceCwdError::Operational("working directory is unavailable".into()))?;
+    let state = registry
+        .state_root
+        .ok_or_else(|| SourceCwdError::Operational("state root is unavailable".into()))?;
+    let credentials = crate::run::declared_credentials(registry).map_err(|error| {
+        source_cwd_authority(format!("credential declarations unavailable: {error}"))
+    })?;
     let Some(source) = &task.access.source_root else {
         if task.access.source_identity.is_some() || task.access.source_live {
             return Err(source_cwd_authority(
                 "graph source identity has no checkout".into(),
             ));
         }
-        return canonical(cwd).map_err(SourceCwdError::Operational);
+        let admission = crate::run::admit_source_root(
+            cwd,
+            state,
+            cwd,
+            &credentials,
+            crate::run::SourceAdmissionMode::Live,
+        )
+        .map_err(source_admission_error)?;
+        report_source_warnings(&admission);
+        return Ok(admission.path);
     };
     if task.writer.is_some() || (!task.access.source_live && task.head.is_none()) {
         return Err(source_cwd_authority(
             "read-only source needs a pinned head and no writer".into(),
         ));
     }
-    let state = registry
-        .state_root
-        .ok_or_else(|| SourceCwdError::Operational("state root is unavailable".into()))?;
-    if !run::access_root_allowed(source, state, true)
-        || provenant_confinement::refuses_lane_root(source, true, registry.home)
+    if task.access.source_live && !std::fs::metadata(source).is_ok_and(|metadata| metadata.is_dir())
     {
         return Err(source_cwd_authority(
-            "graph source checkout is not an allowed read root".into(),
+            "graph source checkout is not an existing directory".into(),
         ));
     }
-    let verified = if task.access.source_live {
-        // A live child may select another project, just as an ordinary CLI
-        // launch can. The host sealed its canonical root and filesystem identity;
-        // immutable review snapshots still require project registration below.
-        canonical(source).map_err(source_cwd_authority)?
+    let mode = if task.access.source_live {
+        crate::run::SourceAdmissionMode::Live
     } else {
-        run::resolve_reader_source(state, cwd, source).map_err(|_| {
-            source_cwd_authority(
-                "graph source checkout is no longer registered with the project".into(),
-            )
-        })?
+        crate::run::SourceAdmissionMode::Registered
     };
-    if verified != *source {
+    let admission = crate::run::admit_source_root(cwd, state, source, &credentials, mode)
+        .map_err(source_admission_error)?;
+    report_source_warnings(&admission);
+    if !task.access.source_live && admission.path != *source {
         return Err(source_cwd_authority(
             "graph source checkout changed location".into(),
         ));
     }
-    let identity = source_identity(&verified).map_err(source_cwd_authority)?;
+    let identity = source_identity(&admission.path).map_err(source_cwd_authority)?;
     if task.access.source_identity.as_ref() != Some(&identity) {
         return Err(source_cwd_authority(
             "graph source checkout identity changed".into(),
         ));
     }
-    Ok(verified)
+    Ok(admission.path)
 }
 
 #[derive(Debug, thiserror::Error)]

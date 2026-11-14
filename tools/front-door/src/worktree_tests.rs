@@ -1280,8 +1280,10 @@ fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBu
     )?;
     let worktree = verify_worktree(&repo, path)?;
     let branch = GitRefName::new(format!("refs/heads/{branch}"))?;
-    let authority = WorktreeWriteAuthority::for_worktree(&worktree, &branch, &rig.home)?;
-    prepare_writer_directories(&worktree, &branch, &authority, &rig.home)?;
+    let credentials = provenant_core::CredentialRoots::for_home(&rig.home);
+    let authority =
+        WorktreeWriteAuthority::for_worktree(&worktree, &branch, &rig.home, &credentials)?;
+    prepare_writer_directories(&worktree, &branch, &authority, &rig.home, &credentials)?;
     let cache = authority.cargo_cache().path.clone();
     fs::write(cache.join("artifact"), b"lane build output")?;
     Ok(cache)

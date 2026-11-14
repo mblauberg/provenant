@@ -33,6 +33,7 @@ use observation::*;
 #[cfg(any(test, feature = "fixture"))]
 use preparation::*;
 
+pub(super) use confinement::declared_credentials;
 pub(crate) use confinement::{find_executable, resolve_executable};
 pub use confinement::{graph_inputs_directory, graph_node_inputs_directory};
 pub(super) use fixtures::start_fabric_relay;

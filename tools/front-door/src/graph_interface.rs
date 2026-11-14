@@ -27,7 +27,7 @@ fn response_outcome(command: &str, data: &Value) -> Outcome {
         match data["status"].as_str() {
             Some("complete") if data["outcome"] == "failed" => return Outcome::Failed,
             Some("cancelled") => return Outcome::Cancelled,
-            Some("paused") => return Outcome::Refused,
+            Some("paused" | "refused") => return Outcome::Refused,
             Some("pending") => return Outcome::Waiting,
             _ => {}
         }
@@ -328,6 +328,25 @@ fn invoke(
             // was reported when it happened.
             let replayed = data["named"]["replayed"] == true;
             let mut result = CommandResult::new(command, response_outcome(command, &data), data);
+            if command == "run"
+                && let Some(refusal) = result.data["source_admission"]
+                    .as_array()
+                    .and_then(|rows| rows.iter().find(|row| row["status"] == "refused"))
+            {
+                result.error = Some(provenant_records::CommandError {
+                    code: refusal["code"]
+                        .as_str()
+                        .unwrap_or("preparation_refused")
+                        .into(),
+                    message: refusal["reason"]
+                        .as_str()
+                        .unwrap_or("source admission refused")
+                        .into(),
+                    diagnostic: None,
+                    cause: None,
+                    repair: None,
+                });
+            }
             if command == "run"
                 && !replayed
                 && let Some(node) = launch_error_node(&result.data, result.status)
@@ -1059,6 +1078,7 @@ mod tests {
             ("complete", "partial", Outcome::Ok),
             ("cancelled", "failed", Outcome::Cancelled),
             ("paused", "failed", Outcome::Refused),
+            ("refused", "failed", Outcome::Refused),
             ("pending", "partial", Outcome::Waiting),
         ] {
             let data = json!({"status":status,"outcome":outcome});

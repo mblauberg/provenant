@@ -2778,6 +2778,7 @@ mod policy_reporting_tests {
             extensions: ExtensionPolicy::Deny,
             agy_state: None,
             permissions: PlanPermissions {
+                credential_roots: policy.mandatory().credential_roots().clone(),
                 policy: Some(policy),
                 read_only: None,
                 mode: AccessMode::ReadOnly,

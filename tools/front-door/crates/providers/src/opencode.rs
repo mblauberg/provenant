@@ -310,7 +310,7 @@ fn prepare(
         crate::launch::filter_optional_grants(
             &mut runtime_reads,
             start,
-            input.home,
+            &input.credential_roots,
             input.policy,
             crate::launch::OmissionSource::Toolchain,
             &mut omitted_discovery,
@@ -321,7 +321,7 @@ fn prepare(
     let config_dir = config_home.join("opencode");
     let optional_start = runtime_reads.len();
     if let Ok(config_dir) = std::fs::canonicalize(&config_dir)
-        && !provenant_confinement::refuses_lane_root(&config_dir, true, Some(input.home))
+        && !provenant_confinement::refuses_lane_root(&config_dir, true, &input.credential_roots)
         && let Ok(entries) = std::fs::read_dir(&config_dir)
     {
         runtime_reads.push(exact(&config_dir));
@@ -339,7 +339,7 @@ fn prepare(
         }
     }
     if let Ok(config_dir) = std::fs::canonicalize(&config_dir)
-        && provenant_confinement::refuses_lane_root(&config_dir, true, Some(input.home))
+        && provenant_confinement::refuses_lane_root(&config_dir, true, &input.credential_roots)
         && !omitted_discovery.iter().any(|entry| {
             entry.path == config_dir
                 && entry.source == crate::launch::OmissionSource::ProviderConfig
@@ -353,7 +353,7 @@ fn prepare(
     crate::launch::filter_optional_grants(
         &mut runtime_reads,
         optional_start,
-        input.home,
+        &input.credential_roots,
         input.policy,
         crate::launch::OmissionSource::ProviderConfig,
         &mut omitted_discovery,
@@ -379,7 +379,7 @@ fn prepare(
         let private_opencode = private_config.join("opencode");
         setup.push(SetupStep::CreateDir(private_opencode.clone()));
         if let Ok(canonical) = std::fs::canonicalize(&config_dir)
-            && !provenant_confinement::refuses_lane_root(&canonical, true, Some(input.home))
+            && !provenant_confinement::refuses_lane_root(&canonical, true, &input.credential_roots)
             && let Ok(entries) = std::fs::read_dir(&config_dir)
         {
             for entry in entries.flatten() {
@@ -490,6 +490,7 @@ fn prepare(
         tool_requirements,
         git_wrapper: Default::default(),
         policy: input.policy.clone(),
+        credential_roots: input.credential_roots.clone(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 process_executables,
@@ -1602,6 +1603,7 @@ mod tests {
         let prompt = crate::Prompt::new("fixture".into());
         let mut input = crate::tests::fixture_input(&route, &plan, &prompt, &cwd, None);
         input.home = &home;
+        input.credential_roots = provenant_core::CredentialRoots::for_home(&home);
         let host_var = |name: &str| (name == "PATH").then(|| host_bin.clone().into_os_string());
         input.host_var = &host_var;
         let spec = prepare(
@@ -2018,6 +2020,7 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
             None,
         );
         input.home = &home;
+        input.credential_roots = provenant_core::CredentialRoots::for_home(&home);
         let spec = prepare(
             &input,
             Access::WorktreeWrite,
@@ -2043,6 +2046,7 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
             None,
         );
         input.home = home;
+        input.credential_roots = provenant_core::CredentialRoots::for_home(home);
         let spec = prepare(
             &input,
             Access::WorktreeWrite,
@@ -2279,6 +2283,7 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
         let mut input = PrepareInput {
             executable: &executable,
             home: &home,
+            credential_roots: provenant_core::CredentialRoots::for_home(&home),
             ..crate::tests::fixture_input(&route, &plan, &prompt, &cwd, None)
         };
         input.provenant.git = &git;
@@ -2357,6 +2362,24 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
         };
         let input = PrepareInput {
             host_var: &lookup,
+            credential_roots: {
+                let mut roots = provenant_core::CredentialRoots::for_home(std::path::Path::new(
+                    "/fixture/home",
+                ));
+                roots.add(
+                    PathBuf::from("/xdg/config/opencode"),
+                    provenant_core::CredentialScope::Subtree,
+                    "provider declaration: opencode XDG config",
+                    provenant_core::CredentialKind::Store,
+                );
+                roots.add(
+                    PathBuf::from("/xdg/data/opencode"),
+                    provenant_core::CredentialScope::Subtree,
+                    "provider declaration: opencode XDG data",
+                    provenant_core::CredentialKind::Store,
+                );
+                roots
+            },
             ..crate::tests::fixture_input(
                 &route,
                 &plan,

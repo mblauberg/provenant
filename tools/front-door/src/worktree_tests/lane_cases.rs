@@ -719,7 +719,13 @@ fn verify_lane_profile(
     if let (Some((worktree, branch)), AccessMode::WorktreeWrite(authority)) =
         (writer, &confinement.plan.permissions().mode)
     {
-        prepare_writer_directories(worktree, branch, authority, &confinement.home)?;
+        prepare_writer_directories(
+            worktree,
+            branch,
+            authority,
+            &confinement.home,
+            &confinement.plan.permissions().credential_roots,
+        )?;
     }
     if let Some(writer) = confinement.writer.as_ref() {
         writer.prepare_private_git_for_fixture(
