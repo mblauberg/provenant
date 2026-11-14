@@ -1,7 +1,8 @@
 //! `[domains.run]`: host-owned settings for worktree-write lanes: extra write
 //! paths, and the repository paths a writer may change without forcing review.
 use crate::permissions::{
-    HostPolicySettings, LanePolicy, MandatoryRoots, PathGrant, PathScope, is_credential_root,
+    HostPolicySettings, LanePolicy, MandatoryRoots, NetworkAccess, OptionalPolicy, PathGrant,
+    PathScope, is_credential_root,
 };
 use crate::review_exempt::{MAX_PATTERNS, ReviewExempt, valid_pattern};
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
@@ -143,8 +144,8 @@ pub enum SandboxSource {
     Parent,
     /// The route matches `domains.run.sandboxed_routes`.
     Route,
-    /// The lane's network is narrower than open; only the sandbox holds it.
-    Network,
+    /// Explicit network or path denials require kernel enforcement.
+    Restriction,
     /// The host platform does not implement sandbox confinement.
     Platform,
     /// The `lanes.sandbox` knob, from the run, graph node or host `[knobs]`.
@@ -152,6 +153,26 @@ pub enum SandboxSource {
     /// Default resolution: lanes run unsandboxed like the CLI started by hand.
     Default,
 }
+// One declaration owns restriction discovery and the backend-selection matrix.
+macro_rules! sandbox_restrictions {
+    ($network:ident, $policy:ident; $($name:ident => $condition:expr),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum SandboxRestriction { $($name),+ }
+        impl SandboxRestriction {
+            pub const ALL: &'static [Self] = &[$(Self::$name),+];
+            pub fn for_policy($network: NetworkAccess, $policy: &OptionalPolicy) -> Vec<Self> {
+                [$(($condition, Self::$name)),+].into_iter()
+                    .filter_map(|(active, restriction)| active.then_some(restriction)).collect()
+            }
+        }
+    };
+}
+sandbox_restrictions! { network, policy;
+    Network => network != NetworkAccess::Open,
+    ReadScope => !policy.deny_read.is_empty(),
+    WriteScope => !policy.deny_write.is_empty(),
+}
+
 /// What decides one attempt's sandbox.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SandboxInputs<'a> {
@@ -161,10 +182,8 @@ pub struct SandboxInputs<'a> {
     pub knob: Option<&'a str>,
     /// The shared admission-floor policy requires parent sandbox retention.
     pub parent_sandboxed: bool,
-    /// The lane's effective network is `provider` or `local`.
-    pub network_narrowed: bool,
-    /// The lane cannot write its checkout.
-    pub read_only: bool,
+    /// Resolved explicit denials, discovered from the policy declaration above.
+    pub restrictions: &'a [SandboxRestriction],
     /// The current process is already inside an operating-system sandbox (e.g. Seatbelt).
     pub os_sandboxed: bool,
     /// Whether the host platform supports sandbox confinement (true on macOS).
@@ -324,20 +343,10 @@ impl RunConfig {
             .map(PathBuf::as_path)
     }
 
-    /// Resolve one attempt's sandbox mode.
-    ///
-    /// By default (`lanes.sandbox` unset or `"auto"`), every lane kind (including read-only)
-    /// runs unsandboxed.
-    ///
-    /// An explicit `--no-sandbox` / knob `"off"` takes precedence over the route floor
-    /// (`sandboxed_routes`), narrowed-network floor, and parent floor where Provenant decides it,
-    /// with a one-line warning naming the dropped restriction(s).
-    ///
-    /// An OS-inherited sandbox (the process is already inside Seatbelt) cannot be removed by
-    /// a child process and is always reported honestly as effective (`effective: true`, `source: Parent`).
-    ///
-    /// Without a supported backend, defaults remain off. An explicit on
-    /// retains its request so preparation reports the unavailable confinement.
+    /// Resolve one attempt's sandbox mode. Ambient launches default off.
+    /// Explicit denials always select enforcement, even with an off knob or an
+    /// unsupported platform: launch then reports the typed backend failure.
+    /// The off knob may still override advisory route and parent floors.
     pub fn sandbox_for(&self, inputs: SandboxInputs<'_>) -> SandboxMode {
         let listed = self
             .sandboxed_routes
@@ -365,6 +374,24 @@ impl RunConfig {
             };
         }
 
+        if !inputs.restrictions.is_empty() {
+            return SandboxMode {
+                requested,
+                effective: true,
+                source: SandboxSource::Restriction,
+                warning: if !inputs.platform_supported {
+                    Some("explicit restrictions require a sandbox backend unavailable on this platform".into())
+                } else if inputs.knob == Some("off") {
+                    Some(
+                        "sandbox off cannot discard explicit restrictions; retaining enforcement"
+                            .into(),
+                    )
+                } else {
+                    None
+                },
+            };
+        }
+
         if !inputs.platform_supported {
             let effective =
                 requested || inputs.parent_sandboxed || (listed && inputs.knob != Some("off"));
@@ -381,9 +408,6 @@ impl RunConfig {
             let mut dropped = Vec::new();
             if listed {
                 dropped.push(format!("route '{}'", inputs.route));
-            }
-            if inputs.network_narrowed {
-                dropped.push("network restriction".to_string());
             }
             if inputs.parent_sandboxed {
                 dropped.push("parent sandbox floor".to_string());
@@ -857,8 +881,7 @@ mod tests {
             route,
             knob: None,
             parent_sandboxed: false,
-            network_narrowed: false,
-            read_only: false,
+            restrictions: &[],
             os_sandboxed: false,
             platform_supported: true,
         }
@@ -873,88 +896,72 @@ mod tests {
             toml_edit::de::from_str("sandboxed_routes = [\"opencode/opencode/\"]").unwrap();
         let default_config = RunConfig::default();
 
-        // 1. Invariant: Default is off for every lane kind when no floor applies.
-        for read_only in [false, true] {
-            let input = SandboxInputs {
-                read_only,
-                ..lane_input("codex/gpt-5.5")
-            };
-            let res = default_config.sandbox_for(input);
-            assert_eq!(
-                (res.requested, res.effective, res.source),
-                (false, false, SandboxSource::Default),
-                "default off for read_only={read_only}"
-            );
-            assert_eq!(res.env_value(), "off");
-        }
-
-        // 2. Invariant: Explicit knob beats default and floors (property: explicit beats default).
+        // Ambient defaults and advisory floors remain overridable.
         for config in [&default_config, &config_with_routes] {
             for route in ["codex/gpt-5.5", "opencode/opencode/glm-5.3-flash-free"] {
-                for network_narrowed in [false, true] {
-                    for parent_sandboxed in [false, true] {
-                        for read_only in [false, true] {
-                            let base = SandboxInputs {
-                                route,
-                                knob: None,
-                                parent_sandboxed,
-                                network_narrowed,
-                                read_only,
-                                os_sandboxed: false,
-                                platform_supported: true,
-                            };
+                for parent_sandboxed in [false, true] {
+                    let listed = config.sandboxed_routes.iter().any(|p| route.starts_with(p));
+                    for knob in [None, Some("auto"), Some("off"), Some("on")] {
+                        let mode = config.sandbox_for(SandboxInputs {
+                            knob,
+                            parent_sandboxed,
+                            ..lane_input(route)
+                        });
+                        assert_eq!(mode.requested, knob == Some("on"));
+                        assert_eq!(
+                            mode.effective,
+                            knob == Some("on")
+                                || (knob != Some("off") && (parent_sandboxed || listed))
+                        );
+                    }
+                }
+            }
+        }
 
-                            // Explicit off beats all Provenant floors:
-                            let off_input = SandboxInputs {
-                                knob: Some("off"),
-                                ..base
-                            };
-                            let off_mode = config.sandbox_for(off_input);
-                            assert!(
-                                !off_mode.effective,
-                                "explicit off must always be unsandboxed on macos"
-                            );
-                            assert_eq!(off_mode.source, SandboxSource::Knob);
-                            assert!(!off_mode.requested);
-                            assert_eq!(off_mode.env_value(), "off");
+        // Every declared restriction must select an enforcing backend or reach
+        // the typed unavailable-backend path, never a direct ambient launch.
+        for restriction in SandboxRestriction::ALL {
+            for platform_supported in [false, true] {
+                for knob in [None, Some("auto"), Some("off"), Some("on")] {
+                    let mode = default_config.sandbox_for(SandboxInputs {
+                        restrictions: std::slice::from_ref(restriction),
+                        platform_supported,
+                        knob,
+                        ..lane_input("command/probe")
+                    });
+                    assert!(mode.effective, "{restriction:?} cannot be dropped");
+                    assert_eq!(mode.source, SandboxSource::Restriction);
+                }
+            }
+        }
 
-                            let listed =
-                                config.sandboxed_routes.iter().any(|p| route.starts_with(p));
-                            let had_restriction = listed || network_narrowed || parent_sandboxed;
-                            assert_eq!(
-                                off_mode.warning.is_some(),
-                                had_restriction,
-                                "warning expected when restrictions are dropped"
-                            );
-
-                            // Explicit on always sandboxes:
-                            let on_input = SandboxInputs {
-                                knob: Some("on"),
-                                ..base
-                            };
-                            let on_mode = config.sandbox_for(on_input);
-                            assert!(on_mode.effective, "explicit on must always sandbox");
-                            assert_eq!(on_mode.source, SandboxSource::Knob);
-                            assert!(on_mode.requested);
-                            assert_eq!(on_mode.env_value(), "on");
-
-                            // Default behavior (knob is None or auto):
-                            for knob in [None, Some("auto")] {
-                                let def_input = SandboxInputs { knob, ..base };
-                                let def_mode = config.sandbox_for(def_input);
-                                assert!(!def_mode.requested);
-                                if parent_sandboxed {
-                                    assert!(def_mode.effective);
-                                    assert_eq!(def_mode.source, SandboxSource::Parent);
-                                } else if listed {
-                                    assert!(def_mode.effective);
-                                    assert_eq!(def_mode.source, SandboxSource::Route);
-                                } else {
-                                    assert!(!def_mode.effective);
-                                    assert_eq!(def_mode.source, SandboxSource::Default);
-                                }
-                            }
-                        }
+        for network in [
+            NetworkAccess::Open,
+            NetworkAccess::Local,
+            NetworkAccess::Provider,
+        ] {
+            for deny_read in [false, true] {
+                for deny_write in [false, true] {
+                    let grant = PathGrant {
+                        path: "/fixture/restricted".into(),
+                        scope: PathScope::Subtree,
+                    };
+                    let policy = OptionalPolicy {
+                        network,
+                        deny_read: deny_read.then_some(grant.clone()).into_iter().collect(),
+                        deny_write: deny_write.then_some(grant).into_iter().collect(),
+                    };
+                    let restrictions = SandboxRestriction::for_policy(network, &policy);
+                    for platform_supported in [false, true] {
+                        let mode = default_config.sandbox_for(SandboxInputs {
+                            restrictions: &restrictions,
+                            platform_supported,
+                            ..lane_input("command/probe")
+                        });
+                        assert_eq!(
+                            mode.effective,
+                            network != NetworkAccess::Open || deny_read || deny_write
+                        );
                     }
                 }
             }

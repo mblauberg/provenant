@@ -86,17 +86,68 @@ impl RepositoryPolicy {
     }
 
     pub fn protects_brief(&self, checkout: &Path, cwd: &Path, brief: &str) -> bool {
-        brief
-            .split(|c: char| {
-                c.is_whitespace()
-                    || matches!(c, '`' | '\'' | '"' | '(' | ')' | '[' | ']' | ',' | ';')
-            })
-            .filter(|word| !word.is_empty())
-            .any(|word| self.protects(checkout, cwd, Path::new(word.trim_end_matches(':'))))
+        let matches_reference = |token: &str| {
+            // Try literal bytes first. Strip punctuation one character at a
+            // time so filename punctuation survives ambiguous prose wrappers.
+            [token, token.trim_start_matches(path_delimiter)]
+                .into_iter()
+                .any(|mut path| {
+                    while !path.is_empty() {
+                        if self.protects(checkout, cwd, Path::new(path)) {
+                            return true;
+                        }
+                        let last = path.chars().next_back().expect("nonempty path");
+                        if !sentence_punctuation(last) {
+                            break;
+                        }
+                        path = &path[..path.len() - last.len_utf8()];
+                    }
+                    false
+                })
+        };
+        brief.split_whitespace().any(|token| {
+            matches_reference(token) || token.split(path_delimiter).any(matches_reference)
+        })
     }
 }
 
+fn sentence_punctuation(c: char) -> bool {
+    c.is_ascii_punctuation() && !matches!(c, '/' | '\\' | '_' | '-')
+        || matches!(c, '…' | '。' | '，' | '！' | '？')
+}
+
+fn path_delimiter(c: char) -> bool {
+    matches!(
+        c,
+        '`' | '\''
+            | '"'
+            | '('
+            | ')'
+            | '['
+            | ']'
+            | '{'
+            | '}'
+            | '<'
+            | '>'
+            | ','
+            | ';'
+            | ':'
+            | '!'
+            | '?'
+            | '*'
+            | '“'
+            | '”'
+            | '‘'
+            | '’'
+            | '«'
+            | '»'
+    )
+}
+
 fn normalise(path: &Path) -> PathBuf {
+    // Briefs and declarations may spell separators in either common form.
+    let separated = path.to_str().map(|text| text.replace('\\', "/"));
+    let path = separated.as_deref().map(Path::new).unwrap_or(path);
     let mut result = PathBuf::new();
     for component in path.components() {
         match component {
@@ -113,6 +164,56 @@ fn normalise(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protected_file_classification_is_invariant_under_prose_wrappers() {
+        let checkout = Path::new("/fixture/repo");
+        let policy = RepositoryPolicy {
+            confidential: false,
+            protected_paths: vec!["private/brief.md".into()],
+        };
+        for path in [
+            "private/brief.md",
+            "./private/brief.md",
+            "private\\brief.md",
+            "./private//brief.md",
+        ] {
+            for prefix in ["", "(", "[", "{", "<", "\"", "'", "`", "“", "‘", "**"] {
+                for suffix in [
+                    "", ".", ",", ":", ";", "!", "?", ")", "]", "}", ">", "\"", "'", "`", "”", "’",
+                    "**.", ").", "]:",
+                ] {
+                    let brief = format!("Read {prefix}{path}{suffix}");
+                    assert!(policy.protects_brief(checkout, checkout, &brief), "{brief}");
+                    assert!(!policy.protects_brief(
+                        checkout,
+                        checkout,
+                        &brief.replace("private", "public")
+                    ));
+                }
+            }
+        }
+        // Literal filename punctuation remains significant, not discarded.
+        for name in [
+            "private/brief.md.",
+            "private/a,b.md",
+            "private/.hidden",
+            "private/a!b.md",
+        ] {
+            let policy = RepositoryPolicy {
+                confidential: false,
+                protected_paths: vec![name.into()],
+            };
+            for brief in [
+                format!("Read {name}"),
+                format!("Read `{name}`"),
+                format!("Read ({name})"),
+                format!("Read ({name})."),
+            ] {
+                assert!(policy.protects_brief(checkout, checkout, &brief));
+            }
+        }
+    }
 
     #[test]
     fn declared_policy_classifies_inputs_and_briefs_without_implicit_policy() {

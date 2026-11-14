@@ -73,7 +73,9 @@ the effective settings with `provenant config show`; the boundaries are in
 
 Use `sandboxed_routes` to select routes for sandboxing and `--no-sandbox` to
 request an unsandboxed run. Configure `sandbox_cache_reads` for host caches a
-sandboxed lane needs. Check the attempt receipt for the effective mode and source.
+sandboxed lane needs. Explicit network restrictions and host path denials retain
+sandbox enforcement even when the sandbox setting is off; a missing enforcing
+backend refuses launch. Check the attempt receipt for the effective mode and source.
 See [ADR 0040](../adr/0040-open-lane-policy-with-explicit-boundaries.md) and the
 [supervisor spec](../specs/supervisor.md) for boundaries.
 
