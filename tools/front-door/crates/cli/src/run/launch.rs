@@ -698,7 +698,10 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
         } => Some((fence.clone(), worktree.clone())),
         _ => None,
     }) {
-        return Err(run::RunError::RetainedWriterImport { fence, worktree }.into());
+        return Err(run::RunError::RetainedWriterImport {
+            fence: Box::new(fence),
+            worktree,
+        }.into());
     }
     // Report any all-refused batch using its typed diagnostic where available.
     if let Some((attempt, reason, kind)) = started.iter().find_map(|started| match started {
