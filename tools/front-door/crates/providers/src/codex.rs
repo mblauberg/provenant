@@ -139,7 +139,7 @@ fn prepare(
     for image in input.images {
         argv.extend(["--image".into(), image.as_os_str().to_owned()]);
     }
-    input.provenant.codex(&mut argv)?;
+    input.provenant.codex(&mut argv, input.policy)?;
     argv.push("-".into());
 
     // Codex runs helpers from its own package (code-mode host, bundled `rg`
@@ -147,7 +147,7 @@ fn prepare(
     // are readable through the runtime baseline; exec roots add exec, not
     // reads. No shared install prefix: its var/ stays unreadable.
     let mut package_omissions = Vec::new();
-    let package = package_grant(input.executable, &mut package_omissions);
+    let package = package_grant(input.executable, &mut package_omissions, input.policy)?;
     let tool_exec_roots = vec![
         subtree("/bin"),
         subtree("/usr/bin"),
@@ -174,7 +174,7 @@ fn prepare(
             target: skills.clone(),
         });
     }
-    let path = crate::launch::tool_search_path(input.home, true);
+    let path = crate::launch::tool_search_path(input.home, true, input.policy)?;
     let mut env = base_env(input, &plan.scratch.path, path);
     if input.account.is_some() {
         // The selected login takes precedence over ambient provider selectors.
@@ -184,9 +184,13 @@ fn prepare(
                 .any(|name| key == *name)
         });
     }
-    input
-        .provenant
-        .environment(&plan.scratch.path, &mut env, &mut setup, false)?;
+    input.provenant.environment(
+        &plan.scratch.path,
+        &mut env,
+        &mut setup,
+        false,
+        input.policy,
+    )?;
     crate::launch::rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
     if input.sandboxed() {
         crate::launch::node_tools(
@@ -231,6 +235,7 @@ fn prepare(
         user_skills: staged_skills,
         tool_requirements,
         git_wrapper: Default::default(),
+        policy: input.policy.clone(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],
@@ -255,7 +260,7 @@ fn prepare(
         },
         stream,
     };
-    crate::launch::prepare_tool_requirements(input, &mut spec);
+    crate::launch::prepare_tool_requirements(input, &mut spec)?;
     input
         .provenant
         .grant(&mut spec.profile.spec, &mut spec.setup, false);

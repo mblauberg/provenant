@@ -127,9 +127,9 @@ macro_rules! adapter {
                     continuation.bind_stream($id, &mut stream)?;
                 }
                 let mut spec = $prepare(&input, access, session, stream)?;
-                crate::launch::prepare_tool_requirements(&input, &mut spec);
+                crate::launch::prepare_tool_requirements(&input, &mut spec)?;
                 crate::launch::private_git_objects(&input, &mut spec)?;
-                crate::launch::prepare_tool_requirements(&input, &mut spec);
+                crate::launch::prepare_tool_requirements(&input, &mut spec)?;
                 Ok(spec)
             }
             fn stream(

@@ -1227,6 +1227,7 @@ fn main() -> Result<()> {
             prompt: &prompt,
             continuation: continuation.as_ref(),
             grant_digest: "recording",
+            policy: &provenant_records::policy::Policy::default(),
             executable: &args.executable,
             home: &home,
             user: &user,

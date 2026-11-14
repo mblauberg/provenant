@@ -78,7 +78,7 @@ fn prepare(
     let mut env = base_env(
         input,
         scratch,
-        crate::launch::tool_search_path(input.home, true),
+        crate::launch::tool_search_path(input.home, true, input.policy)?,
     );
     if input.sandboxed() {
         env.extend([
@@ -139,6 +139,7 @@ fn prepare(
         user_skills: Default::default(),
         tool_requirements,
         git_wrapper: Default::default(),
+        policy: input.policy.clone(),
         profile: ProviderProfile {
             spec: profile,
             observations: Default::default(),

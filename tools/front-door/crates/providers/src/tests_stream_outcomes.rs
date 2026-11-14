@@ -573,8 +573,8 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
 }
 
 #[test]
-fn a_wide_integer_echoed_in_an_ignored_frame_does_not_fail_the_stream()
--> Result<(), ProviderError> {
+fn a_wide_integer_echoed_in_an_ignored_frame_does_not_fail_the_stream() -> Result<(), ProviderError>
+{
     // Shape of #3111: a tool result echoes a JSON Schema whose bound is u64::MAX
     // printed as a float, which is wider than any i64 or u64.
     let stream = concat!(
@@ -833,33 +833,42 @@ fn registry_has_unique_ids_and_matching_quota_sources() -> Result<(), Box<dyn st
 
 #[test]
 fn argv_prompt_limit_counts_utf8_bytes() {
-    assert!(Prompt::new("a".repeat(65_536)).check_argv().is_ok());
+    let default = crate::tests::fixture_policy();
+    assert_eq!(
+        default.rule("ARGV_PROMPT").rule.strength,
+        provenant_records::policy::Strength::Warn
+    );
+    assert!(Prompt::new("a".repeat(65_536)).check_argv(default).is_ok());
     assert!(
         Prompt::new("a".repeat(65_537))
             .with_argv_limit(
                 131_072,
                 provenant_records::diagnostic::SettingSource::Configuration
             )
-            .check_argv()
+            .check_argv(default)
             .is_ok()
     );
+    let mut strict = provenant_records::policy::Policy::default();
+    strict.overlay(
+        &std::collections::BTreeMap::from([(
+            "ARGV_PROMPT".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]),
+        provenant_records::policy::Source::Project,
+    );
     assert!(matches!(
-        Prompt::new("é".repeat(32_769)).check_argv(),
+        Prompt::new("é".repeat(32_769)).check_argv(&strict),
         Err(ProviderError::PromptTooLarge { .. })
     ));
-    let error = Prompt::new("abcd".into())
-        .with_argv_limit(
-            3,
-            provenant_records::diagnostic::SettingSource::Configuration,
-        )
-        .check_argv()
-        .expect_err("configured limit must be enforced");
-    assert!(
-        error
-            .to_string()
-            .contains("domains.run.argv_prompt_limit_bytes")
-    );
-    assert!(error.to_string().contains("host configuration"));
+    assert!(matches!(
+        Prompt::new("abcd".into())
+            .with_argv_limit(
+                3,
+                provenant_records::diagnostic::SettingSource::Configuration,
+            )
+            .check_argv(&strict),
+        Err(ProviderError::PromptTooLarge { .. })
+    ));
 }
 
 pub(super) fn read_only_plan(

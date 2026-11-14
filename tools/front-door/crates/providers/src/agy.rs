@@ -345,7 +345,7 @@ fn prepare(
     if plan.selected_authentication.as_deref() != Some("keychain") {
         return Err(ProviderError::UnsupportedPolicy);
     }
-    input.prompt.check_argv()?;
+    input.prompt.check_argv(input.policy)?;
     let private_home = plan.private_state.as_ref().map_or_else(
         || {
             use std::io::Write;
@@ -428,7 +428,7 @@ fn prepare(
     argv.extend(["--print".into(), input.prompt.text().into()]);
 
     let shell = access == Access::WorktreeWrite;
-    let path = crate::launch::tool_search_path(input.home, shell);
+    let path = crate::launch::tool_search_path(input.home, shell, input.policy)?;
     let mut env = base_env(input, &plan.scratch.path, path);
     for (key, value) in &mut env {
         if key == "HOME" && (input.sandboxed() || input.account.is_some()) {
@@ -500,6 +500,7 @@ fn prepare(
         user_skills: staged_skills,
         tool_requirements,
         git_wrapper: Default::default(),
+        policy: input.policy.clone(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 // The keyring library reads its token through Apple's `security`.

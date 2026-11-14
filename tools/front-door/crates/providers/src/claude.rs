@@ -744,7 +744,7 @@ fn prepare(
     }
 
     let mut package_omissions = Vec::new();
-    let package = package_grant(input.executable, &mut package_omissions);
+    let package = package_grant(input.executable, &mut package_omissions, input.policy)?;
     let scratch = &plan.scratch.path;
     // Filesystem confinement owns writer path access; native permission prompts
     // would refuse tools that cannot ask for approval in a headless lane.
@@ -782,12 +782,13 @@ fn prepare(
     let mut setup = input.provenant.claude(
         scratch,
         &mut argv,
+        input.policy,
         (!shell).then_some(allowed_tools),
         &image_rules,
     )?;
 
     let toolchain = shell || web;
-    let path = crate::launch::tool_search_path(input.home, toolchain);
+    let path = crate::launch::tool_search_path(input.home, toolchain, input.policy)?;
     let mut env = base_env(input, scratch, path);
     if input.account.is_some() {
         // The selected login takes precedence over ambient provider selectors.
@@ -803,9 +804,13 @@ fn prepare(
             .any(|name| key == *name)
         });
     }
-    input
-        .provenant
-        .environment(scratch, &mut env, &mut setup, input.sandboxed())?;
+    input.provenant.environment(
+        scratch,
+        &mut env,
+        &mut setup,
+        input.sandboxed(),
+        input.policy,
+    )?;
     env.extend(
         [
             ("CLAUDE_CODE_TMPDIR", scratch.as_os_str()),
@@ -896,6 +901,7 @@ fn prepare(
         user_skills: staged_skills,
         tool_requirements,
         git_wrapper: Default::default(),
+        policy: input.policy.clone(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],
@@ -915,7 +921,7 @@ fn prepare(
         },
         stream,
     };
-    crate::launch::prepare_tool_requirements(input, &mut spec);
+    crate::launch::prepare_tool_requirements(input, &mut spec)?;
     input
         .provenant
         .grant(&mut spec.profile.spec, &mut spec.setup, true);

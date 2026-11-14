@@ -2,6 +2,7 @@ use crate::{
     ExitObservation, LaunchSpec, PrepareInput, ProviderEvent, ProviderOutcome, StreamState,
 };
 use provenant_records::ResolvedRoute;
+use provenant_records::policy::{Effect, Facts, Policy};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
@@ -34,6 +35,8 @@ pub enum ProviderError {
     InvalidPath,
     #[error("confinement plan asks for a policy this adapter cannot honour")]
     UnsupportedPolicy,
+    #[error("provider cannot honour configured policy action for {code}")]
+    PolicyActionUnsupported { code: &'static str },
     #[error(
         "agy isolated keychain {0} is missing or not a regular file; re-register with \
          `provenant accounts register --adapter agy --directory ~ <label>` if this is the \
@@ -52,6 +55,14 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
+    /// Return the policy rule that required an action this provider cannot perform.
+    pub fn policy_code(&self) -> Option<&'static str> {
+        match self {
+            Self::PolicyActionUnsupported { code } => Some(code),
+            _ => None,
+        }
+    }
+
     pub fn resource_fact(&self) -> Option<provenant_records::diagnostic::ResourceFact> {
         match self {
             Self::PromptTooLarge { limit, origin } => Some(
@@ -70,7 +81,8 @@ impl ProviderError {
             Self::IdentityMismatch
             | Self::UnknownIdentity
             | Self::InvalidPath
-            | Self::UnsupportedPolicy => B::Authority,
+            | Self::UnsupportedPolicy
+            | Self::PolicyActionUnsupported { .. } => B::Authority,
             Self::IsolatedKeychainUnavailable(_) | Self::CredentialReadFailed(_) => B::Credentials,
             Self::PromptTooLarge { .. }
             | Self::Malformed
@@ -96,6 +108,20 @@ fn provider_failure_boundary_depends_on_typed_cause() {
     assert_eq!(
         ProviderError::UnsupportedPolicy.boundary_class(),
         B::Authority
+    );
+    assert_eq!(
+        ProviderError::PolicyActionUnsupported {
+            code: "ARGV_PROMPT"
+        }
+        .boundary_class(),
+        B::Authority
+    );
+    assert_eq!(
+        ProviderError::PolicyActionUnsupported {
+            code: "ARGV_PROMPT"
+        }
+        .policy_code(),
+        Some("ARGV_PROMPT")
     );
     assert_eq!(
         ProviderError::CredentialReadFailed("sentinel".into()).boundary_class(),
@@ -203,14 +229,35 @@ impl Prompt {
     pub fn text(&self) -> &str {
         &self.text
     }
-    pub fn check_argv(&self) -> Result<(), ProviderError> {
-        if self.text.len() > self.argv_limit {
-            Err(ProviderError::PromptTooLarge {
-                limit: self.argv_limit,
-                origin: self.argv_origin,
-            })
-        } else {
-            Ok(())
+    pub fn check_argv(&self, policy: &Policy) -> Result<(), ProviderError> {
+        if self.text.len() <= self.argv_limit {
+            return Ok(());
+        }
+        let error = || ProviderError::PromptTooLarge {
+            limit: self.argv_limit,
+            origin: self.argv_origin,
+        };
+        let detail = format!(
+            "argv prompt is {} bytes, over the configured {} byte limit (source: {})",
+            self.text.len(),
+            self.argv_limit,
+            self.argv_origin.description()
+        );
+        match policy.check("ARGV_PROMPT", Facts::violation(detail)) {
+            Effect::Proceed => Ok(()),
+            Effect::Warn(message) => {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                Ok(())
+            }
+            Effect::Queue(message) => {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(), "error: {message}");
+                Err(ProviderError::PolicyActionUnsupported {
+                    code: "ARGV_PROMPT",
+                })
+            }
+            Effect::Refuse(_) => Err(error()),
         }
     }
 }

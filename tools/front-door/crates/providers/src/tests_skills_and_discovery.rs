@@ -1,4 +1,3 @@
-
 #[test]
 fn identity_probes_preserve_auth_failures_only_from_intact_captures() {
     use provenant_os::exec::{
@@ -120,9 +119,10 @@ fn optional_discovered_grants_are_filtered_without_touching_required_grants()
         &mut grants,
         1,
         &home,
+        crate::tests::fixture_policy(),
         crate::launch::OmissionSource::Toolchain,
         &mut omitted,
-    );
+    )?;
     assert_eq!(grants, vec![required]);
     assert_eq!(
         omitted,
@@ -159,9 +159,10 @@ fn optional_unrepresentable_discovery_is_omitted_with_evidence()
         &mut grants,
         1,
         &home,
+        crate::tests::fixture_policy(),
         crate::OmissionSource::Toolchain,
         &mut omitted,
-    );
+    )?;
     assert_eq!(grants, vec![required]);
     assert_eq!(omitted.len(), 2);
     assert_eq!(omitted[0].path, target);
@@ -198,7 +199,7 @@ fn optional_unrepresentable_write_is_omitted_from_applied_access()
     spec.tool_requirements
         .writes
         .push(crate::launch::subtree(&target));
-    spec.complete_tool_requirements(&plan, &home, Path::new("/fixture/repo"));
+    spec.complete_tool_requirements(&plan, &home, Path::new("/fixture/repo"))?;
     assert!(
         spec.profile
             .spec
@@ -318,7 +319,7 @@ fn discovered_grants_in_credential_roots_are_omitted() -> Result<(), Box<dyn std
     // Feed an independently discovered Node prefix through the same resolver.
     spec.tool_requirements = crate::launch::ToolRequirements::default();
     crate::launch::homebrew_tools(&node_alias, &mut spec.tool_requirements, &mut spec.env);
-    spec.complete_tool_requirements(&plan, &home, Path::new("/fixture/repo"));
+    spec.complete_tool_requirements(&plan, &home, Path::new("/fixture/repo"))?;
     let node_bin = node_prefix.join("bin");
     assert!(
         spec.omitted_discovery
@@ -580,9 +581,8 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
             }
             if adapter == "opencode" {
                 assert!(
-                    spec.profile
-                        .spec
-                        .authentication[0].roots
+                    spec.profile.spec.authentication[0]
+                        .roots
                         .contains(&crate::launch::exact(&opencode_config))
                 );
             }
@@ -698,7 +698,7 @@ fn applied_access_matches_compiled_profile() -> Result<(), Box<dyn std::error::E
         vec![],
         project_receipt.clone(),
     );
-    spec.complete_tool_requirements(&plan, &home, Path::new("/fixture/repo"));
+    spec.complete_tool_requirements(&plan, &home, Path::new("/fixture/repo"))?;
     assert_eq!(spec.project_requirements_receipt(), Some(&project_receipt));
     assert!(spec.profile.spec.runtime_reads.contains(&project_grant));
     assert!(spec.profile.spec.tool_exec_roots.contains(&project_grant));
@@ -932,7 +932,12 @@ fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
             probe
                 .args(["-p", &profile])
                 .arg(&executable)
-                .args(["--exact", "tests::staged_skills_probe_child", "--ignored", "--nocapture"])
+                .args([
+                    "--exact",
+                    "tests::staged_skills_probe_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
                 .env_clear()
                 .env("PROVENANT_PROBE_STAGE", stage.join("SKILL.md"))
                 .env("PROVENANT_PROBE_SECRET", &secret);
@@ -1002,17 +1007,24 @@ fn tool_search_path_preserves_native_home_and_omits_unusable_entry() {
     use std::os::unix::ffi::OsStringExt;
     use std::path::PathBuf;
     let home = PathBuf::from(OsString::from_vec(b"/fixture/home-\xff".to_vec()));
-    let path = crate::launch::tool_search_path(&home, true);
+    let path =
+        crate::launch::tool_search_path(&home, true, crate::tests::fixture_policy()).unwrap();
     assert_eq!(
         std::env::split_paths(&path).next(),
         Some(home.join(".cargo/bin"))
     );
-    let path = crate::launch::tool_search_path(Path::new("/fixture/home:with-separator"), true);
+    let path = crate::launch::tool_search_path(
+        Path::new("/fixture/home:with-separator"),
+        true,
+        crate::tests::fixture_policy(),
+    )
+    .unwrap();
     assert_eq!(
         std::env::split_paths(&path).collect::<Vec<_>>(),
         [PathBuf::from("/usr/bin"), PathBuf::from("/bin")]
     );
-    let path = crate::launch::tool_search_path(&home, false);
+    let path =
+        crate::launch::tool_search_path(&home, false, crate::tests::fixture_policy()).unwrap();
     assert_eq!(
         std::env::split_paths(&path).next(),
         Some(PathBuf::from("/usr/bin"))
@@ -1037,9 +1049,16 @@ fn claude_writer_requires_private_state() -> Result<(), ProviderError> {
     route.account_key = None;
     let prompt = Prompt::new("fixture".into());
     let token = fixture_token();
-    assert!(matches!(claude::Claude.prepare(fixture_input(
-        &route, &plan, &prompt, Path::new("/fixture/repo"), Some(&token),
-    )), Err(ProviderError::UnsupportedPolicy)));
+    assert!(matches!(
+        claude::Claude.prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            Some(&token),
+        )),
+        Err(ProviderError::UnsupportedPolicy)
+    ));
     Ok(())
 }
 
@@ -1060,10 +1079,16 @@ fn opencode_requires_private_state() -> Result<(), ProviderError> {
             agy_state: None,
         })
         .expect("fixture plan");
-        assert!(matches!(opencode::OpenCode.prepare(fixture_input(
-            &route, &plan, &prompt, Path::new("/fixture/repo"), None,
-        )), Err(ProviderError::UnsupportedPolicy)));
-
+        assert!(matches!(
+            opencode::OpenCode.prepare(fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                None,
+            )),
+            Err(ProviderError::UnsupportedPolicy)
+        ));
     }
     Ok(())
 }

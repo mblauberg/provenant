@@ -58,6 +58,12 @@ pub(super) fn fixture_token() -> crate::claude::OauthToken {
     crate::claude::OauthToken::parse(item.as_bytes(), 1_000).expect("fixture token")
 }
 
+pub(super) fn fixture_policy() -> &'static provenant_records::policy::Policy {
+    static POLICY: std::sync::OnceLock<provenant_records::policy::Policy> =
+        std::sync::OnceLock::new();
+    POLICY.get_or_init(provenant_records::policy::Policy::default)
+}
+
 pub(super) fn fixture_input<'a>(
     route: &'a ResolvedRoute,
     confined: &'a provenant_confinement::ConfinedPlan,
@@ -74,6 +80,7 @@ pub(super) fn fixture_input<'a>(
         prompt,
         continuation: None,
         grant_digest: "fixture",
+        policy: fixture_policy(),
         executable,
         home: std::path::Path::new("/fixture/home"),
         user: std::ffi::OsStr::new("fixture"),
@@ -852,14 +859,18 @@ fn cursor_launches_fresh_and_resume_with_edits_only_for_writers() -> Result<(), 
     }
     let plan = read_only_plan("/fixture", Some("login"));
     let prompt = Prompt::new("x".repeat(65_537));
+    let mut strict = provenant_records::policy::Policy::default();
+    strict.overlay(
+        &std::collections::BTreeMap::from([(
+            "ARGV_PROMPT".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]),
+        provenant_records::policy::Source::Project,
+    );
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.policy = &strict;
     assert!(matches!(
-        cursor::Cursor.prepare(fixture_input(
-            &route,
-            &plan,
-            &prompt,
-            Path::new("/fixture/repo"),
-            None
-        )),
+        cursor::Cursor.prepare(input),
         Err(ProviderError::PromptTooLarge { .. })
     ));
     Ok(())
@@ -1468,9 +1479,16 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
                 "native adapter dropped a host environment binding"
             );
         }
-        let homes: Vec<_> = native.env.iter().filter(|(key, _)| key == "CARGO_HOME").collect();
+        let homes: Vec<_> = native
+            .env
+            .iter()
+            .filter(|(key, _)| key == "CARGO_HOME")
+            .collect();
         assert_eq!(homes.len(), 1);
-        assert_eq!(homes[0].1, "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/cargo-home");
+        assert_eq!(
+            homes[0].1,
+            "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/cargo-home"
+        );
         if let Some((_, host_path)) = host.iter().find(|(key, _)| key == "PATH") {
             let child_path = &native.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
             let child_paths: Vec<_> = std::env::split_paths(child_path).collect();
