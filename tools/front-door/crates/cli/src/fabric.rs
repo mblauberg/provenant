@@ -387,7 +387,8 @@ fn execute(
     } else {
         Context::open(roots, home, cwd)?
     };
-    if ctx.in_lane && !cmd.read_only() {
+    let lane_mail_send = matches!(&cmd, Fabric::Mail(Mail::Send { .. }));
+    if ctx.in_lane && !cmd.read_only() && !lane_mail_send {
         return Err(CoordinationError::LaneMutation.into());
     }
     if matches!(cmd, Fabric::Identity) {
@@ -429,6 +430,20 @@ fn execute(
         )?
     };
     let mutate = |input, operation: Operation| {
+        if ctx.in_lane {
+            let Mutation::Mail(input @ MailInput::Send { .. }) = input else {
+                return Err(CoordinationError::LaneMutation.into());
+            };
+            let call = provenant_fabric_runtime::relay::ToolCall::Mail(
+                input,
+                Some(operation.operation_id),
+            );
+            return Ok(call.relay_within(
+                &ctx.lane_relay_socket()?,
+                &cancel,
+                std::time::Duration::from_micros(budget.remaining(clock.mono_now()).as_micros()),
+            )?);
+        }
         json(service.mutate(input, &operation.operation_id, budget, &cancel)?)
     };
     let observe = |input: Mutation| -> Result<Value, EdgeError> {

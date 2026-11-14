@@ -187,6 +187,12 @@ impl ToolCall {
         if !matches!(name, MAIL | EVENTS | CLAIM) {
             return Err(InvalidInput::UnknownTool);
         }
+        // Sender identity is sealed by the host and is never a lane argument.
+        if arguments.get("sender").is_some() {
+            return Err(InvalidInput::Arguments {
+                path: "arguments.sender".to_owned(),
+            });
+        }
         // Optional on the wire; the runtime input always carries the list.
         if name == MAIL
             && arguments["op"] == "send"

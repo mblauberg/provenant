@@ -30,8 +30,9 @@ peer. No scan or URL heuristic joins projects.
 
 Lanes open the database read-only and no lane profile grants writes to it, its
 companions or Fabric locks. A lane reaches the host only through its own
-attempt-bound socket, where the host, not the request, fixes the sender; CLI
-coordination mutations refuse inside lanes.
+attempt-bound socket, where the host, not the request, fixes the sender.
+`fabric mail send` uses that relay inside a lane; other CLI coordination
+mutations refuse. A caller-supplied sender is rejected at the relay boundary.
 - Why: a lane must not forge records that the host or another agent trusts.
 - Test: `crates/providers/src/seatbelt_snapshots.rs::fabric_profiles_only_read_database_and_allow_only_the_attempt_socket`;
   `crates/fabric-runtime/src/relay/lane_tests.rs::lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal`
