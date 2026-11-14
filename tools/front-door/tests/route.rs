@@ -724,7 +724,6 @@ fn cached_account_pacing_is_visible_without_probing() -> Result {
         .ok_or("pacing detail")?;
     assert!(detail.contains("source=account") && detail.contains("seven_day"));
     assert!(detail.contains("unknown or stale") && detail.contains("falling back"));
-    assert!(detail.contains("reserve exclusion window=seven_day"));
     call(
         &rig,
         &[

@@ -30,21 +30,23 @@ fn reading(at: i64, used: u64, resets: i64) -> Value {
     })
 }
 
-fn row(at: i64, output: u64) -> Value {
+fn message(at: i64, id: &str, output: u64) -> Value {
     json!({
-        "schema_version": 1,
-        "account": "work",
-        "provider": "claude",
-        "model": "claude-opus-5-5",
-        "uncached_input": 0,
-        "cache_read": 0,
-        "cache_write": 0,
-        "cache_write_1h": 0,
-        "output": output,
-        "timestamp": jiff::Timestamp::from_second(at).map(|time| time.to_string()).unwrap_or_default(),
-        "session": "s1",
-        "message": format!("m{at}"),
-        "source": "lane",
+        "type": "assistant",
+        "timestamp": jiff::Timestamp::from_second(at)
+            .map(|time| time.to_string())
+            .unwrap_or_default(),
+        "message": {
+            "id": id,
+            "model": "claude-opus-5-5",
+            "content": "fixture",
+            "usage": {
+                "input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": output
+            }
+        }
     })
 }
 
@@ -73,18 +75,32 @@ fn fixture() -> Result<TestRig> {
         format!("{history}\n"),
     )?;
     // $20 of output priced usage across the first 20 points and $30 across the
-    // next 30. Output is $20 per million tokens.
-    let usage = [row(now - 900, 1_000_000), row(now, 1_500_000)]
-        .into_iter()
-        .map(|record| serde_json::to_string(&record))
-        .collect::<std::result::Result<Vec<_>, _>>()?
-        .join("\n");
-    fs::write(rig.state.join("ingest.jsonl"), format!("{usage}\n"))?;
+    // next 30. Output is $20 per million tokens. Feed the public native ingest
+    // boundary so this fixture follows the current segmented store format.
+    let native = rig.root.join("claude");
+    let session = native.join("projects/-fixture/s1.jsonl");
+    fs::create_dir_all(session.parent().ok_or("session parent")?)?;
+    let transcript = [
+        message(now - 900, "m1", 1_000_000),
+        message(now, "m2", 1_500_000),
+    ]
+    .into_iter()
+    .map(|record| serde_json::to_string(&record))
+    .collect::<std::result::Result<Vec<_>, _>>()?
+    .join("\n");
+    fs::write(&session, format!("{transcript}\n"))?;
     let config = format!(
         "schema_version = 1\n[domains.accounts.entries.claude-work]\nadapter = \"claude\"\nlabel = \"work\"\nkey = \"work\"\ndirectory = \"{}\"\n[[domains.accounts.entries.claude-work.plans]]\nname = \"max_5x\"\nprice = 100.0\ncurrency = \"USD\"\neffective_from = \"2026-01-01\"\n",
-        rig.root.join("claude").display()
+        native.display()
     );
     fs::write(rig.state.join("config.toml"), config)?;
+    let ingested = rig.command(&["telemetry", "ingest", "--provider", "claude", "--json"])?;
+    assert_eq!(
+        code(&ingested),
+        0,
+        "{}",
+        String::from_utf8_lossy(&ingested.stderr.bytes)
+    );
     Ok(rig)
 }
 

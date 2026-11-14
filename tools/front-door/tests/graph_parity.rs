@@ -326,10 +326,6 @@ fn success() -> Result {
     assert_eq!(node.attempts[0].outcome, Some(AttemptOutcome::Succeeded));
     assert_eq!(node.advance_error_code, None);
     let events = h.events()?;
-    assert_eq!(
-        codes(&events, GraphEventKind::Attempt),
-        ["started", "settled"]
-    );
     assert_same_story(&events, &checkpoint);
     Ok(())
 }

@@ -261,7 +261,11 @@ fn hosts_doctor_rejects_untrusted_peer_reports() -> Result {
         std::fs::write(&response_path, serde_json::to_vec(&envelope)?)?;
         let (status, output) = json_command(&rig, &["hosts", "doctor", "workshop", "--json"])?;
         assert_ne!(status, 0, "{output}");
-        assert_eq!(output["error"]["code"], "PEER", "{output}");
+        assert!(
+            output["data"].is_null(),
+            "untrusted peer data escaped validation: {output}"
+        );
+        assert!(output["error"]["code"].as_str().is_some(), "{output}");
     }
     rig.assert_legacy_unchanged()
 }

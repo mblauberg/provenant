@@ -670,6 +670,9 @@ fn command_network_is_graph_wide() -> Result {
         "mf-off": reach, "mf-on": reach, "m-default": reach, "m-on": reach, "m-off": reach,
         "r-default": reach, "r-on": reach, "r-off": reach
     }))?;
+    // Network denial is enforced by confinement; make the sandbox source
+    // explicit because the repository default leaves lanes unsandboxed.
+    configure(&rig, &["knobs"], "lanes.sandbox", toml_edit::value("on"))?;
     let _cleanup = rig.process_cleanup();
     // Graphs currently expose one network setting, not per-task manifest overrides.
     for (name, network, state, reported) in [
