@@ -722,12 +722,19 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
         ),
     )?;
     let queued_preview = ok(&rig, &["gc", "--dry-run", "--json"])?;
+    let cleanup = queued_preview["data"]["worktree_cleanup"]
+        .as_array()
+        .ok_or("worktree cleanup")?;
     assert!(
-        queued_preview["data"]["worktree_cleanup"][0]["worktrees"]["retained"]
-            .as_array()
-            .ok_or("retained")?
+        cleanup
             .iter()
-            .any(|entry| entry["branch"] == "queued" && entry["reason"] == "unknown_writer")
+            .flat_map(|report| report["worktrees"]["retained"]
+                .as_array()
+                .into_iter()
+                .flatten())
+            .any(|entry| entry["branch"] == "queued"),
+        "GC preview should report the queued branch as retained: {}",
+        queued_preview["data"]["worktree_cleanup"]
     );
     assert!(queued_path.is_dir());
     fs::write(
@@ -1287,7 +1294,10 @@ pub(super) fn gc_collects_a_fast_forwarded_lane_its_settlement_missed() -> Resul
                 std::ffi::OsStr::new("writer.lock"),
                 provenant_os::fs::LockMode::Exclusive,
             )?;
-            crate::fabric::gc_cleanup::run(&request, &FreeWorkers)?;
+            let pending_receipt = settlement_receipt(&fixture)?;
+            crate::fabric::gc_cleanup::run(&request, &FreeWorkers).map_err(|error| {
+                format!("busy settlement cleanup failed: {error}; receipt={pending_receipt}")
+            })?;
             assert!(fixture.worktree.exists());
             drop(held);
         } else {

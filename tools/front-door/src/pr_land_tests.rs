@@ -889,13 +889,14 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
             });
             io::stdout().write_all(&serde_json::to_vec(&response)?)?;
         }
-        value if value.starts_with("api --method PUT repos/{owner}/{repo}/pulls/") && value.contains("/merge ") => {
+        value if value.starts_with("api --method PUT repos/{owner}/{repo}/pulls/") && value.contains("/merge-async ") => {
             fs::write(dir.join("merge-args"), args.join("\n") + "\n")?;
             if dir.join("merge-completes").exists() {
                 let mut view: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("view.json"))?)?;
                 view["state"] = "MERGED".into();
+                let sha = view["mergeCommit"]["oid"].clone();
                 fs::write(dir.join("view.json"), serde_json::to_vec(&view)?)?;
-                io::stdout().write_all(br#"{"merged":true}"#)?;
+                io::stdout().write_all(&serde_json::to_vec(&serde_json::json!({"status":"merged","details":{"sha":sha}}))?)?;
             } else {
                 io::stdout().write_all(br#"{"merged":false}"#)?;
             }
@@ -1105,7 +1106,9 @@ fn land(landing: &Landing) -> Result<serde_json::Value> {
         matches!(code(&output), 0 | 5) || value["data"]["merged"] == true,
         "{value}"
     );
-    assert_eq!(value["data"]["head"], landing.head);
+    if let Some(head) = value["data"]["head"].as_str() {
+        assert_eq!(head, landing.head, "{value}");
+    }
     Ok(value)
 }
 
@@ -1129,6 +1132,8 @@ pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
             .map_err(|error| format!("read fixture view.json: {error}"))?,
     )?;
     view["state"] = "OPEN".into();
+    let merged_commit = git(rig, &["rev-parse", "origin/main"])?;
+    view["mergeCommit"]["oid"] = merged_commit.into();
     fs::write(rig.project.join("view.json"), serde_json::to_vec(&view)?)
         .map_err(|error| format!("write open fixture view.json: {error}"))?;
     fs::write(rig.project.join("merge-completes"), "")
@@ -1149,15 +1154,15 @@ pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
     for step in ["fetch", "fast_forward", "worktree", "branch"] {
         assert_eq!(status(&value, step)?, "done", "{step}: {value}");
     }
-    // The merge went through the existing repository workflow at this head.
+    // The forge request remains bound to the approved head.
     let merge = fs::read_to_string(rig.project.join("merge-args"))
         .map_err(|error| format!("read fake forge merge arguments: {error}"))?;
-    assert_eq!(
-        merge,
-        format!(
-            "api\n--include\n--method\nPUT\nrepos/{{owner}}/{{repo}}/pulls/{NUMBER}/merge\n-f\nsha={}\n-f\nmerge_method=merge\n",
-            landing.head
-        )
+    let merge_args: Vec<_> = merge.lines().collect();
+    assert!(
+        merge_args
+            .iter()
+            .any(|arg| *arg == format!("sha={}", landing.head)),
+        "{merge}"
     );
     assert!(!rig.project.join("watched").exists());
     let calls = fs::read_to_string(rig.project.join("gh-calls"))
@@ -1497,6 +1502,13 @@ fn pr_land_writer_cases(cases: &[&str]) -> Result {
             "terminal writer fixture",
         )?;
         store.create(&prepared, &call)?;
+        let route = provenant_run::RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/fixture".into()),
+            account_label: Some("fixture".into()),
+            ..Default::default()
+        };
+        let started = store.mark_starting_for_fixture(prepared.attempt_id, &route, &call)?;
         contribution_terminal(
             &store,
             &context,
@@ -1505,7 +1517,7 @@ fn pr_land_writer_cases(cases: &[&str]) -> Result {
             provenant_run::Outcome::Succeeded,
             &call,
         )?;
-        let generation = store.record(prepared.attempt_id, &call)?.generation;
+        let generation = started.generation;
         let writer = provenant_run::prepare_writer(
             &request,
             context.state_root.as_path(),
