@@ -287,15 +287,7 @@ fn capture_plan_without_silence_uses_registry_default() -> TestResult {
     assert!(!plan.silent(1_799_999, Some(0)));
     assert!(plan.silent(1_800_000, Some(0)));
     assert!(!plan.silent(1_800_000, Some(1)));
-    assert_eq!(
-        plan.silent_for_ms(1_800_000, Some(0), true),
-        None,
-        "disk pause suppresses silence"
-    );
-    assert_eq!(
-        plan.silent_for_ms(1_800_000, Some(0), false),
-        Some(1_800_000)
-    );
+    assert!(plan.silent_for_ms(1_800_000, Some(0)).is_some());
     assert!(
         CapturePlan {
             silence_ms: 3_600_001,
@@ -574,7 +566,6 @@ fn settlement_checks_exact_attempt_and_both_digests_before_scratch() -> TestResu
         &release,
         PublishMode::Replace,
     )?)?;
-    std::fs::write(attempt.path().join(crate::build_pause::PAUSE_FILE), b"{")?;
     let commit = recovery.verify_settlement(&held)?;
     let scratch_dir = tempfile::tempdir()?;
     std::fs::set_permissions(scratch_dir.path(), std::fs::Permissions::from_mode(0o700))?;
@@ -729,26 +720,6 @@ fn settlement_checks_exact_attempt_and_both_digests_before_scratch() -> TestResu
     Ok(())
 }
 
-#[test]
-fn corrupt_pause_journal_does_not_block_observation() -> TestResult {
-    let root = tempfile::tempdir()?;
-    std::fs::write(root.path().join(crate::build_pause::PAUSE_FILE), b"{")?;
-    let handle = CustodyHandle {
-        directory: Directory::open_anchor(root.path())?,
-        scope: scope(),
-        requester: ActorId::from_bytes([7; 16]),
-        held: false,
-    };
-    let clock = SystemClock::new();
-    let observation = observe(
-        &handle,
-        WaitBudget::cli(clock.mono_now(), 1)?,
-        &CancelToken::new(),
-        &clock,
-    )?;
-    assert!(matches!(observation, Observation::Unknown));
-    Ok(())
-}
 #[test]
 fn two_recoverers_cannot_hold_the_same_writer_exclusion() -> TestResult {
     let root = tempfile::tempdir()?;

@@ -406,12 +406,6 @@ pub(crate) fn policy_warning(
             report(&message);
             Ok(())
         }
-        Effect::Queue(message) => {
-            report(&format!(
-                "policy action cannot queue this provider operation: {message}"
-            ));
-            Err(ProviderError::PolicyActionUnsupported { code })
-        }
         Effect::Refuse(diagnostic) => {
             report(
                 diagnostic

@@ -44,13 +44,17 @@ dropped whole.
   `review_exempt` paths do not count toward an `uncommitted` outcome.
 - Admission: `lanes.max_concurrency` (writers) and `lanes.max_concurrency_read_only`
   cap batches; `[domains.fabric.lanes]` `max_lanes`, `max_writer_lanes` and
-  per-project variants cap live lanes (all off unless set); `status` shows what
-  a queued lane waits for. `[domains.lanes.projects.ID]` also takes
+  per-project variants observe live lanes (all off unless set). Resource rules
+  (`ADMISSION_*`, `PROCESS_CENSUS`, `BUILD_DISK`) default to `warn`; set
+  `policy.CODE` to `off` or, where supported, `refuse`. No resource rule queues
+  a launch. `status` shows
+  actual launch preparation and custody waits. `[domains.lanes.projects.ID]` also takes
   `capabilities = ["postgres"]`.
-- Build slots throttle compiling `cargo` commands to `max_concurrent_builds`
-  per state directory; a waiter fails after `build_wait_minutes` and
-  `status` names holders. A build that scrubs its environment must keep
-  `PROVENANT_BUILD_SLOT` or it queues behind its own parent. `lanes.local_cargo`
+- Build slots track compiling `cargo` commands up to `max_concurrent_builds`
+  per state directory. A busy slot warns and the build proceeds immediately.
+  Cargo owns its build-lock queue. New builds observe the resolved disk policy;
+  a strict disk rule refuses before starting, while running builds are never paused.
+  `PROVENANT_BUILD_SLOT` identifies nested Cargo commands. `lanes.local_cargo`
   (`all`, `check`, `none`) refuses compiling cargo commands in lanes; no project
   file sets it, so set `check` under `[knobs]` on each host that builds this
   repository. Lane builds default to `CARGO_INCREMENTAL=0` and line-table debug

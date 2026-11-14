@@ -176,7 +176,7 @@ mod tests {
                 "project".into(),
                 Project {
                     rules: BTreeMap::from([
-                        ("PROCESS_CENSUS".into(), Strength::Queue),
+                        ("PROCESS_CENSUS".into(), Strength::Refuse),
                         ("MISSING_RULE".into(), Strength::Off),
                     ]),
                 },

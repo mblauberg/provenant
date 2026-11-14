@@ -6,7 +6,6 @@
       "lanes.max_concurrency_read_only",
       "lanes.max_depth",
       "lanes.silence_seconds",
-      "lanes.slot_wait_seconds",
       "lanes.context_handoff_tokens",
       "lanes.token_budget",
       "lanes.budget_action",
@@ -33,7 +32,6 @@
       "domains.fabric.graph.limits.expansion_depth",
       "domains.fabric.graph.limits.concurrency",
       "domains.fabric.lanes.max_concurrent_builds",
-      "domains.fabric.lanes.build_wait_minutes",
       "providers.{provider}.update",
       "providers.{provider}.runtime_deadline_seconds",
       "gc.graph_checkpoint_days"
@@ -44,7 +42,7 @@
       "graph_checkpoint_days": {"type": "int", "allowed": "1 to 3650 days", "default": "90", "effect": "Retain terminal graph checkpoints for at least this many days after their last save"},
       "schedule": {"type": "bool", "allowed": "true or false", "default": "true", "effect": "Run the daily scheduled sweep. false also skips admission collection; completion cleanup and landing cleanup still run"},
       "idle_days": {"type": "int", "allowed": "1 to 3650 days", "default": "7", "effect": "Minimum idle age before a lane cache or declared output is collected"},
-      "free_floor": {"type": "size", "allowed": "whole B, K, M, G, T or KiB to TiB; a plain number means GiB", "default": "10% of the state volume, at least 50 GiB", "effect": "Free-space floor for admission, build pauses and pressure collection; below it GC removes further eligible caches oldest first"},
+      "free_floor": {"type": "size", "allowed": "whole B, K, M, G, T or KiB to TiB; a plain number means GiB", "default": "1% of the state volume, capped at 5 GiB", "effect": "Advisory free-space floor for admission, new builds and pressure collection; below it GC removes further eligible caches oldest first"},
       "lane_cargo_cache_max": {"type": "size", "allowed": "same syntax as free_floor", "default": "32G", "effect": "Cap all marked lane Cargo caches; evict oldest eligible caches first while retaining live, foreign and unobserved custody"},
       "alert_below": {"type": "size", "allowed": "same syntax as free_floor", "default": "free_floor", "effect": "Free space below which an applied collection emits one gc.low_disk note per dip"},
       "projects.{project}.regenerable": {"type": "string_list", "allowed": "directory names; not .git, .worktrees, absolute or parent paths", "default": "[\"target\"] with a root Cargo.toml, otherwise []", "effect": "Git-ignored directory names collected at any depth in the project's linked worktrees; `.provenant/scratch` is collected in addition without a declaration"},
@@ -354,10 +352,9 @@
   "host_lane_build_settings": {
     "path": "domains.fabric.lanes",
     "settings": {
-      "start_spacing_ms": {"type": "int", "min": 0, "max": 600000, "default": 0, "effect": "Milliseconds between starts of the same lane class, for both writers and read-only lanes. Build slots gate heavy runs independently."},
-      "memory_pressure_threshold": {"type": "enum", "allowed": "critical, warning or never", "default": "critical", "effect": "Kernel memory pressure level at which new lanes wait on macOS. warning also defers at critical; never disables the pressure gate. The disk floor still applies; the memory floor is advisory."},
-      "max_concurrent_builds": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))", "effect": "A build throttle, not a hard cap: cargo builds, tests, checks and lints that a lane's cargo shim runs at once across the host and every project that shares the state directory. Lanes are not capped by it; a command that compiles waits for a free slot. Direct ~/.cargo/bin/cargo, rustc and non-cargo builds are not gated."},
-      "build_wait_minutes": {"type": "int", "min": 1, "max": 1440, "auto_value": -1, "default": 30, "effect": "Minutes a build waits for a build slot or another build's Cargo lock before it gives up with an error."},
+      "start_spacing_ms": {"type": "int", "min": 0, "max": 600000, "default": 0, "effect": "Advisory spacing window between starts of the same class, enforced through policy.ADMISSION_SPACING (warn by default)."},
+      "memory_pressure_threshold": {"type": "enum", "allowed": "critical, warning or never", "default": "critical", "effect": "Kernel memory pressure threshold for policy.ADMISSION_PRESSURE. The rule defaults to warn; never disables its observation."},
+      "max_concurrent_builds": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))", "effect": "A build throttle, not a hard cap: cargo builds, tests, checks and lints that a lane's cargo shim runs at once across the host and every project that shares the state directory. Slots are advisory: a compiling command tries once, then warns and proceeds when busy. Cargo owns its build-lock queue. Direct ~/.cargo/bin/cargo, rustc and non-cargo builds are not gated."},
       "lane_port_base": {"type": "int", "min": 1024, "max": 65535, "auto_value": -1, "default": 30000, "effect": "First port of the range split into per-writer-lane blocks. A writer with an allocated block holds it for its lifetime and sees PROVENANT_LANE_PORT_BASE and PROVENANT_LANE_PORT_COUNT. Unreadable lane-port settings or allocation I/O errors warn and skip allocation."},
       "lane_port_block": {"type": "int", "min": 1, "max": 1024, "auto_value": -1, "default": 16, "effect": "Ports in each writer lane's block (PROVENANT_LANE_PORT_COUNT)."},
       "lane_port_blocks": {"type": "int", "min": 0, "max": 1024, "auto_value": -1, "default": 64, "effect": "Blocks in the range, so the most writer lanes that hold a block at once; the base plus blocks times block size must be at most 65536. 0 turns allocation off. A writer launched while every block is held is not started and reports no free port block."},
@@ -536,12 +533,6 @@
       "reader": "tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/custody.rs, tools/front-door/crates/supervisor/src/guardian.rs",
       "effect": "Mark a provider observation silent after this many seconds without output or CPU progress; never kill it for silence.",
       "trade_off": "Lower marks silence sooner; the process census and observation cadence stays unchanged."
-    },
-    "lanes.slot_wait_seconds": {
-      "type": "int", "min": 0, "max": 86400, "default": 7200, "status": "wired",
-      "reader": "tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/guardian.rs",
-      "effect": "Most time in total that a lane's build-slot waits keep off its wall-clock deadline. Beyond it the wall deadline runs while the lane waits, so a stuck lane cannot wait forever. 0 keeps no waiting off the deadline.",
-      "trade_off": "Higher tolerates longer queues for build slots; lower ends a stuck lane sooner."
     },
     "lanes.context_handoff_tokens": {
       "type": "int", "min": 0, "max": 2000000, "default": 0, "status": "wired",

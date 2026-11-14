@@ -219,7 +219,6 @@ pub(crate) fn registry() -> Result<&'static Registry, ConfigError> {
                     .into_iter()
                     .map(|strength| match strength {
                         provenant_records::policy::Strength::Refuse => "refuse".to_owned(),
-                        provenant_records::policy::Strength::Queue => "queue".to_owned(),
                         provenant_records::policy::Strength::Warn => "warn".to_owned(),
                         provenant_records::policy::Strength::Off => "off".to_owned(),
                     })
@@ -675,7 +674,7 @@ mod policy_action_tests {
         );
         assert_eq!(
             registry.knobs["policy.ADMISSION_WRITERS"].values,
-            ["refuse", "queue", "warn", "off"]
+            ["refuse", "warn", "off"]
         );
     }
 }

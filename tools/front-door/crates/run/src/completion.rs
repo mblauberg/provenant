@@ -208,7 +208,7 @@ fn read_snapshot(attempt: &Directory) -> Result<Option<Handoff>> {
 /// The verification and slot-wait rules every writer lane is told. A writer's `cargo` commands
 /// that compile take one of the host's shared build slots, and a lane that
 /// stopped to report the wait cost a whole task (#2484).
-pub const BUILD_SLOT_GUIDANCE: &str = "Verification: where the repository has CI, CI runs the tests and lints on pull requests and the integrated branch, not on every push; the CI scope line below says what CI, if any, you wait for. Run at most one cheap compile check (`cargo check` on the one package you changed), then commit and push; do not run test suites, clippy or nextest locally, and do not restart a build that was stopped. The repository's test tiers (T0 to T3) describe what CI and a configured host run; they are not a checklist for you. A `cargo` command the host refuses because CI runs it is final: do not look for another way to run it.\nBuild slots: your `cargo` commands that compile wait for one of the host's shared build slots, and other lanes and projects hold them. A wait is normal and bounded; the command proceeds when a slot frees. Keep waiting. Do not stop, abandon the task or report review_required because a build is queued; use the time to review or plan.\n";
+pub const BUILD_SLOT_GUIDANCE: &str = "Verification: where the repository has CI, CI runs the tests and lints on pull requests and the integrated branch, not on every push; the CI scope line below says what CI, if any, you wait for. Run at most one cheap compile check (`cargo check` on the one package you changed), then commit and push; do not run test suites, clippy or nextest locally, and do not restart a build that was stopped. The repository's test tiers (T0 to T3) describe what CI and a configured host run; they are not a checklist for you. A `cargo` command the host refuses because CI runs it is final: do not look for another way to run it.\nBuild slots: compiling `cargo` commands try one advisory slot. Busy or unavailable slots warn and the build proceeds; Cargo manages its own build locks.\n";
 
 /// The reading rule every lane is told. Tool output stays in a lane's context and is
 /// paid for again on every later turn, so whole-file and large-range reads dominate its cost.
@@ -276,7 +276,7 @@ mod tests {
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
     #[test]
-    fn writer_preamble_states_the_slot_wait_rule_and_read_only_does_not() {
+    fn writer_preamble_states_advisory_build_policy_and_read_only_does_not() {
         let handoff = Path::new("/state/handoff.json");
         let writer = lane_preamble(
             "Model policy.",

@@ -87,7 +87,22 @@ impl DiskPressure for LaneDisk {
         let floor = provenant_config::GcSettings::read(state)?.free_floor_bytes(state)?;
         let free =
             provenant_confinement::disk::lane_available_bytes(state, &context.roots.home, cwd)?;
-        Ok(free < floor)
+        // The guardian only warns; running builds always continue.
+        let policy = provenant_config::policy::read(
+            state,
+            &context.project_id.to_string(),
+            &Default::default(),
+        );
+        Ok(!matches!(
+            policy.check(
+                "GUARDIAN_DISK",
+                provenant_records::policy::Facts {
+                    violated: free < floor,
+                    detail: format!("free={free} bytes, gc.free_floor={floor} bytes"),
+                },
+            ),
+            provenant_records::policy::Effect::Proceed
+        ))
     }
 }
 

@@ -86,16 +86,6 @@ not (
 
 [test-groups]
 serial-process = { max-threads = 1 }
-launch-contention = { max-threads = 1 }
-
-# Each of these fixtures races several real launches on one host registry
-# lock. Run beside each other they contend for that lock and the machine and
-# cross their own time limits, so they run one at a time; every other test
-# still runs in parallel with them. Default-profile overrides also apply to
-# the ci and lane profiles.
-[[profile.default.overrides]]
-filter = 'package(=provenant) & binary(=graph_provider) & (test(=simultaneous_first_launches_pass_cutover_guard) | test(=simultaneous_writer_launches_create_attempts))'
-test-group = "launch-contention"
 
 # This fixture runs two provider commands, each with its own 30-second wait.
 # Keep the outer limit above their combined budgets so failures reach assertions.

@@ -464,23 +464,6 @@ impl Stepped {
             boot_readable: std::sync::Mutex::new(true),
         }
     }
-    /// The wall clock alone steps, as an operator or NTP can make it.
-    fn step_wall_ms(&self, ms: i64) {
-        *self.wall_offset_micros.lock().unwrap() += ms * 1000;
-    }
-    /// Real time passes: the wall and host clocks both move.
-    fn pass_micros(&self, micros: u64) {
-        *self.host_base_micros.lock().unwrap() += micros;
-        *self.wall_offset_micros.lock().unwrap() += i64::try_from(micros).unwrap_or(0);
-    }
-    fn pass_ms(&self, ms: u64) {
-        self.pass_micros(ms * 1000);
-    }
-    /// The host restarts: a new boot whose clock has run `host_ms`.
-    fn reboot(&self, boot: &'static str, host_ms: u64) {
-        *self.boot.write().unwrap() = boot;
-        *self.host_base_micros.lock().unwrap() = host_ms * 1000 - self.inner.mono_now().as_micros();
-    }
 }
 impl Clock for Stepped {
     fn wall_now(&self) -> std::result::Result<WallTime, provenant_core::TimeError> {
@@ -523,38 +506,6 @@ fn writers<const N: usize>(
     Ok(ids)
 }
 
-/// Probes memory, and while it does another process starts a writer.
-struct RivalStarts<'a> {
-    store: &'a RunStore,
-    rival: AttemptId,
-    clock: &'a Stepped,
-    call: &'a Request<'a>,
-    started: Cell<bool>,
-}
-impl Resources for RivalStarts<'_> {
-    fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
-        crate::tests::HostFacts::new(100).guardian_identity()
-    }
-    fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
-        crate::tests::HostFacts::new(100).observe_process(pid)
-    }
-    fn memory(&self) -> std::io::Result<MemorySample> {
-        if !self.started.replace(true) {
-            self.clock.pass_ms(1_000);
-            let rival = self.store.claim(self.rival, self.clock, self.call);
-            assert!(rival.is_ok_and(|record| record.is_some()), "rival starts");
-            self.clock.pass_ms(500);
-        }
-        Ok(MemorySample {
-            available_bytes: 100,
-            total_bytes: 100,
-        })
-    }
-    fn disk(&self, _: &Directory) -> std::io::Result<u64> {
-        Ok(u64::MAX)
-    }
-}
-
 fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -580,11 +531,6 @@ fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
     let parent_dir = store.attempt_dir(parent_id, false)?;
     artifacts::seal(&parent_dir, "stdout.log", b"parent work", CAPTURE_LIMIT)?;
     let child_id = starting(&store, &child, &call)?;
-    assert!(
-        store
-            .claim_observed(child_id, &clock, &call, &facts)?
-            .is_none()
-    );
     if block_reclaim {
         // The ledger yield commits before the owning store. Simulate the
         // latter failing: cleanup must still reclaim despite an active ticket.
@@ -607,16 +553,16 @@ fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
         .claim_observed(child_id, &clock, &call, &facts)?
         .ok_or("child claim")?;
     if block_reclaim {
-        assert!(!store.set_child_wait_observed(parent_id, false, &call, &facts)?);
+        assert!(store.set_child_wait_observed(parent_id, false, &call, &facts)?);
         let reopened = RunStore::open(&context(temp.path())?, &call)?;
         let retained = reopened.record(parent_id, &call)?;
         assert_eq!(retained.started_at, parent_record.started_at);
         assert_eq!(retained.generation, parent_record.generation);
         assert!(matches!(retained.state, AttemptState::Running { .. }));
         assert!(
-            reopened.lane_waits_with_resources(&[retained], &call, &facts)[0]
-                .waiting_for
-                .contains("admission")
+            reopened
+                .lane_waits_with_resources(&[retained], &call, &facts)
+                .is_empty()
         );
         assert_eq!(
             parent_dir.read_stable("stdout.log".as_ref(), CAPTURE_LIMIT)?,
@@ -1472,11 +1418,9 @@ fn read_only_disk_floor_warning_is_emitted_once_by_admit() -> TestResult {
             self.facts.guardian_identity()
         }
         fn process_budget(&self) -> std::io::Result<provenant_os::sys::resources::ProcessBudget> {
-            let probes = self.probes.get() + 1;
-            self.probes.set(probes);
-            // Hold admission across several probes to prove the warning is once.
+            self.probes.set(self.probes.get() + 1);
             Ok(provenant_os::sys::resources::ProcessBudget {
-                used: if probes < 3 { 100 } else { 0 },
+                used: 0,
                 limit: 100,
             })
         }
@@ -1501,7 +1445,7 @@ fn read_only_disk_floor_warning_is_emitted_once_by_admit() -> TestResult {
     };
     let admitted = store.admit(id, &attempt, &probe, &clock, &cancel)?;
     assert!(matches!(admitted.state, AttemptState::Running { .. }));
-    assert!(probe.probes.get() >= 3);
+    assert_eq!(probe.probes.get(), 1, "admission samples resources once");
     Ok(())
 }
 

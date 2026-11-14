@@ -16,7 +16,6 @@ pub enum Boundary {
 #[serde(rename_all = "snake_case")]
 pub enum Strength {
     Refuse,
-    Queue,
     Warn,
     Off,
 }
@@ -43,16 +42,11 @@ pub struct Rule {
     /// when its consumer has a meaningful refusal path.
     #[serde(default)]
     pub refusable: bool,
-    /// Queue is available only where the consumer actually waits for capacity
-    /// or for an observed resource to recover.
-    #[serde(default)]
-    pub queueable: bool,
 }
 impl Rule {
     pub fn supports(&self, strength: Strength) -> bool {
         match (self.boundary, strength) {
             (Boundary::None, Strength::Refuse) => self.refusable,
-            (Boundary::None, Strength::Queue) => self.queueable,
             (Boundary::None, Strength::Warn | Strength::Off) => true,
             (_, Strength::Refuse) => true,
             _ => false,
@@ -60,15 +54,10 @@ impl Rule {
     }
 
     pub fn strengths(&self) -> Vec<Strength> {
-        [
-            Strength::Refuse,
-            Strength::Queue,
-            Strength::Warn,
-            Strength::Off,
-        ]
-        .into_iter()
-        .filter(|strength| self.supports(*strength))
-        .collect()
+        [Strength::Refuse, Strength::Warn, Strength::Off]
+            .into_iter()
+            .filter(|strength| self.supports(*strength))
+            .collect()
     }
 }
 
@@ -102,17 +91,16 @@ impl Facts {
 pub enum Effect {
     Proceed,
     Warn(String),
-    Queue(String),
     Refuse(crate::diagnostic::Diagnostic),
 }
 impl Effect {
     pub fn blocks(&self) -> bool {
-        matches!(self, Self::Queue(_) | Self::Refuse(_))
+        matches!(self, Self::Refuse(_))
     }
     pub fn message(&self) -> Option<&str> {
         match self {
             Self::Proceed => None,
-            Self::Warn(message) | Self::Queue(message) => Some(message),
+            Self::Warn(message) => Some(message),
             Self::Refuse(diag) => diag.detail.as_deref(),
         }
     }
@@ -216,7 +204,6 @@ impl Policy {
         match rule.strength {
             Strength::Off => Effect::Proceed,
             Strength::Warn => Effect::Warn(message),
-            Strength::Queue => Effect::Queue(message),
             Strength::Refuse => {
                 Effect::Refuse(crate::diagnostic::Diagnostic::new(code).detail(message))
             }
@@ -237,7 +224,7 @@ impl Policy {
         );
         match self.check(code, facts) {
             Effect::Refuse(_) => typed_error,
-            Effect::Proceed | Effect::Warn(_) | Effect::Queue(_) => {
+            Effect::Proceed | Effect::Warn(_) => {
                 panic!("violated boundary policy did not refuse")
             }
         }
@@ -270,7 +257,6 @@ impl Policy {
 const fn strength_name(strength: Strength) -> &'static str {
     match strength {
         Strength::Refuse => "refuse",
-        Strength::Queue => "queue",
         Strength::Warn => "warn",
         Strength::Off => "off",
     }
@@ -293,30 +279,14 @@ mod tests {
                     "{}",
                     rule.code
                 );
-                assert_eq!(
-                    rule.supports(Strength::Queue),
-                    rule.queueable,
-                    "{}",
-                    rule.code
-                );
             } else {
                 assert_eq!(rule.strength, Strength::Refuse, "{}", rule.code);
                 assert!(rule.knob.is_none(), "{}", rule.code);
                 assert!(rule.supports(Strength::Refuse), "{}", rule.code);
-                assert!(!rule.supports(Strength::Queue), "{}", rule.code);
                 assert!(!rule.supports(Strength::Warn), "{}", rule.code);
                 assert!(!rule.supports(Strength::Off), "{}", rule.code);
             }
         }
-        assert!(
-            table()
-                .iter()
-                .filter(|rule| rule.queueable)
-                .all(|rule| rule.code.starts_with("ADMISSION_")),
-            "only real admission waits may expose Queue"
-        );
-        assert!(!Policy::default().rule("PROCESS_CENSUS").rule.refusable);
-        assert!(!Policy::default().rule("PROCESS_CENSUS").rule.queueable);
     }
     #[test]
     #[allow(clippy::panic)]
@@ -347,34 +317,5 @@ mod tests {
             );
             assert_eq!(policy.rule(&rule.code).rule.strength, Strength::Refuse);
         }
-    }
-
-    #[test]
-    fn unsupported_queue_override_retains_warn_default() {
-        let mut policy = Policy::default();
-        policy.overlay(
-            &BTreeMap::from([("ARGV_PROMPT".into(), Strength::Queue)]),
-            Source::Dispatch,
-        );
-        assert_eq!(policy.rule("ARGV_PROMPT").rule.strength, Strength::Warn);
-        assert_eq!(policy.rule("ARGV_PROMPT").source, Source::CompiledDefault);
-        assert!(matches!(
-            policy.check("ARGV_PROMPT", Facts::violation("oversized prompt")),
-            Effect::Warn(_)
-        ));
-
-        policy.overlay(
-            &BTreeMap::from([("ADMISSION_WRITERS".into(), Strength::Queue)]),
-            Source::Dispatch,
-        );
-        assert_eq!(
-            policy.rule("ADMISSION_WRITERS").rule.strength,
-            Strength::Queue
-        );
-        assert_eq!(policy.rule("ADMISSION_WRITERS").source, Source::Dispatch);
-        assert!(matches!(
-            policy.check("ADMISSION_WRITERS", Facts::violation("writer cap reached")),
-            Effect::Queue(_)
-        ));
     }
 }

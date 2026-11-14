@@ -1,23 +1,18 @@
-//! Host admission. Each attempt waits inside its own guardian, before spawn;
-//! there is no scheduler daemon. Resource samples are taken outside the store
-//! transaction, which then leases host capacity
-//! and spacing from the host ledger while claiming.
+//! Single-pass host admission. Resource policy is advisory by default;
+//! custody and durable store claims retain their integrity boundaries.
 use crate::{
     db::{bytes, decode, sql_int},
     store::insert_event,
     *,
 };
 use provenant_confinement::valid_read_only_writable;
-use provenant_core::retry::Backoff;
 use provenant_core::{AttemptId, CancelToken, Clock, DurationMicros, GitOid, WallTime};
-use provenant_os::build_slots::{SlotWait, WaitKind};
 use provenant_os::{
     fs::Directory,
     sys::resources::{self, MemorySample},
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
 /// Write evidence from the prepared confinement plan, never launch authority.
 #[derive(Default)]
@@ -163,9 +158,7 @@ pub trait Resources {
         self.reclaim_disk(attempt)
     }
 }
-/// A starved admission retries collection about once a minute: its backoff
-/// caps at two seconds, and a sweep walks every lane target.
-const RECLAIM_EVERY: u32 = 30;
+
 pub struct SystemResources;
 impl Resources for SystemResources {
     fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
@@ -252,7 +245,6 @@ impl RunStore {
                     &ledger,
                     self.context.state_root.as_path(),
                     &ticket,
-                    caps,
                     call.clock,
                     call,
                     owner.as_ref().ok_or(RunError::Conflict)?,
@@ -376,305 +368,46 @@ impl RunStore {
         &self,
         lanes: &[AttemptRecord],
         call: &Request<'_>,
-        resources: &dyn Resources,
+        _resources: &dyn Resources,
     ) -> Vec<LaneWait> {
-        let pressure_threshold = provenant_config::LaneBuildSettings::read(&self.writer_registry)
-            .map(|settings| settings.memory_pressure_threshold())
-            .unwrap_or_default();
-        // One observational view shares a host census across its rows. Actual
-        // admission keeps taking fresh resource samples at its own boundary.
-        let process_budget = std::cell::OnceCell::new();
-        let mut stalled_cache = std::collections::HashMap::new();
-        let slot_queue = self.slot_queue(lanes, call);
         lanes
             .iter()
-            .filter(|lane| {
-                matches!(
-                    lane.state,
-                    AttemptState::Queued { .. } | AttemptState::Starting { .. }
-                ) || matches!(lane.state, AttemptState::Running { .. })
-            })
             .filter_map(|lane| {
-                let ticket = self.ticket(&self.db, lane.attempt_id).ok()?;
-                let class = ticket.lane_class;
-                let stalled = !matches!(lane.state, AttemptState::Queued { .. })
-                    && *stalled_cache.entry(lane.attempt_id).or_insert_with(|| {
-                        self.attempt_dir(lane.attempt_id, false)
-                            .is_ok_and(|attempt| {
-                                self.supervisor_stalled(&attempt, Self::scope(lane), call)
-                            })
-                    });
-                let waiting_for = if stalled {
+                if !matches!(
+                    lane.state,
+                    AttemptState::Queued { .. }
+                        | AttemptState::Starting { .. }
+                        | AttemptState::Running { .. }
+                ) {
+                    return None;
+                }
+                let waiting_for = if !matches!(lane.state, AttemptState::Queued { .. })
+                    && self
+                        .attempt_dir(lane.attempt_id, false)
+                        .is_ok_and(|attempt| {
+                            self.supervisor_stalled(&attempt, Self::scope(lane), call)
+                        }) {
                     "host_stalled: supervisor is in uninterruptible sleep".to_owned()
-                } else if matches!(lane.state, AttemptState::Running { .. }) {
-                    match &lane.state {
-                        AttemptState::Running { extra } => extra.get("child_wait")
-                            .and_then(|wait| wait.as_str())
-                            .map(|wait| if wait == "children" {
-                                "children: host and project admission yielded".to_owned()
-                            } else {
-                                "admission: reclaiming host and project capacity or startup spacing".to_owned()
-                            }),
-                        _ => None,
-                    }
-                        .or_else(|| self.disk_pause_wait(lane, resources))
-                        .or_else(|| self.build_slot_wait(lane, call, &slot_queue))
-                        .or_else(|| {
-                            lane.provider_silent_for_ms.0
-                                .map(provenant_records::run::provider_silence_reason)
-                        })?
-                } else if matches!(lane.state, AttemptState::Queued { .. }) {
-                    self.recovery_process_wait(lane.attempt_id, call)
-                        .unwrap_or_else(|| match process_budget.get_or_init(|| resources.process_budget()) {
-                            Ok(budget) if !budget.has_room() => format!(
-                                "host capacity: user process count {} of {}",
-                                budget.used, budget.limit
-                            ),
-                            Err(error) => format!(
-                                "launch: not yet handed to a guardian; process budget probe failed, not holding the lane: {}",
-                                probe_error(error)
-                            ),
-                            _ => "launch: not yet handed to a guardian".to_owned(),
-                        })
-                } else if matches!(lane.state, AttemptState::Starting { .. })
-                    && self.attempt_dir(lane.attempt_id, false).is_ok_and(|attempt| {
-                        matches!(
-                            attempt.try_lock_existing(
-                                std::ffi::OsStr::new(crate::writer::SEED_WAIT_LOCK),
-                                provenant_os::fs::LockMode::Exclusive,
-                            ),
-                            Err(provenant_os::fs::FsError::LockTimeout { .. })
-                        )
-                    })
-                {
-                    "launch preparation: seeding the Cargo cache".to_owned()
-                } else {
-                    let spacing = ticket.startup_spacing_ms;
-                    let left = crate::ledger::spacing_left(
-                        &self.writer_registry,
-                        class,
-                        spacing,
-                        call.clock,
-                    );
-                    if let Some(left) = left.filter(|left| *left > 0) {
-                        format!(
-                            "{} startup spacing: {} s left of {} s",
-                            class_name(class),
-                            tenths(left),
-                            tenths(spacing)
-                        )
-                    } else if let Some(hit) = self.lane_cap_hit(&ticket, call) {
-                        format!(
-                            "host capacity: {}: {} of {} active",
-                            hit.kind.description(),
-                            hit.active,
-                            hit.limit
-                        )
-                    } else if let Some(reason) = self.admission_disk_wait(lane, class, resources) {
-                        reason
+                } else if let AttemptState::Running { extra } = &lane.state {
+                    if extra.get("child_wait").and_then(|v| v.as_str()) == Some("children") {
+                        "children: host and project admission yielded".to_owned()
+                    } else if let Some(ms) = lane.provider_silent_for_ms.0 {
+                        provenant_records::run::provider_silence_reason(ms)
                     } else {
-                        match resources.pressure() {
-                            Ok(Some(pressure)) if pressure_threshold.defers(pressure) => {
-                                format!("host capacity: memory pressure {pressure:?}")
-                            }
-                            pressure => {
-                                let budget = process_budget.get_or_init(|| resources.process_budget());
-                                let pressure_error = pressure.as_ref().err();
-                                let budget_error = budget.as_ref().err();
-                                let full = budget.as_ref().ok().filter(|budget| !budget.has_room());
-                                if let Some(budget) = full {
-                                    let mut reason = format!(
-                                        "host capacity: user process count {} of {}",
-                                        budget.used, budget.limit
-                                    );
-                                    if let Some(error) = pressure_error {
-                                        reason.push_str(
-                                            "; memory pressure probe failed, not holding the lane: ",
-                                        );
-                                        reason.push_str(&probe_error(error));
-                                    }
-                                    reason
-                                } else if let (Some(pressure), Some(budget)) =
-                                    (pressure_error, budget_error)
-                                {
-                                    format!(
-                                        "host capacity: probes failed, not holding the lane: memory pressure: {}; process budget: {}",
-                                        probe_error(pressure),
-                                        probe_error(budget)
-                                    )
-                                } else if let Some(error) = pressure_error {
-                                    format!(
-                                        "host capacity: memory pressure probe failed, not holding the lane: {}",
-                                        probe_error(error)
-                                    )
-                                } else if let Some(error) = budget_error {
-                                    format!(
-                                        "host capacity: process budget probe failed, not holding the lane: {}",
-                                        probe_error(error)
-                                    )
-                                } else {
-                                    "launch preparation: preparing the lane"
-                                        .to_owned()
-                                }
-                            }
-                        }
+                        return None;
                     }
+                } else {
+                    self.recovery_process_wait(lane.attempt_id, call)
+                        .unwrap_or_else(|| "launch preparation".to_owned())
                 };
                 Some(LaneWait {
                     extra: Default::default(),
                     attempt_id: lane.attempt_id,
-                    lane_class: class,
+                    lane_class: self.ticket(&self.db, lane.attempt_id).ok()?.lane_class,
                     waiting_for,
                 })
             })
             .collect()
-    }
-    /// A gated build in the lane says it waits by writing a marker in the
-    /// lane's scratch directory. The lane writes it, so it is read
-    /// without following links, bounded, and trusted only for which of two
-    /// fixed waits it names, that it is fresh and, for a slot wait, plausible
-    /// slot counts and a start time.
-    fn wait_marker(
-        &self,
-        lane: &AttemptRecord,
-        call: &Request<'_>,
-    ) -> Option<(WaitKind, Option<SlotWait>)> {
-        use provenant_os::build_slots::WAIT_MARKER;
-        let attempt = self.attempt_dir(lane.attempt_id, false).ok()?;
-        match attempt.metadata_at("process-exit.json".as_ref(), false) {
-            Err(error) if error.is_not_found() => {}
-            _ => return None,
-        }
-        let temporary = attempt.open_directory("tmp".as_ref()).ok()?;
-        let now = u64::try_from(call.clock.wall_now().ok()?.as_micros() / 1_000_000).ok()?;
-        // The marker sits in the lane's scratch (`tmp/candidate-N`), one file
-        // per waiting command. Bound how much a lane can make the host scan.
-        temporary
-            .entries()
-            .ok()?
-            .map_while(|entry| entry.ok())
-            .take(32)
-            .filter_map(|name| temporary.open_directory(&name).ok())
-            .find_map(|scratch| {
-                scratch
-                    .entries()
-                    .ok()?
-                    .map_while(|entry| entry.ok())
-                    .filter(|name| name.to_string_lossy().starts_with(WAIT_MARKER))
-                    .take(32)
-                    .find_map(|name| {
-                        let raw = scratch.read_stable(&name, 64).ok()?;
-                        let text = std::str::from_utf8(&raw).ok()?;
-                        Some((
-                            WaitKind::from_marker(text, now)?,
-                            WaitKind::slot_wait(text, now),
-                        ))
-                    })
-            })
-    }
-    /// The running lanes waiting for a build slot, oldest wait first, with the
-    /// slot counts they last saw. Only lanes of this project are visible; the
-    /// slots are shared by every project on the host.
-    fn slot_queue(
-        &self,
-        lanes: &[AttemptRecord],
-        call: &Request<'_>,
-    ) -> Vec<(AttemptId, SlotWait)> {
-        let mut queue: Vec<_> = lanes
-            .iter()
-            .filter(|lane| matches!(lane.state, AttemptState::Running { .. }))
-            .filter_map(|lane| match self.wait_marker(lane, call)? {
-                (WaitKind::Slot, Some(wait)) => Some((lane.attempt_id, wait)),
-                _ => None,
-            })
-            .collect();
-        queue.sort_by_key(|(attempt, wait)| (wait.since, attempt.to_string()));
-        queue
-    }
-    fn build_slot_wait(
-        &self,
-        lane: &AttemptRecord,
-        call: &Request<'_>,
-        queue: &[(AttemptId, SlotWait)],
-    ) -> Option<String> {
-        let (kind, _) = self.wait_marker(lane, call)?;
-        match kind {
-            WaitKind::Slot => Some(
-                match queue.iter().position(|(id, _)| *id == lane.attempt_id) {
-                    Some(index) => {
-                        let wait = queue[index].1;
-                        format!(
-                            "build slot: waiting {} of {} (longest first); {} of {} slots held",
-                            index + 1,
-                            queue.len(),
-                            wait.held,
-                            wait.limit
-                        )
-                    }
-                    None => "build slot: a cargo build waits for one of the host's build slots"
-                        .to_owned(),
-                },
-            ),
-            WaitKind::CargoLock => Some(
-                "build slot: a cargo build waits for another build's lock in its target directory"
-                    .to_owned(),
-            ),
-        }
-    }
-    /// Only writers wait on the live disk floor; readers warn in `admit`.
-    fn admission_disk_wait(
-        &self,
-        lane: &AttemptRecord,
-        class: LaneClass,
-        resources: &dyn Resources,
-    ) -> Option<String> {
-        if class != LaneClass::Writer {
-            return None;
-        }
-        let attempt = self.attempt_dir(lane.attempt_id, false).ok()?;
-        // The guardian samples sealed state, cwd and cache volumes. A listing
-        // cannot reconstruct those private launch inputs from the attempt path.
-        let observed =
-            crate::artifacts::read_sealed_observed(&attempt, "admission-disk.json", 1024)
-                .ok()
-                .flatten()
-                .and_then(|raw| serde_json::from_slice::<AdmissionDiskSample>(&raw).ok())
-                .filter(|sample| sample.generation == lane.generation);
-        let free = observed
-            .map(|sample| sample.free)
-            .or_else(|| resources.disk(&attempt).ok())?;
-        let (floor, origin) = disk_floor(&self.writer_registry).ok()?;
-        (free < floor).then(|| format!(
-            "host capacity: disk space: {free} bytes available; gc.free_floor is {floor} bytes (source: {})",
-            origin.description()
-        ))
-    }
-
-    /// The running guardian publishes this lane's pause in its checkpoint.
-    fn disk_pause_wait(&self, lane: &AttemptRecord, resources: &dyn Resources) -> Option<String> {
-        let attempt = self.attempt_dir(lane.attempt_id, false).ok()?;
-        // The periodic checkpoint may predate provider exit while a living
-        // guardian retains unresolved cleanup. Exit publication ends pausing.
-        match attempt.metadata_at("process-exit.json".as_ref(), false) {
-            Err(error) if error.is_not_found() => {}
-            _ => return None,
-        }
-        let raw = attempt
-            .read_stable("process.json".as_ref(), RECORD_LIMIT)
-            .ok()?;
-        let state: serde_json::Value = serde_json::from_slice(&raw).ok()?;
-        let guardian: provenant_supervisor::census::ProcessIdentity =
-            serde_json::from_value(state.get("guardian")?.clone()).ok()?;
-        if !matches!(
-            resources.observe_process(guardian.pid),
-            provenant_supervisor::census::ProcessObservation::Present(fact)
-                if fact.identity == guardian && !fact.zombie
-        ) {
-            return None;
-        }
-        state["disk_paused"].as_bool()?.then(|| {
-            "disk pressure paused builds below gc.free_floor; run `provenant gc --apply`".to_owned()
-        })
     }
     fn ticket(&self, db: &Connection, id: AttemptId) -> Result<AdmissionTicket> {
         let raw: Vec<u8> = db
@@ -834,8 +567,7 @@ impl RunStore {
         self.contribution_diagnostic(next.attempt_id, self.retain_contribution_route(&next, call));
         Ok(next)
     }
-    /// Wait until host capacity, startup spacing and resource floors admit
-    /// this attempt, then mark it running. Expiry or a state change refuses.
+    /// Sample advisory resources once, then claim custody without a resource poll loop.
     #[allow(clippy::print_stderr)]
     pub fn admit(
         &self,
@@ -846,257 +578,153 @@ impl RunStore {
         cancel: &CancelToken,
     ) -> Result<AttemptRecord> {
         let call = Request { clock, cancel };
+        call.check()?;
+        if crate::artifacts::read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.is_some() {
+            return Err(RunError::Cancelled);
+        }
+        let ticket = self.ticket(&self.db, id)?;
         let request = self.request(id, &call)?;
         let policy = crate::launch_policy(
             &self.writer_registry,
             &self.context.project_id.to_string(),
             &request.task,
         );
-        let mut warned_policy = std::collections::BTreeSet::new();
-        let backoff = Backoff::new(Duration::from_millis(100), 2, Duration::from_secs(2));
-        let mut retries = 0_u64;
-        let mut refusal = None;
-        let mut below_floor = 0_u32;
-        let mut warned_memory_floor = false;
-        let mut warned_disk_floor = false;
-        let mut last_disk_sample = None;
-        loop {
-            let call = Request { clock, cancel };
-            let ticket = self.ticket(&self.db, id)?;
-            let now = clock
-                .wall_now()
-                .map_err(|_| RunError::Validation("wall clock"))?;
-            if now >= ticket.admission_deadline {
-                return Err(refusal.unwrap_or(RunError::Refused));
-            }
-            // An explicit cancel before spawn ends the wait; finish records it.
-            if crate::artifacts::read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.is_some() {
-                return Err(RunError::Cancelled);
-            }
-            // Disk policy is live configuration, shared with the guardian and
-            // settlement. An unreadable current floor queues rather than
-            // admitting with the ticket's submission-time observation.
-            let disk_floor_bytes = disk_floor(&self.writer_registry);
-            let pressure = resources.pressure().unwrap_or_else(|error| {
+        let settings = provenant_config::LaneBuildSettings::read(&self.writer_registry)
+            .inspect_err(|error| {
+                eprintln!(
+                    "admission: settings unavailable: {}; proceeding with shipped policy",
+                    probe_error(error)
+                )
+            })
+            .unwrap_or_default();
+        let pressure = resources
+            .pressure()
+            .inspect_err(|error| {
                 eprintln!(
                     "admission: memory pressure probe failed: {}",
-                    probe_error(&error)
-                );
-                None
-            });
-            // Build slots gate builds inside lanes, not admission, and range
-            // errors are reported when configuration loads. Only a file that
-            // cannot be read as settings refuses here.
-            let settings = provenant_config::LaneBuildSettings::read(&self.writer_registry);
-            if settings
-                .as_ref()
-                .is_err_and(|error| error.kind() == std::io::ErrorKind::InvalidInput)
-            {
+                    probe_error(error)
+                )
+            })
+            .ok()
+            .flatten()
+            .filter(|level| settings.memory_pressure_threshold().defers(*level));
+        let processes = resources
+            .process_budget()
+            .inspect_err(|error| {
                 eprintln!(
-                    "warning: optional lane build settings unavailable; using compiled defaults"
-                );
-            }
-            // Like pressure, an unreadable process budget is logged and does
-            // not hold the lane: the limit is unknown, not exceeded.
-            let processes = resources
-                .process_budget()
-                .inspect_err(|error| {
-                    eprintln!(
-                        "admission: process budget probe failed: {}",
-                        probe_error(error)
-                    );
-                })
-                .ok()
-                .filter(|budget| !budget.has_room());
-            if !warned_memory_floor
-                && let Some(warning) =
-                    memory_floor_warning(resources.memory(), ticket.memory_floor_basis_points)
-            {
-                eprintln!(
-                    "admission warning [{}]: {}; next: {}",
-                    warning.code,
-                    warning
-                        .detail
-                        .as_deref()
-                        .unwrap_or("memory availability is low"),
-                    warning.next.as_deref().unwrap_or("inspect host memory")
-                );
-                warned_memory_floor = true;
-            }
-            let fits = match (
-                pressure,
-                resources.disk(attempt),
-                disk_floor_bytes,
-                settings,
-            ) {
-                (pressure, Ok(disk), Ok((floor, origin)), Ok(settings)) => {
-                    let threshold = settings.memory_pressure_threshold();
-                    let pressure = pressure.filter(|level| threshold.defers(*level));
-                    let mut disk = disk;
-                    let writer = ticket.lane_class == LaneClass::Writer;
-                    if !writer
-                        && let Some(warning) =
-                            read_only_disk_warning(&mut warned_disk_floor, disk, floor, origin)
-                    {
-                        eprintln!(
-                            "admission warning [{}]: {}; next: {}",
-                            warning.code,
-                            warning.detail.as_deref().unwrap_or("disk space is low"),
-                            warning.next.as_deref().unwrap_or("free disk space")
-                        );
-                    }
-                    if writer && disk < floor {
-                        if below_floor.is_multiple_of(RECLAIM_EVERY)
-                            && resources.reclaim_disk(attempt)
-                        {
-                            disk = resources.disk(attempt).unwrap_or(disk);
-                        }
-                        below_floor = below_floor.saturating_add(1);
-                    }
-                    if writer {
-                        let sample = AdmissionDiskSample {
-                            generation: ticket.generation,
-                            free: disk,
-                        };
-                        if last_disk_sample != Some(sample) {
-                            // Status evidence only: publication failure must not
-                            // alter admission. No paths or private context escape.
-                            if let Ok(raw) = serde_json::to_vec(&sample) {
-                                let _ = attempt.atomic_write(
-                                    "admission-disk.json".as_ref(),
-                                    ".admission-disk-",
-                                    &raw,
-                                    provenant_os::fs::PublishMode::Replace,
-                                );
-                            }
-                            last_disk_sample = Some(sample);
-                        }
-                    }
-                    refusal = if writer && disk < floor {
-                        Some(RunError::Admission(AdmissionError::Disk {
-                            free: disk,
-                            floor,
-                            origin,
-                        }))
-                    } else if let Some(level) = pressure {
-                        Some(RunError::Admission(AdmissionError::MemoryPressure {
-                            level: match level {
-                                resources::MemoryPressure::Normal => {
-                                    provenant_records::diagnostic::PressureLevel::Normal
-                                }
-                                resources::MemoryPressure::Warning => {
-                                    provenant_records::diagnostic::PressureLevel::Warning
-                                }
-                                resources::MemoryPressure::Critical => {
-                                    provenant_records::diagnostic::PressureLevel::Critical
-                                }
-                            },
-                            threshold: threshold.diagnostic_value(),
-                            origin: settings.memory_pressure_source(),
-                        }))
-                    } else {
-                        processes.map(|budget| {
-                            RunError::Admission(AdmissionError::Processes {
-                                used: budget.used,
-                                limit: budget.limit,
-                            })
-                        })
-                    };
-                    pressure.is_none() && processes.is_none() && (!writer || disk >= floor)
-                }
-                _ => {
-                    refusal = None;
-                    false
-                }
-            };
-            let fits = if let Some(error) = refusal.as_ref() {
-                use provenant_records::policy::{Effect, Facts};
-                let code = match error {
-                    RunError::Admission(AdmissionError::Disk { .. }) => "ADMISSION_DISK",
-                    RunError::Admission(AdmissionError::MemoryPressure { .. }) => {
-                        "ADMISSION_PRESSURE"
-                    }
-                    RunError::Admission(AdmissionError::Processes { .. }) => "PROCESS_CENSUS",
-                    _ => "ADMISSION_DISK",
-                };
-                match policy.check(code, Facts::violation(error.to_string())) {
-                    Effect::Proceed => {
-                        refusal = None;
-                        true
-                    }
-                    Effect::Warn(message) => {
-                        if warned_policy.insert(code) {
-                            eprintln!("warning: {message}");
-                        }
-                        refusal = None;
-                        true
-                    }
-                    Effect::Queue(_) => false,
-                    Effect::Refuse(_) => return Err(refusal.take().ok_or(RunError::Refused)?),
-                }
-            } else if !fits {
-                // Unavailable resource probes are observations, not authority.
-                use provenant_records::policy::{Effect, Facts};
-                match policy.check(
-                    "ADMISSION_DISK",
-                    Facts::violation("resource observation unavailable"),
-                ) {
-                    Effect::Proceed => true,
-                    Effect::Warn(message) => {
-                        if warned_policy.insert("ADMISSION_DISK") {
-                            eprintln!("warning: {message}");
-                        }
-                        true
-                    }
-                    Effect::Queue(_) | Effect::Refuse(_) => false,
-                }
-            } else {
-                true
-            };
-            if fits {
-                match self.claim_observed(id, clock, &call, resources) {
-                    Ok(Some(record)) => return Ok(record),
-                    // A busy store is transient; keep waiting to the deadline.
-                    Ok(None) => {
-                        // Name the applicable total or writer cap for either lane class.
-                        if let Some(hit) = self.lane_cap_hit(&ticket, &call) {
-                            refusal = Some(RunError::Admission(AdmissionError::LaneCap {
-                                active: hit.active,
-                                limit: hit.limit,
-                                kind: hit.kind,
-                                origin: hit.origin,
-                            }));
-                        }
-                    }
-                    Err(RunError::Admission(AdmissionError::GuardianIdentity)) => {
-                        refusal = Some(RunError::Admission(AdmissionError::GuardianIdentity));
-                    }
-                    Err(RunError::Contention) => {}
-                    Err(error) => return Err(error),
-                }
-            }
-            if cancel.is_cancelled() {
-                return Err(RunError::Cancelled);
-            }
-            let left = u64::try_from(
-                ticket
-                    .admission_deadline
-                    .as_micros()
-                    .saturating_sub(now.as_micros()),
-            )
-            .unwrap_or(0);
-            let pause = backoff.delay(retries).min(Duration::from_micros(left));
-            let deadline = clock
-                .mono_now()
-                .checked_add(provenant_core::DurationMicros::from_micros(
-                    u64::try_from(pause.as_micros()).unwrap_or(u64::MAX),
-                ))
-                .map_err(|_| RunError::Validation("admission budget"))?;
-            clock
-                .wait_until(deadline)
-                .map_err(|_| RunError::Validation("admission budget"))?;
-            retries = retries.saturating_add(1);
+                    "admission: process budget probe failed: {}",
+                    probe_error(error)
+                )
+            })
+            .ok()
+            .filter(|budget| !budget.has_room());
+        let disk = resources
+            .disk(attempt)
+            .inspect_err(|error| eprintln!("admission: disk probe failed: {}", probe_error(error)))
+            .ok();
+        let floor = disk_floor(&self.writer_registry)
+            .inspect_err(|error| {
+                eprintln!("admission: disk floor unavailable: {error}; proceeding")
+            })
+            .ok();
+        if let Some(warning) =
+            memory_floor_warning(resources.memory(), ticket.memory_floor_basis_points)
+        {
+            eprintln!(
+                "admission warning [{}]: {}; next: {}",
+                warning.code,
+                warning
+                    .detail
+                    .as_deref()
+                    .unwrap_or("available memory is low"),
+                warning.next.as_deref().unwrap_or("inspect host memory")
+            );
         }
+        let spacing = crate::ledger::spacing_left(
+            &self.writer_registry,
+            ticket.lane_class,
+            ticket.startup_spacing_ms,
+            clock,
+        )
+        .filter(|left| *left > 0);
+        let low_disk = disk.zip(floor).filter(|(free, (floor, _))| free < floor);
+        if ticket.lane_class == LaneClass::ReadOnly
+            && let Some((free, (floor, origin))) = low_disk
+            && let Some(warning) = read_only_disk_warning(&mut false, free, floor, origin)
+        {
+            eprintln!(
+                "admission warning [{}]: {}; next: {}",
+                warning.code,
+                warning
+                    .detail
+                    .as_deref()
+                    .unwrap_or("free disk space is low"),
+                warning.next.as_deref().unwrap_or("free disk space")
+            );
+        }
+        let writer_disk = low_disk.filter(|_| ticket.lane_class == LaneClass::Writer);
+        let observed = |error: RunError| (error.to_string(), error);
+        // Each observation names its typed refusal; the policy decides its effect.
+        let observations: [(&str, Option<(String, RunError)>); 4] = [
+            (
+                "ADMISSION_DISK",
+                writer_disk.map(|(free, (floor, origin))| {
+                    observed(RunError::Admission(AdmissionError::Disk {
+                        free,
+                        floor,
+                        origin,
+                    }))
+                }),
+            ),
+            (
+                "ADMISSION_PRESSURE",
+                pressure.map(|level| {
+                    use provenant_records::diagnostic::PressureLevel;
+                    observed(RunError::Admission(AdmissionError::MemoryPressure {
+                        level: match level {
+                            resources::MemoryPressure::Normal => PressureLevel::Normal,
+                            resources::MemoryPressure::Warning => PressureLevel::Warning,
+                            resources::MemoryPressure::Critical => PressureLevel::Critical,
+                        },
+                        threshold: settings.memory_pressure_threshold().diagnostic_value(),
+                        origin: settings.memory_pressure_source(),
+                    }))
+                }),
+            ),
+            (
+                "PROCESS_CENSUS",
+                processes.map(|budget| {
+                    observed(RunError::Admission(AdmissionError::Processes {
+                        used: budget.used,
+                        limit: budget.limit,
+                    }))
+                }),
+            ),
+            (
+                "ADMISSION_SPACING",
+                spacing.map(|left| {
+                    (
+                        format!(
+                            "a lane of this class started within domains.fabric.lanes.start_spacing_ms; {left} ms remain"
+                        ),
+                        RunError::Refused,
+                    )
+                }),
+            ),
+        ];
+        for (code, observation) in observations {
+            use provenant_records::policy::{Effect, Facts};
+            let Some((detail, error)) = observation else {
+                continue;
+            };
+            match policy.check(code, Facts::violation(detail)) {
+                Effect::Proceed => {}
+                Effect::Warn(message) => eprintln!("warning: {message}"),
+                Effect::Refuse(_) => return Err(error),
+            }
+        }
+        self.claim_observed(id, clock, &call, resources)?
+            .ok_or(RunError::Refused)
     }
     #[cfg(test)]
     pub(crate) fn claim(
@@ -1144,7 +772,7 @@ impl RunStore {
         use provenant_records::policy::{Effect, Facts, Strength};
         let configured = self.lane_caps();
         let ticket = self.ticket(&self.db, id)?;
-        for strength in [Strength::Refuse, Strength::Queue, Strength::Warn] {
+        for strength in [Strength::Refuse, Strength::Warn] {
             let caps = configured.under_strength(&policy, strength);
             let Some(hit) =
                 crate::ledger::cap_hit(&ledger, self.context.project_id, ticket.lane_class, caps)?
@@ -1166,7 +794,6 @@ impl RunStore {
                     use std::io::Write;
                     let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
                 }
-                Effect::Queue(_) => return Ok(None),
                 Effect::Refuse(_) => {
                     return Err(RunError::Admission(AdmissionError::LaneCap {
                         active: hit.active,
@@ -1200,7 +827,6 @@ impl RunStore {
                 &ledger,
                 self.context.state_root.as_path(),
                 &ticket,
-                caps,
                 clock,
                 call,
                 &owner,
@@ -1315,29 +941,14 @@ fn is_format_character(character: char) -> bool {
             | '\u{E0020}'..='\u{E007F}'
     )
 }
-fn class_name(class: LaneClass) -> &'static str {
-    match class {
-        LaneClass::Writer => "writer",
-        LaneClass::ReadOnly => "read-only",
-    }
-}
+
 /// Milliseconds as seconds to one decimal place, rounded up so a wait never
 /// reads as zero while it holds.
-fn tenths(ms: u64) -> String {
-    let tenths = ms.div_ceil(100);
-    format!("{}.{}", tenths / 10, tenths % 10)
-}
+
 fn deadline(from: WallTime, seconds: u64) -> Result<WallTime> {
     DurationMicros::from_seconds(seconds)
         .and_then(|duration| from.checked_add(duration))
         .map_err(|_| RunError::Validation("admission deadline"))
-}
-
-/// Bounded status evidence from the guardian's sealed multi-volume probe.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct AdmissionDiskSample {
-    generation: u64,
-    free: u64,
 }
 
 /// Resolve the live host disk floor and its source for admission and status.
@@ -1520,93 +1131,6 @@ mod process_wait_tests {
         Ok(())
     }
 
-    struct Full;
-    impl Resources for Full {
-        fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
-            crate::tests::HostFacts::new(100).guardian_identity()
-        }
-        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
-            crate::tests::HostFacts::new(100).observe_process(pid)
-        }
-        fn memory(&self) -> std::io::Result<MemorySample> {
-            Ok(MemorySample {
-                available_bytes: 100,
-                total_bytes: 100,
-            })
-        }
-        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
-            Ok(u64::MAX)
-        }
-        fn process_budget(&self) -> std::io::Result<resources::ProcessBudget> {
-            Ok(resources::ProcessBudget {
-                used: 950,
-                limit: 1000,
-            })
-        }
-    }
-
-    #[test]
-    fn queued_lane_reports_process_capacity() -> std::result::Result<(), Box<dyn std::error::Error>>
-    {
-        let temp = tempfile::tempdir()?;
-        let clock = crate::tests::clock();
-        let cancel = CancelToken::new();
-        let call = crate::tests::call(&clock, &cancel);
-        let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
-        let run = crate::tests::input();
-        store.create(&run, &call)?;
-        let lane = store.record(run.attempt_id, &call)?;
-        let waits = store.lane_waits_with_resources(&[lane], &call, &Full);
-        assert_eq!(
-            waits[0].waiting_for,
-            "host capacity: user process count 950 of 1000"
-        );
-        Ok(())
-    }
-
-    /// The process budget a probe source reports.
-    #[derive(Clone, Copy)]
-    enum Budget {
-        Unlimited,
-        Full { used: u64, limit: u64 },
-        Failed(&'static str),
-    }
-    /// A probe source whose results are the cases under test.
-    struct Probes {
-        pressure: Option<&'static str>,
-        budget: Budget,
-    }
-    impl Resources for Probes {
-        fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
-            crate::tests::HostFacts::new(100).guardian_identity()
-        }
-        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
-            crate::tests::HostFacts::new(100).observe_process(pid)
-        }
-        fn memory(&self) -> std::io::Result<MemorySample> {
-            Ok(MemorySample {
-                available_bytes: 100,
-                total_bytes: 100,
-            })
-        }
-        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
-            Ok(u64::MAX)
-        }
-        fn pressure(&self) -> std::io::Result<Option<resources::MemoryPressure>> {
-            match self.pressure {
-                Some(message) => Err(std::io::Error::other(message)),
-                None => Ok(None),
-            }
-        }
-        fn process_budget(&self) -> std::io::Result<resources::ProcessBudget> {
-            match self.budget {
-                Budget::Unlimited => Ok(resources::ProcessBudget::UNLIMITED),
-                Budget::Full { used, limit } => Ok(resources::ProcessBudget { used, limit }),
-                Budget::Failed(message) => Err(std::io::Error::other(message)),
-            }
-        }
-    }
-
     fn starting_lane(
         store: &RunStore,
         call: &Request<'_>,
@@ -1625,110 +1149,6 @@ mod process_wait_tests {
     }
 
     #[test]
-    fn lane_wait_view_samples_process_budget_once_and_refreshes_the_next_view()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        use std::cell::Cell;
-        struct Counting {
-            budget: Cell<Budget>,
-            calls: Cell<usize>,
-        }
-        impl Resources for Counting {
-            fn observe_process(
-                &self,
-                pid: i64,
-            ) -> provenant_supervisor::census::ProcessObservation {
-                crate::tests::HostFacts::new(100).observe_process(pid)
-            }
-
-            fn memory(&self) -> std::io::Result<MemorySample> {
-                Ok(MemorySample {
-                    available_bytes: 100,
-                    total_bytes: 100,
-                })
-            }
-            fn disk(&self, _: &Directory) -> std::io::Result<u64> {
-                Ok(u64::MAX)
-            }
-            fn process_budget(&self) -> std::io::Result<resources::ProcessBudget> {
-                self.calls.set(self.calls.get() + 1);
-                Probes {
-                    pressure: None,
-                    budget: self.budget.get(),
-                }
-                .process_budget()
-            }
-        }
-        let temp = tempfile::tempdir()?;
-        let clock = crate::tests::clock();
-        let cancel = CancelToken::new();
-        let call = crate::tests::call(&clock, &cancel);
-        let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
-        let mut lanes = Vec::new();
-        for n in 1..=4u8 {
-            let mut run = crate::tests::input();
-            run.attempt_id = provenant_core::AttemptId::from_bytes([n; 16]);
-            run.operation_id = provenant_core::OperationId::parse(&format!("view-census-{n}"))?;
-            run.attempt_id = provenant_core::AttemptId::from_bytes([n; 16]);
-            crate::tests::rekey(&mut run);
-            store.create(&run, &call)?;
-            let queued = store.record(run.attempt_id, &call)?;
-            lanes.push(if n % 2 == 0 {
-                store.mark_starting(
-                    &queued,
-                    &crate::tests::route(),
-                    &[],
-                    &Default::default(),
-                    None,
-                    &call,
-                )?
-            } else {
-                queued
-            });
-        }
-        let resources = Counting {
-            budget: Cell::new(Budget::Unlimited),
-            calls: Cell::new(0),
-        };
-        for (view, budget) in [
-            Budget::Full {
-                used: 950,
-                limit: 1000,
-            },
-            Budget::Failed("unavailable"),
-            Budget::Unlimited,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            resources.budget.set(budget);
-            let waits = store.lane_waits_with_resources(&lanes, &call, &resources);
-            assert_eq!(waits.len(), 4);
-            assert_eq!(
-                resources.calls.get(),
-                view + 1,
-                "every view samples once, including failed censuses"
-            );
-            for (lane, wait) in lanes.iter().zip(waits) {
-                assert_eq!(wait.attempt_id, lane.attempt_id);
-                let queued = matches!(lane.state, AttemptState::Queued { .. });
-                let expected = match (budget, queued) {
-                    (Budget::Full { .. }, _) => "host capacity: user process count 950 of 1000",
-                    (Budget::Failed(_), true) => {
-                        "launch: not yet handed to a guardian; process budget probe failed, not holding the lane: unavailable"
-                    }
-                    (Budget::Failed(_), false) => {
-                        "host capacity: process budget probe failed, not holding the lane: unavailable"
-                    }
-                    (Budget::Unlimited, true) => "launch: not yet handed to a guardian",
-                    (Budget::Unlimited, false) => "launch preparation: preparing the lane",
-                };
-                assert_eq!(wait.waiting_for, expected);
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
     fn admission_starting_lane_reports_launch_preparation_without_a_limit()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -1737,145 +1157,12 @@ mod process_wait_tests {
         let call = crate::tests::call(&clock, &cancel);
         let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
         let lane = starting_lane(&store, &call)?;
-        let waits = store.lane_waits_with_resources(
-            &[lane],
-            &call,
-            &Probes {
-                pressure: None,
-                budget: Budget::Unlimited,
-            },
-        );
-        assert_eq!(
-            waits[0].waiting_for,
-            "launch preparation: preparing the lane"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn queued_lane_reports_failed_process_budget_probe()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let clock = crate::tests::clock();
-        let cancel = CancelToken::new();
-        let call = crate::tests::call(&clock, &cancel);
-        let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
-        let run = crate::tests::input();
-        store.create(&run, &call)?;
-        let lane = store.record(run.attempt_id, &call)?;
-        let waits = store.lane_waits_with_resources(
-            &[lane],
-            &call,
-            &Probes {
-                pressure: None,
-                budget: Budget::Failed("unavailable"),
-            },
-        );
-        assert_eq!(
-            waits[0].waiting_for,
-            "launch: not yet handed to a guardian; process budget probe failed, \
-             not holding the lane: unavailable"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn starting_lane_reports_failed_process_budget_probe()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let clock = crate::tests::clock();
-        let cancel = CancelToken::new();
-        let call = crate::tests::call(&clock, &cancel);
-        let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
-        let lane = starting_lane(&store, &call)?;
-        let waits = store.lane_waits_with_resources(
-            &[lane],
-            &call,
-            &Probes {
-                pressure: None,
-                budget: Budget::Failed("unavailable"),
-            },
-        );
-        assert_eq!(
-            waits[0].waiting_for,
-            "host capacity: process budget probe failed, not holding the lane: unavailable"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn starting_lane_reports_failed_memory_pressure_probe()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let clock = crate::tests::clock();
-        let cancel = CancelToken::new();
-        let call = crate::tests::call(&clock, &cancel);
-        let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
-        let lane = starting_lane(&store, &call)?;
-        let waits = store.lane_waits_with_resources(
-            &[lane],
-            &call,
-            &Probes {
-                pressure: Some("unavailable"),
-                budget: Budget::Unlimited,
-            },
-        );
-        assert_eq!(
-            waits[0].waiting_for,
-            "host capacity: memory pressure probe failed, not holding the lane: unavailable"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn starting_lane_names_full_process_budget_when_pressure_probe_fails()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let clock = crate::tests::clock();
-        let cancel = CancelToken::new();
-        let call = crate::tests::call(&clock, &cancel);
-        let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
-        let lane = starting_lane(&store, &call)?;
-        let waits = store.lane_waits_with_resources(
-            &[lane],
-            &call,
-            &Probes {
-                pressure: Some("unavailable"),
-                budget: Budget::Full {
-                    used: 512,
-                    limit: 512,
-                },
-            },
-        );
-        assert_eq!(
-            waits[0].waiting_for,
-            "host capacity: user process count 512 of 512; memory pressure probe failed, \
-             not holding the lane: unavailable"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn starting_lane_names_both_failed_probes()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let clock = crate::tests::clock();
-        let cancel = CancelToken::new();
-        let call = crate::tests::call(&clock, &cancel);
-        let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
-        let lane = starting_lane(&store, &call)?;
-        let waits = store.lane_waits_with_resources(
-            &[lane],
-            &call,
-            &Probes {
-                pressure: Some("unreadable"),
-                budget: Budget::Failed("exhausted"),
-            },
-        );
-        assert_eq!(
-            waits[0].waiting_for,
-            "host capacity: probes failed, not holding the lane: memory pressure: unreadable; \
-             process budget: exhausted"
+        let waits =
+            store.lane_waits_with_resources(&[lane], &call, &crate::tests::HostFacts::new(100));
+        assert!(
+            waits
+                .iter()
+                .any(|wait| wait.waiting_for.starts_with("launch preparation"))
         );
         Ok(())
     }

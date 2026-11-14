@@ -253,13 +253,6 @@ impl Prompt {
                 let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
                 Ok(())
             }
-            Effect::Queue(message) => {
-                use std::io::Write;
-                let _ = writeln!(std::io::stderr().lock(), "error: {message}");
-                Err(ProviderError::PolicyActionUnsupported {
-                    code: "ARGV_PROMPT",
-                })
-            }
             Effect::Refuse(_) => Err(error()),
         }
     }

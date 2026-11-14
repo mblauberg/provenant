@@ -76,7 +76,7 @@ impl crate::LaunchSpec {
     /// Put a `cargo` shim first on the lane's PATH. Cargo commands that compile
     /// take one host build slot (`slots` across every project on this state
     /// directory) before the real `cargo` runs, and keep it until it exits.
-    /// Waiting blocks only that command.
+    /// Busy slots warn and the command proceeds.
     ///
     /// The host provisions the slot files (`BuildSlots::provision`) before
     /// the lane starts. The lane is granted read access to that directory and
@@ -114,19 +114,21 @@ impl crate::LaunchSpec {
             }
             Ok(shell_quote(value))
         };
-        if !(1..=64).contains(&gate.slots)
-            || gate.wait_seconds == 0
-            || !["all", "check", "none"].contains(&gate.local_cargo)
+        if !(1..=64).contains(&gate.slots) || !["all", "check", "none"].contains(&gate.local_cargo)
         {
             return Err(ProviderError::Malformed);
         }
         let bin = scratch.join("bin");
+        // The shim checks a new build against this launch's own resolved rule.
+        let rule = serde_json::to_string(self.policy.rule("BUILD_DISK"))
+            .map_err(|_| ProviderError::Malformed)?;
+        let disk = gate.disk_floor.map_or_else(String::new, |floor| format!(
+            "PROVENANT_BUILD_DISK_FLOOR={} PROVENANT_BUILD_DISK_RULE={}\nexport PROVENANT_BUILD_DISK_FLOOR PROVENANT_BUILD_DISK_RULE\n", floor, shell_quote(&rule)
+        ));
         let script = format!(
-            "#!/bin/sh\nPROVENANT_BUILD_SLOT_STATE={} PROVENANT_BUILD_SLOTS={} PROVENANT_BUILD_WAIT_SECS={} PROVENANT_BUILD_WAIT_MARKER={} PROVENANT_LOCAL_CARGO={}\nexport PROVENANT_BUILD_SLOT_STATE PROVENANT_BUILD_SLOTS PROVENANT_BUILD_WAIT_SECS PROVENANT_BUILD_WAIT_MARKER PROVENANT_LOCAL_CARGO\nexec {} internal build-slot -- {} \"$@\"\n",
+            "#!/bin/sh\n{disk}PROVENANT_BUILD_SLOT_STATE={} PROVENANT_BUILD_SLOTS={} PROVENANT_LOCAL_CARGO={}\nexport PROVENANT_BUILD_SLOT_STATE PROVENANT_BUILD_SLOTS PROVENANT_LOCAL_CARGO\nexec {} internal build-slot -- {} \"$@\"\n",
             text(gate.state)?,
             gate.slots,
-            gate.wait_seconds,
-            text(gate.wait_marker)?,
             gate.local_cargo,
             text(gate.provenant)?,
             text(gate.cargo)?,
@@ -745,13 +747,10 @@ pub struct BuildSlotGate<'a> {
     pub state: &'a Path,
     /// How many builds the host runs at once.
     pub slots: u64,
-    /// Seconds a build waits for a slot or a Cargo lock before giving up.
-    pub wait_seconds: u64,
+    /// Resolved free floor, sealed by the host; the rule is the launch's `BUILD_DISK`.
+    pub disk_floor: Option<u64>,
     /// The real `cargo` the shim runs once it holds a slot.
     pub cargo: &'a Path,
-    /// File in the lane's private temporary directory where a waiting build
-    /// says so, for the host's `lanes` and `status`.
-    pub wait_marker: &'a Path,
     /// Cargo commands the lane may run: `all`, `check` or `none`. The shim
     /// refuses the rest; see the `lanes.local_cargo` knob.
     pub local_cargo: &'a str,
@@ -2362,12 +2361,11 @@ mod tests {
         spec.cwd = root.clone();
         let provenant = root.join("fake provenant");
         let gate = BuildSlotGate {
+            disk_floor: None,
             provenant: &provenant,
             state: &state,
             slots: 3,
-            wait_seconds: 1800,
             cargo: Path::new("/home/.cargo/bin/cargo"),
-            wait_marker: Path::new("/tmp/lane/build-slot-wait"),
             local_cargo: "all",
         };
         spec.configure_build_slots(&scratch, &gate).unwrap();
@@ -2404,7 +2402,7 @@ mod tests {
         // and the host's slot environment, with hostile values in the lane's.
         std::fs::write(
             &provenant,
-            "#!/bin/sh\nprintf '<%s>' \"$@\"\nprintf '[%s|%s|%s]' \"$PROVENANT_BUILD_SLOT_STATE\" \"$PROVENANT_BUILD_SLOTS\" \"$PROVENANT_BUILD_WAIT_SECS\"\n",
+            "#!/bin/sh\nprintf '<%s>' \"$@\"\nprintf '[%s|%s]' \"$PROVENANT_BUILD_SLOT_STATE\" \"$PROVENANT_BUILD_SLOTS\"\n",
         )
         .unwrap();
         let shim = root.join("cargo");
@@ -2416,17 +2414,16 @@ mod tests {
             .args(["test", "--", "two words"])
             .env("PROVENANT_BUILD_SLOT_STATE", "/lane/chosen")
             .env("PROVENANT_BUILD_SLOTS", "64")
-            .env("PROVENANT_BUILD_WAIT_SECS", "1")
             .output()
             .unwrap();
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8(output.stdout).unwrap(),
             format!(
-                "<internal><build-slot><--></home/.cargo/bin/cargo><test><--><two words>[{}|3|1800]",
+                "<internal><build-slot><--></home/.cargo/bin/cargo><test><--><two words>[{}|3]",
                 state.display()
             ),
-            "the host's slot directory, count and wait override the lane's environment"
+            "the host's slot directory and count override the lane's environment"
         );
     }
 
@@ -2455,12 +2452,11 @@ mod tests {
         input.provenant.state = &state;
         let mut spec = Codex.prepare(input).unwrap();
         let gate = BuildSlotGate {
+            disk_floor: None,
             provenant: Path::new("/fixture/bin/provenant"),
             state: &state,
             slots: 2,
-            wait_seconds: 60,
             cargo: Path::new("/home/.cargo/bin/cargo"),
-            wait_marker: Path::new("/tmp/lane/build-slot-wait"),
             local_cargo: "all",
         };
         spec.configure_build_slots(&base.join("scratch"), &gate)
@@ -2486,33 +2482,31 @@ mod tests {
 
     #[test]
     fn the_cargo_shim_refuses_settings_that_cannot_be_trusted() {
-        for (state, slots, wait) in [("/s", 0, 60), ("/s", 65, 60), ("/s", 1, 0)] {
+        for (state, slots) in [("/s", 0), ("/s", 65)] {
             let mut spec = bare_spec("/usr/bin");
             let gate = BuildSlotGate {
+                disk_floor: None,
                 provenant: Path::new("/p"),
                 state: Path::new(state),
                 slots,
-                wait_seconds: wait,
                 cargo: Path::new("/c"),
-                wait_marker: Path::new("/t/build-slot-wait"),
                 local_cargo: "all",
             };
             assert!(
                 spec.configure_build_slots(Path::new("/scratch"), &gate)
                     .is_err(),
-                "{state} {slots} {wait}"
+                "{state} {slots}"
             );
             assert!(spec.setup.is_empty());
         }
         for state in ["relative", "/s\nx"] {
             let mut spec = bare_spec("/usr/bin");
             let gate = BuildSlotGate {
+                disk_floor: None,
                 provenant: Path::new("/p"),
                 state: Path::new(state),
                 slots: 1,
-                wait_seconds: 60,
                 cargo: Path::new("/c"),
-                wait_marker: Path::new("/t/build-slot-wait"),
                 local_cargo: "all",
             };
             assert!(
@@ -2526,12 +2520,11 @@ mod tests {
     #[test]
     fn unrepresentable_build_slot_shim_is_skipped_without_mutating_launch() {
         let gate = BuildSlotGate {
+            disk_floor: None,
             provenant: Path::new("/runtime"),
             state: Path::new("/state"),
             slots: 1,
-            wait_seconds: 60,
             cargo: Path::new("/cargo"),
-            wait_marker: Path::new("/scratch/wait"),
             local_cargo: "all",
         };
         for missing_path in [true, false] {

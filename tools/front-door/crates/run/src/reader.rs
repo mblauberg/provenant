@@ -906,8 +906,6 @@ impl RunStore {
                 silent: bool,
                 #[serde(default)]
                 silent_for_ms: Option<u64>,
-                #[serde(default)]
-                disk_paused: bool,
             }
             let parsed = serde_json::from_slice::<ProcessCheckpoint>(&bytes);
             let scoped = parsed.as_ref().is_ok_and(|observation| {
@@ -932,7 +930,6 @@ impl RunStore {
                 record.process_observation_valid.0 = true;
                 record.last_output_at = observation.last_output_at;
                 record.priority = observation.priority;
-                record.provider_silence_suppressed.0 = observation.disk_paused;
                 let fresh = observation
                     .observed_at
                     .zip(call.clock.wall_now().ok())

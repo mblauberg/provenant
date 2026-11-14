@@ -1341,10 +1341,6 @@ pub struct AttemptRecord {
     /// identity-checked. Used only for live coverage reporting.
     #[serde(skip)]
     pub process_observation_valid: Transient<bool>,
-    /// Whether the guardian reports a current disk pause or the host reports
-    /// a build-slot wait; either makes silence inapplicable.
-    #[serde(skip)]
-    pub provider_silence_suppressed: Transient<bool>,
     /// Custody evidence. Absence is an unknown launch state and never authorises a writer retry.
     #[serde(default)]
     pub provider_launched: Option<bool>,

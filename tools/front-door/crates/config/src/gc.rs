@@ -185,9 +185,6 @@ pub struct LaneBuildSettings {
     /// Most writer lanes live at once for one project.
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub max_project_writer_lanes: Option<u64>,
-    /// Minutes a build waits for a build slot or a Cargo lock before giving up.
-    #[serde(default, deserialize_with = "deserialize_auto")]
-    pub build_wait_minutes: Option<u64>,
     /// First port of the range split into per-writer-lane blocks.
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub lane_port_base: Option<u64>,
@@ -221,7 +218,6 @@ pub struct LaneBuildSettings {
 }
 /// Longest configurable gap between lane starts: ten minutes.
 pub const MAX_START_SPACING_MS: u64 = 600_000;
-pub const DEFAULT_BUILD_WAIT_MINUTES: u64 = 30;
 /// Default lane port space: 64 blocks of 16 ports from 30000, below the
 /// ephemeral ranges of macOS and Linux and one block per possible writer lane.
 pub const DEFAULT_LANE_PORT_BASE: u64 = 30000;
@@ -318,9 +314,6 @@ impl LaneBuildSettings {
                 .is_some_and(|project| project > self.writer_lanes())
         {
             invalid.push("max_project_writer_lanes");
-        }
-        if !in_range(self.build_wait_minutes, 1440) {
-            invalid.push("build_wait_minutes");
         }
         if self
             .lane_port_base
@@ -424,14 +417,7 @@ impl LaneBuildSettings {
             .unwrap_or(u64::MAX)
             .min(self.writer_lanes())
     }
-    pub fn build_wait(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(
-            60 * self
-                .build_wait_minutes
-                .unwrap_or(DEFAULT_BUILD_WAIT_MINUTES)
-                .clamp(1, 1440),
-        )
-    }
+
     pub fn jobs(&self) -> u64 {
         self.cargo_build_jobs.unwrap_or_else(|| {
             std::thread::available_parallelism().map_or(1, |n| n.get().clamp(1, 2) as u64)
@@ -515,7 +501,7 @@ impl GcSettings {
         crate::loader::read_settings(state, "gc", Self::validate)
     }
 
-    /// The configured floor, or 10% of the state volume with a 50 GiB minimum.
+    /// The configured floor, or 1% of the state volume capped at 5 GiB.
     /// Installation can render before the state directory has been created.
     pub fn free_floor_bytes(&self, state: &Path) -> std::io::Result<u64> {
         if let Some(size) = &self.free_floor {
@@ -577,7 +563,7 @@ impl GcSettings {
 }
 
 fn default_free_floor(total_bytes: u64) -> u64 {
-    (total_bytes / 10).max(50 * 1024_u64.pow(3))
+    (total_bytes / 100).min(5 * 1024_u64.pow(3))
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -864,23 +850,6 @@ mod tests {
     }
 
     #[test]
-    fn free_floor_defaults_to_ten_percent_with_a_fifty_gib_minimum() {
-        let gib = 1024_u64.pow(3);
-        assert_eq!(super::default_free_floor(100 * gib), 50 * gib);
-        assert_eq!(super::default_free_floor(1000 * gib), 100 * gib);
-        let settings = super::GcSettings {
-            free_floor: Some("20G".into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            settings
-                .free_floor_bytes(std::path::Path::new("/missing/state"))
-                .unwrap(),
-            20 * gib
-        );
-    }
-
-    #[test]
     fn observed_default_floor_matches_dispatch_floor() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let settings = super::GcSettings::read(temp.path())?;
@@ -1000,17 +969,11 @@ mod build_tests {
         assert_eq!(defaults.writer_lanes(), u64::MAX);
         assert_eq!(defaults.project_writer_lanes(), u64::MAX);
         assert_eq!(defaults.start_spacing_ms.unwrap_or(0), 0);
-        let invalid: LaneBuildSettings = toml_edit::de::from_str(
-            "max_writer_lanes = 65\nmax_project_writer_lanes = 0\nbuild_wait_minutes = 0",
-        )
-        .unwrap();
+        let invalid: LaneBuildSettings =
+            toml_edit::de::from_str("max_writer_lanes = 65\nmax_project_writer_lanes = 0").unwrap();
         assert_eq!(
             invalid.invalid_keys(),
-            [
-                "max_writer_lanes",
-                "max_project_writer_lanes",
-                "build_wait_minutes"
-            ]
+            ["max_writer_lanes", "max_project_writer_lanes",]
         );
         let wider: LaneBuildSettings =
             toml_edit::de::from_str("max_writer_lanes = 8\nmax_project_writer_lanes = 9").unwrap();

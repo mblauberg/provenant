@@ -905,62 +905,6 @@ fn admission_holds_spacing_floors_and_deadline() -> TestResult {
     );
     assert_eq!(running.started_at, Some(now.wall_now()?));
 
-    store.set_admission_policy(AdmissionPolicy {
-        startup_spacing_ms: 20_000,
-        read_only_spacing_ms: 2_000,
-        ..AdmissionPolicy::default()
-    });
-    let mut spaced = input();
-    spaced.operation_id = provenant_core::OperationId::parse("spaced")?;
-    spaced.attempt_id = AttemptId::from_bytes([11; 16]);
-    crate::tests::rekey(&mut spaced);
-    store.create(&spaced, &call)?;
-    let id = spaced.attempt_id;
-    store.mark_starting(
-        &store.record(id, &call)?,
-        &route(),
-        &[],
-        &Default::default(),
-        None,
-        &call,
-    )?;
-    assert!(
-        store.claim(id, &now, &call)?.is_none(),
-        "2 s read-only host spacing"
-    );
-
-    // A one-second window from the queued time, 100 microseconds, so the
-    // starved wait pauses on the virtual clock until the deadline.
-    store.set_admission_policy(AdmissionPolicy {
-        startup_spacing_ms: 20_000,
-        read_only_spacing_ms: 2_000,
-        admission_seconds: 1,
-        ..AdmissionPolicy::default()
-    });
-    let mut expired = input();
-    expired.attempt_id = provenant_core::AttemptId::from_bytes([13; 16]);
-    expired.operation_id = provenant_core::OperationId::parse("expired")?;
-    expired.attempt_id = AttemptId::from_bytes([14; 16]);
-    crate::tests::rekey(&mut expired);
-    store.create(&expired, &call)?;
-    let id = expired.attempt_id;
-    let attempt = store.attempt_dir(id, false)?;
-    store.mark_starting(
-        &store.record(id, &call)?,
-        &route(),
-        &[],
-        &Default::default(),
-        None,
-        &call,
-    )?;
-    let starved = HostFacts::new(1);
-    assert!(matches!(
-        store.admit(id, &attempt, &starved, &clock, &cancel),
-        Err(RunError::Refused)
-    ));
-    // The clock moved only by the waits, and stopped at the deadline.
-    assert_eq!(clock.wall_now()?, WallTime::from_micros(1_000_100)?);
-    assert_eq!(clock.mono_now(), MonoTime::from_micros(1_000_000));
     Ok(())
 }
 #[test]

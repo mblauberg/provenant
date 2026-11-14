@@ -388,13 +388,13 @@ Lane-writable missing child records alone cannot authorise deletion.
 
 `crates/run/assets/policy.toml` owns executable launch rules. The records API
 resolves each rule to code, boundary, strength, source, knob and justification;
-`Policy::check(code, facts)` returns proceed, warn, queue or refuse. Only
+`Policy::check(code, facts)` returns proceed, warn or refuse. Only
 credentials, Git isolation, data integrity and authority default to refuse.
 All other defaults warn (or are off), with explicit knobs. `provenant config
 show` includes `policy.rules`, and lane preambles render the same resolved table.
 `config set policy.CODE refuse` or dispatch `--set policy.CODE=refuse` selects
 strict enforcement where that rule supports refusal. Warning-only rules accept
-warn or off; queue is available only at admission sites that can wait. Unsupported
+warn or off. No strength waits. Unsupported
 strengths are diagnosed and retain the prior effective strength.
 `[domains.policy.projects."PROJECT_ID".rules]` overrides host strengths, and
 dispatch overrides win. Sources are compiled default, host, project or dispatch.
@@ -414,54 +414,61 @@ Git-isolation boundary.
 
 ## Atomic admission
 
-Writer custody is exclusive per verified worktree, including retained-import
+Writer custody remains exclusive per verified worktree, including retained-import
 fences across run-state roots. Git probes, scans, seeding and provider preparation
-must not hold a shared writer registry lock. Repository mutation locks protect
-creation/removal; they do not serialise independent writer claims. Contention
-waits until the admission deadline, never an unrelated retry-count limit.
+must not hold a shared writer registry lock. The repository lock protects worktree
+creation/removal, registration and coherent Git configuration snapshots. It tries
+once plus one immediate retry; it never waits for the former 300-second budget.
+No repository lock spans provider execution or network discovery.
 
-Admission and the attempt rows commit together; the immutable request is
-published before acknowledgement. The store refuses a second row for a work key
-inside the same transaction. Transactions contain no launches, probes,
-waits or supervisor calls. Optional total and writer-specific host/project caps
-are independent. Build slots gate compiling Cargo commands rather than idle
-writers. Configuration and bounds belong to `provenant config schema --all`.
+Admission and attempt rows commit together. The immutable request is published
+before acknowledgement; duplicate work keys are rejected in the store transaction.
+Transactions contain no launches, probes or resource waits. Guardian identity,
+writer custody and store integrity still exclude competing owners. A guardian
+custody ACK has one bounded integrity allowance, with no separate handshake ladder.
 
-Memory pressure, free-space floors and configured lane caps are observations
-under the policy table. Their defaults warn and admit; supported explicit queue
-or refuse strengths enforce the corresponding threshold. Process counts remain
-Warn/Off observations. Failed optional probes warn rather than inventing a
-boundary. Guardian identity and writer custody still fail closed independently
-of these observations.
+The policy table (`crates/run/assets/policy.toml`) owns admission's resource
+rules: `ADMISSION_DISK`, `ADMISSION_PRESSURE`, `PROCESS_CENSUS`,
+`ADMISSION_SPACING` and the lane caps `ADMISSION_WRITERS`,
+`ADMISSION_PROJECT_WRITERS`, `ADMISSION_LANES` and `ADMISSION_PROJECT_LANES`.
+Each has boundary `none` and strength `warn`. Override them like any other
+rule, with `policy.CODE` knobs or the `policy` domain: `off` disables a rule
+and `refuse` makes it strict where the row allows it; process counts stay
+warn or off. Diagnostics show the rule, knob and effective source. Memory
+availability alone remains advisory. Disk strictness applies to lanes with
+write authority; private scratch or bookkeeping alone warns. Resource probes
+run once, before one custody claim. Unavailable probes or configuration warn
+and proceed with the resolved policy; there is no resource poll loop and no
+rule queues a launch. Host leases still bind boot, guardian and owner-store
+identities, and unknown or busy custody retains ownership until independent
+proof permits release. `domains.run.admission_seconds` still bounds graph
+launch scheduling, which consumes that deadline; it no longer drives resource
+polling.
 
-Host leases bind the boot, guardian identity and owner-store identity. A changed
-boot or proven absence releases a lease; busy, replaced, corrupt or unreadable
-state retains it until independent custody evidence permits release.
+Build slots are advisory occupancy tracking. A compiling Cargo command tries a
+slot once; busy or unavailable slots warn and the command proceeds. Cargo owns
+its build-lock queue: there is no `.cargo-lock` pre-wait, wait marker or wall-time
+extension. A new build samples its output volume against the host-resolved disk
+rule and floor. Strict disk policy refuses a new build immediately. The guardian
+only warns for a running build; disk pressure never authorises SIGSTOP or SIGCONT.
+`gc.free_floor` defaults to 1% of the state volume capped at 5 GiB and remains
+configurable. Terminal recovery makes one attempt and retains its reservation
+for later reconciliation when publication is incomplete; durable exit publication
+and writer custody still retain their integrity holds.
 
-Startup spacing is independent for writer and read-only classes. Preparation
-promotes a ticket that gains write authority. The host monotonic clock and boot
-identity are read inside the ledger transaction, so lock order is clock order;
-wall-clock adjustments cannot shorten spacing. Reboot clears prior-boot spacing.
-An unreadable clock/boot identity refuses the claim. Spacing constrains admission,
-not eventual provider spawn. Each launch admits exactly one attempt.
+Each concurrent launch fixture uses its own temporary registry. The nextest
+`launch-contention` serial group added a host scheduling restriction rather than
+protecting shared admission state and has been removed. Concurrency within each
+fixture continues to exercise first-launch initialisation and writer isolation.
 
-Status derives queued waits from the owner store and ledger, including over peer
-reads. Unknown observations remain unavailable. A running guardian's observed
-silence may return a wait early with the condition unmet; it never becomes
-settlement or changes the execution state. Resume of progress clears that
-observation. The [admission owner](../../tools/front-door/crates/run/src/ledger.rs)
-owns lease persistence and defaults.
-
-- Why (default): an accepted receipt must mean durable admission, and read-only lanes
-  must not queue behind writer spacing that exists to pace worktree and
-  provider startup.
-- Test: `crates/run/src/ledger.rs::live_guardian_fences_busy_replaced_and_corrupt_store`;
-  `crates/run/src/ledger.rs::cross_boot_malformed_and_readable_row_removal_release`;
-  `crates/run/src/dispatch_core_tests.rs::pressure_errors_and_low_advisory_memory_do_not_refuse`;
-  `crates/providers/src/lane.rs::claude_shell_restores_jobs_after_scrub`;
+- Test: `crates/run/src/dispatch_disk_admission_tests.rs::resource_pressure_and_busy_caps_never_queue_default_admission`;
+  `crates/run/src/dispatch_disk_admission_tests.rs::strict_disk_floor_refuses_without_waiting_and_can_be_disabled`;
+  `crates/run/src/ledger.rs::live_guardian_fences_busy_replaced_and_corrupt_store`;
   `crates/os/src/build_slots.rs::slots_are_bounded_and_reusable`;
-  `tests/build_slot.rs::more_builds_than_slots_compile_serially`
-- Owner: `crates/run/src/admission.rs`, `crates/run/src/ledger.rs`, `crates/os/src/sys/clock.rs`
+  `tests/build_slot.rs::busy_slot_never_blocks_a_build`;
+  `crates/supervisor/tests/custody.rs::disk_floor_never_stops_a_running_build`
+- Owner: `crates/run/src/admission.rs`, `crates/run/src/ledger.rs`,
+  `crates/os/src/build_slots.rs`, `crates/supervisor/src/guardian.rs`
 
 ## Lane priority
 
@@ -896,8 +903,7 @@ live usage; Codex reports completed-turn usage and cannot be interrupted by
 tokens mid-turn. Providers without live usage get an advisory target only.
 At 90% the host records the warning through the existing control capability
 matrix; current lane adapters cannot receive that warning as a live steer.
-Time queued for a build slot stays off the wall deadline, up to
-`lanes.slot_wait_seconds` (default 7200) in total.
+Busy build slots proceed immediately and add no wall-clock extension.
 - Why (default): preserve a writer's valuable wrap-up while bounding extra spend.
 - Test: `crates/supervisor/src/guardian/tests.rs::budget_actions_preserve_clean_points_and_natural_completion`;
   `crates/run/src/limits.rs::every_budget_field_resolves_independently_and_zero_remains_an_override`;

@@ -20,23 +20,6 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-// Match Run's persisted claim backoff so transient contention cannot spend
-// every guardian callback before a replacement driver is eligible.
-// Fixture builds keep the production value only for its schedule test.
-#[cfg_attr(feature = "fixture", allow(dead_code))]
-const PRODUCTION_TERMINAL_RETRY_MS: [u64; 4] = [0, 5_000, 30_000, 120_000];
-// Fixture builds prove the retry path without spending five seconds on the
-// forged-row recovery case; production keeps the schedule above. The window
-// still has to outlast a test repairing the row on a slow CI host.
-#[cfg(feature = "fixture")]
-const TERMINAL_RETRY_MS: [u64; 4] = [0, 50, 250, 1_000];
-#[cfg(not(feature = "fixture"))]
-const TERMINAL_RETRY_MS: [u64; 4] = PRODUCTION_TERMINAL_RETRY_MS;
-
-fn retry_terminal(terminal: impl FnMut() -> bool, wait: impl FnMut(Duration)) -> bool {
-    retry_terminal_with(TERMINAL_RETRY_MS, terminal, wait)
-}
-
 fn census_fallback_notice(fallback: bool, recorded: &mut bool) -> Option<&'static str> {
     if fallback && !*recorded {
         *recorded = true;
@@ -118,27 +101,6 @@ fn cancel_poll_interval(watched: bool) -> u64 {
 // checkpoint, and silence is never a stop reason; sampling faster than the
 // checkpoint only repeated `proc_pidinfo`.
 const CPU_SAMPLE_INTERVAL_MS: u64 = 1_000;
-
-fn retry_terminal_with(
-    schedule: [u64; 4],
-    mut terminal: impl FnMut() -> bool,
-    mut wait: impl FnMut(Duration),
-) -> bool {
-    for delay in schedule {
-        if delay != 0 {
-            wait(Duration::from_millis(delay));
-        }
-        if terminal() {
-            return true;
-        }
-    }
-    false
-}
-
-fn wait_terminal_retry(delay: Duration) {
-    let (_wake, waiting) = std::sync::mpsc::channel::<()>();
-    let _ = waiting.recv_timeout(delay);
-}
 
 /// Clone failure must leave the driver's writer lease available for recovery.
 fn settlement_recovery(
@@ -325,7 +287,7 @@ pub struct GuardianHooks<'a> {
     pub stderr_filter: Option<&'a mut dyn provenant_os::exec::CaptureFilter>,
 }
 /// The host resolves the same free-space floor used by admission and GC.
-/// An unreadable sample resumes running builds.
+/// Samples are advisory and never authorise signalling a running build.
 pub trait DiskPressure {
     fn below_floor(&self, context: &[u8]) -> io::Result<bool>;
 }
@@ -828,9 +790,6 @@ fn lane_port_allocation(
             match effect {
                 Effect::Proceed => return Ok((None, None)),
                 Effect::Warn(message) => return Ok((None, Some(message))),
-                // Queue has no actual port-block wait path. Policy validation
-                // rejects it, and an invalid serialized value must not refuse.
-                Effect::Queue(_) => return Ok((None, None)),
                 Effect::Refuse(_) => {}
             }
             use provenant_records::diagnostic::PortSettingSource;
@@ -974,12 +933,6 @@ impl Driver<'_> {
         let budgets =
             Budgets::with_cleanup(plan.wall_ms, plan.root_flush_ms, plan.descendant_grace_ms);
         let mut state = State::prepared(budgets);
-        // Time spent queued for a build slot does not count towards the wall
-        // deadline: sample the lane's wait markers about once a second.
-        let mut slot_sampled_at: Option<Instant> = None;
-        // Total extension granted for slot waits, bounded by `plan.slot_wait_ms`
-        // so a lane that keeps refreshing its marker cannot run forever.
-        let mut slot_extended_ms = 0_u64;
         let mut budget_warned = false;
         let mut budget_stop_sent = false;
         let mut budget_crossed = false;
@@ -1092,7 +1045,6 @@ impl Driver<'_> {
         let mut last_observation_ms: Option<u64> = None;
         let mut last_cpu_observation_ms = 0;
         let mut last_disk_sample_ms = None;
-        let mut disk_paused = false;
         let mut disk_warning_active = false;
         let mut last_cancel_ms = None;
         let mut cancel_pending = false;
@@ -1143,7 +1095,6 @@ impl Driver<'_> {
             }
             if exit.is_some() && !host_closed {
                 drop(memory.take());
-                child.resume_builds();
                 host_closed = true;
                 if let Some(holder) = self.holder
                     && holder
@@ -1384,29 +1335,6 @@ impl Driver<'_> {
             } else {
                 Event::Silence
             };
-            if exit.is_none() {
-                let at = Instant::now();
-                if let Some(last) = slot_sampled_at
-                    && at.duration_since(last) >= Duration::from_secs(1)
-                {
-                    let waiting = wall_now().is_some_and(|wall| {
-                        provenant_os::build_slots::slot_wait_active(
-                            &self.attempt,
-                            u64::try_from(wall.as_micros() / 1_000_000).unwrap_or(0),
-                        )
-                    });
-                    if waiting {
-                        let ms = u64::try_from(at.duration_since(last).as_millis())
-                            .unwrap_or(0)
-                            .min(plan.slot_wait_ms.saturating_sub(slot_extended_ms));
-                        slot_extended_ms = slot_extended_ms.saturating_add(ms);
-                        state.extend_wall_deadline(ms);
-                    }
-                    slot_sampled_at = Some(at);
-                } else if slot_sampled_at.is_none() {
-                    slot_sampled_at = Some(at);
-                }
-            }
             let mut tick = Tick::at(now);
             tick.observed_exit = exit;
             // The monotonic clock stops while the host sleeps; the wall
@@ -1422,7 +1350,6 @@ impl Driver<'_> {
                     Effect::CloseStdin => child.stdin = None,
                     Effect::BeginCleanup(_) => cleanup_pending = true,
                     Effect::DeliverStop(reason) if exit.is_none() => {
-                        child.resume_builds();
                         stop_reason.get_or_insert(reason);
                         stop_at.get_or_insert(now);
                         let outcome = stop_delivery_outcome(child.stop(false));
@@ -1531,29 +1458,22 @@ impl Driver<'_> {
             {
                 last_disk_sample_ms = Some(now);
                 if let Some(disk) = hooks.disk {
-                    match disk.below_floor(&self.holder_context) {
-                        Ok(paused) => {
-                            // Crossing the floor must pause running builds promptly.
-                            census_event_pending |= paused && !disk_paused;
-                            disk_paused = paused;
-                            disk_warning_active = false;
+                    let warning = match disk.below_floor(&self.holder_context) {
+                        Ok(true) => Some(
+                            "disk space below gc.free_floor; avoid starting new builds; running builds continue",
+                        ),
+                        Ok(false) => None,
+                        Err(_) => Some("disk floor observation failed; running builds continue"),
+                    };
+                    if let Some(message) = warning {
+                        if !disk_warning_active {
+                            warn(&mut warnings, &mut omitted_warnings, message);
                         }
-                        Err(_) => {
-                            disk_paused = false;
-                            if !disk_warning_active {
-                                warn(
-                                    &mut warnings,
-                                    &mut omitted_warnings,
-                                    "disk floor observation failed",
-                                );
-                                disk_warning_active = true;
-                            }
-                        }
+                        disk_warning_active = true;
+                    } else {
+                        disk_warning_active = false;
                     }
                 }
-            }
-            if !disk_paused || exit.is_some() || stop_reason.is_some() {
-                child.resume_builds();
             }
             // Process events wake the scoped tree and provider-group walk, at
             // most every 100 ms. Without an event nothing watched has forked
@@ -1631,29 +1551,6 @@ impl Driver<'_> {
                         }
                         census_warning_active = !census.is_complete();
                     }
-                    if disk_paused
-                        && exit.is_none()
-                        && stop_reason.is_none()
-                        && (self.descendant_stop_allowed
-                            || (self.escapee_stop_allowed
-                                && self.holder_reports_no_live_children()))
-                        && let Some(provider) = self.reservation.provider.as_ref()
-                    {
-                        let spared = self
-                            .spared
-                            .spared_identities()
-                            .chain(self.protected.iter())
-                            .cloned()
-                            .collect();
-                        child.pause_builds(
-                            &census,
-                            provider,
-                            &spared,
-                            &self.attempt,
-                            self.reservation.scope,
-                            &self.guardian,
-                        );
-                    }
                 } else if !census_warning_active {
                     warn(
                         &mut warnings,
@@ -1687,13 +1584,11 @@ impl Driver<'_> {
                     last_progress_ms: Option<u64>,
                     silent: bool,
                     silent_for_ms: Option<u64>,
-                    disk_paused: bool,
                     provider_cpu_micros: Option<u64>,
                     last_cpu_progress_ms: Option<u64>,
                     publication_pending: bool,
                 }
-                let disk_paused = disk_paused && exit.is_none() && stop_reason.is_none();
-                let silent_for_ms = plan.silent_for_ms(now, state.last_progress_ms(), disk_paused);
+                let silent_for_ms = plan.silent_for_ms(now, state.last_progress_ms());
                 let mut observed = Observed {
                     schema_version: 1,
                     scope: self.reservation.scope,
@@ -1709,7 +1604,6 @@ impl Driver<'_> {
                     last_progress_ms: state.last_progress_ms(),
                     silent: silent_for_ms.is_some(),
                     silent_for_ms,
-                    disk_paused,
                     provider_cpu_micros,
                     last_cpu_progress_ms,
                     publication_pending: false,
@@ -2196,32 +2090,34 @@ impl Driver<'_> {
         }
         drop(self._custody.take());
         // Worktree exclusion spans settlement retries; attempt custody is free.
-        let settled = retry_terminal(
-            || {
-                if holder
-                    .terminal(&self.holder_context, &self.attempt, &exit, &recovery)
-                    .is_err()
-                {
-                    return false;
-                }
-                let verified = self
-                    .attempt
-                    .open_verified_directory(OsStr::new("quarantine"))
-                    .map_err(CustodyError::from)
-                    .and_then(|quarantine| {
-                        verify_release(
-                            self.reservation.scope,
-                            &self.attempt,
-                            &self.attempt,
-                            &quarantine,
-                        )
-                    });
-                verified.is_ok()
-            },
-            wait_terminal_retry,
-        );
+        let settled = (|| {
+            if holder
+                .terminal(&self.holder_context, &self.attempt, &exit, &recovery)
+                .is_err()
+            {
+                return false;
+            }
+            let verified = self
+                .attempt
+                .open_verified_directory(OsStr::new("quarantine"))
+                .map_err(CustodyError::from)
+                .and_then(|quarantine| {
+                    verify_release(
+                        self.reservation.scope,
+                        &self.attempt,
+                        &self.attempt,
+                        &quarantine,
+                    )
+                });
+            verified.is_ok()
+        })();
         if settled {
             let _ = recovery.clear_settled_reservation();
+        } else {
+            let _ = writeln!(
+                io::stderr(),
+                "terminal publication incomplete; retaining reservation for reconciliation"
+            );
         }
         Ok(())
     }

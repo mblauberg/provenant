@@ -1631,43 +1631,15 @@ impl Reconciled {
     }
 }
 
-// Retry idempotent recovery steps inside the existing store contention budget.
-// Short SQLite waits leave time to re-read state after a busy snapshot or a
-// terminal commit that succeeded before a later bookkeeping write was busy.
+// Recovery is idempotent and the next reconciliation can retry a busy store.
+// SQLite retains its single bounded integrity wait; no outer retry ladder.
 pub(crate) fn retry_reconcile<T>(
-    db: &rusqlite::Connection,
+    _db: &rusqlite::Connection,
     call: &Request<'_>,
-    mut action: impl FnMut() -> Result<T>,
+    action: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    struct Restore<'a>(&'a rusqlite::Connection, std::time::Duration);
-    impl Drop for Restore<'_> {
-        fn drop(&mut self) {
-            let _ = self.0.busy_timeout(self.1);
-        }
-    }
-    let timeout = provenant_sqlite::busy_timeout();
-    let _restore = Restore(db, timeout);
-    let budget = call.lock_budget();
-    loop {
-        call.check()?;
-        let remaining = budget.remaining(call.clock.mono_now()).as_micros();
-        db.busy_timeout(
-            std::time::Duration::from_micros(remaining).min(std::time::Duration::from_millis(100)),
-        )?;
-        match action() {
-            Err(RunError::Contention) if !budget.deadline().is_expired(call.clock.mono_now()) => {
-                let now = call.clock.mono_now();
-                let delay = budget.remaining(now).as_micros().min(10_000);
-                let next = now
-                    .checked_add(provenant_core::DurationMicros::from_micros(delay))
-                    .map_err(|_| RunError::Validation("reconcile retry deadline"))?;
-                call.clock
-                    .wait_until(next)
-                    .map_err(|_| RunError::Validation("reconcile retry wait"))?;
-            }
-            result => return result,
-        }
-    }
+    call.check()?;
+    action()
 }
 
 // A lock timeout can race a terminal commit by another settlement owner.

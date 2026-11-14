@@ -469,8 +469,6 @@ pub struct Lanes {
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub max_project_writer_lanes: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
-    pub build_wait_minutes: Option<u64>,
-    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub lane_port_base: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub lane_port_block: Option<u64>,
@@ -531,7 +529,6 @@ impl Lanes {
             max_project_lanes: self.max_project_lanes,
             max_writer_lanes: self.max_writer_lanes,
             max_project_writer_lanes: self.max_project_writer_lanes,
-            build_wait_minutes: self.build_wait_minutes,
             lane_port_base: self.lane_port_base,
             lane_port_block: self.lane_port_block,
             lane_port_blocks: self.lane_port_blocks,
@@ -898,7 +895,6 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::int("lanes.max_project_lanes", 1, 32),
     FieldMetadata::int("lanes.max_writer_lanes", 1, 64),
     FieldMetadata::int("lanes.max_project_writer_lanes", 1, 32),
-    FieldMetadata::int("lanes.build_wait_minutes", 1, 1440),
     FieldMetadata::int("lanes.lane_port_base", 1024, 65535),
     FieldMetadata::int("lanes.lane_port_block", 1, 1024),
     FieldMetadata::int("lanes.lane_port_blocks", 0, 1024),
@@ -1069,7 +1065,6 @@ mod tests {
         config.lanes.max_project_lanes = Some(0);
         config.lanes.max_writer_lanes = Some(65);
         config.lanes.max_project_writer_lanes = Some(0);
-        config.lanes.build_wait_minutes = Some(0);
         let errors = config.validate();
         assert!(
             errors
@@ -1082,7 +1077,6 @@ mod tests {
             "max_project_lanes",
             "max_writer_lanes",
             "max_project_writer_lanes",
-            "build_wait_minutes",
         ] {
             assert!(errors.iter().any(|e| e.field == format!("lanes.{key}")));
         }

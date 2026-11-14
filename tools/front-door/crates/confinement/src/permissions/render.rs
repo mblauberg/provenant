@@ -1018,7 +1018,6 @@ fn report_policy_warning(policy: &Policy, code: &str, detail: String) {
     match policy.check(code, Facts::violation(detail)) {
         Effect::Proceed => {}
         Effect::Warn(message) => report_policy_message(message),
-        Effect::Queue(_) => panic!("optional-filter rules do not support queue effects"),
         Effect::Refuse(_) => panic!("optional-filter rules are warn-or-off decisions"),
     }
 }

@@ -74,8 +74,8 @@ const MAX_WORKTREES: usize = 10_000;
 const MAX_BRANCHES: usize = 10_000;
 const MAX_STATE_RECORD: u64 = 64 * 1024;
 /// The single common-directory protocol for repository mutations and the Git
-/// snapshots they depend on. Blocking acquisition follows writer custody, when
-/// held; a repository holder may only try a writer lock without waiting. Release
+/// snapshots they depend on. Acquisition tries once plus one immediate retry;
+/// a repository holder may only try a writer lock without waiting. Release
 /// this owner before network discovery, slow census, or provider execution.
 pub const REPOSITORY_LOCK: &str = "provenant-repository.lock";
 
@@ -88,7 +88,18 @@ pub fn lock_repository(
     cancel: &CancelToken,
     clock: &dyn Clock,
 ) -> Result<LockGuard, FsError> {
-    common.lock(OsStr::new(REPOSITORY_LOCK), mode, budget, cancel, clock)
+    let _ = (budget, clock);
+    if cancel.is_cancelled() {
+        return Err(FsError::Cancelled {
+            path: common.anchored_path().join(REPOSITORY_LOCK),
+        });
+    }
+    // Protect creation/removal, registration, and coherent Git config snapshots.
+    // Never retain this hold across provider work or network discovery.
+    match common.try_lock(OsStr::new(REPOSITORY_LOCK), mode) {
+        Err(FsError::LockTimeout { .. }) => common.try_lock(OsStr::new(REPOSITORY_LOCK), mode),
+        result => result,
+    }
 }
 const WRITER_LOCK: &str = "writer.lock";
 const WORKTREE_ROOT: &str = ".worktrees";

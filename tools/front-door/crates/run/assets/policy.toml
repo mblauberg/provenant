@@ -913,10 +913,38 @@ site = "run/src/admission.rs#RunStore::admit"
 boundary = "none"
 strength = "warn"
 refusable = true
-queueable = true
 knob = "policy.ADMISSION_DISK"
 threshold = "gc.free_floor"
 justification = "The effective disk floor is configured or shipped; its source and value accompany the observation."
+
+[[rule]]
+code = "ADMISSION_SPACING"
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.ADMISSION_SPACING"
+threshold = "domains.fabric.lanes.start_spacing_ms"
+justification = "Startup spacing is configured; a lane of the same class started within the window, and the start is still recorded."
+
+[[rule]]
+code = "BUILD_DISK"
+site = "src/build_slot.rs#check_disk"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.BUILD_DISK"
+threshold = "gc.free_floor"
+justification = "A new build samples its output volume once against the configured or shipped floor; running builds are never signalled."
+
+[[rule]]
+code = "GUARDIAN_DISK"
+site = "src/disk_guard.rs#LaneDisk::below_floor"
+boundary = "none"
+strength = "warn"
+knob = "policy.GUARDIAN_DISK"
+threshold = "gc.free_floor"
+justification = "The guardian observes free space during a running lane and only warns; running builds continue."
 
 [[rule]]
 code = "ADMISSION_PRESSURE"
@@ -924,7 +952,6 @@ site = "run/src/admission.rs#RunStore::admit"
 boundary = "none"
 strength = "warn"
 refusable = true
-queueable = true
 knob = "policy.ADMISSION_PRESSURE"
 threshold = "domains.fabric.lanes.memory_pressure_threshold"
 justification = "The effective pressure threshold is configured or shipped; its source and value accompany the observation."
@@ -935,7 +962,6 @@ site = "run/src/admission.rs#RunStore::admit"
 boundary = "none"
 strength = "warn"
 refusable = true
-queueable = true
 knob = "policy.ADMISSION_PROJECT_WRITERS"
 threshold = "domains.fabric.lanes.max_project_writer_lanes"
 justification = "The applicable host or project cap is configured or shipped; the observation names its setting, source and value."
@@ -946,7 +972,6 @@ site = "run/src/admission.rs#RunStore::admit"
 boundary = "none"
 strength = "warn"
 refusable = true
-queueable = true
 knob = "policy.ADMISSION_WRITERS"
 threshold = "domains.fabric.lanes.max_writer_lanes"
 justification = "The host writer cap is configured or shipped and its source and value accompany the observation."
@@ -957,7 +982,6 @@ site = "run/src/admission.rs#RunStore::admit"
 boundary = "none"
 strength = "warn"
 refusable = true
-queueable = true
 knob = "policy.ADMISSION_LANES"
 threshold = "domains.fabric.lanes.max_lanes"
 justification = "The host lane cap is configured or shipped and its source and value accompany the observation."
@@ -968,7 +992,6 @@ site = "run/src/admission.rs#RunStore::admit"
 boundary = "none"
 strength = "warn"
 refusable = true
-queueable = true
 knob = "policy.ADMISSION_PROJECT_LANES"
 threshold = "domains.fabric.lanes.max_project_lanes"
 justification = "The project lane cap is configured or shipped and its source and value accompany the observation."
