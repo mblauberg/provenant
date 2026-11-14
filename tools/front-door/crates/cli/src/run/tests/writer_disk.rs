@@ -409,7 +409,7 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
     .ok_or("writer accepted insufficient disk")?;
     let refusal = disk_policy_refusal(check);
     assert_eq!(refusal.terminal_cause, TerminalCause::DiskFloor);
-    assert_eq!(refusal.policy_code.as_deref(), Some("LAUNCH_DISK"));
+    assert!(refusal.policy_code.is_none());
     assert_eq!(
         refusal.resource,
         Some(provenant_records::diagnostic::ResourceFact::Disk {

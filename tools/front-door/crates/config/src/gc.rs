@@ -1243,6 +1243,16 @@ mod disk_limit_tests {
                 };
                 assert_eq!(limits.level(free), expected);
             }
+            let detail = limits.detail(17);
+            for fact in [
+                "17 bytes",
+                &format!("gc.free_floor is {floor} bytes"),
+                &format!("gc.critical_free is {critical} bytes"),
+                limits.free_floor_source.description(),
+                limits.critical_free_source.description(),
+            ] {
+                assert!(detail.contains(fact));
+            }
             let encoded = serde_json::to_vec(&limits)?;
             let decoded: DiskLimits = serde_json::from_slice(&encoded)?;
             assert_eq!(

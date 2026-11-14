@@ -1690,7 +1690,11 @@ impl RunStore {
                 RECORD_LIMIT,
             )?
             .is_some();
-        if clean_budget && !decoded.complete {
+        let completed_budget_handoff = exit.stop_reason == Some(StopReason::TokenBudget)
+            && handoff
+                .as_ref()
+                .is_some_and(|handoff| !handoff.unfinished() && handoff.validate().is_ok());
+        if (clean_budget || completed_budget_handoff) && !decoded.complete {
             // Use the lane's recorded outcome, including a done progress
             // handoff. With no completed report, ordinary review is required;
             // a clean boundary must not invent success or impose a timeout.
@@ -1779,7 +1783,9 @@ impl RunStore {
         // A writer that passed its token budget was stopped by the host: say
         // so, with the budget and where it came from. Settlement records
         // whether its work could be committed.
-        if decoded.outcome == Outcome::TimedOut && exit.stop_reason == Some(StopReason::TokenBudget)
+        if exit.stop_reason == Some(StopReason::TokenBudget)
+            && (decoded.outcome == Outcome::TimedOut
+                || exit.termination != Some(Termination::Exit(0)))
         {
             decoded.terminal_cause = Some(TerminalCause::TokenBudget);
             let budget = record.limits.as_ref().and_then(|l| l.token_budget.as_ref());
@@ -2292,7 +2298,8 @@ impl RunStore {
         if matches!(
             decoded.outcome,
             Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
-        ) {
+        ) || completed_budget_handoff
+        {
             match crate::reader::route_identity(
                 record.resolved_route.as_ref(),
                 record.applied_route.as_ref(),
@@ -2365,6 +2372,9 @@ impl RunStore {
         }
         let redaction_failed = result_redaction_failed || session_redaction_failed;
         if redaction_failed {
+            if decoded.terminal_cause == Some(TerminalCause::TokenBudget) {
+                decoded.terminal_cause = Some(TerminalCause::SettlementFailure);
+            }
             // A redaction failure fails a lane that would otherwise succeed. A
             // cancelled, timed-out or lost lane keeps its outcome, and every
             // reason it already has survives with the redaction failure after it.

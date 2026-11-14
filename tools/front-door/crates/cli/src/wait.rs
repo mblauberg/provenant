@@ -25,7 +25,11 @@ impl Default for Settings {
     }
 }
 impl Settings {
-    pub fn timeout(&self, override_seconds: Option<u64>) -> u64 {
+    pub fn timeout(
+        &self,
+        override_seconds: Option<u64>,
+        origin: Option<&provenant_config::Origin>,
+    ) -> u64 {
         let requested = override_seconds
             .filter(|seconds| *seconds != 0)
             .unwrap_or(self.timeout_seconds);
@@ -34,10 +38,12 @@ impl Settings {
             .unwrap_or(provenant_core::MAX_LANE_RUNTIME_SECONDS);
         if requested > maximum {
             use std::io::Write;
-            let source = if self.max_timeout_seconds.is_some() {
-                "host configuration"
+            let source = if self.max_timeout_seconds.is_none() {
+                "shipped default".to_owned()
             } else {
-                "shipped default"
+                origin
+                    .map(|origin| format!("{origin:?}"))
+                    .unwrap_or_else(|| "explicit settings".into())
             };
             let _ = writeln!(
                 std::io::stderr().lock(),
@@ -117,7 +123,7 @@ mod tests {
                 let effective = requested
                     .filter(|n| *n != 0)
                     .unwrap_or(settings.timeout_seconds);
-                assert_eq!(settings.timeout(requested), effective.min(maximum));
+                assert_eq!(settings.timeout(requested, None), effective.min(maximum));
             }
         }
     }

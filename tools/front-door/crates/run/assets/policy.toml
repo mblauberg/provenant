@@ -259,16 +259,6 @@ threshold = "domains.routing.pacing.free"
 justification = "A free-pool pacing profile can override the reserve for its selected window."
 
 [[rule]]
-code = "LAUNCH_DISK"
-site = "run/src/launch.rs#Providers::check_policy"
-boundary = "none"
-strength = "warn"
-refusable = true
-knob = "policy.LAUNCH_DISK"
-threshold = "gc.free_floor"
-justification = "Writer launch may warns when available storage remains below the configured free-space floor after collection."
-
-[[rule]]
 code = "DISPATCH_PREPAREDPROVIDER_CHECK_POLICY_AUTHORITY"
 site = "cli/src/run/launch.rs#PreparedProvider::identity_refusal"
 boundary = "authority"
@@ -917,16 +907,6 @@ strength = "refuse"
 justification = "A guardian and store identity are required to bind a lease to its owner and preserve custody when the host later recovers it."
 
 [[rule]]
-code = "ADMISSION_DISK"
-site = "run/src/admission.rs#RunStore::admit"
-boundary = "none"
-strength = "warn"
-refusable = true
-knob = "policy.ADMISSION_DISK"
-threshold = "gc.free_floor"
-justification = "The effective disk floor is configured or shipped; its source and value accompany the observation."
-
-[[rule]]
 code = "ADMISSION_SPACING"
 site = "run/src/admission.rs#RunStore::admit"
 boundary = "none"
@@ -935,16 +915,6 @@ refusable = true
 knob = "policy.ADMISSION_SPACING"
 threshold = "domains.fabric.lanes.start_spacing_ms"
 justification = "Startup spacing is configured; a lane of the same class started within the window, and the start is still recorded."
-
-[[rule]]
-code = "BUILD_DISK"
-site = "src/build_slot.rs#check_disk"
-boundary = "none"
-strength = "warn"
-refusable = true
-knob = "policy.BUILD_DISK"
-threshold = "gc.free_floor"
-justification = "A new build samples its output volume once against the configured or shipped floor; running builds are never signalled."
 
 [[rule]]
 code = "GUARDIAN_DISK"

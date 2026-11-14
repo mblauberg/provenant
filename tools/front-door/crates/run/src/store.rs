@@ -929,7 +929,20 @@ impl RunStore {
         if matches!(
             publication.outcome,
             Outcome::Succeeded | Outcome::ReviewRequired
-        ) && (outcome_exit != Some(0) || exit.never_spawned)
+        ) && (exit.never_spawned
+            || (outcome_exit != Some(0)
+                && !matches!(
+                    SettlementReason::derive(
+                        publication.outcome,
+                        Some(&TerminalEvidence::ProcessExit),
+                        &publication.partial_signals,
+                        publication.terminal_cause,
+                        publication.handoff.as_ref(),
+                    )
+                    .rule()
+                    .terminal_outcome,
+                    provenant_records::run::SettlementTerminalOutcome::Succeeded
+                )))
         {
             return Err(RunError::Validation("success lacks verified provider exit"));
         }

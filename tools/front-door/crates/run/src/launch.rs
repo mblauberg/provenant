@@ -455,10 +455,10 @@ fn check_launch_policy(
             provenant_records::diagnostic::BoundaryClass::None
                 if matches!(
                     refusal.terminal_cause,
-                    TerminalCause::DiskFloor | TerminalCause::DiskObservationUnavailable
+                    TerminalCause::DiskObservationUnavailable
                 ) =>
             {
-                "LAUNCH_DISK"
+                "SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE"
             }
             // A generic refusal with no boundary is not evidence of disk pressure.
             // Keep its typed outcome instead of letting a disk knob authorize it.

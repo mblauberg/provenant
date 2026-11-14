@@ -26,7 +26,7 @@ host stop and its handoff, and releases graph dependants. Capture bytes alone ar
 complete read-only answer can succeed without a handoff; a writer with
 non-exempt uncommitted work does not deliver it.
 - Why: a crash, truncation or wrong identity must not read as success.
-- Test: `crates/run/src/dispatch_custody_tests.rs::publication_holder_commits_decoded_success_only_with_exit_zero_and_observed_identity`; `crates/run/src/dispatch_settlement_tests.rs::a_read_only_answer_without_handoff_settles_succeeded`
+- Test: `crates/run/src/dispatch_custody_tests.rs::publication_holder_accepts_exit_zero_or_completed_host_budget`; `crates/run/src/dispatch_settlement_tests.rs::a_read_only_answer_without_handoff_settles_succeeded`
 
 A declared stop or missing writer handoff makes an otherwise successful attempt
 require review. Only a valid final handoff determines a declared stop; a

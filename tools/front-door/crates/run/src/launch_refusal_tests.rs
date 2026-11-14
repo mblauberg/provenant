@@ -84,10 +84,6 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             effort: None,
         };
         if disk {
-            std::fs::write(
-                store.writer_registry.join("config.toml"),
-                "schema_version=1\n[knobs]\n'policy.LAUNCH_DISK'='refuse'\n",
-            )?;
             let project = temp.path().join("project");
             let worktree = temp.path().join("worktree");
             std::fs::create_dir(&project)?;

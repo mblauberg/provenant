@@ -362,11 +362,11 @@ fn disk_policy_refusal(error: DiskCheck) -> Box<run::PrepareRefusal> {
         }
     };
     let policy_code = match &error {
-        DiskCheck::Low { .. } => "LAUNCH_DISK",
-        DiskCheck::Unobserved(_) => "SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE",
+        DiskCheck::Low { .. } => None,
+        DiskCheck::Unobserved(_) => Some("SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE"),
     };
     let mut refusal = run::PrepareRefusal::boxed(cause, String::from(error));
-    refusal.policy_code = Some(policy_code.into());
+    refusal.policy_code = policy_code.map(str::to_owned);
     refusal.resource = resource;
     refusal
 }

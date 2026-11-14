@@ -1,3 +1,9 @@
+## Breaking changes
+
+### Lanes and settlement
+
+- Replace `policy.LAUNCH_DISK`, `policy.ADMISSION_DISK` and `policy.BUILD_DISK` overrides with `gc.free_floor` and `gc.critical_free`; set `gc.critical_free='0B'` to disable the critical stop. (#3078)
+
 ## Fixes
 
 ### Lanes and settlement
