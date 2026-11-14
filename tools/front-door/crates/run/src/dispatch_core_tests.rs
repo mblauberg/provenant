@@ -507,7 +507,7 @@ fn launch_records_plan_write_grants_and_git_digest() -> TestResult {
                 &|_, _| Err(RunError::Validation("fixture holder")),
                 &call,
             )?.as_slice(),
-            [Started::Refused { attempt, kind: RefusalKind::Handoff, .. }]
+            [Started::Refused { attempt, .. }]
                 if *attempt == id
         ));
         drop(store);

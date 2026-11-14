@@ -74,7 +74,8 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let context = context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
         let mut run = input();
         run.request.task.route = RequestedRoute::Model {
             extra: Default::default(),
@@ -83,6 +84,10 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             effort: None,
         };
         if disk {
+            std::fs::write(
+                store.writer_registry.join("config.toml"),
+                "schema_version=1\n[knobs]\n'policy.LAUNCH_DISK'='refuse'\n",
+            )?;
             let project = temp.path().join("project");
             let worktree = temp.path().join("worktree");
             std::fs::create_dir(&project)?;

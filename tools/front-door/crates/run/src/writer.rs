@@ -1908,9 +1908,9 @@ mod cargo_setup_tests {
                 review_exempt: Default::default(),
             });
         }
-        // Eight real worktrees share .git/config. Start their preparations
-        // together, including the initial open, verification and custody reads,
-        // and require every launch to finish with both upstream keys.
+        // Eight real worktrees share .git/config. When a sibling holds an
+        // incomplete config, preparation reports busy without waiting. Retry
+        // after the sibling publishes.
         let start = std::sync::Barrier::new(8);
         let common = Directory::open_anchor(&git_dir)?;
         let clock = provenant_os::clock::SystemClock::new();
@@ -1949,24 +1949,26 @@ mod cargo_setup_tests {
                             project: project.clone(),
                             worktree: writer.worktree.path().to_path_buf(),
                         };
-                        let preparation = prepare_writer_with_facts(
+                        let result = prepare_writer_with_facts(
                             &request,
                             &state,
                             custody_project,
                             &worktrees::RepoFacts::default(),
                         );
-                        prepared.send(()).map_err(|error| error.to_string())?;
-                        *writer = preparation.map_err(|error| error.to_string())?;
-                        prepare_writer_git(writer, &state, &root, None, &CancelToken::new())
-                            .map_err(|error| error.to_string())
+                        let busy = matches!(
+                            result,
+                            Err(RunError::Filesystem(FsError::LockTimeout { .. }))
+                        );
+                        prepared.send(busy).map_err(|error| error.to_string())?;
+                        Ok::<(), String>(())
                     })
                 })
                 .collect();
             let all_started = (0..8).all(|_| starting.recv_timeout(Duration::from_secs(5)).is_ok());
-            let blocked = matches!(
-                finished.recv_timeout(Duration::from_millis(200)),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-            );
+            let busy_results: Vec<_> = (0..8)
+                .map(|_| finished.recv_timeout(Duration::from_secs(5)))
+                .collect();
+            let all_busy = busy_results.iter().all(|result| matches!(result, Ok(true)));
             let restored = common
                 .atomic_write(
                     OsStr::new("config"),
@@ -1984,9 +1986,26 @@ mod cargo_setup_tests {
             }
             assert!(all_started, "writer preparations did not start");
             assert!(
-                blocked,
-                "initial preparation read config during a sibling update"
+                all_busy,
+                "preparation must report the held repository lock as busy"
             );
+            for writer in std::iter::once(&mut writer)
+                .chain(std::iter::once(&mut second))
+                .chain(siblings.iter_mut())
+            {
+                let request = WriterRequest {
+                    extra: [("custody_project".into(), serde_json::json!(custody_project))].into(),
+                    project: project.clone(),
+                    worktree: writer.worktree.path().to_path_buf(),
+                };
+                *writer = prepare_writer_with_facts(
+                    &request,
+                    &state,
+                    custody_project,
+                    &worktrees::RepoFacts::default(),
+                )?;
+                prepare_writer_git(writer, &state, &root, None, &CancelToken::new())?;
+            }
             Ok::<(), String>(())
         })?;
         for writer in std::iter::once(&writer)

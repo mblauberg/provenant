@@ -555,8 +555,13 @@ pub(crate) fn lane_provider() -> Result {
     use provenant_os::exec::Executor;
     use provenant_os::exec::StreamPolicy;
     use provenant_os::exec::SystemExecutor;
+    let state_directory = PathBuf::from(
+        std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).ok_or("state dir")?,
+    );
     let argv: Vec<OsString> = vec![
         std::env::current_exe()?.into_os_string(),
+        "--state-dir".into(),
+        state_directory.as_os_str().to_owned(),
         "fabric".into(),
         "identity".into(),
         "--json".into(),
@@ -579,9 +584,7 @@ pub(crate) fn lane_provider() -> Result {
     let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME")?);
     let assets = PathBuf::from(std::env::var_os("PROVENANT_ROOT").ok_or("assets")?);
     let mut inputs = provenant_core::RootInputs::new(home, assets);
-    inputs.state_dir = Some(PathBuf::from(
-        std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).ok_or("state dir")?,
-    ));
+    inputs.state_dir = Some(state_directory);
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     provenant_cli::fabric::publish(
         &provenant_records::CommandResult::new(
