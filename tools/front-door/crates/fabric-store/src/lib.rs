@@ -83,6 +83,23 @@ pub enum Error {
     Time(#[from] provenant_core::TimeError),
 }
 
+impl From<provenant_sqlite::VersionError> for Error {
+    fn from(error: provenant_sqlite::VersionError) -> Self {
+        use provenant_sqlite::VersionError as E;
+        match error {
+            E::Refused { found, .. } => Self::SchemaVersion(found),
+            E::Sqlite(error) => error.into(),
+            E::MissingBaseTable { .. } => {
+                Self::Invalid("STATE_RESET_REQUIRED: missing known base table")
+            }
+            E::MissingStep { .. } => {
+                Self::Invalid("missing schema step; a writable open applies it")
+            }
+            E::InvalidStep { .. } => Self::Invalid("invalid additive schema step declaration"),
+        }
+    }
+}
+
 impl From<rusqlite::Error> for Error {
     fn from(error: rusqlite::Error) -> Self {
         if provenant_sqlite::is_busy(&error) {

@@ -69,14 +69,14 @@ fn invalid_hook_candidates_do_not_block_valid_answers() {
         store
             .db
             .execute(
-                "INSERT INTO human_requests VALUES(?1,?2,1,'chair','answered',?3)",
+                "INSERT INTO human_requests (project, id, revision, session, state, record) VALUES(?1,?2,1,'chair','answered',?3)",
                 params![project().to_string(), request.to_string(), b"{}".as_slice()],
             )
             .unwrap();
         store
             .db
             .execute(
-                "INSERT INTO human_answers VALUES(?1,?2,?3,?4)",
+                "INSERT INTO human_answers (project, id, request, record) VALUES(?1,?2,?3,?4)",
                 params![
                     project().to_string(),
                     id.to_string(),
@@ -88,7 +88,7 @@ fn invalid_hook_candidates_do_not_block_valid_answers() {
         store
             .db
             .execute(
-                "INSERT INTO human_answer_outbox VALUES(?1,?2,?3)",
+                "INSERT INTO human_answer_outbox (project, answer, record) VALUES(?1,?2,?3)",
                 params![
                     project().to_string(),
                     id.to_string(),
@@ -227,14 +227,14 @@ fn hook_page_reports_individually_oversized_answer_and_revisits_overflow() {
         store
             .db
             .execute(
-                "INSERT INTO human_requests VALUES(?1,?2,1,'chair','answered',?3)",
+                "INSERT INTO human_requests (project, id, revision, session, state, record) VALUES(?1,?2,1,'chair','answered',?3)",
                 params![project().to_string(), request.to_string(), b"{}".as_slice()],
             )
             .unwrap();
         store
             .db
             .execute(
-                "INSERT INTO human_answers VALUES(?1,?2,?3,?4)",
+                "INSERT INTO human_answers (project, id, request, record) VALUES(?1,?2,?3,?4)",
                 params![
                     project().to_string(),
                     id.to_string(),
@@ -246,7 +246,7 @@ fn hook_page_reports_individually_oversized_answer_and_revisits_overflow() {
         store
             .db
             .execute(
-                "INSERT INTO human_answer_outbox VALUES(?1,?2,?3)",
+                "INSERT INTO human_answer_outbox (project, answer, record) VALUES(?1,?2,?3)",
                 params![
                     project().to_string(),
                     id.to_string(),
@@ -347,7 +347,7 @@ fn overview_reads_committed_wal_and_limits_rows() {
         writer
             .db
             .execute(
-                "INSERT INTO human_requests VALUES(?1,?2,1,'chair','open',?3)",
+                "INSERT INTO human_requests (project, id, revision, session, state, record) VALUES(?1,?2,1,'chair','open',?3)",
                 params![project, id, record.as_bytes()],
             )
             .unwrap();
@@ -388,7 +388,7 @@ fn overview_rejects_non_text_session_in_record() {
         store
             .db
             .execute(
-                "INSERT OR REPLACE INTO human_requests VALUES(?1,?2,1,'chair','open',?3)",
+                "INSERT OR REPLACE INTO human_requests (project, id, revision, session, state, record) VALUES(?1,?2,1,'chair','open',?3)",
                 params![project, id, record.as_bytes()],
             )
             .unwrap();
@@ -415,7 +415,7 @@ fn overview_bounds_aggregate_request_bytes_before_decoding() {
         writer
             .db
             .execute(
-                "INSERT INTO human_requests VALUES(?1,?2,1,'chair','open',?3)",
+                "INSERT INTO human_requests (project, id, revision, session, state, record) VALUES(?1,?2,1,'chair','open',?3)",
                 params![project, id, record.as_bytes()],
             )
             .unwrap();

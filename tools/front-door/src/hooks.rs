@@ -1433,7 +1433,7 @@ mod answer_delivery_tests {
         };
         let insert = |item: &AnswerOffer| -> Result<(), Error> {
             db.execute(
-                "INSERT INTO human_requests VALUES(?1,?2,1,'chair','answered',?3)",
+                "INSERT INTO human_requests (project, id, revision, session, state, record) VALUES(?1,?2,1,'chair','answered',?3)",
                 rusqlite::params![
                     target.project.to_string(),
                     item.answer.request_id.to_string(),
@@ -1441,7 +1441,7 @@ mod answer_delivery_tests {
                 ],
             )?;
             db.execute(
-                "INSERT INTO human_answers VALUES(?1,?2,?3,?4)",
+                "INSERT INTO human_answers (project, id, request, record) VALUES(?1,?2,?3,?4)",
                 rusqlite::params![
                     target.project.to_string(),
                     item.answer.id.to_string(),
@@ -1450,7 +1450,7 @@ mod answer_delivery_tests {
                 ],
             )?;
             db.execute(
-                "INSERT INTO human_answer_outbox VALUES(?1,?2,?3)",
+                "INSERT INTO human_answer_outbox (project, answer, record) VALUES(?1,?2,?3)",
                 rusqlite::params![
                     target.project.to_string(),
                     item.answer.id.to_string(),
@@ -1598,7 +1598,7 @@ mod answer_delivery_tests {
         let small = offer("small", 2);
         for item in [&large, &small] {
             db.execute(
-                "INSERT INTO human_requests VALUES(?1,?2,1,'chair','answered',?3)",
+                "INSERT INTO human_requests (project, id, revision, session, state, record) VALUES(?1,?2,1,'chair','answered',?3)",
                 rusqlite::params![
                     target.project.to_string(),
                     item.answer.request_id.to_string(),
@@ -1606,7 +1606,7 @@ mod answer_delivery_tests {
                 ],
             )?;
             db.execute(
-                "INSERT INTO human_answers VALUES(?1,?2,?3,?4)",
+                "INSERT INTO human_answers (project, id, request, record) VALUES(?1,?2,?3,?4)",
                 rusqlite::params![
                     target.project.to_string(),
                     item.answer.id.to_string(),
@@ -1615,7 +1615,7 @@ mod answer_delivery_tests {
                 ],
             )?;
             db.execute(
-                "INSERT INTO human_answer_outbox VALUES(?1,?2,?3)",
+                "INSERT INTO human_answer_outbox (project, answer, record) VALUES(?1,?2,?3)",
                 rusqlite::params![
                     target.project.to_string(),
                     item.answer.id.to_string(),
@@ -1693,7 +1693,7 @@ mod answer_delivery_tests {
             })
             .ok_or("no context-dependent answer size found")?;
         db.execute(
-            "INSERT INTO human_requests VALUES(?1,?2,1,'chair','answered',?3)",
+            "INSERT INTO human_requests (project, id, revision, session, state, record) VALUES(?1,?2,1,'chair','answered',?3)",
             rusqlite::params![
                 target.project.to_string(),
                 borderline.answer.request_id.to_string(),
@@ -1701,7 +1701,7 @@ mod answer_delivery_tests {
             ],
         )?;
         db.execute(
-            "INSERT INTO human_answers VALUES(?1,?2,?3,?4)",
+            "INSERT INTO human_answers (project, id, request, record) VALUES(?1,?2,?3,?4)",
             rusqlite::params![
                 target.project.to_string(),
                 borderline.answer.id.to_string(),
@@ -1710,7 +1710,7 @@ mod answer_delivery_tests {
             ],
         )?;
         db.execute(
-            "INSERT INTO human_answer_outbox VALUES(?1,?2,?3)",
+            "INSERT INTO human_answer_outbox (project, answer, record) VALUES(?1,?2,?3)",
             rusqlite::params![
                 target.project.to_string(),
                 borderline.answer.id.to_string(),
@@ -1782,7 +1782,7 @@ mod answer_delivery_tests {
         };
         let db = rusqlite::Connection::open(root.as_path().join("fabric/fabric.sqlite3"))?;
         db.execute(
-            "INSERT INTO human_requests VALUES(?1,?2,1,'chair','answered',?3)",
+            "INSERT INTO human_requests (project, id, revision, session, state, record) VALUES(?1,?2,1,'chair','answered',?3)",
             rusqlite::params![
                 target.project.to_string(),
                 item.answer.request_id.to_string(),
@@ -1790,7 +1790,7 @@ mod answer_delivery_tests {
             ],
         )?;
         db.execute(
-            "INSERT INTO human_answers VALUES(?1,?2,?3,?4)",
+            "INSERT INTO human_answers (project, id, request, record) VALUES(?1,?2,?3,?4)",
             rusqlite::params![
                 target.project.to_string(),
                 item.answer.id.to_string(),
@@ -1799,7 +1799,7 @@ mod answer_delivery_tests {
             ],
         )?;
         db.execute(
-            "INSERT INTO human_answer_outbox VALUES(?1,?2,?3)",
+            "INSERT INTO human_answer_outbox (project, answer, record) VALUES(?1,?2,?3)",
             rusqlite::params![
                 target.project.to_string(),
                 item.answer.id.to_string(),

@@ -484,7 +484,7 @@ impl Store {
                 update(tx, &prior)?;
             }
             tx.execute(
-                "INSERT INTO human_requests VALUES(?1,?2,?3,?4,?5,?6)",
+                "INSERT INTO human_requests (project, id, revision, session, state, record) VALUES(?1,?2,?3,?4,?5,?6)",
                 params![
                     value.project_id.to_string(),
                     value.id.to_string(),
@@ -522,7 +522,7 @@ impl Store {
             value.updated_at.clone_from(&answer.answered_at);
             value.answer_id = Some(answer.id);
             tx.execute(
-                "INSERT INTO human_answers VALUES(?1,?2,?3,?4)",
+                "INSERT INTO human_answers (project, id, request, record) VALUES(?1,?2,?3,?4)",
                 params![
                     value.project_id.to_string(),
                     answer.id.to_string(),
@@ -531,7 +531,7 @@ impl Store {
                 ],
             )?;
             tx.execute(
-                "INSERT INTO human_answer_outbox VALUES(?1,?2,?3)",
+                "INSERT INTO human_answer_outbox (project, answer, record) VALUES(?1,?2,?3)",
                 params![
                     value.project_id.to_string(),
                     answer.id.to_string(),
@@ -698,7 +698,7 @@ fn state_text(state: RequestState) -> &'static str {
 }
 fn history(tx: &rusqlite::Connection, value: &HumanRequest) -> Result<()> {
     tx.execute(
-        "INSERT INTO human_request_history VALUES(?1,?2,?3,?4)",
+        "INSERT INTO human_request_history (project, request, revision, record) VALUES(?1,?2,?3,?4)",
         params![
             value.project_id.to_string(),
             value.id.to_string(),

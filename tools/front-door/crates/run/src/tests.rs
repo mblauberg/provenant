@@ -1079,13 +1079,23 @@ fn database_initialisation_lock_preserves_wait_errors() -> TestResult {
     let contended =
         provenant_sqlite::with_busy_timeout(std::time::Duration::from_millis(50), || {
             matches!(
-                db::open_database(context.state_root.as_path(), "run.sqlite3", &request),
+                db::open_database(
+                    context.state_root.as_path(),
+                    "run.sqlite3",
+                    db::SCHEMA,
+                    &request
+                ),
                 Err(RunError::Contention)
             )
         });
     cancel.cancel();
     let cancelled = matches!(
-        db::open_database(context.state_root.as_path(), "run.sqlite3", &request),
+        db::open_database(
+            context.state_root.as_path(),
+            "run.sqlite3",
+            db::SCHEMA,
+            &request
+        ),
         Err(RunError::Cancelled)
     );
     assert_eq!((contended, cancelled), (true, true));

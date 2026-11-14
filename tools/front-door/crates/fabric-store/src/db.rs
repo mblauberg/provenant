@@ -13,24 +13,15 @@ use std::{
     rc::Rc,
 };
 
-/// The only schema this release opens, for `fabric.sqlite3` and `host.sqlite3`.
-pub(crate) const SCHEMA: provenant_sqlite::Schema = provenant_sqlite::Schema {
-    sql: include_str!("schema.sql"),
-    version: 18,
-};
+/// Format-major base and additive steps for `fabric.sqlite3` and `host.sqlite3`.
+pub(crate) const SCHEMA: provenant_sqlite::Schema = include!("schema.rs");
 
 /// The database schema version this release opens.
 pub const CURRENT_SCHEMA_VERSION: usize = SCHEMA.version as usize;
 
-/// Refuse a database at any other version, leaving it unchanged.
+/// Validate the format, known base and steps without changing the database.
 fn check_version(db: &Connection) -> Result<()> {
-    match provenant_sqlite::check_version(db, SCHEMA) {
-        Ok(()) => Ok(()),
-        Err(provenant_sqlite::VersionError::Refused { found, .. }) => {
-            Err(Error::SchemaVersion(found))
-        }
-        Err(provenant_sqlite::VersionError::Sqlite(error)) => Err(error.into()),
-    }
+    provenant_sqlite::check_version(db, SCHEMA).map_err(Error::from)
 }
 fn enable_wal(db: &Connection) -> Result<()> {
     match provenant_sqlite::enable_wal(db) {
@@ -165,9 +156,7 @@ impl Store {
             database_path,
             _owner: PhantomData,
         };
-        if provenant_sqlite::stored_version(&store.db)? != SCHEMA.version {
-            return Err(Error::Invalid("local delivery index unavailable"));
-        }
+        check_version(&store.db)?;
         crate::local_delivery::before(deadline)?;
         Ok(Some(store))
     }
@@ -347,16 +336,13 @@ impl Store {
         }
         companions(&fabric, &path, database)?;
         let db = provenant_sqlite::open_connection(&db_path, false)?;
-        // Refuse another version before journal-mode changes or schema writes.
-        check_version(&db)?;
+        // Refuse another format or missing base before journal-mode changes.
+        provenant_sqlite::check_format(&db, SCHEMA).map_err(Error::from)?;
         enable_wal(&db)?;
         if database == "fabric.sqlite3" {
             provenant_sqlite::retain_read_only_wal(&db)?;
         }
-        provenant_sqlite::ensure_schema(&db, SCHEMA).map_err(|error| match error {
-            provenant_sqlite::VersionError::Refused { found, .. } => Error::SchemaVersion(found),
-            provenant_sqlite::VersionError::Sqlite(error) => error.into(),
-        })?;
+        provenant_sqlite::ensure_schema(&db, SCHEMA).map_err(Error::from)?;
         Ok(Self {
             db,
             state_root: root.clone(),

@@ -1,7 +1,7 @@
 # State and config
 
 Owner: `crates/core` (IDs, roots, time), `crates/records` (codecs, digests),
-`crates/config` (config, release, managed install)
+`crates/config` (config, release, managed install), `crates/sqlite` (SQLite formats)
 Anchor: `crates/core/src/roots.rs`, `crates/records/tests/contracts.rs`,
 `crates/config/src/managed_tests.rs`
 
@@ -51,6 +51,35 @@ collected name is not allocated to a later graph.
 - Test: `crates/fabric-runtime/src/graph/journal_tests.rs::checkpoint_collection_keeps_pending_graphs_and_reserves_collected_names`
 - Owner: `crates/fabric-runtime/src/graph/journal.rs`,
   `src/fabric/interface.rs`
+
+## SQLite stores
+
+### A format major permits additive evolution
+
+`user_version` identifies a store's format major. Binaries with the same
+major can read and write the store regardless of release minor. Each owner
+declares one ordered list of additive steps, tagged with the release minor
+that added them; no minor counter is stored. Steps add tables and indexes
+with `IF NOT EXISTS`, or columns that are nullable or have a non-NULL constant
+default. They never rewrite, drop or rename existing objects. Every insert
+names its columns, so an older writer ignores columns added by a newer one.
+
+A writable open creates the base and any missing steps atomically, or applies
+missing steps to an existing same-major store. Existence determines which
+steps are missing. A current store opens without a write; concurrent openers
+re-check under the same immediate transaction before applying steps. A reader
+ignores unknown objects, but refuses a missing known base table or a missing
+declared step. A missing step requires a writable open. A different major is
+refused without changing the store. Non-additive changes require a new major
+and the state reset procedure.
+- Why: additive changes during 2.0.x must preserve stored state and permit
+  binaries of different minors to share the same format.
+- Test: `crates/sqlite/src/schema_tests.rs::same_major_additions_are_bidirectionally_compatible_and_idempotent`;
+  `crates/sqlite/src/schema_tests.rs::current_opens_do_not_take_a_write_lock_and_concurrent_upgrades_recheck`;
+  `crates/sqlite/src/schema_tests.rs::owner_step_declarations_are_additive`;
+  `crates/sqlite/src/schema_tests.rs::owner_table_inserts_always_name_columns`;
+  `crates/sqlite/src/schema_tests.rs::incompatible_stores_are_refused_byte_unchanged`
+- Owner: `crates/sqlite/src/schema.rs`, each store's schema declaration
 
 ## Records
 

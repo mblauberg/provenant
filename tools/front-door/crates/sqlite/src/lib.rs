@@ -246,113 +246,14 @@ pub fn enable_wal(db: &Connection) -> Result<(), WalError> {
     Ok(())
 }
 
-/// One store's schema: the file that creates it and the only version it opens.
-#[derive(Clone, Copy, Debug)]
-pub struct Schema {
-    /// Statements that create every table, index and trigger, ending in
-    /// `PRAGMA user_version=<version>;`.
-    pub sql: &'static str,
-    pub version: i64,
-}
+mod schema;
+pub use schema::{
+    RESET_CODE, Schema, Step, StepKind, VersionError, check_format, check_version, ensure_schema,
+    schema_matches, stored_version, validate_steps,
+};
 
-/// The refusal code for a store at another version. Its message names the reset.
-pub const RESET_CODE: &str = "STATE_RESET_REQUIRED";
-
-#[derive(Debug)]
-pub enum VersionError {
-    /// The store is at another version, or has tables but no version. It is
-    /// left exactly as found.
-    Refused {
-        found: i64,
-        expected: i64,
-    },
-    Sqlite(rusqlite::Error),
-}
-
-impl std::fmt::Display for VersionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Refused { found, expected } => write!(
-                f,
-                "{RESET_CODE}: store schema version {found} is not {expected}; move the store aside to start it fresh"
-            ),
-            Self::Sqlite(error) => error.fmt(f),
-        }
-    }
-}
-
-impl std::error::Error for VersionError {}
-
-impl From<rusqlite::Error> for VersionError {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::Sqlite(error)
-    }
-}
-
-/// Whether the store has not been created yet. Refuses a store at any version
-/// but the schema's, without writing to it.
-fn is_fresh(db: &Connection, schema: Schema) -> Result<bool, VersionError> {
-    let (version, has_schema): (i64, bool) = db.query_row(
-        "SELECT (SELECT user_version FROM pragma_user_version), EXISTS(SELECT 1 FROM sqlite_schema)",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    match (version, has_schema) {
-        (0, false) => Ok(true),
-        (found, _) if found == schema.version => Ok(false),
-        (found, _) => Err(VersionError::Refused {
-            found,
-            expected: schema.version,
-        }),
-    }
-}
-
-/// Refuse a store at any version but the schema's. An empty store passes. Reads
-/// only, so a refused store is not modified.
-pub fn check_version(db: &Connection, schema: Schema) -> Result<(), VersionError> {
-    is_fresh(db, schema).map(drop)
-}
-
-/// The version of an existing store, or 0 for one never created. Reads only.
-pub fn stored_version(db: &Connection) -> rusqlite::Result<i64> {
-    db.query_row("SELECT user_version FROM pragma_user_version", [], |row| {
-        row.get(0)
-    })
-}
-
-/// Create an empty store from its schema in one immediate transaction, or
-/// accept one already at the schema's version. Any other store is refused.
-/// Re-checks inside the transaction, so concurrent openers create it once.
-pub fn ensure_schema(db: &Connection, schema: Schema) -> Result<(), VersionError> {
-    if !is_fresh(db, schema)? {
-        return Ok(());
-    }
-    let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
-    if is_fresh(&tx, schema)? {
-        tx.execute_batch(schema.sql)?;
-    }
-    tx.commit()?;
-    Ok(())
-}
-
-/// Whether the store's `sqlite_schema` text is exactly the schema file's
-/// statements, in order, byte for byte.
-pub fn schema_matches(db: &Connection, schema: Schema) -> rusqlite::Result<bool> {
-    let mut query = db.prepare(
-        "SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY rowid",
-    )?;
-    let statements: Vec<String> = query
-        .query_map([], |row| row.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    let mut rest = schema.sql;
-    for statement in &statements {
-        match rest.find(statement.as_str()) {
-            Some(at) => rest = &rest[at + statement.len()..],
-            None => return Ok(false),
-        }
-    }
-    Ok(!rest.contains("CREATE "))
-}
+#[cfg(test)]
+mod schema_tests;
 
 #[cfg(test)]
 mod tests {
@@ -564,6 +465,7 @@ mod tests {
     const SCHEMA: Schema = Schema {
         sql: "CREATE TABLE t (v INTEGER) STRICT;\nCREATE INDEX t_v ON t(v);\nPRAGMA user_version=3;",
         version: 3,
+        steps: &[],
     };
 
     #[test]
@@ -575,34 +477,6 @@ mod tests {
         assert!(schema_matches(&db, SCHEMA)?);
         db.execute_batch("CREATE TABLE extra (v INTEGER)")?;
         assert!(!schema_matches(&db, SCHEMA)?);
-        Ok(())
-    }
-
-    #[test]
-    fn a_store_at_another_version_is_refused_unchanged() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = std::env::temp_dir().canonicalize()?.join(format!(
-            "provenant-sqlite-version-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&temp)?;
-        for (name, version) in [("older", 2), ("newer", 4), ("unversioned", 0)] {
-            let path = temp.join(name);
-            let db = Connection::open(&path)?;
-            db.execute_batch(&format!(
-                "CREATE TABLE t (v INTEGER); INSERT INTO t VALUES (1); PRAGMA user_version={version};"
-            ))?;
-            drop(db);
-            let before = std::fs::read(&path)?;
-            let db = open_connection(&path, false)?;
-            assert!(matches!(
-                ensure_schema(&db, SCHEMA),
-                Err(VersionError::Refused { found, expected: 3 }) if found == version
-            ));
-            drop(db);
-            assert_eq!(std::fs::read(&path)?, before, "{name}");
-        }
-        std::fs::remove_dir_all(&temp)?;
         Ok(())
     }
 }

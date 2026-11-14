@@ -153,7 +153,7 @@ impl Store {
         self.write(request,|tx| {
             let highest:i64=tx.query_row("SELECT coalesce(max(seq),0) FROM events WHERE project=?",[project.to_string()],|r|r.get(0))?;
             if seq>highest { return Err(Error::Invalid("event cursor")); }
-            tx.execute("INSERT INTO event_cursors VALUES(?,?,?) ON CONFLICT(project,consumer) DO UPDATE SET seq=max(seq,excluded.seq)",params![project.to_string(),consumer.to_string(),seq])?;
+            tx.execute("INSERT INTO event_cursors (project, consumer, seq) VALUES(?,?,?) ON CONFLICT(project,consumer) DO UPDATE SET seq=max(seq,excluded.seq)",params![project.to_string(),consumer.to_string(),seq])?;
             Ok(())
         })
     }

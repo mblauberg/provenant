@@ -101,10 +101,7 @@ pub enum Error {
     Future,
 }
 
-const SCHEMA: provenant_sqlite::Schema = provenant_sqlite::Schema {
-    sql: include_str!("log_schema.sql"),
-    version: 1,
-};
+const SCHEMA: provenant_sqlite::Schema = include!("log_schema.rs");
 
 pub struct LogStore {
     root: StateRoot,
@@ -206,10 +203,13 @@ impl LogStore {
         }
         Self::check_files(dir)?;
         let db = provenant_sqlite::open_connection(&self.path(), !write)?;
-        provenant_sqlite::check_version(&db, SCHEMA)?;
+        provenant_sqlite::check_format(&db, SCHEMA)?;
         let fresh = provenant_sqlite::stored_version(&db)? == 0;
         if fresh && !write {
             return Ok(None);
+        }
+        if !write {
+            provenant_sqlite::check_version(&db, SCHEMA)?;
         }
         if fresh {
             // Both apply to a store only before its tables exist.
@@ -454,11 +454,11 @@ impl LogStore {
         };
         let payload = serde_json::to_vec(&entry)?;
         tx.execute(
-            "INSERT INTO entries VALUES (?1,?2,?3,?4)",
+            "INSERT INTO entries (sequence, created_at, bytes, payload) VALUES (?1,?2,?3,?4)",
             params![sequence, now, payload.len() as i64, payload],
         )?;
         tx.execute(
-            "INSERT INTO receipts VALUES (?1,?2,?3,?4,?5,?6)",
+            "INSERT INTO receipts (operation_id, issued_at, digest, sequence, created_at, host) VALUES (?1,?2,?3,?4,?5,?6)",
             params![
                 entry.update.operation_id.as_str(),
                 entry.update.issued_at,
@@ -954,7 +954,7 @@ mod tests {
         let tx = db.transaction().unwrap();
         tx.execute_batch(
             "WITH RECURSIVE rows(n) AS (VALUES(0) UNION ALL SELECT n + 1 FROM rows WHERE n < 100000)
-             INSERT INTO receipts SELECT 'synthetic-' || n, 1, 'digest', n + 2, 1, 'host' FROM rows",
+             INSERT INTO receipts (operation_id, issued_at, digest, sequence, created_at, host) SELECT 'synthetic-' || n, 1, 'digest', n + 2, 1, 'host' FROM rows",
         )
         .unwrap();
         tx.commit().unwrap();
