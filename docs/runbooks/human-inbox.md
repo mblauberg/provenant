@@ -93,10 +93,8 @@ exception; `scripts/check-doc-truth` compares this table with
 | `claude` | `PreToolUse` hook | Available | Tool-call boundary |
 | Every other adapter | Fabric mail | Unavailable | Unavailable |
 
-Claude's `PreToolUse` hook may offer answers on Bash calls within a 50 ms
-budget; offering never acknowledges. If the hook reports the local delivery index
-unavailable, run any `provenant inbox` command to upgrade the store (back up the
-Fabric store first; older binaries refuse the added schema).
+Claude's `PreToolUse` hook may offer answers on Bash calls; offering never
+acknowledges them.
 
 ## Steering
 
