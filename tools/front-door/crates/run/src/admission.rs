@@ -209,7 +209,8 @@ impl RunStore {
             )?)
         };
 
-        self.write(call, |tx| {
+        let (admitted, warnings) = self.write(call, |tx| {
+            let mut warnings = Vec::new();
             let old = self.record(id, call)?;
             let AttemptState::Running { .. } = &old.state else {
                 return Err(RunError::Refused);
@@ -227,7 +228,7 @@ impl RunStore {
             } else {
                 // The ledger may have committed a yield before a failed store
                 // commit. Always recheck it, even if this ticket says active.
-                let reclaimed = crate::ledger::lease_with_policy(
+                let (reclaimed, lease_warnings) = crate::ledger::lease_with_policy(
                     &ledger,
                     self.context.state_root.as_path(),
                     &ticket,
@@ -236,8 +237,9 @@ impl RunStore {
                     owner.as_ref().ok_or(RunError::Conflict)?,
                     configured,
                     &policy,
-                )?
-                .is_some();
+                )?;
+                warnings = lease_warnings;
+                let reclaimed = reclaimed.is_some();
                 ticket.active = reclaimed;
                 if reclaimed {
                     extra.remove("child_wait");
@@ -254,8 +256,12 @@ impl RunStore {
                 next.revision = next.revision.checked_add(1).ok_or(RunError::Conflict)?;
                 update_attempt(tx, &old, &next)?;
             }
-            Ok(admitted)
-        })
+            Ok((admitted, warnings))
+        })?;
+        for warning in warnings {
+            eprintln!("warning: {warning}");
+        }
+        Ok(admitted)
     }
 
     pub fn admission_policy(&self) -> AdmissionPolicy {
@@ -769,7 +775,7 @@ impl RunStore {
             clock,
             resources,
         )?;
-        self.write(call, |tx| {
+        let (record, warnings) = self.write(call, |tx| {
             let old = self.record(id, call)?;
             if !matches!(old.state, AttemptState::Starting { .. }) {
                 return Err(RunError::Refused);
@@ -779,7 +785,7 @@ impl RunStore {
             // namespace, so they live in the host ledger, not this store.
             // The ledger reads the clock under its own lock; the lane starts at
             // the time spacing was judged and recorded.
-            let Some(now) = crate::ledger::lease_with_policy(
+            let (admitted, warnings) = crate::ledger::lease_with_policy(
                 &ledger,
                 self.context.state_root.as_path(),
                 &ticket,
@@ -788,9 +794,9 @@ impl RunStore {
                 &owner,
                 configured,
                 &policy,
-            )?
-            else {
-                return Ok(None);
+            )?;
+            let Some(now) = admitted else {
+                return Ok((None, warnings));
             };
             ticket.active = true;
             tx.execute(
@@ -809,8 +815,12 @@ impl RunStore {
                 .then(|| deadline(now, ticket.runtime_seconds))
                 .transpose()?;
             update_attempt(tx, &old, &next)?;
-            Ok(Some(next))
-        })
+            Ok((Some(next), warnings))
+        })?;
+        for warning in warnings {
+            eprintln!("warning: {warning}");
+        }
+        Ok(record)
     }
 }
 /// A failed resource probe as one bounded line. Control and Unicode format

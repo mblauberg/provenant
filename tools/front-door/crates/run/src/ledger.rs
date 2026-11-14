@@ -105,6 +105,7 @@ pub(crate) fn lease(
         LaneCaps::of(&provenant_config::LaneBuildSettings::default()),
         &provenant_records::policy::Policy::default(),
     )
+    .map(|(lease, _)| lease)
 }
 
 #[allow(clippy::too_many_arguments)] // Store ownership, clocks and resolved policy remain explicit.
@@ -117,10 +118,11 @@ pub(crate) fn lease_with_policy(
     owner: &LeaseOwner,
     configured: LaneCaps,
     policy: &provenant_records::policy::Policy,
-) -> Result<Option<WallTime>> {
+) -> Result<(Option<WallTime>, Vec<String>)> {
     let (project, class) = (ticket.project_id, ticket.lane_class);
     let id = ticket.attempt_id.to_string();
-    immediate(db, request, |tx| {
+    let mut warnings = Vec::new();
+    let admitted = immediate(db, request, |tx| {
         let now = time
             .wall_now()
             .map_err(|_| RunError::Validation("wall clock"))?;
@@ -153,10 +155,7 @@ pub(crate) fn lease_with_policy(
                 Facts::violation(format!("active={}, limit={}", hit.active, hit.limit)),
             ) {
                 Effect::Proceed => {}
-                Effect::Warn(message) => {
-                    use std::io::Write;
-                    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
-                }
+                Effect::Warn(message) => warnings.push(message.to_string()),
                 Effect::Refuse(_) => {
                     return Err(RunError::Admission(AdmissionError::LaneCap {
                         active: hit.active,
@@ -209,7 +208,8 @@ pub(crate) fn lease_with_policy(
             ],
         )?;
         Ok(Some(now))
-    })
+    })?;
+    Ok((admitted, warnings))
 }
 /// Give up both host and project capacity, retaining custody for reclaim.
 pub(crate) fn yield_lease(
