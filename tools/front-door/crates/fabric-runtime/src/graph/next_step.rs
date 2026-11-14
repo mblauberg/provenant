@@ -744,7 +744,7 @@ pub(super) fn settlement_fallback_decision(
         }
         _ => None,
     };
-    let custody_released = live_fallback_allowed(outcome, launched, node.access, fallback_evidence);
+    let custody_released = live_fallback_allowed(outcome, launched, fallback_evidence);
     let step = cause.map(|cause| {
         cause.next_step(
             &node.on_stop,

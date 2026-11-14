@@ -61,27 +61,37 @@ To cut over from 1.x to 2.0.0, on **each host, peers included**:
    this cut-over. Its captured installer output must refuse immediately, without
    opening a terminal. The reset prompt requires both stdin and stderr to be
    terminals; otherwise run `install.sh --upgrade --reset-state` explicitly.
+   `PROVENANT_INSTALL_TTY=1` simulates a terminal for installer tests, including
+   the reset prompt; captured invocations must leave it unset.
    Read the dropped and kept lists before proceeding.
 5. Run `provenant check install` using the new binary.
 
 The installer validates all account previews and release smoke checks before
 resetting, boots out the old tick and peer agents, then restarts them after
 successful installation. If installation fails after shutdown, the output names
-the stopped or potentially stopped agents and prints the acknowledged install
-command that finishes installation and restarts the current agents. Rerun it
+only current agents successfully stopped and prints
+`install.sh --upgrade --state-dir STATE --reset-state` to finish installation
+and restart them. Recovery without a reset plan omits `--reset-state`. Rerun it
 before opening sessions. Provider archives move
 out of the dropped tree to `provider-history/format-1/`, retaining their relative
-attempt paths. Admission leases are dropped with the run stores. Read-only tmp
+attempt paths. The format-1 usage ledger moves to `usage-history/format-1/`;
+format 2 starts a fresh `usage-ledger/` without reading old rows. Admission
+leases are dropped with the run stores. Read-only tmp
 directories and partial removal can be retried safely. Dropped symlinks,
 including lock-named links, are unlinked with an identity check; their targets
 are never followed. A symlink or non-directory at a provider-history source or
-archive ancestor refuses during preflight, before shutdown or deletion.
+archive ancestor, or an existing archive destination, refuses during
+preflight, before shutdown or moves. The usage ledger source and archive
+ancestors must also be directories, and its archive destination must be absent.
 
 Only positively identified 1.x SQLite headers (or the retired work index) are
 reset evidence; filenames alone never establish the format when a receipt is
-missing. Format-2 schema bumps cannot trigger a reset. An empty/short main file
-or a zero schema header with WAL/shared-memory companions may be awaiting a
-checkpoint and is not format-1 evidence. Unknown or unreadable headers refuse,
+missing. A format-1 receipt authorises reset even if stores were left at
+intermediate migration versions. Format-2 schema bumps cannot trigger a reset.
+An empty main file or a zero schema SQLite header identifies neither format,
+with or without companions. A short main file with WAL/shared-memory companions
+may await a checkpoint and is not format-1 evidence. Without a format-1 receipt,
+other unknown non-empty or unreadable headers refuse,
 name the file and require repair or restoration before retrying. See the
 [state format contract](../specs/state.md#a-format-break-needs-acknowledgement)
 for the shipped-version table and receipt rules.

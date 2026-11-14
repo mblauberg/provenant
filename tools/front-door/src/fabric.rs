@@ -944,7 +944,7 @@ impl F3Facade for BoundFacade<'_> {
                         health.reason = None;
                         health.host = value.host;
                         health.available = value.available;
-                        health.execution = value.execution;
+                        health.execution = Some(value.execution);
                     }
                     Err(PeerError::ProtocolMismatch { remote, .. }) => {
                         health.protocol = Some(remote);

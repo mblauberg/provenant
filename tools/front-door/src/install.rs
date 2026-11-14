@@ -266,36 +266,39 @@ struct PreviewReporter {
     reset: Option<crate::state_reset::Plan>,
     reset_state: Option<PathBuf>,
     receipt_state_format: Option<u64>,
+    reset_planned: bool,
     stopped_agents: std::collections::BTreeSet<&'static str>,
 }
 impl PreviewReporter {
-    fn stopping(&mut self, agent: &'static str) {
-        // A failed stop may have partially succeeded, so report it too.
+    fn stopped(&mut self, agent: &'static str) {
         self.stopped_agents.insert(agent);
     }
 
-    fn stopped_report(&self, state: &Path, source: &Path) -> Option<String> {
+    fn stopped_report(&self, state: &Path) -> Option<String> {
         if self.stopped_agents.is_empty() {
             return None;
         }
-        let quote =
-            |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
+        let state = format!("'{}'", state.display().to_string().replace('\'', "'\\''"));
         Some(format!(
-            "Agents stopped or requiring restart: {}. To finish installation and restart the current agents, run: provenant --state-dir {} install --source {} --reset-state",
+            "Agents stopped: {}. To finish installation and restart the current agents, run: install.sh --upgrade --state-dir {}{}",
             self.stopped_agents
                 .iter()
                 .copied()
                 .collect::<Vec<_>>()
                 .join(", "),
-            quote(state),
-            quote(source)
+            state,
+            if self.reset_planned {
+                " --reset-state"
+            } else {
+                ""
+            },
         ))
     }
 
     fn before_remove_with(
         &mut self,
         action: &Action,
-        stop: impl FnOnce(&Path) -> io::Result<()>,
+        stop: impl FnOnce(&Path) -> io::Result<bool>,
     ) -> io::Result<()> {
         if matches!(
             action.selector.as_str(),
@@ -317,12 +320,13 @@ impl PreviewReporter {
             {
                 return Err(io::Error::other("unexpected agent plist path"));
             }
-            self.stopping(match action.selector.as_str() {
-                "peer-agent" => "dev.provenant.peer",
-                "gc-agent" => "dev.provenant.gc (retired)",
-                _ => "dev.provenant.tick",
-            });
-            stop(&home)?;
+            if stop(&home)? && action.selector != "gc-agent" {
+                self.stopped(if action.selector == "peer-agent" {
+                    "dev.provenant.peer"
+                } else {
+                    "dev.provenant.tick"
+                });
+            }
         }
         Ok(())
     }
@@ -348,16 +352,16 @@ impl InstallReporter for PreviewReporter {
             .ok_or_else(|| io::Error::other("missing agent home"))?;
         crate::state_reset::remove(&plan, || {
             if provenant_fabric_runtime::peer_agent::eligible(&state, &home) {
-                self.stopping("dev.provenant.peer");
-                provenant_fabric_runtime::peer_agent::stop(&home).map_err(io::Error::other)?;
-                self.stopping("dev.provenant.disk-guard (retired)");
+                if provenant_fabric_runtime::peer_agent::stop(&home).map_err(io::Error::other)? {
+                    self.stopped("dev.provenant.peer");
+                }
                 retire_disk_guard(&home).map_err(io::Error::other)?;
-                self.stopping("dev.provenant.gc (retired)");
                 super::tick_agent::retire_gc(&home).map_err(io::Error::other)?;
             }
             if super::tick_agent::eligible(&state, &home) {
-                self.stopping("dev.provenant.tick");
-                super::tick_agent::stop(&home).map_err(io::Error::other)?;
+                if super::tick_agent::stop(&home).map_err(io::Error::other)? {
+                    self.stopped("dev.provenant.tick");
+                }
             }
             Ok(())
         })
@@ -369,7 +373,9 @@ impl InstallReporter for PreviewReporter {
             "tick-agent" | "tick-service" => {
                 super::tick_agent::stop(home).map_err(io::Error::other)
             }
-            "gc-agent" => super::tick_agent::retire_gc(home).map_err(io::Error::other),
+            "gc-agent" => super::tick_agent::retire_gc(home)
+                .map(|_| false)
+                .map_err(io::Error::other),
             _ => provenant_fabric_runtime::peer_agent::stop(home).map_err(io::Error::other),
         })
     }
@@ -1124,13 +1130,12 @@ fn apply_install(
         };
         if agents && !args.dry_run && provenant_fabric_runtime::peer_agent::eligible(&state, &home)
         {
-            reporter.stopping("dev.provenant.disk-guard (retired)");
             retire_disk_guard(&home)
                 .map_err(|error| InstallError::AgentRetirement(error.to_string()))?;
-            reporter.stopping("dev.provenant.gc (retired)");
             super::tick_agent::retire_gc(&home)
                 .map_err(|error| InstallError::AgentRetirement(error.to_string()))?;
         }
+        reporter.reset_planned = reset.is_some();
         // Intermediate receipts must not claim the state transition finished:
         // a later batch can fail while only old artifacts (no DB header) remain.
         reporter.receipt_state_format = reset.as_ref().map(|_| 1);
@@ -1211,7 +1216,7 @@ fn apply_install(
     // Covers reset, receipt publication and final inspection failures alike.
     // The tracked set also covers partial shutdown and earlier agent removals.
     if result.is_err()
-        && let Some(message) = reporter.stopped_report(&state, &args.source)
+        && let Some(message) = reporter.stopped_report(&state)
     {
         let _ = writeln!(io::stderr().lock(), "{message}");
     }
@@ -1274,11 +1279,7 @@ fn apply_install(
         reporter.stopped_agents.remove("dev.provenant.tick");
     }
     if result.is_ok() {
-        // Obsolete services stay retired. Only current agents need restarting.
-        reporter
-            .stopped_agents
-            .retain(|name| !name.ends_with("(retired)"));
-        if let Some(message) = reporter.stopped_report(&state, &args.source) {
+        if let Some(message) = reporter.stopped_report(&state) {
             let _ = writeln!(io::stderr().lock(), "{message}");
         }
     }
@@ -1860,7 +1861,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         let script;
         if let Some(source) = &args.from_source {
             script = std::fs::read(source.join("install.sh")).map_err(|error| error.to_string())?;
-            install_args.extend(["--from-source".into(), source.as_os_str().to_owned()]);
+            install_args.extend(["--source".into(), source.as_os_str().to_owned()]);
             if !fabric.peers.is_empty() {
                 let files = runner.execute(
                     &[
@@ -1965,7 +1966,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
             let (command, input) = if let Some(archive) = &source_archive {
                 (
                     format!(
-                        "set -eu; scratch=$(mktemp -d); trap 'rm -rf \"$scratch\"' 0; tar -xzf - -C \"$scratch\"; git -C \"$scratch\" init -q </dev/null; git -C \"$scratch\" add -f . </dev/null; sh \"$scratch/install.sh\" --upgrade --non-interactive {} {} --from-source \"$scratch\"",
+                        "set -eu; scratch=$(mktemp -d); trap 'rm -rf \"$scratch\"' 0; tar -xzf - -C \"$scratch\"; git -C \"$scratch\" init -q </dev/null; git -C \"$scratch\" add -f . </dev/null; sh \"$scratch/install.sh\" --upgrade --non-interactive {} {} --source \"$scratch\"",
                         if args.yes { "--yes" } else { "" },
                         if args.reset_state {
                             "--reset-state"
@@ -2206,27 +2207,28 @@ mod tests {
     }
 
     #[test]
-    fn post_shutdown_failure_reports_affected_agents_and_recovery_command() {
+    fn post_shutdown_failure_reports_only_stopped_agents_and_the_required_acknowledgement() {
         use super::*;
-        // Temp-root installs deliberately cannot stop the real account agents.
-        // Exercise the reporter used by all post-shutdown failure exits.
         let mut reporter = PreviewReporter::default();
-        assert!(
-            reporter
-                .stopped_report(Path::new("/state"), Path::new("/release"))
-                .is_none()
-        );
-        reporter.stopping("dev.provenant.peer");
-        reporter.stopping("dev.provenant.tick");
+        assert!(reporter.stopped_report(Path::new("/state")).is_none());
+        reporter.stopped("dev.provenant.peer");
+        reporter.stopped("dev.provenant.tick");
         let report = reporter
-            .stopped_report(Path::new("/state"), Path::new("/release's build"))
+            .stopped_report(Path::new("/state's data"))
             .expect("stopped agents");
         for name in ["dev.provenant.peer", "dev.provenant.tick"] {
             assert!(report.contains(name));
         }
-        assert!(report.contains(
-            "provenant --state-dir '/state' install --source '/release'\\''s build' --reset-state"
-        ));
+        assert!(report.contains("install.sh --upgrade --state-dir '/state'\\''s data'"));
+        assert!(!report.contains("--reset-state"));
+        assert!(!report.contains("--source"));
+        reporter.reset_planned = true;
+        assert!(
+            reporter
+                .stopped_report(Path::new("/state"))
+                .expect("reset recovery")
+                .contains("--reset-state")
+        );
     }
 
     #[test]
@@ -2253,18 +2255,26 @@ mod tests {
             identity: None,
             edits: Vec::new(),
         };
+        assert!(
+            reporter
+                .before_remove_with(&action, |_| Err(io::Error::other("stop failed")))
+                .is_err()
+        );
+        assert!(reporter.stopped_agents.is_empty());
+        reporter.before_remove_with(&action, |_| Ok(false))?;
+        assert!(reporter.stopped_agents.is_empty());
         let mut stops = 0;
         reporter.before_remove_with(&action, |cwd| {
             assert_eq!(cwd, home);
             stops += 1;
-            Ok(())
+            Ok(true)
         })?;
         assert_eq!(stops, 1);
         action.path = AbsolutePath::new(&home.join("foreign.plist"))?;
         reporter.before_remove_with(&action, |cwd| {
             assert_eq!(cwd, home);
             stops += 1;
-            Ok(())
+            Ok(true)
         })?;
         assert_eq!(stops, 2);
         action.before = Some(provenant_records::OwnedValue::File {
@@ -2276,7 +2286,7 @@ mod tests {
             reporter
                 .before_remove_with(&action, |_| {
                     stops += 1;
-                    Ok(())
+                    Ok(true)
                 })
                 .is_err()
         );

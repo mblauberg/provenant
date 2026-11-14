@@ -857,22 +857,23 @@ pub fn previous_plist(
 /// The managed-file owner calls this for an exact plist match or a missing
 /// recorded plist, under its install lock. A missing service needs no bootout;
 /// a failure keeps the receipt for retry.
-pub fn stop(home: &Path) -> Result<(), AgentError> {
+pub fn stop(home: &Path) -> Result<bool, AgentError> {
     stop_with(home, launchctl)
 }
 
 fn stop_with(
     home: &Path,
     mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
-) -> Result<(), AgentError> {
+) -> Result<bool, AgentError> {
     let service = format!("gui/{}/{LABEL}", provenant_os::fs::effective_uid());
-    if run(&["print".as_ref(), service.as_ref()], home)?.0 {
+    let present = run(&["print".as_ref(), service.as_ref()], home)?.0;
+    if present {
         let (ok, error) = run(&["bootout".as_ref(), service.as_ref()], home)?;
         if !ok {
             return Err(AgentError::Launchctl("bootout", error));
         }
     }
-    Ok(())
+    Ok(present)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]

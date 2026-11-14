@@ -35,7 +35,7 @@ moves to the next. `route list` and `route resolve` start no process and mutate
 nothing.
 - Why: the fallback plan is decided once and visible.
 - Test: `crates/routing/src/tests/selection.rs::alternatives_are_bounded_distinct_and_keep_the_callers_order`;
-  `crates/routing/src/fallback.rs::tests::switching_requires_safe_outcome_and_every_guard`;
+  `crates/routing/src/fallback.rs::tests::preparation_switch_requires_local_custody_budget_and_unpinned_route`;
   `tests/route.rs::help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates`
 
 ## Policy is overridable data

@@ -405,10 +405,8 @@ pub enum PeerAction {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
         input: Box<crate::handoff::SessionHandoff>,
-        /// The source's wait, so the peer finishes inside it. Absent from an
-        /// older source.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        budget_seconds: Option<u64>,
+        /// The source's wait, so the peer finishes inside it.
+        budget_seconds: u64,
     },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -554,16 +552,12 @@ pub struct PeerHealth {
     pub host: HostId,
     pub available: bool,
     /// Readiness requires the run owner; config presence alone proves nothing.
-    pub execution: Option<bool>,
-    /// Release and supported run operations, absent on older peers.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub release: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_capabilities: Option<crate::runs::RunCapabilities>,
-    /// Present when this peer's build reports route readiness. An older peer
-    /// omits it, which is how a chair tells it cannot report readiness.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub readiness: Option<PeerReadiness>,
+    pub execution: bool,
+    /// Every format-2 peer reports its release and supported run operations.
+    pub release: String,
+    pub run_capabilities: crate::runs::RunCapabilities,
+    /// Every format-2 peer reports route readiness, even before a route probe.
+    pub readiness: PeerReadiness,
 }
 
 /// The state of a host's route readiness, with the quota record's wire names.
@@ -622,21 +616,17 @@ impl PeerReadiness {
     pub fn reporting() -> Self {
         Self::not_probed()
     }
-    /// What a probe of a peer shows. A protocol mismatch or a health reply
-    /// without readiness comes from a peer too old to report it; any other
-    /// failure, or a reply that is not a health reply, is an unreachable peer.
+    /// What a probe of a peer shows. A protocol mismatch is unsupported; any
+    /// other failure, or a reply that is not a health reply, is unreachable.
     pub fn from_probe(probe: &Result<PeerResponse, PeerError>) -> Self {
         match probe {
             Ok(PeerResponse {
                 result: PeerResult::Health { data, .. },
                 ..
-            }) => match &data.readiness {
-                Some(reported) => Self {
-                    extra: Default::default(),
-                    state: reported.state,
-                    reason: reported.reason.as_deref().map(|r| plain_text(r, 64)),
-                },
-                None => Self::unsupported_version(),
+            }) => Self {
+                extra: Default::default(),
+                state: data.readiness.state,
+                reason: data.readiness.reason.as_deref().map(|r| plain_text(r, 64)),
             },
             Err(PeerError::ProtocolMismatch { .. }) => Self::unsupported_version(),
             _ => Self::unreachable(),
@@ -1436,10 +1426,19 @@ mod tests {
                         extra: Default::default(),
                         host: request.target_host,
                         available: true,
-                        execution: None,
-                        release: None,
-                        run_capabilities: None,
-                        readiness: None,
+                        execution: false,
+                        release: "2.0.0".into(),
+                        run_capabilities: crate::runs::RunCapabilities {
+                            submit: false,
+                            list: true,
+                            status: true,
+                            wait: true,
+                            cancel: true,
+                            resume: true,
+                            output: true,
+                            events: true,
+                        },
+                        readiness: PeerReadiness::reporting(),
                     },
                     extra: Default::default(),
                 },
@@ -1992,40 +1991,41 @@ mod tests {
     }
 
     #[test]
-    fn peer_health_wire_data_omits_local_diagnostics() {
-        let health = PeerHealth {
-            extra: Default::default(),
-            host: HostId::from_bytes([2; 16]),
-            available: true,
-            execution: Some(true),
-            release: None,
-            run_capabilities: None,
-            readiness: None,
-        };
-        let value = serde_json::to_value(health).unwrap();
-        assert_eq!(value.as_object().unwrap().len(), 3);
-        assert!(value.get("protocol").is_none());
-        assert!(value.get("reason").is_none());
-        let result: PeerResult = serde_json::from_value(serde_json::json!({
-            "result": "health",
-            "data": value,
-        }))
-        .unwrap();
-        assert!(matches!(result, PeerResult::Health { .. }));
-
-        let advertised: PeerHealth = serde_json::from_value(serde_json::json!({
-            "host": HostId::from_bytes([2; 16]), "available": true, "execution": true,
-            "release": "1.6.5", "run_capabilities": {
-                "submit": false, "list": true, "status": true, "wait": true,
+    fn peer_health_requires_every_format_two_field() {
+        let host = HostId::from_bytes([2; 16]);
+        let complete = serde_json::json!({
+            "host": host,
+            "available": true,
+            "execution": true,
+            "release": "2.0.0",
+            "run_capabilities": {
+                "submit": true, "list": true, "status": true, "wait": true,
                 "cancel": true, "resume": true, "output": true, "events": true
-            }
-        }))
-        .unwrap();
-        assert_eq!(advertised.release.as_deref(), Some("1.6.5"));
-        assert!(!advertised.run_capabilities.unwrap().submit);
-        let wire = serde_json::to_value(advertised).unwrap();
-        assert_eq!(wire["release"], "1.6.5");
-        assert_eq!(wire["run_capabilities"]["submit"], false);
+            },
+            "readiness": {"state": "unknown", "reason": "not_probed"}
+        });
+        let decoded: PeerHealth = serde_json::from_value(complete.clone()).unwrap();
+        assert_eq!(decoded.release, "2.0.0");
+        assert!(decoded.run_capabilities.submit);
+        assert_eq!(decoded.readiness.state, PeerReadinessState::Unknown);
+        for field in [
+            "host",
+            "available",
+            "execution",
+            "release",
+            "run_capabilities",
+            "readiness",
+        ] {
+            let mut omitted = complete.clone();
+            omitted.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<PeerHealth>(omitted).is_err(),
+                "format-2 health accepted a missing {field}"
+            );
+        }
+        let encoded = serde_json::to_value(decoded).unwrap();
+        assert!(encoded.get("protocol").is_none());
+        assert!(encoded.get("reason").is_none());
     }
 
     #[test]
@@ -2149,27 +2149,14 @@ mod tests {
     }
 
     #[test]
-    fn peer_readiness_reads_old_and_unreachable_peers_as_unknown() {
+    fn peer_readiness_reads_protocol_mismatch_and_unreachable_peers_as_unknown() {
         let host = HostId::from_bytes([2; 16]);
-        let health = |data: serde_json::Value| -> Result<PeerResponse, PeerError> {
-            let response = serde_json::json!({
-                "version": 1, "protocol": PROTOCOL, "host": host,
-                "project": project_key(Path::new("/home/a")),
-                "result": {"result": "health", "data": data},
-            });
-            Ok(serde_json::from_value(response).unwrap())
-        };
         let reason = |probe: &Result<PeerResponse, PeerError>| {
             let read = PeerReadiness::from_probe(probe);
             (read.state, read.reason)
         };
         let unknown = |reason: &str| (PeerReadinessState::Unknown, Some(reason.to_owned()));
-        // An older peer's health reply has no readiness: its version is too old.
-        let old = health(serde_json::json!({
-            "host": host, "available": true, "execution": true,
-        }));
-        assert_eq!(reason(&old), unknown("unsupported_peer_version"));
-        // A protocol mismatch cannot report readiness either.
+        // A protocol mismatch remains distinct from a transport failure.
         let mismatch = Err(PeerError::ProtocolMismatch {
             peer: "workshop".into(),
             remote: 1,
@@ -2185,26 +2172,45 @@ mod tests {
             assert_eq!(reason(&Err(failed)), unknown("unreachable_peer"));
         }
         // A current peer's report is kept, with its reason bounded and cleaned.
-        let current = health(serde_json::json!({
-            "host": host, "available": true, "execution": true,
-            "readiness": {"state": "unavailable", "reason": "exhausted\u{202e}", "future": 1},
-        }));
+        let response = serde_json::json!({
+            "version": 1, "protocol": PROTOCOL, "host": host,
+            "project": project_key(Path::new("/home/a")),
+            "result": {"result": "health", "data": {
+                "host": host, "available": true, "execution": true,
+                "release": "2.0.0",
+                "run_capabilities": {
+                    "submit": true, "list": true, "status": true, "wait": true,
+                    "cancel": true, "resume": true, "output": true, "events": true
+                },
+                "readiness": {"state": "unavailable", "reason": "exhausted\u{202e}", "future": 1}
+            }}
+        });
+        let current: PeerResponse = serde_json::from_value(response).unwrap();
         assert_eq!(
-            reason(&current),
+            reason(&Ok(current)),
             (
                 PeerReadinessState::Unavailable,
                 Some("exhausted".to_owned())
             )
         );
-        // What a current peer sends round-trips and decodes on an older chair's shape.
+        // The current peer reports its readiness record even before probing routes.
         let sent = PeerHealth {
             extra: Default::default(),
             host,
             available: true,
-            execution: Some(true),
-            release: None,
-            run_capabilities: None,
-            readiness: Some(PeerReadiness::reporting()),
+            execution: true,
+            release: "2.0.0".into(),
+            run_capabilities: crate::runs::RunCapabilities {
+                submit: true,
+                list: true,
+                status: true,
+                wait: true,
+                cancel: true,
+                resume: true,
+                output: true,
+                events: true,
+            },
+            readiness: PeerReadiness::reporting(),
         };
         let value = serde_json::to_value(sent).unwrap();
         assert_eq!(value["readiness"]["state"], "unknown");
@@ -2266,11 +2272,17 @@ mod tests {
             action: PeerAction::SessionHandoff {
                 extra: Default::default(),
                 input: Box::new(input.clone()),
-                budget_seconds: Some(30),
+                budget_seconds: 30,
             },
         };
         let frame = serde_json::to_vec(&request).unwrap();
         assert!(frame.len() < MAX_FRAME, "{} bytes", frame.len());
+        let mut without_budget = serde_json::to_value(&request).unwrap();
+        without_budget["action"]
+            .as_object_mut()
+            .unwrap()
+            .remove("budget_seconds");
+        assert!(decode_request(&serde_json::to_vec(&without_budget).unwrap()).is_err());
         let decoded = decode_request(&frame).unwrap();
         assert!(
             matches!(&decoded.action, PeerAction::SessionHandoff { input: got, .. } if **got == input)

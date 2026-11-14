@@ -2944,12 +2944,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         ..
                     } if route_index + 1 < node.routes.len()
                         && fallback_candidate(*outcome, node.access, false)
-                        && !live_fallback_allowed(
-                            *outcome,
-                            false,
-                            node.access,
-                            fallback_evidence,
-                        ) =>
+                        && !live_fallback_allowed(*outcome, false, fallback_evidence) =>
                     {
                         owner
                             .preparation_refusal_cause(&key, reference)

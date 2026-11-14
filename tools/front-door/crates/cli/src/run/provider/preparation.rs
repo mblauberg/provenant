@@ -1749,7 +1749,6 @@ fn next_permitted_candidate(
             outcome,
             handoff: provenant_routing::FallbackHandoff::Local,
             custody_released: true,
-            read_only: false,
             budget_remaining: true,
             pinned,
         }

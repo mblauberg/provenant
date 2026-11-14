@@ -30,7 +30,7 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --yes) yes=true; shift ;;
         --reset-state) reset=true; shift ;;
-        --source|--from-source)
+        --source)
             source_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
             shift
             if [ "$#" -gt 0 ] && [ "${1#--}" = "$1" ]; then source_dir=$1; shift; fi ;;
@@ -42,7 +42,7 @@ while [ "$#" -gt 0 ]; do
         --preflight-only) preflight_only=true; shift ;;
         --non-interactive) non_interactive=true; shift ;;
         --help)
-            printf '%s\n' 'Usage: install.sh [--yes] [--reset-state] [--upgrade] [--source|--from-source [DIR]] [--tag TAG] [--state-dir DIR] [--bin-dir DIR]'
+            printf '%s\n' 'Usage: install.sh [--yes] [--reset-state] [--upgrade] [--source [DIR]] [--tag TAG] [--state-dir DIR] [--bin-dir DIR]'
             exit 0 ;;
         *) die 2 "Unknown option: $1" ;;
     esac
@@ -233,15 +233,7 @@ else
     actual=$(shasum -a 256 "$scratch/package.tar.gz")
     actual=${actual%% *}
     [ "$actual" = "$expected" ] || die 4 'Release checksum mismatch'
-    legacy_app_stage=false
-    for candidate in "$HOME"/Applications/.provenant-upgrade.*; do
-        [ -x "$candidate/Provenant Console.app/Contents/MacOS/provenant-console" ] || continue
-        [ -x "$candidate/Provenant Console.app/Contents/MacOS/quota-menubar" ] || continue
-        legacy_app_stage=true
-        break
-    done
-    # Older upgrade wrappers stage the app before invoking this packaged installer.
-    if [ "$target" = aarch64-apple-darwin ] && ! "$legacy_app_stage"; then
+    if [ "$target" = aarch64-apple-darwin ]; then
         apps_archive=provenant-apps-aarch64-apple-darwin.tar.gz
         apps_status=$(curl -LsS --proto '=https' --tlsv1.2 -w '%{http_code}' "$base/$apps_archive" -o "$scratch/$apps_archive" </dev/null) || die 4 'Cannot download bundled app archive'
         case "$apps_status" in
@@ -283,7 +275,7 @@ if "$upgrade"; then
     else
         preflight_status=$?
         [ "$preflight_status" -eq 6 ] || die "$preflight_status" 'Upgrade preflight could not inspect state'
-        if ! "$non_interactive" && ! "$reset" && [ -t 0 ] && [ -t 2 ]; then
+        if ! "$non_interactive" && ! "$reset" && { { [ -t 0 ] && [ -t 2 ]; } || [ "${PROVENANT_INSTALL_TTY:-}" = 1 ]; }; then
             ask "Type reset to delete the dropped state listed above" no
             [ "$answer" = reset ] && reset=true
         fi

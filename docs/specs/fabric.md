@@ -246,6 +246,10 @@ name reservation after checkpoint collection, and authenticated
 status and artifact reads carry that binding back. The origin checks the full
 binding before trusting a remote attempt. The changed Submit payload raises
 the base protocol fence; mixed versions refuse before payload decoding.
+Format-2 health replies always carry execution readiness, the release, run
+capabilities and route readiness. Session handoffs always carry the source
+budget; the peer uses the smaller source/local limit with a response margin.
+Missing fields fail decoding; an unreachable peer still reads as unknown.
 Credentials, keys and keychains never cross hosts (no test:
 peer request types carry no credential fields), and peer changes need a
 chair-run smoke between two real hosts (review gate).

@@ -59,25 +59,11 @@ pub struct FallbackPolicy {
     pub outcome: FallbackOutcome,
     pub handoff: FallbackHandoff,
     pub custody_released: bool,
-    pub read_only: bool,
     pub budget_remaining: bool,
     pub pinned: bool,
 }
 
 impl FallbackPolicy {
-    pub fn allows_switch(self) -> bool {
-        matches!(
-            self.outcome,
-            FallbackOutcome::AuthRequired
-                | FallbackOutcome::UsageLimited
-                | FallbackOutcome::ModelUnavailable
-                | FallbackOutcome::AdapterUnavailable
-        ) && self.handoff == FallbackHandoff::Local
-            && self.custody_released
-            && self.budget_remaining
-            && !self.pinned
-    }
-
     /// A candidate that local preparation excluded never ran, so any typed
     /// exclusion may advance to the next permitted candidate. Pins and budget
     /// still apply; uncertain or launched handoff never qualifies.
@@ -94,18 +80,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn switching_requires_safe_outcome_and_every_guard() {
+    fn preparation_switch_requires_local_custody_budget_and_unpinned_route() {
         let base = FallbackPolicy {
-            outcome: FallbackOutcome::from_exclusion(
-                &provenant_records::RouteExclusionReason::LoginExpired,
-            ),
+            outcome: FallbackOutcome::AuthRequired,
             handoff: FallbackHandoff::Local,
             custody_released: true,
-            read_only: false,
             budget_remaining: true,
             pinned: false,
         };
-        assert_eq!(base.outcome, FallbackOutcome::AuthRequired);
+        assert!(base.allows_preparation_switch());
+        // A local preparation exclusion may advance regardless of its typed
+        // outcome; the graph owns whether its evidence permits that decision.
+        assert!(
+            FallbackPolicy {
+                outcome: FallbackOutcome::Other,
+                ..base
+            }
+            .allows_preparation_switch()
+        );
+        for refused in [
+            FallbackPolicy {
+                pinned: true,
+                ..base
+            },
+            FallbackPolicy {
+                budget_remaining: false,
+                ..base
+            },
+            FallbackPolicy {
+                custody_released: false,
+                ..base
+            },
+            FallbackPolicy {
+                handoff: FallbackHandoff::UncertainOrLaunched,
+                ..base
+            },
+            FallbackPolicy {
+                handoff: FallbackHandoff::Launched,
+                ..base
+            },
+        ] {
+            assert!(!refused.allows_preparation_switch(), "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn exclusion_reasons_keep_their_preparation_categories() {
+        assert_eq!(
+            FallbackOutcome::from_exclusion(&provenant_records::RouteExclusionReason::LoginExpired,),
+            FallbackOutcome::AuthRequired
+        );
         assert_eq!(
             FallbackOutcome::from_exclusion(
                 &provenant_records::RouteExclusionReason::AccountMismatch,
@@ -121,138 +145,12 @@ mod tests {
         for reason in [
             provenant_records::RouteExclusionReason::UnknownAvailability,
             provenant_records::RouteExclusionReason::StaleAvailability,
-            provenant_records::RouteExclusionReason::UnverifiedModel,
         ] {
-            let outcome = FallbackOutcome::from_exclusion(&reason);
-            assert!(
-                FallbackPolicy { outcome, ..base }.allows_switch(),
+            assert_eq!(
+                FallbackOutcome::from_exclusion(&reason),
+                FallbackOutcome::AdapterUnavailable,
                 "{reason:?}"
             );
-        }
-        let denied = FallbackPolicy {
-            outcome: FallbackOutcome::from_exclusion(
-                &provenant_records::RouteExclusionReason::DisclosureDenied,
-            ),
-            ..base
-        };
-        assert!(!denied.allows_switch());
-        // Preparation exclusions never ran, so even an untyped one advances
-        // locally; pins, budget and uncertain handoff still stop it.
-        for outcome in [FallbackOutcome::Other, denied.outcome] {
-            let local = FallbackPolicy { outcome, ..base };
-            assert!(local.allows_preparation_switch());
-            for refused in [
-                FallbackPolicy {
-                    pinned: true,
-                    ..local
-                },
-                FallbackPolicy {
-                    budget_remaining: false,
-                    ..local
-                },
-                FallbackPolicy {
-                    custody_released: false,
-                    ..local
-                },
-                FallbackPolicy {
-                    handoff: FallbackHandoff::UncertainOrLaunched,
-                    ..local
-                },
-                FallbackPolicy {
-                    handoff: FallbackHandoff::Launched,
-                    read_only: true,
-                    ..local
-                },
-            ] {
-                assert!(!refused.allows_preparation_switch(), "{refused:?}");
-            }
-        }
-        for outcome in [
-            FallbackOutcome::AuthRequired,
-            FallbackOutcome::UsageLimited,
-            FallbackOutcome::ModelUnavailable,
-            FallbackOutcome::AdapterUnavailable,
-            FallbackOutcome::from_exclusion(
-                &provenant_records::RouteExclusionReason::ProviderUpdating,
-            ),
-        ] {
-            assert!(FallbackPolicy { outcome, ..base }.allows_switch());
-        }
-        for outcome in [FallbackOutcome::AuthRequired, FallbackOutcome::UsageLimited] {
-            let launched_reader = FallbackPolicy {
-                outcome,
-                handoff: FallbackHandoff::Launched,
-                read_only: true,
-                custody_released: false,
-                ..base
-            };
-            assert!(!launched_reader.allows_switch());
-            assert!(
-                !FallbackPolicy {
-                    read_only: false,
-                    ..launched_reader
-                }
-                .allows_switch()
-            );
-            assert!(
-                !FallbackPolicy {
-                    budget_remaining: false,
-                    ..launched_reader
-                }
-                .allows_switch()
-            );
-            assert!(
-                !FallbackPolicy {
-                    pinned: true,
-                    ..launched_reader
-                }
-                .allows_switch()
-            );
-            assert!(
-                !FallbackPolicy {
-                    handoff: FallbackHandoff::UncertainOrLaunched,
-                    ..launched_reader
-                }
-                .allows_switch()
-            );
-        }
-        for outcome in [
-            FallbackOutcome::AdapterUnavailable,
-            FallbackOutcome::ModelUnavailable,
-        ] {
-            assert!(
-                !FallbackPolicy {
-                    outcome,
-                    handoff: FallbackHandoff::Launched,
-                    read_only: true,
-                    ..base
-                }
-                .allows_switch()
-            );
-        }
-        for policy in [
-            FallbackPolicy {
-                outcome: FallbackOutcome::Other,
-                ..base
-            },
-            FallbackPolicy {
-                handoff: FallbackHandoff::UncertainOrLaunched,
-                ..base
-            },
-            FallbackPolicy {
-                custody_released: false,
-                ..base
-            },
-            FallbackPolicy {
-                budget_remaining: false,
-                ..base
-            },
-            FallbackPolicy {
-                pinned: true,
-                ..base
-            },
-        ] {
-            assert!(!policy.allows_switch());
         }
     }
 }
