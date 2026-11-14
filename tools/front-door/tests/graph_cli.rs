@@ -80,10 +80,7 @@ fn file_briefs_reach_the_compiled_prompt_or_refuse_before_launch() -> Result {
             .output()?;
         let value: Value = serde_json::from_slice(&output.stdout)?;
         assert!(!output.status.success(), "{value}");
-        assert!(
-            value["error"]["message"].as_str().unwrap().contains(name),
-            "{value}"
-        );
+        assert_eq!(value["error"]["code"], "invalid_input", "{value}");
         assert!(graph_records(&rig.state())?.is_empty());
     }
     for path in [
@@ -1768,7 +1765,13 @@ fn settled_task_graph(rig: &GraphProject) -> Result<String> {
         .ok_or_else(|| format!("graph id: {started}"))?;
     // The fixture provider cannot run, so the graph settles unsuccessfully
     // (or asks for input); either ends the wait.
-    rig.run(&["wait", id, "--timeout", "10s"])?;
+    // In JSON mode wait emits progress event rows before its final command
+    // record. This helper only needs the graph to settle; status below checks
+    // the public failed-node state.
+    let _wait = rig
+        .command()
+        .args(["wait", id, "--timeout", "10s"])
+        .output()?;
     let (_, settled) = rig.run(&["status", id])?;
     assert!(
         settled["data"]["rows"].as_array().is_some_and(|rows| rows

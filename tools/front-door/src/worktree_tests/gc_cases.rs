@@ -1262,7 +1262,8 @@ pub(super) fn gc_collects_a_settled_lane_whose_completion_attempt_failed() -> Re
 pub(super) fn gc_collects_a_fast_forwarded_lane_its_settlement_missed() -> Result {
     use crate::fabric::gc_cleanup::SPAWNED;
     for busy in [true, false] {
-        let fixture = crate::fabric::peer_tests::SettlementFixture::resumed_with_lane_commit()?;
+        let fixture = crate::fabric::peer_tests::SettlementFixture::resumed_with_lane_commit()
+            .map_err(|error| format!("fast-forward fixture creation failed: {error}"))?;
         let rig = &fixture.rig;
         let lane = fixture.worktree.to_str().ok_or("lane path")?;
         publish_upstream(rig, &git(rig, &["-C", lane, "rev-parse", "HEAD"])?)?;
@@ -1273,7 +1274,8 @@ pub(super) fn gc_collects_a_fast_forwarded_lane_its_settlement_missed() -> Resul
                 &fixture.roots,
                 &FreeWorkers,
                 None,
-            )?;
+            )
+            .map_err(|error| format!("busy-branch settlement failed: {error}"))?;
             let request = SPAWNED
                 .replace(Ok(Vec::new()))
                 .map_err(|error| error.to_string())?
@@ -1307,12 +1309,14 @@ pub(super) fn gc_collects_a_fast_forwarded_lane_its_settlement_missed() -> Resul
                 &fixture.roots,
                 &FreeWorkers,
                 None,
-            )?;
+            )
+            .map_err(|error| format!("deferred-branch settlement failed: {error}"))?;
             SPAWNED.set(Ok(Vec::new()));
             assert_eq!(settlement_receipt(&fixture)?["cleanup_deferred"], true);
         }
         assert!(fixture.worktree.exists(), "busy={busy}");
-        let swept = ok(rig, &["gc", "--apply", "--json"])?;
+        let swept = ok(rig, &["gc", "--apply", "--json"])
+            .map_err(|error| format!("fast-forward lane GC sweep failed (busy={busy}): {error}"))?;
         assert!(
             !fixture.worktree.exists(),
             "the sweep must collect a fast-forwarded lane its settlement missed (busy={busy}); gc={swept}; settlement={}",

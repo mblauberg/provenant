@@ -1623,7 +1623,7 @@ fn simultaneous_writer_launches_are_admitted_or_scheduled_for_retry() -> Result 
                 let accepted = node["attempts"][0]["attempt_ref"].is_string();
                 let retry = node["state"] == "running"
                     && node["launch_retry"]["wake_at"].as_str().is_some()
-                    && response["data"]["status"] == "waiting"
+                    && response["status"] == "waiting"
                     && response["data"]["waits"].as_array().is_some_and(|waits| {
                         waits.iter().any(|wait| {
                             wait["node"] == node["id"] && wait["wait"] == "launch_retry"
@@ -3749,7 +3749,7 @@ fn opencode_usage_limit_stops_hanging_provider() -> Result {
         "opencode-hanging-limit",
         json!({
             "id":"provider", "prompt":"free limit then hang", "access":"read_only",
-            "route":{"adapter":"opencode","model":"opencode/glm-5.3-flash-free"}
+            "route":{"adapter":"opencode","model":"opencode/opencode/glm-5.3-flash-free"}
         }),
         "60s",
     )?;

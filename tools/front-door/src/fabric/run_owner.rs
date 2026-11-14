@@ -1461,7 +1461,9 @@ impl BinaryRunOwner<'_> {
                     if cancel.is_cancelled() {
                         return Err(FacadeError::Cancelled);
                     }
-                    if budget.remaining(self.factory.clock.mono_now()).as_micros() == 0 {
+                    if budget.remaining(self.factory.clock.mono_now()).as_micros() == 0
+                        && !(budget.is_nonblocking() && last_attempts.is_none())
+                    {
                         if let Some(attempts) = last_attempts {
                             return Ok(RunResult::Wait {
                                 extra: Default::default(),

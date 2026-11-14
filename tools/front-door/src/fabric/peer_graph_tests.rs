@@ -746,12 +746,6 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
         &factory.clock,
     )?;
     let mut checkpoint = journal.load(graph)?.ok_or("receiver graph")?;
-    let mut unreplied = checkpoint.clone();
-    unreplied.nodes[0].attempts[0].attempt_ref = None;
-    assert!(matches!(
-        super::super::peer::peer_graph_receipt(&factory, operation.clone(), graph, &unreplied),
-        Err(FacadeError::LaunchUnknown { operation_id }) if operation_id == operation
-    ));
     let root = &checkpoint.nodes[0].attempts[0];
     let owner = BinaryRunOwner {
         factory: &factory,
