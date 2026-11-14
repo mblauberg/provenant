@@ -520,15 +520,20 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
                 entry.path.clone()
             }
         })
-        .chain(report.removals.iter().filter_map(|record| {
-            // A candidate the expired budget could not observe is kept, with
-            // its cause recorded, rather than given an output entry.
-            matches!(
-                record.outcome,
-                provenant_records::custody::RemovalOutcome::Kept { .. }
-            )
-            .then(|| PathBuf::from(&record.subject.id))
-        }))
+        // A candidate the expired budget could not observe is kept, with its
+        // cause recorded, rather than given an output entry.
+        .chain(
+            report
+                .removals
+                .iter()
+                .filter(|record| {
+                    matches!(
+                        record.outcome,
+                        provenant_records::custody::RemovalOutcome::Kept { .. }
+                    )
+                })
+                .map(|record| PathBuf::from(&record.subject.id)),
+        )
         .collect::<std::collections::BTreeSet<_>>();
     let expected = (0..40)
         .map(|index| fixture.root.join(format!("foreign-{index}")))
