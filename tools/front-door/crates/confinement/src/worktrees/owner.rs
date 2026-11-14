@@ -482,7 +482,7 @@ pub fn prune_owned(
         entry,
         head,
         cancel,
-        &|| {
+        &|_census: bool| {
             if let Some(evidence) = evidence {
                 validate_removal_evidence(context, head, evidence, &references, cancel)?;
             }

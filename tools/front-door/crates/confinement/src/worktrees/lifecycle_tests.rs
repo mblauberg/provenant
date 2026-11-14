@@ -636,6 +636,25 @@ pub(super) fn gc_owned_lane(
         .ok_or_else(|| "missing GC fixture worktree".into())
 }
 
+/// Commit in `lane`, merge its branch into the default branch, and relist it.
+fn merge_lane(
+    fixture: &Fixture,
+    context: &WorktreeContext<'_>,
+    lane: &WorktreeInfo,
+    name: &str,
+) -> Result<WorktreeInfo, Box<dyn Error>> {
+    run_in_worktree(
+        fixture,
+        &lane.path,
+        &["commit", "--allow-empty", "-m", name],
+    )?;
+    fixture.run(&["merge", "--no-ff", name, "-m", "merge GC fixture"])?;
+    list(context, &cancel())?
+        .into_iter()
+        .find(|listed| listed.path == lane.path)
+        .ok_or_else(|| "missing GC fixture worktree".into())
+}
+
 /// A custody-aware merged lane: owned as `gc_owned_lane`, then committed and
 /// merged into the default branch.
 pub(super) fn gc_merged_worktree(
@@ -643,18 +662,26 @@ pub(super) fn gc_merged_worktree(
     context: &WorktreeContext<'_>,
     name: &str,
 ) -> Result<WorktreeInfo, Box<dyn Error>> {
-    let created = gc_owned_lane(test, context, name)?;
-    run_in_worktree(
-        test.fixture,
-        &created.path,
-        &["commit", "--allow-empty", "-m", name],
+    let lane = gc_owned_lane(test, context, name)?;
+    merge_lane(test.fixture, context, &lane, name)
+}
+
+/// A merged lane with no `WorktreeOwner`, as a checkout Provenant did not
+/// create: tests of foreign and unknown-writer handling use this.
+pub(super) fn gc_merged_unowned_worktree(
+    fixture: &Fixture,
+    context: &WorktreeContext<'_>,
+    name: &str,
+) -> Result<WorktreeInfo, Box<dyn Error>> {
+    let created = create(
+        context,
+        WorktreeCreate {
+            branch: name.to_owned(),
+            base: None,
+        },
+        &cancel(),
     )?;
-    test.fixture
-        .run(&["merge", "--no-ff", name, "-m", "merge GC fixture"])?;
-    list(context, &cancel())?
-        .into_iter()
-        .find(|lane| lane.path == created.path)
-        .ok_or_else(|| "missing GC fixture worktree".into())
+    merge_lane(fixture, context, &created, name)
 }
 
 #[test]

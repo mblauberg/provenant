@@ -1058,9 +1058,17 @@ fn gc_census_never_runs_under_the_repository_lock() -> Result<(), Box<dyn Error>
         let fixture = Fixture::new()?;
         let test_context = TestContext::new(&fixture)?;
         let mut context = test_context.context();
-        let mut lane = gc_merged_worktree(&test_context, &context, "gc-census-lock")?;
+        let foreign = scenario.starts_with("foreign");
+        // A foreign lane has no owner; a managed one is owned and seeded.
+        let mut lane = if foreign {
+            gc_merged_unowned_worktree(&fixture, &context, "gc-census-lock")?
+        } else {
+            gc_merged_worktree(&test_context, &context, "gc-census-lock")?
+        };
         let retirement = HostRetirementFixture::new(&test_context)?;
-        retirement.seed_lane(&context, &lane)?;
+        if !foreign {
+            retirement.seed_lane(&context, &lane)?;
+        }
         let upstream = fixture.head()?;
         let evidence = gc_landing_evidence(&fixture, upstream)?;
         let probe = LockProbeWorkers {
@@ -1068,7 +1076,6 @@ fn gc_census_never_runs_under_the_repository_lock() -> Result<(), Box<dyn Error>
             repository_held: Default::default(),
         };
         context.workers = &probe;
-        let foreign = scenario.starts_with("foreign");
         if foreign {
             lane.occupancy =
                 Occupancy::custody_unknown(lane.path.clone(), "fixture unknown writer");

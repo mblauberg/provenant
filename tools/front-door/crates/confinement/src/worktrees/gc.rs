@@ -1456,7 +1456,7 @@ fn collect_impl(
                 None
             };
             drop(locked);
-            let eligible = || -> Result<(), WorktreeError> {
+            let eligible = |census: bool| -> Result<(), WorktreeError> {
                 if let SelectedRetirement::Subsumed(evidence) = &action {
                     validate_removal_evidence(context, lane.head, evidence, &refs, cancel)?;
                     if let Some(branch) = branch.as_ref() {
@@ -1481,9 +1481,14 @@ fn collect_impl(
                             detail,
                         })?;
                 }
-                census_free(context, &lane.path)
+                // A census is slow: never under the repository lock.
+                if census {
+                    census_free(context, &lane.path)
+                } else {
+                    Ok(())
+                }
             };
-            eligible()?;
+            eligible(true)?;
             if !dry {
                 let port = policy
                     .retirement_port

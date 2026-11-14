@@ -568,11 +568,11 @@ fn gc_preview_and_apply_both_retain_a_managed_tree_with_an_unknown_census()
 }
 
 #[test]
-fn gc_dry_run_retains_merged_worktree_with_unknown_writer() -> Result<(), Box<dyn Error>> {
+fn gc_dry_run_keeps_a_merged_foreign_worktree_when_foreign_cleanup_is_off() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test_context = TestContext::new(&fixture)?;
     let context = test_context.context();
-    let lane = gc_merged_worktree(&test_context, &context, "gc-dry-unknown")?;
+    let lane = gc_merged_unowned_worktree(&fixture, &context, "gc-dry-unknown")?;
     let report = collect(
         &context,
         &[lane],
@@ -595,12 +595,15 @@ fn gc_dry_run_retains_merged_worktree_with_unknown_writer() -> Result<(), Box<dy
         },
         &cancel(),
     )?;
-    assert_eq!(report.worktrees.retained.len(), 1);
-    assert_eq!(
-        report.worktrees.retained[0].reason,
-        RetainReason::UnknownWriter
-    );
+    // A merged checkout Provenant did not create is foreign: with foreign
+    // cleanup off it is kept and reported as such, never removed.
     assert!(report.worktrees.removed.is_empty());
+    assert!(report.removals.is_empty());
+    let [candidate] = report.candidates.as_slice() else {
+        return Err("expected exactly one candidate".into());
+    };
+    assert_eq!((candidate.class, candidate.action), ("foreign", "kept"));
+    assert!(candidate.path.is_dir());
     Ok(())
 }
 

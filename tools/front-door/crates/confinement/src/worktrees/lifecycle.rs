@@ -1025,7 +1025,7 @@ pub(super) fn remove_tree_when_before_delete(
     entry: &GitWorktree,
     expected_head: GitOid,
     cancel: &CancelToken,
-    eligible: &dyn Fn() -> Result<(), WorktreeError>,
+    eligible: &dyn Fn(bool) -> Result<(), WorktreeError>,
     output: Option<&provenant_config::ProjectGcSettings>,
     repository: Repository,
     before_delete: impl FnOnce(
@@ -1050,7 +1050,7 @@ pub(super) fn remove_tree_when_before_delete(
         entry,
         expected_head,
     )?;
-    eligible()?;
+    eligible(true)?;
     let prepared =
         worktree_dirty_at(context, locked.verified.repo(), cancel)? == WorktreeCondition::Ignored;
     if prepared && !matches!(repository, Repository::Discard) {
@@ -1076,7 +1076,7 @@ pub(super) fn remove_tree_when_before_delete(
         Repository::Remove | Repository::Discard => {
             // Any slow census happens before the repository lock is taken.
             if prepared {
-                eligible()?;
+                eligible(true)?;
             }
             Some(repository_lock(context, LockMode::Exclusive, cancel)?)
         }
@@ -1087,7 +1087,8 @@ pub(super) fn remove_tree_when_before_delete(
         entry,
         expected_head,
     )?;
-    eligible()?;
+    // The repository lock may be ours: only the cheap fence reruns under it.
+    eligible(repository_guard.is_none())?;
     let (_submodule_guards, submodules) = hold_submodules(context, locked.verified.repo(), cancel)?;
     let cleanliness = worktree_cleanliness_at(context, locked.verified.repo(), cancel)?;
     let discard = matches!(repository, Repository::Discard);
@@ -1546,7 +1547,7 @@ pub(super) fn remove_merged_candidate(
                 return Ok(());
             }
             let canonical = canonicalize(&entry.path)?;
-            let eligible = || {
+            let eligible = |_census: bool| {
                 let refs = retained_refs(context, Some(branch), None, &[], cancel)?;
                 if matches!(
                     removal_evidence(context, tip, &refs, cancel)?,
@@ -1894,7 +1895,7 @@ fn remove_with_owner(
                     bool,
                     Option<provenant_records::custody::LandedEvidence>,
                 )>| {
-                    let eligible = || {
+                    let eligible = |_census: bool| {
                         if !discard {
                             let refs =
                                 retained_refs(context, entry.branch.as_ref(), None, &[], cancel)?;
