@@ -1,10 +1,9 @@
-//! Publication checks use the same byte rules for files, raw blobs and commits.
+//! Publication checks validate Git evidence and scan the built executable for sensitive bytes.
 use super::{CheckError, GitContext, Scan, WorkingFile, checked_bytes, index_records, read_file};
 use provenant_confinement::utility::{GitObjectKind, GitRead};
 use provenant_core::GitOid;
 use provenant_os::exec::Termination;
-use provenant_records::CanonicalV1;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const MAX_FILE: u64 = 5 * 1024 * 1024;
@@ -17,79 +16,6 @@ const PUBLIC: &[&str] = &[
     "docs/worktrees.md",
 ];
 const LEGAL: &[&str] = &["LICENSE"];
-const FIXTURE_PATHS: &str = include_str!("release-fixtures.txt");
-
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct Fixture {
-    path: String,
-    rule: &'static str,
-    digest: [u8; 8],
-}
-
-#[derive(Default)]
-struct FixtureUse {
-    current_matches: BTreeSet<Fixture>,
-    // Only entries for tracked paths can be judged stale; other repositories
-    // scanned by `check release` do not contain this project's fixtures.
-    tracked: BTreeSet<String>,
-    suppressed: usize,
-}
-
-fn fixtures() -> Result<Vec<Fixture>, CheckError> {
-    let mut fixtures = Vec::new();
-    for line in FIXTURE_PATHS.lines().map(str::trim) {
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let mut fields = line.split_ascii_whitespace();
-        let path = fields
-            .next()
-            .ok_or(CheckError::Evidence("malformed release fixture entry"))?;
-        valid_path(path)?;
-        let rule = fields
-            .next()
-            .and_then(|value| RULES.iter().find(|(id, _, _)| *id == value).map(|r| r.0))
-            .ok_or(CheckError::Evidence("malformed release fixture rule"))?;
-        let text = fields
-            .next()
-            .ok_or(CheckError::Evidence("malformed release fixture digest"))?;
-        if text.len() != 16
-            || !text
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            || fields.next().is_some()
-        {
-            return Err(CheckError::Evidence("malformed release fixture digest"));
-        }
-        let mut digest = [0; 8];
-        for (index, byte) in digest.iter_mut().enumerate() {
-            let pair = text
-                .as_bytes()
-                .get(index * 2..index * 2 + 2)
-                .ok_or(CheckError::Evidence("malformed release fixture digest"))?;
-            *byte = u8::from_str_radix(utf8(pair)?, 16)
-                .map_err(|_| CheckError::Evidence("malformed release fixture digest"))?;
-        }
-        fixtures.push(Fixture {
-            path: path.to_owned(),
-            rule,
-            digest,
-        });
-    }
-    Ok(fixtures)
-}
-
-fn line_digest(line: &[u8]) -> [u8; 8] {
-    let digest = CanonicalV1::file_digest(line);
-    let mut prefix = [0; 8];
-    prefix.copy_from_slice(&digest.bytes()[..8]);
-    prefix
-}
-
-fn digest_hex(digest: &[u8; 8]) -> String {
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 pub(super) fn inspect(
     git: &GitContext<'_>,
     range: Option<(GitOid, GitOid)>,
@@ -164,35 +90,16 @@ pub(super) fn inspect(
             )?;
         }
     }
-    let fixtures = fixtures()?;
-    let mut fixture_use = FixtureUse::default();
     for (path, mode) in tracked {
-        fixture_use.tracked.insert(path.clone());
         path_rules(&mut scan, &path)?;
         let mut symlink = mode == "120000";
         match read_file(git.repo.root_dir(), Path::new(&path), MAX_FILE)? {
             WorkingFile::Bytes(bytes) => {
                 scan.note(format!("release:working:{path}"), &bytes);
-                emit_path_matches(
-                    &mut scan,
-                    &path,
-                    &byte_matches(&bytes)?,
-                    &fixtures,
-                    &mut fixture_use,
-                    true,
-                )?;
             }
             WorkingFile::Symlink(target) => {
                 symlink = true;
                 scan.note(format!("release:working-symlink:{path}"), &target);
-                emit_path_matches(
-                    &mut scan,
-                    &path,
-                    &byte_matches(&target)?,
-                    &fixtures,
-                    &mut fixture_use,
-                    true,
-                )?;
             }
             WorkingFile::Missing => {
                 let Some((rule, message)) = required_file(&path) else {
@@ -212,7 +119,7 @@ pub(super) fn inspect(
         }
     }
     let mut seen_commits = BTreeSet::new();
-    let mut blobs = HashMap::<GitOid, Vec<Match>>::new();
+    let mut seen_blobs = BTreeSet::new();
     for commit in commits {
         if !seen_commits.insert(commit.to_string()) {
             continue;
@@ -226,7 +133,6 @@ pub(super) fn inspect(
         )?;
         scan.note(format!("release:commit:{commit}"), &raw);
         let commit_path = format!("@commit/{commit}");
-        emit_matches(&mut scan, &commit_path, &byte_matches(&raw)?)?;
         emit_matches(&mut scan, &commit_path, &identity_matches(&raw)?)?;
         let bytes = release_read(git, GitRead::AllTreeEntries { oid: commit })?;
         scan.note(format!("release:tree:{commit}"), &bytes);
@@ -269,7 +175,7 @@ pub(super) fn inspect(
             if entry.size > MAX_FILE {
                 return Err(CheckError::Evidence("publication blob exceeds 5 MiB"));
             }
-            if let std::collections::hash_map::Entry::Vacant(slot) = blobs.entry(entry.oid) {
+            if seen_blobs.insert(entry.oid) {
                 let raw = release_read(
                     git,
                     GitRead::RawObject {
@@ -283,22 +189,16 @@ pub(super) fn inspect(
                     ));
                 }
                 scan.note(format!("release:blob:{}", entry.oid), &raw);
-                slot.insert(byte_matches(&raw)?);
-            }
-            if let Some(matches) = blobs.get(&entry.oid) {
-                emit_path_matches(
-                    &mut scan,
-                    &entry.path,
-                    matches,
-                    &fixtures,
-                    &mut fixture_use,
-                    false,
-                )?;
             }
         }
     }
-    emit_stale_fixtures(&mut scan, &fixtures, &fixture_use)?;
-    note_fixture_suppressions(&mut scan, fixture_use.suppressed);
+    let artifact = std::env::current_exe()
+        .map_err(|_| CheckError::Evidence("running artifact path is unreadable"))?;
+    let bytes = std::fs::read(artifact)
+        .map_err(|_| CheckError::Evidence("running artifact bytes are unreadable"))?;
+    scan.note("release:artifact", &bytes);
+    let matches = byte_matches(&bytes);
+    emit_matches(&mut scan, "@artifact/provenant", &matches)?;
     scan.findings.sort_by(|a, b| {
         (&a.rule, a.path.as_path_text(), a.line, &a.message).cmp(&(
             &b.rule,
@@ -429,7 +329,7 @@ fn path_rules(scan: &mut Scan, path: &str) -> Result<(), CheckError> {
     Ok(())
 }
 
-type Match = (&'static str, usize, &'static str, Option<[u8; 8]>);
+type Match = (&'static str, usize, &'static str);
 type ByteRule = (&'static str, &'static str, fn(&[u8]) -> bool);
 const RULES: &[ByteRule] = &[
     (
@@ -451,47 +351,6 @@ const RULES: &[ByteRule] = &[
     ),
     ("release.aws-key", "possible AWS access key", aws_key),
 ];
-fn byte_matches(bytes: &[u8]) -> Result<Vec<Match>, CheckError> {
-    if bytes.len() as u64 > MAX_FILE {
-        return Err(CheckError::Evidence("release content exceeds 5 MiB"));
-    }
-    // Rules match bytes, so binary content is scanned rather than refused.
-    let mut matches = Vec::new();
-    for (line, bytes) in bytes.split(|b| *b == b'\n').enumerate() {
-        for &(id, message, matches_rule) in RULES {
-            if matches_rule(bytes) {
-                matches.push((id, line + 1, message, Some(line_digest(bytes))));
-            }
-        }
-    }
-    Ok(matches)
-}
-fn identity_matches(raw: &[u8]) -> Result<Vec<Match>, CheckError> {
-    let text = utf8(raw)?;
-    let mut matches = Vec::new();
-    for (line_number, line) in text.lines().take_while(|line| !line.is_empty()).enumerate() {
-        let (role, identity) = if let Some(identity) = line.strip_prefix("author ") {
-            ("author", identity)
-        } else if let Some(identity) = line.strip_prefix("committer ") {
-            ("committer", identity)
-        } else {
-            continue;
-        };
-        if identity_email(identity).is_some_and(personal_email) {
-            matches.push((
-                "release.personal-email",
-                line_number + 1,
-                if role == "author" {
-                    "commit author exposes a personal email"
-                } else {
-                    "commit committer exposes a personal email"
-                },
-                None,
-            ));
-        }
-    }
-    Ok(matches)
-}
 fn identity_email(identity: &str) -> Option<&str> {
     let open = identity.rfind('<')?;
     let close = identity[open + 1..].find('>')? + open + 1;
@@ -513,67 +372,49 @@ fn personal_email(email: &str) -> bool {
             })
         })
 }
+fn identity_matches(raw: &[u8]) -> Result<Vec<Match>, CheckError> {
+    let text = utf8(raw)?;
+    let mut matches = Vec::new();
+    for (line_number, line) in text.lines().take_while(|line| !line.is_empty()).enumerate() {
+        let (role, identity) = if let Some(identity) = line.strip_prefix("author ") {
+            ("author", identity)
+        } else if let Some(identity) = line.strip_prefix("committer ") {
+            ("committer", identity)
+        } else {
+            continue;
+        };
+        if identity_email(identity).is_some_and(personal_email) {
+            matches.push((
+                "release.personal-email",
+                line_number + 1,
+                if role == "author" {
+                    "commit author exposes a personal email"
+                } else {
+                    "commit committer exposes a personal email"
+                },
+            ));
+        }
+    }
+    Ok(matches)
+}
 fn emit_matches(scan: &mut Scan, path: &str, matches: &[Match]) -> Result<(), CheckError> {
-    for &(rule, line, message, _) in matches {
+    for &(rule, line, message) in matches {
         scan.finding(rule, Path::new(path), line, message)?;
     }
     Ok(())
 }
-fn emit_path_matches(
-    scan: &mut Scan,
-    path: &str,
-    matches: &[Match],
-    fixtures: &[Fixture],
-    use_state: &mut FixtureUse,
-    current: bool,
-) -> Result<(), CheckError> {
-    for &(rule, line, message, digest) in matches {
-        if let Some(digest) = digest {
-            let fixture = Fixture {
-                path: path.to_owned(),
-                rule,
-                digest,
-            };
-            if fixtures.contains(&fixture) {
-                use_state.suppressed += 1;
-                if current {
-                    use_state.current_matches.insert(fixture);
-                }
-                continue;
+fn byte_matches(bytes: &[u8]) -> Vec<Match> {
+    let mut matches = Vec::new();
+    for line in bytes.split(|b| *b == b'\n') {
+        for &(id, message, matches_rule) in RULES {
+            if matches_rule(line) && !matches.iter().any(|(rule, _, _)| *rule == id) {
+                // Artifacts have no meaningful source line; report one finding
+                // per rule against the artifact itself.
+                matches.push((id, 1, message));
             }
         }
-        scan.finding(rule, Path::new(path), line, message)?;
     }
-    Ok(())
-}
-fn stale_fixtures<'a>(
-    fixtures: &'a [Fixture],
-    usage: &FixtureUse,
-) -> impl Iterator<Item = &'a Fixture> {
-    fixtures.iter().filter(|fixture| {
-        usage.tracked.contains(&fixture.path) && !usage.current_matches.contains(*fixture)
-    })
-}
-fn emit_stale_fixtures(
-    scan: &mut Scan,
-    fixtures: &[Fixture],
-    usage: &FixtureUse,
-) -> Result<(), CheckError> {
-    for fixture in stale_fixtures(fixtures, usage) {
-        scan.finding(
-            "release.fixture-stale",
-            Path::new(&fixture.path),
-            1,
-            &format!(
-                "reviewed release fixture entry {} matches no current-tree finding",
-                digest_hex(&fixture.digest)
-            ),
-        )?;
-    }
-    Ok(())
-}
-fn note_fixture_suppressions(scan: &mut Scan, count: usize) {
-    scan.note(format!("release:fixture-suppressions:{count}"), b"");
+    matches
 }
 fn contains(bytes: &[u8], needle: &[u8]) -> bool {
     bytes.windows(needle.len()).any(|part| part == needle)
@@ -649,144 +490,8 @@ fn aws_key(bytes: &[u8]) -> bool {
 mod tests {
     use super::*;
 
-    // Built at runtime so this source file holds no token-shaped literal.
-    fn fake_token(fill: u8) -> Vec<u8> {
-        [b"ghp_".as_slice(), &[fill; 20]].concat()
-    }
-
     #[test]
-    fn reviewed_literal_is_suppressed_but_other_line_at_same_path_is_reported() {
-        let path = "fixtures/example.txt";
-        let reviewed = fake_token(b'a');
-        let fixture = Fixture {
-            path: path.to_owned(),
-            rule: "release.github-token",
-            digest: line_digest(&reviewed),
-        };
-        let bytes = [reviewed.as_slice(), b"\n", &fake_token(b'b')].concat();
-        let matches = byte_matches(&bytes).unwrap();
-        let mut scan = Scan {
-            findings: Vec::new(),
-            evidence: Vec::new(),
-        };
-        let mut usage = FixtureUse::default();
-        emit_path_matches(
-            &mut scan,
-            path,
-            &matches,
-            std::slice::from_ref(&fixture),
-            &mut usage,
-            true,
-        )
-        .unwrap();
-        assert_eq!(scan.findings.len(), 1);
-        assert_eq!(scan.findings[0].rule, "release.github-token");
-        assert_eq!(scan.findings[0].line, 2);
-        assert_eq!(usage.suppressed, 1);
-        assert!(usage.current_matches.contains(&fixture));
-    }
-
-    #[test]
-    fn different_history_token_at_a_listed_path_is_reported() {
-        let path = "fixtures/example.txt";
-        let reviewed = fake_token(b'a');
-        let other = fake_token(b'b');
-        let fixtures = [Fixture {
-            path: path.to_owned(),
-            rule: "release.github-token",
-            digest: line_digest(&reviewed),
-        }];
-        let mut scan = Scan {
-            findings: Vec::new(),
-            evidence: Vec::new(),
-        };
-        let mut usage = FixtureUse::default();
-        emit_path_matches(
-            &mut scan,
-            path,
-            &byte_matches(&other).unwrap(),
-            &fixtures,
-            &mut usage,
-            false,
-        )
-        .unwrap();
-        assert_eq!(scan.findings.len(), 1);
-        assert_eq!(usage.suppressed, 0);
-    }
-
-    #[test]
-    fn stale_fixture_entry_is_reported_and_suppression_count_is_noted() {
-        let fixture = Fixture {
-            path: "fixtures/stale.txt".to_owned(),
-            rule: "release.github-token",
-            digest: line_digest(&fake_token(b'a')),
-        };
-        let mut usage = FixtureUse::default();
-        let mut scan = Scan {
-            findings: Vec::new(),
-            evidence: Vec::new(),
-        };
-        emit_stale_fixtures(&mut scan, std::slice::from_ref(&fixture), &usage).unwrap();
-        assert!(scan.findings.is_empty(), "untracked paths are not judged");
-        usage.tracked.insert(fixture.path.clone());
-        emit_stale_fixtures(&mut scan, std::slice::from_ref(&fixture), &usage).unwrap();
-        assert_eq!(scan.findings[0].rule, "release.fixture-stale");
-        note_fixture_suppressions(&mut scan, 3);
-        assert_eq!(scan.evidence[0].0, "release:fixture-suppressions:3");
-    }
-
-    #[test]
-    fn fixture_allowlist_reproduces_from_current_reviewed_paths() {
-        let listed = fixtures().unwrap();
-        let paths = listed
-            .iter()
-            .map(|fixture| fixture.path.as_str())
-            .collect::<BTreeSet<_>>();
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
-        let mut generated = BTreeSet::new();
-        for path in paths {
-            let bytes = match std::fs::read(root.join(path)) {
-                Ok(bytes) => bytes,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => panic!("failed to read listed path {path}: {error}"),
-            };
-            for (rule, _, _, digest) in byte_matches(&bytes).unwrap() {
-                let Some(digest) = digest else { continue };
-                generated.insert(Fixture {
-                    path: path.to_owned(),
-                    rule,
-                    digest,
-                });
-            }
-        }
-        // A reviewed edit to a listed path changes its digests; bless rewrites
-        // them. New paths still need a reviewed entry before blessing.
-        if std::env::var_os("PROVENANT_BLESS_RELEASE_FIXTURES").is_some() {
-            let mut text = FIXTURE_PATHS
-                .lines()
-                .take_while(|line| line.starts_with('#'))
-                .map(|line| format!("{line}\n"))
-                .collect::<String>();
-            for fixture in &generated {
-                let digest = fixture
-                    .digest
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>();
-                text.push_str(&format!("{} {} {digest}\n", fixture.path, fixture.rule));
-            }
-            let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/check/release-fixtures.txt");
-            std::fs::write(file, text).unwrap();
-            return;
-        }
-        assert!(
-            generated.is_subset(&listed.into_iter().collect::<BTreeSet<_>>()),
-            "after reviewing the change, rerun with PROVENANT_BLESS_RELEASE_FIXTURES=1"
-        );
-    }
-
-    #[test]
-    fn registry_checks_the_same_raw_bytes_for_every_source() {
+    fn byte_rules_match_sensitive_values_in_binary_data() {
         let input = [
             b"note\n/Users/".as_slice(),
             b"person/private\n",
@@ -794,23 +499,15 @@ mod tests {
             &[b'a'; 20],
         ]
         .concat();
-        let matches = byte_matches(&input).unwrap();
-        assert!(
-            matches
-                .iter()
-                .any(|m| m.0 == "release.home-path" && m.1 == 2)
-        );
-        assert!(
-            matches
-                .iter()
-                .any(|m| m.0 == "release.github-token" && m.1 == 3)
-        );
+        let matches = byte_matches(&input);
+        assert!(matches.iter().any(|m| m.0 == "release.home-path"));
+        assert!(matches.iter().any(|m| m.0 == "release.github-token"));
         assert!(!github_token(b"ghp_too_short"));
         assert!(!home_path(b"/home/"));
         assert!(!home_path(b"(subpath \"/fixture/home/.claude/projects\")"));
         assert!(home_path(b"(subpath \"/home/person/.claude\")"));
         assert!(home_path(b"/Users/person/x"));
-        assert!(byte_matches(&[0xff]).unwrap().is_empty());
+        assert!(byte_matches(&[0xff]).is_empty());
         let binary = [
             &[0x89, b'P', b'N', b'G', 0xff, b'\n'][..],
             b"ghp_",
@@ -819,9 +516,8 @@ mod tests {
         .concat();
         assert!(
             byte_matches(&binary)
-                .unwrap()
                 .iter()
-                .any(|m| m.0 == "release.github-token" && m.1 == 2)
+                .any(|m| m.0 == "release.github-token")
         );
     }
     #[test]
@@ -848,8 +544,7 @@ mod tests {
             (
                 "release.personal-email",
                 2,
-                "commit author exposes a personal email",
-                None
+                "commit author exposes a personal email"
             )
         );
         assert_eq!(
@@ -857,8 +552,7 @@ mod tests {
             (
                 "release.personal-email",
                 3,
-                "commit committer exposes a personal email",
-                None
+                "commit committer exposes a personal email"
             )
         );
         for email in [

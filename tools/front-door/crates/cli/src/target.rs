@@ -11,9 +11,6 @@ use provenant_records::work_key::{NODE_ID_BYTES, valid_node};
 /// Longest graph name in bytes.
 pub const NAME_BYTES: usize = 48;
 
-/// Spellings that earlier versions accepted as a target prefix.
-const LEGACY_PREFIXES: [&str; 5] = ["lane", "graph", "run", "operation", "land"];
-
 /// One parsed target: a graph, optionally narrowed to a node and an attempt.
 /// An attempt only has meaning with a node, so `Display` omits it otherwise.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,10 +26,6 @@ pub struct Target {
 pub enum TargetError {
     #[error("empty target; use NAME[/NODE[#N]]")]
     Empty,
-    #[error("the {prefix}: prefix is removed; use NAME[/NODE[#N]]")]
-    LegacyPrefix { prefix: String },
-    #[error("ids are no longer targets; use the graph NAME, as in NAME[/NODE[#N]]")]
-    LegacyId,
     #[error("a name starts with a lowercase letter; use NAME[/NODE[#N]]")]
     NameStart,
     #[error("a name has lowercase letters, digits and hyphens only; use NAME[/NODE[#N]]")]
@@ -62,19 +55,9 @@ impl Target {
         if spelling.is_empty() {
             return Err(TargetError::Empty);
         }
-        if let Some((prefix, _)) = spelling.split_once(':')
-            && LEGACY_PREFIXES.contains(&prefix)
-        {
-            return Err(TargetError::LegacyPrefix {
-                prefix: prefix.to_owned(),
-            });
-        }
         let mut segments = spelling.split('/');
         let head = segments.next().unwrap_or_default();
         let node_part = segments.next();
-        if check_name(head).is_err() && is_legacy_id(head) {
-            return Err(TargetError::LegacyId);
-        }
         if segments.next().is_some() {
             return Err(TargetError::TooManySegments);
         }
@@ -122,16 +105,6 @@ impl fmt::Display for Target {
         }
         Ok(())
     }
-}
-
-/// A hexadecimal id or prefix. A name starts with a letter, so a segment that
-/// starts with a digit and is all hex cannot be a name. Pure digits are left to
-/// the name check: they read as a number, not an id.
-fn is_legacy_id(segment: &str) -> bool {
-    let hex = !segment.is_empty() && segment.bytes().all(|byte| byte.is_ascii_hexdigit());
-    hex && ((segment.as_bytes()[0].is_ascii_digit()
-        && !segment.bytes().all(|b| b.is_ascii_digit()))
-        || segment.len() == 32 && segment.bytes().any(|byte| byte.is_ascii_digit()))
 }
 
 fn check_name(name: &str) -> Result<(), TargetError> {
@@ -443,35 +416,6 @@ mod tests {
         ];
         for (spelling, expected) in cases {
             assert_eq!(Target::parse(spelling), Err(expected), "{spelling:?}");
-        }
-    }
-
-    #[test]
-    fn refuses_removed_spellings() {
-        for prefix in ["lane", "graph", "run", "operation", "land"] {
-            for rest in ["abc", "42", "fix/review"] {
-                assert_eq!(
-                    Target::parse(&format!("{prefix}:{rest}")),
-                    Err(TargetError::LegacyPrefix {
-                        prefix: prefix.into()
-                    }),
-                );
-            }
-        }
-        let attempt_id = "0123456789abcdef0123456789abcdef";
-        for spelling in [
-            attempt_id,
-            "3f2a9c",
-            "1e",
-            &format!("{attempt_id}/{attempt_id}"),
-            &format!("{attempt_id}/task/{attempt_id}"),
-            "3f2a9c/review",
-        ] {
-            assert_eq!(
-                Target::parse(spelling),
-                Err(TargetError::LegacyId),
-                "{spelling}"
-            );
         }
     }
 

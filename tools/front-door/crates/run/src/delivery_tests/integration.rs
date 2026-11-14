@@ -377,8 +377,10 @@ fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
     run(&git_dir, &["push", "-q", "origin", "HEAD:refs/heads/main"])?;
     let expected = run(&git_dir, &["rev-parse", "HEAD"])?;
     run(&git_dir, &["update-ref", "-d", "refs/remotes/origin/main"])?;
+    let custody_project =
+        registered_writer_project_id(&project, &home, &root.join("checkout"), &root.join("state"))?;
     let writer = WriterRequest {
-        extra: Default::default(),
+        extra: writer_custody_extra(custody_project),
         project: project.clone(),
         worktree: project.clone(),
     };

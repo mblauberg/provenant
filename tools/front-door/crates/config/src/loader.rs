@@ -1271,14 +1271,31 @@ fn repair_semantic(
 
 fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
     let key: String = issue.location.key_path.chars().take(256).collect();
+    if issue.rule == "unknown_key"
+        && let Some(replacement) = crate::removed::config_key_replacement(&key)
+    {
+        return Ok(Finding {
+            rule: issue.rule.into(),
+            path: user_path()?,
+            line: issue.location.line,
+            message: format!("{key}: removed setting; {replacement}"),
+        });
+    }
+    if let Some(source) = &issue.source
+        && let Some(replacement) = crate::removed::diagnostic_code_replacement(source.code)
+    {
+        return Ok(Finding {
+            rule: issue.rule.into(),
+            path: user_path()?,
+            line: issue.location.line,
+            message: format!("{key}: {replacement}"),
+        });
+    }
     Ok(Finding {
         rule: issue.rule.into(),
         path: user_path()?,
         line: issue.location.line,
         message: match &issue.source {
-            _ if issue.rule == "unknown_key" && key == "domains.fabric.pipelines" => {
-                "domains.fabric.pipelines: pipeline settings, including domains.fabric.pipelines.experiment, have been removed; delete the stale configuration table".into()
-            }
             Some(source)
                 if source.code == "unknown_fallback"
                     || source.code == "unsupported_fallback_effort" =>
@@ -1287,24 +1304,6 @@ fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
                     "{key}: invalid model fallback ({}); effective fallback checked after overlays",
                     source.code
                 )
-            }
-            Some(source) if source.code.starts_with("moved_to_schedule.") => {
-                let replacement = source.code.trim_start_matches("moved_to_schedule.");
-                format!(
-                    "{key}: ignored invalid configuration ({}: {}); replace the retired key with schedule.{replacement}",
-                    issue.rule, source.code
-                )
-            }
-            Some(source) if source.code.starts_with("retired.") => {
-                return Ok(Finding {
-                    rule: issue.rule.into(),
-                    path: user_path()?,
-                    line: issue.location.line,
-                    message: format!(
-                        "{key}: ignored invalid configuration ({}); run `provenant config check` and edit the reported key",
-                        source.code
-                    ),
-                });
             }
             Some(source) => format!(
                 "{key}: ignored invalid configuration ({}: {})",
@@ -1324,18 +1323,6 @@ fn knob_message(key: &str, rule: &str) -> String {
             None => "using the default".to_owned(),
         };
         return format!("{key}: invalid value ({rule}); {fallback}");
-    }
-    if matches!(
-        name,
-        "domains.routing.capacity_cooldown_seconds"
-            | "domains.routing.settlement_retries"
-            | "domains.routing.capacity_retry_seconds"
-            | "domains.routing.capacity_retry_max_seconds"
-            | "domains.routing.retry_delay_ceiling_seconds"
-    ) {
-        return format!(
-            "{key}: retired setting; move its timing value under [domains.routing.schedule] or delete it"
-        );
     }
     match crate::knobs::nearest_knobs(name).as_slice() {
         [] => format!(
@@ -2501,30 +2488,13 @@ mod warning_tests {
         inputs.state_dir = Some(temp.path().join("state"));
         std::fs::create_dir(inputs.state_dir.as_ref().ok_or("state")?)?;
         let roots = inputs.resolve(&Resolver)?;
-        let issue = Issue {
-            location: location(
-                "",
-                0,
-                &Origin::Compiled {
-                    profile: Profile::Balanced,
-                },
-                "domains.routing.pacing_overrides.0",
-            ),
-            rule: "invalid",
-            source: Some(SectionError {
-                detail: None,
-                field: String::new(),
-                code: "moved_to_schedule.expires",
-            }),
-            rejected: String::new(),
-        };
-        let warning = issue_finding(&issue)?;
-        assert!(warning.message.contains("schedule.expires"));
-        assert!(
-            warning
-                .message
-                .contains("replace the retired key with schedule.expires")
-        );
+        let text = b"schema_version=1\n[knobs]\nunregistered.setting=1";
+        let config = load(&roots, Some(&text[..]))?;
+        let warning = config
+            .warnings
+            .iter()
+            .find(|warning| warning.message.contains("unknown knob"))
+            .ok_or("missing current unknown-key warning")?;
         assert!(first_warning(
             roots.state.as_path(),
             Some("revision one"),

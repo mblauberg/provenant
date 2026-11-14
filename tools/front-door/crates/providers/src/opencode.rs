@@ -86,9 +86,8 @@ crate::adapter!(OpenCode, "opencode", prepare, failure_diagnostic);
 const MODEL_ON_WIRE: bool = false;
 
 /// Confirm that the retained database contains the exact session identity.
-/// OpenCode 2.x records a session in `session_v2` and no longer writes the
-/// older `session` table, so either table names it; a table the installed
-/// OpenCode does not have records nothing.
+/// OpenCode 2.x stores sessions in `session_v2`; a missing table or session is
+/// an unknown identity.
 pub fn session_exists(data: &std::path::Path, session: &str) -> Result<(), ProviderError> {
     use rusqlite::{Connection, OpenFlags};
     let db = Connection::open_with_flags(
@@ -98,18 +97,18 @@ pub fn session_exists(data: &std::path::Path, session: &str) -> Result<(), Provi
     .map_err(|_| ProviderError::UnknownIdentity)?;
     db.busy_timeout(std::time::Duration::from_millis(250))
         .map_err(|_| ProviderError::UnknownIdentity)?;
-    for sql in [
-        "SELECT EXISTS(SELECT 1 FROM session_v2 WHERE id=?)",
-        "SELECT EXISTS(SELECT 1 FROM session WHERE id=?)",
-    ] {
-        let Ok(found) = db.query_row(sql, [session], |row| row.get::<_, bool>(0)) else {
-            continue;
-        };
-        if found {
-            return Ok(());
-        }
+    let found = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_v2 WHERE id=?)",
+            [session],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|_| ProviderError::UnknownIdentity)?;
+    if found {
+        Ok(())
+    } else {
+        Err(ProviderError::UnknownIdentity)
     }
-    Err(ProviderError::UnknownIdentity)
 }
 
 /// The answering model from OpenCode's own session record, keyed by the
@@ -123,35 +122,21 @@ pub fn observe_model(data: &std::path::Path, session: &str) -> Result<String, Pr
     .map_err(|_| ProviderError::UnknownIdentity)?;
     db.busy_timeout(std::time::Duration::from_millis(250))
         .map_err(|_| ProviderError::UnknownIdentity)?;
-    // OpenCode keeps assistant turns in `session_message` (v2 shape) or in the
-    // older `message` table. A session may be recorded in either, so read both
-    // and require every recorded answer to name the same provider and model.
-    let mut models = Vec::new();
-    for sql in [
-        "SELECT DISTINCT json_extract(data,'$.model.providerID'), json_extract(data,'$.model.id') \
-         FROM session_message WHERE session_id=? AND type='assistant' LIMIT 2",
-        "SELECT DISTINCT json_extract(data,'$.providerID'), json_extract(data,'$.modelID') \
-         FROM message WHERE session_id=? AND json_extract(data,'$.role')='assistant' LIMIT 2",
-    ] {
-        // A table the installed OpenCode does not have records nothing.
-        let Ok(mut statement) = db.prepare(sql) else {
-            continue;
-        };
-        let rows = statement
-            .query_map([session], |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                ))
-            })
-            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
-            .map_err(|_| ProviderError::UnknownIdentity)?;
-        for row in rows {
-            if !models.contains(&row) {
-                models.push(row);
-            }
-        }
-    }
+    let mut statement = db
+        .prepare(
+            "SELECT DISTINCT json_extract(data,'$.model.providerID'), json_extract(data,'$.model.id') \
+             FROM session_message WHERE session_id=? AND type='assistant' LIMIT 2",
+        )
+        .map_err(|_| ProviderError::UnknownIdentity)?;
+    let models = statement
+        .query_map([session], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .map_err(|_| ProviderError::UnknownIdentity)?;
     match models.as_slice() {
         [] => Err(ProviderError::UnknownIdentity),
         [(Some(provider), Some(model))] => Ok(format!("opencode/{provider}/{model}")),
@@ -730,7 +715,8 @@ struct ErrorBody {
 }
 #[derive(Deserialize)]
 struct LimitError {
-    #[serde(default, rename = "type", alias = "name")]
+    // Provider HTTP errors may report only a code; absence is current wire data.
+    #[serde(default, rename = "type")]
     kind: String,
     message: Option<String>,
     #[serde(default)]
@@ -1210,50 +1196,7 @@ mod tests {
         ));
     }
 
-    fn seed_v1(dir: &std::path::Path, provider: &str, model: &str) {
-        let db = rusqlite::Connection::open(dir.join("opencode.db")).unwrap();
-        db.execute_batch("CREATE TABLE IF NOT EXISTS message (session_id TEXT, data TEXT)")
-            .unwrap();
-        db.execute(
-            "INSERT INTO message VALUES ('ses_z', ?)",
-            [format!(
-                r#"{{"role":"assistant","providerID":"{provider}","modelID":"{model}"}}"#
-            )],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn zen_session_recorded_in_message_table_is_observed() {
-        let dir = tempfile::tempdir().unwrap();
-        seed_v1(dir.path(), "opencode", "deepseek-v4.1-flash-free");
-        assert_eq!(
-            observe_model(dir.path(), "ses_z").unwrap(),
-            "opencode/opencode/deepseek-v4.1-flash-free"
-        );
-        seed_v1(dir.path(), "opencode-go", "mimo-v2.6-flash");
-        assert!(matches!(
-            observe_model(dir.path(), "ses_z"),
-            Err(ProviderError::IdentityMismatch)
-        ));
-        assert!(matches!(
-            observe_model(dir.path(), "ses_other"),
-            Err(ProviderError::UnknownIdentity)
-        ));
-    }
-
-    #[test]
-    fn go_session_recorded_in_message_table_names_the_go_provider() {
-        let dir = tempfile::tempdir().unwrap();
-        seed_v1(dir.path(), "opencode-go", "mimo-v2.6-flash");
-        assert_eq!(
-            observe_model(dir.path(), "ses_z").unwrap(),
-            "opencode/opencode-go/mimo-v2.6-flash"
-        );
-    }
-
-    /// OpenCode 2.x keeps a session only in `session_v2`, with its assistant
-    /// turns in `session_message`; the older `session` table is not written.
+    /// Seed only the current session and assistant-turn tables.
     fn seed_v2_only(dir: &std::path::Path, session: &str, provider: &str, model: &str) {
         let db = rusqlite::Connection::open(dir.join("opencode.db")).unwrap();
         db.execute_batch(

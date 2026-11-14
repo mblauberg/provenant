@@ -698,7 +698,7 @@ impl RunStore {
         // Custody has one location: the reader's attempt or the writer's
         // persisted worktree slot. Inventorying every slot here made each
         // terminal row pay for the host's entire retained writer history.
-        let writer = self.attempt_writer_slot(record.attempt_id, record.project_id, call)?;
+        let writer = self.attempt_writer_slot(record.attempt_id, call)?;
         // An inaccessible own slot or reservation cannot prove release, so it
         // remains a fence rather than failing the caller. The supervisor owns
         // the layout; predecessor and sibling slots are not evidence about

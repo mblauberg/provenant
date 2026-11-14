@@ -1919,30 +1919,101 @@ fn registered_knobs_have_production_readers() {
     }
 }
 
-/// A retired routing timing key warns with its repair (the table its value now
-/// belongs under); an unknown domain key warns without one.
+/// Misplaced routing knobs name their exact domain field; unrelated unknown
+/// knob keys remain ordinary unknown-key warnings.
 #[test]
-fn misplaced_domain_knobs_warn_and_only_retired_keys_name_their_new_table() {
-    let warning_for = |key: &str| {
+fn misplaced_routing_knobs_name_their_current_domain_fields() {
+    for field in [
+        "capacity_cooldown_seconds",
+        "settlement_retries",
+        "capacity_retry_seconds",
+        "capacity_retry_max_seconds",
+        "retry_delay_ceiling_seconds",
+    ] {
+        let key = format!("domains.routing.{field}");
         let text = format!("schema_version=1\n[knobs]\n'{key}'=30");
         let config = load(&roots(), Some(text.as_bytes())).unwrap();
         assert_warning(&config, "unknown_key");
-        config.warnings[0].message.clone()
-    };
-    for key in [
-        "domains.routing.capacity_cooldown_seconds",
-        "domains.routing.settlement_retries",
-        "domains.routing.capacity_retry_seconds",
-        "domains.routing.capacity_retry_max_seconds",
-        "domains.routing.retry_delay_ceiling_seconds",
-    ] {
-        let message = warning_for(key);
-        assert!(message.contains(key), "{message}");
-        assert!(message.contains("domains.routing.schedule"), "{message}");
+        let message = &config.warnings[0].message;
+        assert!(message.contains(&format!("knobs.{key}")), "{message}");
+        assert!(
+            message.contains(&format!("set `{field}` in `[domains.routing]`")),
+            "{message}"
+        );
     }
-    let message = warning_for("domains.routing.future");
-    assert!(message.contains("domains.routing.future"), "{message}");
-    assert!(!message.contains("domains.routing.schedule"), "{message}");
+    let text = "schema_version=1\n[knobs]\n'domains.routing.future'=30";
+    let config = load(&roots(), Some(text.as_bytes())).unwrap();
+    assert_warning(&config, "unknown_key");
+    assert!(!config.warnings[0].message.contains("retired setting"));
+}
+
+#[test]
+fn removed_model_policy_lane_keys_warn_with_current_controls() {
+    #[derive(Debug, Default, Deserialize, serde::Serialize)]
+    #[serde(default, deny_unknown_fields)]
+    struct Routing {
+        model_policy: ModelPolicy,
+    }
+    impl DomainConfig for Routing {}
+    #[derive(Debug, Default, Deserialize, serde::Serialize)]
+    #[serde(default, deny_unknown_fields)]
+    struct ModelPolicy {
+        defaults: Defaults,
+    }
+    #[derive(Debug, Default, Deserialize, serde::Serialize)]
+    #[serde(default, deny_unknown_fields)]
+    struct Defaults {
+        lane: Lane,
+    }
+    #[derive(Debug, Default, Deserialize, serde::Serialize)]
+    #[serde(default, deny_unknown_fields)]
+    struct Lane {
+        max_context: Option<u64>,
+    }
+    fn defaults(_: Profile) -> &'static str {
+        ""
+    }
+    const SECTIONS: DomainSections<Routing> =
+        DomainSections::new(&[DomainSection::new::<Routing>("routing", defaults)]);
+    let current_text =
+        "schema_version=1\n[domains.routing.model_policy.defaults.lane]\nmax_context=2048";
+    let current = load_with_domains(&roots(), Some(current_text.as_bytes()), &SECTIONS).unwrap();
+    assert_eq!(
+        current
+            .domains
+            .routing
+            .model_policy
+            .defaults
+            .lane
+            .max_context,
+        Some(2048)
+    );
+    for (key, value, remedy) in [
+        (
+            "max_continuations",
+            "2",
+            "graph `limits.continuations` to bound restarts",
+        ),
+        (
+            "resume_continuations",
+            "true",
+            "automatic restarts use fresh sessions",
+        ),
+    ] {
+        let text = format!(
+            "schema_version=1\n[domains.routing.model_policy.defaults.lane]\n{key}={value}"
+        );
+        let config = load_with_domains(&roots(), Some(text.as_bytes()), &SECTIONS).unwrap();
+        assert_warning(&config, "unknown_key");
+        let full_key = format!("domains.routing.model_policy.defaults.lane.{key}");
+        assert!(
+            config.warnings.iter().any(|warning| {
+                warning.message.contains(&full_key) && warning.message.contains(remedy)
+            }),
+            "{key}: {:?}",
+            config.warnings
+        );
+    }
 }
 
 #[test]

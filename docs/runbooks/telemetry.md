@@ -12,10 +12,15 @@ lower bound.
 ## The usage ledger
 
 Settled attempts are recorded in `<state>/usage-ledger/`, which outlives the run
-store, so it keeps lane usage after run history is removed. The ledger keeps
-graph and node identities with each priced settlement. Historical 1.x `run` and
-`task` labels remain opaque text and are read as stored. Unreadable ledger
-lines are reported by segment and line and kept, not repaired.
+store, so it keeps lane usage after run history is removed. Each format-2 ledger
+row requires graph and node identities with its priced settlement. Unreadable
+ledger lines are reported by segment and line and kept, not repaired. The
+format-1 reset must discard `usage-ledger/`, the prior schema-1 `ingest/`
+segments and `ingest-cursors.json`. Format 2 reads only the format-2 ledger and
+schema-2 ingest rows. Removing the old cursors lets later requests replay their
+selected transcript contents rather than skipping them by a matching cursor
+digest; each request's `--since` bound still applies. The reset may also remove
+the inert single-file `ingest.jsonl` and `ingest.jsonl.unmigrated` paths.
 
 ## Native session ingest
 
@@ -28,9 +33,9 @@ hook ingests the last day automatically within a three-second budget. The store
 (the `ingest` directory in the state root, one `YYYY-MM-DD.jsonl` segment per
 UTC day, with no whole-size limit) holds counts, model, account, timestamps and
 IDs only, never prompt, reply, tool or path text. A message that straddles
-UTC midnight stays under the day it was first stored. If an old single-file
-store had lines over 1 MiB, they are not migrated: the file is kept as
-`ingest.jsonl.unmigrated` and one line says how many.
+UTC midnight stays under the day it was first stored. Format 2 reads the
+segmented schema-2 store only; it does not import a prior single-file
+`ingest.jsonl` store.
 
 To attribute chair sessions, launch with the registered account's directory:
 `CLAUDE_CONFIG_DIR=~/.claude-work claude`. `provenant telemetry cost --by account`

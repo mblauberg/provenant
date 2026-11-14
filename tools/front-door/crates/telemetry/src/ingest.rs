@@ -21,14 +21,10 @@ use std::{
 };
 use thiserror::Error;
 
-pub const ROW_SCHEMA_VERSION: u64 = 1;
+pub const ROW_SCHEMA_VERSION: u64 = 2;
 /// The only provider whose sessions leave a native transcript.
 pub const PROVIDER: &str = "claude";
 const DIRECTORY: &str = "ingest";
-/// The single-file store earlier releases wrote; see [`migrate_legacy`].
-const LEGACY_STORE: &str = "ingest.jsonl";
-/// Where the old file is kept when some of its lines could not be carried over.
-const UNMIGRATED_STORE: &str = "ingest.jsonl.unmigrated";
 const LOCK: &str = "ingest.lock";
 const CURSORS: &str = "ingest-cursors.json";
 const CURSOR_CAP: u64 = 32 << 20;
@@ -89,7 +85,7 @@ pub struct Row {
     pub account: String,
     pub provider: String,
     pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
     pub uncached_input: u64,
     pub cache_read: u64,
@@ -100,19 +96,19 @@ pub struct Row {
     pub session: String,
     pub message: String,
     pub source: Source,
-    /// Native transcript identity, absent for older or non-subagent rows.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Native transcript identity, absent for top-level sessions.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
     /// Digest of the config directory that supplied this row.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub native_config: Option<String>,
     /// Native tool-use ID, present when an attempt matches this transcript.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub native_attempt: Option<String>,
     /// Provider-reported reasoning tokens; absent means unreported, never zero.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reply: Option<crate::signals::ReplyContext>,
 }
 
@@ -404,10 +400,8 @@ struct Cursor {
     inode: u64,
     offset: u64,
     tail: String,
-    /// Pending structural events survive ingestion and routine upgrades.
-    #[serde(default)]
+    /// Pending structural events survive across incremental ingestion.
     reply: crate::signals::ReplyContext,
-    #[serde(default)]
     last_reply: Option<String>,
 }
 
@@ -453,8 +447,6 @@ fn read_cursors(directory: &Directory, store: &str) -> BTreeMap<String, Cursor> 
     }
     serde_json::from_slice::<CursorStore>(&bytes)
         .ok()
-        // Version 1 did not retain pending structural events. Replay those
-        // transcripts rather than treating discarded observations as zero.
         .filter(|cursor| cursor.schema_version == 2 && cursor.store_digest == store)
         .map(|cursor| cursor.files)
         .unwrap_or_default()
@@ -714,7 +706,6 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
             FsError::LockTimeout { .. } => IngestError::Busy,
             other => other.into(),
         })?;
-    migrate_legacy(&directory)?;
     let store = open_segments(&directory, true)?;
     sweep_staging(&store)?;
     let mut cursors = if request.incremental {
@@ -1091,72 +1082,6 @@ fn each_line(reader: impl Read, mut each: impl FnMut(&[u8])) -> std::io::Result<
     }
 }
 
-/// One-off: earlier releases kept every row in one `ingest.jsonl`, which grew
-/// past its cap and stopped every reader. Split it into dated segments, then
-/// remove it. Rows go to the day of their timestamp; a line with none (a torn
-/// write, another schema's row) stays beside the line before it. Safe to repeat
-/// after an interruption: lines already in a segment are not added twice.
-/// Delete this function once no release writes the single file.
-/// The ingest lock must be held.
-#[allow(clippy::print_stderr)] // The one report of rows left behind; the rename keeps it to once.
-fn migrate_legacy(root: &Directory) -> Result<(), IngestError> {
-    let file = match root.open_read(OsStr::new(LEGACY_STORE)) {
-        Ok(file) => file,
-        Err(error) if error.is_not_found() => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    let mut days: BTreeMap<String, Vec<Vec<u8>>> = BTreeMap::new();
-    let mut last = segments::name(jiff::Timestamp::UNIX_EPOCH);
-    let dropped = each_line(file, |line| {
-        if line.is_empty() {
-            return;
-        }
-        let day = serde_json::from_slice::<serde_json::Value>(line)
-            .ok()
-            .and_then(|value| value.get("timestamp")?.as_str()?.parse().ok())
-            .map_or_else(|| last.clone(), segments::name);
-        days.entry(day.clone()).or_default().push(line.to_vec());
-        last = day;
-    })?;
-    let store = open_segments(root, true)?;
-    for (day, lines) in days {
-        let mut out = match store.read_bounded(OsStr::new(&day), SEGMENT_CAP) {
-            Ok(bytes) => bytes,
-            Err(error) if error.is_not_found() => Vec::new(),
-            Err(error) => return Err(error.into()),
-        };
-        if out.last().is_some_and(|last| *last != b'\n') {
-            out.push(b'\n');
-        }
-        let mut held: BTreeSet<Vec<u8>> = out
-            .split(|byte| *byte == b'\n')
-            .map(<[u8]>::to_vec)
-            .collect();
-        for line in lines {
-            if held.insert(line.clone()) {
-                out.extend_from_slice(&line);
-                out.push(b'\n');
-            }
-        }
-        store
-            .atomic_write(OsStr::new(&day), ".ingest-", &out, PublishMode::Replace)?
-            .require_durable()?;
-    }
-    if dropped == 0 {
-        root.unlink(OsStr::new(LEGACY_STORE))?;
-    } else {
-        // Keep what could not be carried over, once: the rename also stops the
-        // next open from migrating again.
-        root.replace(OsStr::new(LEGACY_STORE), root, OsStr::new(UNMIGRATED_STORE))?;
-        eprintln!(
-            "provenant: {dropped} line(s) of the old {LEGACY_STORE} were too long to migrate; \
-             the file is kept as {UNMIGRATED_STORE}"
-        );
-    }
-    root.sync()?;
-    Ok(())
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct RowFilter {
     pub account: Option<String>,
@@ -1173,16 +1098,6 @@ pub fn read_rows(roots: &Roots, filter: &RowFilter) -> Result<Vec<Row>, IngestEr
         Err(error) if error.is_not_found() => return Ok(Vec::new()),
         Err(error) => return Err(error.into()),
     };
-    // One-off: a reader meeting the single-file store splits it first.
-    if root.metadata_at(OsStr::new(LEGACY_STORE), false).is_ok() {
-        let _lock = root
-            .try_lock(OsStr::new(LOCK), LockMode::Exclusive)
-            .map_err(|error| match error {
-                FsError::LockTimeout { .. } => IngestError::Busy,
-                other => other.into(),
-            })?;
-        migrate_legacy(&root)?;
-    }
     let directory = match open_segments(&root, false) {
         Ok(directory) => directory,
         Err(IngestError::Filesystem(error)) if error.is_not_found() => return Ok(Vec::new()),

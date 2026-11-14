@@ -29,7 +29,7 @@ const LIMIT: usize = 1_048_576;
 /// A day's backoff is for a probe binary that is absent or cannot execute.
 /// Any other failure is the host (busy executor, process budget, a probe
 /// directory that vanished before spawn) and retries on the short `Network`
-/// schedule. No new persisted variant: older readers reject unknown values.
+/// schedule; unavailable probe infrastructure does not imply an account failure.
 fn command_error(program: &str, error: ExecError) -> ProbeFailure {
     match error {
         ExecError::Io {

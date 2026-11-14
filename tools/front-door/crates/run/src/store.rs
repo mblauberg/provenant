@@ -839,7 +839,7 @@ impl RunStore {
                 profile: task.profile.clone(),
                 limits: None,
                 schema_version: 2, attempt_id, project_id: context.project_id, attempt_number: u64::from(key.attempt()), revision: 1, generation: 0,
-                delivery_id: task.delivery_id, retry_of: input.request.parent, superseded_by: None, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, granted_tracking_ref: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, verified_owner: Some(context.actor_id), session: None,
+                delivery_id: task.delivery_id, retry_of: input.request.parent, superseded_by: None, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, verified_owner: Some(context.actor_id), session: None,
                 queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, provider_silent_for_ms: provenant_records::run::Transient(None), process_observation_valid: provenant_records::run::Transient(false), provider_silence_suppressed: provenant_records::run::Transient(false), provider_launched: None, preparation_failure: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
                 terminal_evidence: None, settlement_reason: None, cancellation_disposition: None, settlement_receipts: None, custody_pending: None,
                 prompt: ArtifactRecord {extra: Default::default(),  path: artifact_path(attempt_id, AttemptFile::Prompt.name())?, digest: task.prompt_digest, bytes: input.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
@@ -1897,15 +1897,15 @@ pub(crate) fn insert_event(db: &rusqlite::Connection, attempt: &AttemptRecord) -
     Ok(())
 }
 
-// Supervisor owns this extensible v1 file. Only custody/exit fields consumed by
-// run are decoded; the bounded codec still rejects duplicate members/version.
+// Supervisor owns this extensible file. Run decodes the fields it consumes;
+// the bounded codec still rejects duplicate members and malformed records.
 #[derive(serde::Deserialize)]
 struct SealedExit {
     scope: provenant_supervisor::custody::Scope,
     termination: Option<Termination>,
     never_spawned: bool,
     stop_reason: Option<provenant_supervisor::machine::StopReason>,
-    #[serde(default)]
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
     cancel_delivered_before_exit: Option<bool>,
     terminal_observed: bool,
     unresolved_cleanup: bool,

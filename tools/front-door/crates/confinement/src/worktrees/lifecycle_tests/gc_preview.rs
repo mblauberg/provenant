@@ -665,14 +665,14 @@ fn git_inventory_accepts_unregistered_and_recreated_worktrees() -> Result<(), Bo
             .is_err()
     );
     assert!(matches!(bind("other"), Err(WorktreeError::IdentityChanged)));
-    // Legacy identity and registry reservations are never membership gates.
+    // Unrecognised identity and reservation files are never membership gates.
     fs::write(
         state.current_path()?.join("identity.json"),
-        b"invalid old schema and inode",
+        b"invalid identity data",
     )?;
     fs::write(
         state.current_path()?.join("reservation.json"),
-        b"legacy registry data",
+        b"unrecognised reservation data",
     )?;
     fixture.run(&["worktree", "remove", path.to_str().ok_or("path")?])?;
     fixture.run(&[

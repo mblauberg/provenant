@@ -167,14 +167,14 @@ impl<'a> Service<'a> {
                     Ok::<_, RunError>(writer)
                 })
                 .transpose()?;
-            // Preserve the sealed request and authority digest across custody metadata
-            // upgrades. Only the absent legacy attribution binding is equivalent.
+            // Preserve the sealed request and authority digest only when the
+            // complete current writer identity still matches.
             if let Some(saved) = previous
                 .as_ref()
                 .and_then(|request| request.task.writer.as_ref())
-                && writer.as_ref().is_some_and(|resolved| {
-                    equivalent_writer(saved, resolved, self.store.context.project_id)
-                })
+                && writer
+                    .as_ref()
+                    .is_some_and(|resolved| equivalent_writer(saved, resolved))
             {
                 writer = Some(saved.clone());
             }

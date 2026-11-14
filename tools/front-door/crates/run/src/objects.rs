@@ -393,10 +393,8 @@ fn sanitise_source(source: &Directory, repo: &VerifiedRepo) -> Result<u64> {
         match info.read_stable(OsStr::new("alternates"), 1024 * 1024) {
             Ok(bytes) => {
                 let shared = repo.common_git_dir().join("objects");
-                // Older launches used an unquoted path. Only the host's own
-                // alternate is accepted; a lane-supplied foreign path fails.
+                // Only the host's quoted alternate is accepted; foreign paths fail.
                 if bytes != format!("{}\n", quote_alternate(&shared)).as_bytes()
-                    && bytes != format!("{}\n", shared.display()).as_bytes()
                     && !bytes.is_empty()
                 {
                     return Err(RunError::Validation("lane object alternates are untrusted"));

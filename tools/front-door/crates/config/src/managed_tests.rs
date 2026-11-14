@@ -1076,13 +1076,11 @@ fn edited_inherited_hook_is_relinquished_but_explicit_on_names_recovery() {
 }
 
 #[test]
-fn historical_peer_agent_is_refused_without_touching_unrecognised_bytes() {
-    // A recognised pre-receipt plist remains a supported install upgrade.
-    let mut recognised = Fixture::new();
-    recognised.targets.roots =
-        RootInputs::new(recognised.home.clone(), recognised.base.join("checkout"))
-            .resolve(&Resolver)
-            .unwrap();
+fn unrecognised_peer_agent_is_refused_without_touching_bytes() {
+    let mut f = Fixture::new();
+    f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
+        .resolve(&Resolver)
+        .unwrap();
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let context = InstallContext {
@@ -1090,31 +1088,6 @@ fn historical_peer_agent_is_refused_without_touching_unrecognised_bytes() {
         cancel: &cancel,
         budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
     };
-    install(
-        &recognised.plan(),
-        &context,
-        &mut Reporter::default(),
-        &Smoke,
-        false,
-    )
-    .unwrap();
-    let historical = peer_agent_plist(recognised.targets.roots.state.as_path()).unwrap();
-    fs::create_dir_all(historical.parent().unwrap()).unwrap();
-    fs::write(&historical, b"historical plist\n").unwrap();
-    fs::set_permissions(&historical, fs::Permissions::from_mode(0o644)).unwrap();
-    recognised.targets.peer_agent = Some(b"new plist\n".to_vec());
-    recognised.targets.peer_agent_previous = Some(b"historical plist\n".to_vec());
-    let release = recognised.release();
-    let plan = Snapshots::capture(&release, &recognised.targets)
-        .and_then(|snapshots| plan_install(release, recognised.targets.clone(), snapshots))
-        .unwrap();
-    install(&plan, &context, &mut Reporter::default(), &Smoke, false).unwrap();
-    assert_eq!(fs::read(&historical).unwrap(), b"new plist\n");
-
-    let mut f = Fixture::new();
-    f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
-        .unwrap();
     install(&f.plan(), &context, &mut Reporter::default(), &Smoke, false).unwrap();
     let plist = peer_agent_plist(f.targets.roots.state.as_path()).unwrap();
     fs::create_dir_all(plist.parent().unwrap()).unwrap();
@@ -4304,50 +4277,6 @@ fn json_rewrite_retries_are_bounded_and_other_drift_still_refuses() {
     .unwrap_err();
     assert!(matches!(err, InstallError::Drift(_)));
     assert_eq!(reporter.previews, 1);
-}
-
-#[test]
-fn reinstall_migrates_the_receipted_gc_agent_to_tick() {
-    let mut f = Fixture::new();
-    f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
-        .unwrap();
-    f.targets.tick_agent = Some(b"rendered tick plist\n".to_vec());
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let ctx = context(&clock, &cancel);
-    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    let tick = tick_agent_plist(f.targets.roots.state.as_path()).unwrap();
-    let gc = tick.with_file_name("dev.provenant.gc.plist");
-    fs::rename(&tick, &gc).unwrap();
-    let receipt_path = f.targets.roots.state.as_path().join("install/receipt.json");
-    let text = fs::read_to_string(&receipt_path).unwrap();
-    fs::write(
-        &receipt_path,
-        text.replace("tick-agent", "gc-agent")
-            .replace("dev.provenant.tick.plist", "dev.provenant.gc.plist"),
-    )
-    .unwrap();
-    let plan = f.plan();
-    assert!(plan.actions().iter().any(|action| {
-        action.selector == "gc-agent" && action.disposition == Disposition::Remove
-    }));
-    assert!(
-        plan.actions()
-            .iter()
-            .any(|action| action.selector == "tick-agent")
-    );
-    install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    assert!(!gc.exists());
-    assert!(tick.exists());
-    assert!(
-        !read_receipt(&f.targets)
-            .unwrap()
-            .unwrap()
-            .entries
-            .iter()
-            .any(|entry| entry.selector == "gc-agent")
-    );
 }
 
 #[test]

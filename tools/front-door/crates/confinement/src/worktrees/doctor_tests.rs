@@ -336,11 +336,38 @@ fn a_read_only_probe_cannot_make_concurrent_admission_writer_busy() -> Result<()
 }
 
 #[test]
-fn legacy_gate_upgrade_and_missing_lock_preserve_custody_evidence() -> Result<(), Box<dyn Error>> {
+fn interrupted_writer_slot_initialisation_can_retry_without_repairing_a_published_slot()
+-> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
-    let path = fixture.root.join("legacy-probe");
+    let path = fixture.root.join("interrupted-slot");
+    FAIL_WRITER_GATE_INITIALISATION.with(|failure| failure.set(true));
+    assert!(matches!(
+        writer_directory(context.project_state, &path),
+        Err(WorktreeError::UnknownWriter)
+    ));
+    assert!(
+        context
+            .project_state
+            .metadata_at(&state_dir_name(&path), false)
+            .unwrap_err()
+            .is_not_found()
+    );
+    let slot = writer_directory(context.project_state, &path)?;
+    drop(provenant_supervisor::custody::writer_observation_guard(
+        &slot,
+    )?);
+    Ok(())
+}
+
+#[test]
+fn missing_observer_gate_refuses_and_retained_lock_preserves_custody_evidence()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let path = fixture.root.join("missing-gate-probe");
     let slot = writer_directory(context.project_state, &path)?;
     drop(slot.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?);
     let gate_path = slot.current_path()?.join("writer-probe.lock");
@@ -351,27 +378,36 @@ fn legacy_gate_upgrade_and_missing_lock_preserve_custody_evidence() -> Result<()
     ));
     assert!(
         !gate_path.exists(),
-        "read-only observation cannot initialise legacy state"
+        "read-only observation cannot create a missing gate"
     );
-    prepare_writer_probe(context.project_state, &path)?;
-    assert!(gate_path.is_file());
-    assert_eq!(
-        disk_writer_state(context.project_state, &path),
-        Occupancy::Available
+    assert!(matches!(
+        cache_writer_probe(context.project_state, &path),
+        Err(Occupancy::Unknown { evidence, .. }) if evidence.contains("writer-probe.lock")
+    ));
+    assert!(
+        !gate_path.exists(),
+        "observation cannot repair a missing gate"
     );
+
     // Retained import evidence remains a fence even without an exclusion inode.
-    fs::remove_file(slot.current_path()?.join(WRITER_LOCK))?;
-    fs::write(slot.current_path()?.join("reservation.json"), "retained")?;
+    let retained_path = fixture.root.join("retained-probe");
+    let retained = writer_directory(context.project_state, &retained_path)?;
+    drop(retained.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?);
+    fs::remove_file(retained.current_path()?.join(WRITER_LOCK))?;
     fs::write(
-        slot.current_path()?.join("import-retained.json"),
+        retained.current_path()?.join("reservation.json"),
+        "retained",
+    )?;
+    fs::write(
+        retained.current_path()?.join("import-retained.json"),
         "retained",
     )?;
     assert!(
-        matches!(disk_writer_state(context.project_state, &path), Occupancy::Unknown { evidence, .. }
+        matches!(disk_writer_state(context.project_state, &retained_path), Occupancy::Unknown { evidence, .. }
         if evidence.contains("retained import fence"))
     );
     assert!(
-        matches!(cache_writer_probe(context.project_state, &path), Err(Occupancy::Unknown { evidence, .. })
+        matches!(cache_writer_probe(context.project_state, &retained_path), Err(Occupancy::Unknown { evidence, .. })
         if evidence.contains("retained import fence"))
     );
     Ok(())

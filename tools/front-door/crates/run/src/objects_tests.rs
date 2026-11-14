@@ -344,7 +344,10 @@ impl Fixture {
         fs::create_dir(source.join("info"))?;
         fs::write(
             source.join("info/alternates"),
-            format!("{}\n", project.join(".git/objects").display()),
+            format!(
+                "{}\n",
+                super::quote_alternate(&project.join(".git/objects"))
+            ),
         )?;
         let runtime = UtilityRuntime::new(&executable, &home)?;
         let executor = SystemExecutor::new(1)?;

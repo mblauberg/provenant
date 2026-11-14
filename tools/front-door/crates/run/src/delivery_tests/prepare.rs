@@ -181,8 +181,15 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
             lane.to_str().ok_or("lane")?,
         ],
     )?;
+    let store_root = root.join("store");
+    let custody_project = registered_writer_project_id(
+        &project,
+        &store_root.join("home"),
+        &store_root.join("checkout"),
+        &store_root.join("state"),
+    )?;
     let writer = WriterRequest {
-        extra: Default::default(),
+        extra: writer_custody_extra(custody_project),
         project,
         worktree: lane.clone(),
     };
@@ -221,8 +228,8 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700))?;
     let head = GitOid::parse(&git(&lane, &["rev-parse", "HEAD"])?)?;
     let head_text = head.to_string();
-    let fixture = root.join("store");
-    std::fs::create_dir(&fixture)?;
+    let fixture = store_root;
+    std::fs::create_dir_all(&fixture)?;
     let (clock, cancel) = (tests::clock(), provenant_core::CancelToken::new());
     let call = tests::call(&clock, &cancel);
     let store = RunStore::open(&tests::context(&fixture)?, &call)?;
@@ -295,7 +302,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
         ],
     )?;
     let idle_writer = WriterRequest {
-        extra: Default::default(),
+        extra: writer.extra.clone(),
         project: writer.project.clone(),
         worktree: idle_lane.clone(),
     };
@@ -738,8 +745,15 @@ fn host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch()
             "HEAD~1",
         ],
     )?;
+    let store_root = root.join("store");
+    let custody_project = registered_writer_project_id(
+        &project,
+        &store_root.join("home"),
+        &store_root.join("checkout"),
+        &store_root.join("state"),
+    )?;
     let writer = WriterRequest {
-        extra: Default::default(),
+        extra: writer_custody_extra(custody_project),
         project,
         worktree: lane.clone(),
     };
@@ -755,8 +769,8 @@ fn host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch()
     std::fs::write(lane.join("change"), "a repair on a stale base")?;
     git(&lane, &["add", "change"])?;
     git(&lane, &["commit", "-qm", "Repair"])?;
-    let fixture = root.join("store");
-    std::fs::create_dir(&fixture)?;
+    let fixture = store_root;
+    std::fs::create_dir_all(&fixture)?;
     let (clock, cancel) = (tests::clock(), provenant_core::CancelToken::new());
     let call = tests::call(&clock, &cancel);
     let store = RunStore::open(&tests::context(&fixture)?, &call)?;

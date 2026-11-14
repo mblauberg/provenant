@@ -191,7 +191,7 @@ mod tests {
     fn writer_task() -> TaskRequest {
         let mut task = crate::tests::input().request.task.clone();
         task.writer = Some(provenant_records::run::WriterRequest {
-            extra: Default::default(),
+            extra: crate::tests::writer_extra(),
             project: "/p".into(),
             worktree: "/p/lane".into(),
         });

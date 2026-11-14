@@ -134,9 +134,8 @@ fn a_settled_attempt_appends_one_row_even_when_settlement_is_retried() -> Result
     assert_eq!(ledger.rows, [row]);
     let stored = &ledger.rows[0];
     assert_eq!(stored.attempt, fact.attempt_id.to_string());
-    assert_eq!(stored.graph.as_deref(), Some("ledger-graph"));
-    assert_eq!(stored.node.as_deref(), Some("node-1"));
-    assert_eq!(stored.labels, Default::default());
+    assert_eq!(stored.graph.as_str(), "ledger-graph");
+    assert_eq!(stored.node.as_str(), "node-1");
     assert_eq!(stored.outcome, "succeeded");
     assert_eq!(stored.tokens.reasoning, Some(9));
     Ok(())
@@ -209,8 +208,8 @@ fn an_unrecognised_line_is_reported_by_segment_and_line() -> Result {
     let path = state.join(DIRECTORY).join(&segment);
     let mut text = std::fs::read_to_string(&path)?;
     text.push_str("not json\n");
-    text.push_str("{\"format\":\"provenant.usage-ledger.v9\"}\n");
-    text.push_str("{\"format\":\"provenant.usage-ledger.v1\",\"attempt\":\"x\"}\n");
+    text.push_str("{\"format\":\"provenant.usage-ledger.v3\"}\n");
+    text.push_str("{\"format\":\"provenant.usage-ledger.v2\",\"attempt\":\"x\"}\n");
     text.push_str("{\"torn");
     std::fs::write(&path, text)?;
     std::fs::write(state.join(DIRECTORY).join("notes.txt"), "stray")?;
@@ -231,7 +230,7 @@ fn an_unrecognised_line_is_reported_by_segment_and_line() -> Result {
             (segment.as_str(), Some(5)),
         ]
     );
-    assert!(ledger.unrecognised[2].reason.contains("v9"));
+    assert!(ledger.unrecognised[2].reason.contains("v3"));
     // Appending reports them too, and a torn line does not swallow the new row.
     let second = row(&fact(2, 20_000, "m", Some(2))?, &key(2)?, Some(&prices))?;
     let appended = settle(&state, &second)?;
@@ -240,55 +239,6 @@ fn an_unrecognised_line_is_reported_by_segment_and_line() -> Result {
     let ledger = read(&state)?;
     assert_eq!(ledger.rows, [first, second]);
     assert_eq!(ledger.unrecognised.len(), 5);
-    Ok(())
-}
-
-#[test]
-fn a_kept_1x_ledger_row_decodes_old_ids_as_opaque_labels() -> Result {
-    let (_temp, state) = state()?;
-    let finished = WallTime::from_micros(20_000 * DAY + 1)?;
-    let attempt = AttemptId::from_bytes([1; 16]);
-    let legacy = serde_json::json!({
-        "format": "provenant.usage-ledger.v1",
-        "source": "backfill",
-        "project": ProjectId::from_bytes([2; 16]),
-        "graph": null,
-        "node": null,
-        "attempt": attempt.to_string(),
-        "labels": { "run": "legacy-run-id", "task": "legacy-task-id" },
-        "provider": "p",
-        "model": "m",
-        "effort": "high",
-        "account": "account",
-        "outcome": "succeeded",
-        "started": finished,
-        "finished": finished,
-        "tokens": {
-            "uncached_input": 1,
-            "cache_read": 0,
-            "cache_write": 0,
-            "cache_write_1h": null,
-            "output_excluding_reasoning": 0,
-            "reasoning": 0
-        },
-        "cost": null,
-        "context_band": null
-    });
-    let directory = state.join(DIRECTORY);
-    provenant_os::fixture::private_state_dir(&directory)?;
-    let segment = segments::name(finished.as_timestamp());
-    std::fs::write(directory.join(segment), format!("{legacy}\n"))?;
-    let ledger = read(&state)?;
-    assert_eq!(ledger.unrecognised, []);
-    assert_eq!(ledger.rows.len(), 1);
-    assert_eq!(ledger.rows[0].graph, None);
-    assert_eq!(ledger.rows[0].node, None);
-    assert_eq!(ledger.rows[0].labels.run.as_deref(), Some("legacy-run-id"));
-    assert_eq!(
-        ledger.rows[0].labels.task.as_deref(),
-        Some("legacy-task-id")
-    );
-    assert_eq!(ledger.rows[0].source, Source::Backfill);
     Ok(())
 }
 

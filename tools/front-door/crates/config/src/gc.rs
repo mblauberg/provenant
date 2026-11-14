@@ -88,8 +88,8 @@ pub struct LaneBuildSettings {
     /// grace without writing is unprotected unless a Cargo lock is held. 15
     /// minutes unless set.
     pub build_dir_grace_seconds: Option<u64>,
-    /// Seconds between walks of the lane caches by settlement-triggered
-    /// collection. Within it, a settlement skips the walk unless free space is
+    /// Seconds between walks of the lane caches by admission-triggered
+    /// collection. Within it, an admission skips the walk unless free space is
     /// below the floor or the last walk found the total near the cap. 5
     /// minutes unless set.
     pub build_dir_survey_interval_seconds: Option<u64>,
@@ -105,7 +105,7 @@ pub const DEFAULT_LANE_PORT_BLOCKS: u64 = 64;
 /// Hard ceilings on the configurable lane caps.
 pub const WRITER_LANES_CEILING: u64 = 64;
 pub const PROJECT_WRITER_LANES_CEILING: u64 = 32;
-/// Cargo's accepted `debug` levels, including the legacy numeric and boolean forms.
+/// Cargo's accepted `debug` levels, including current numeric and boolean forms.
 const CARGO_DEBUG_LEVELS: [&str; 10] = [
     "none",
     "line-directives-only",
@@ -122,7 +122,7 @@ const CARGO_DEBUG_LEVELS: [&str; 10] = [
 pub const DEFAULT_BUILD_DIR_MAX_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 /// Recency grace for lane build output when `build_dir_grace_seconds` is unset.
 pub const DEFAULT_BUILD_DIR_GRACE_SECONDS: u64 = 15 * 60;
-/// Interval between settlement-triggered walks when
+/// Interval between admission-triggered walks when
 /// `build_dir_survey_interval_seconds` is unset.
 pub const DEFAULT_BUILD_DIR_SURVEY_INTERVAL_SECONDS: u64 = 5 * 60;
 /// The asset's -1 sentinel selects the host-dependent default.

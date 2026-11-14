@@ -87,20 +87,6 @@ pub struct HarnessProfile {
     /// Remaining settlement retries sealed for a graph task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settlement_retry_limit: Option<u8>,
-    // Preserve the removed field only to verify sealed request and attempt digests.
-    #[doc(hidden)]
-    #[serde(
-        rename = "task_class",
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_legacy_task_class"
-    )]
-    pub legacy_task_class: Option<Option<String>>,
-}
-fn deserialize_legacy_task_class<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Option<String>>, D::Error> {
-    Option::<String>::deserialize(deserializer).map(Some)
 }
 impl HarnessProfile {
     fn is_empty(&self) -> bool {
@@ -330,7 +316,7 @@ pub struct WriterRequest {
 pub struct WriterDeliveryRequest {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
-    /// Push is the legacy behaviour; integration never checks out either head.
+    /// Push is the default delivery mode; integration never checks out either head.
     #[serde(default, skip_serializing_if = "DeliveryMode::is_push")]
     pub mode: DeliveryMode,
     /// A configured remote name, never a URL supplied by a provider.
@@ -467,8 +453,7 @@ pub struct WriterDeliveryReceipt {
     pub review_acceptance: Option<WriterReviewAcceptance>,
     pub state: WriterDeliveryState,
     /// The destination ref's tips around a delivered push or integration.
-    /// Absent on receipts that did not publish, and on older receipts, whose
-    /// destinations are then unobserved.
+    /// Absent when this receipt did not publish to a destination.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integration: Option<WriterIntegration>,
 }
@@ -1251,7 +1236,6 @@ pub struct SettlementReceipts {
     pub git_import: EffectDisposition,
     pub manifest_conflict: EffectDisposition,
     pub cleanup_custody_release: EffectDisposition,
-    #[serde(default)]
     pub delivery: EffectDisposition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancellation: Option<CancellationDisposition>,
@@ -1324,7 +1308,6 @@ pub struct AttemptRecord {
     pub observed_route: Option<RouteRecord>,
     pub authority_digest: Digest,
     /// Project-relative write exceptions actually granted before launch.
-    #[serde(default)]
     pub read_only_writable: Vec<String>,
     /// Explicit write allowances from the plan handed to confinement.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1332,12 +1315,8 @@ pub struct AttemptRecord {
     /// Writers only; concrete Git paths stay out of the record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_grants_digest: Option<Digest>,
-    /// Compatibility with records from earlier development versions; never used as authority.
-    #[serde(default, skip_serializing)]
-    pub granted_tracking_ref: Option<String>,
     pub subject: Option<GitOid>,
     pub head: Option<GitOid>,
-    #[serde(default)]
     pub protected_paths: Vec<PathWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<WriterDeliveryReceipt>,
@@ -1366,7 +1345,7 @@ pub struct AttemptRecord {
     /// a build-slot wait; either makes silence inapplicable.
     #[serde(skip)]
     pub provider_silence_suppressed: Transient<bool>,
-    /// Custody evidence. None in older records must never authorise a writer retry.
+    /// Custody evidence. Absence is an unknown launch state and never authorises a writer retry.
     #[serde(default)]
     pub provider_launched: Option<bool>,
     /// Confirmed pre-custody preparation refusal, sealed with its terminal row.
@@ -1405,13 +1384,11 @@ pub struct AttemptRecord {
     /// Fallback candidates that did not launch before this attempt did.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped_routes: Vec<SkippedRoute>,
-    /// Stamped when the attempt is created; a record without one decodes as
-    /// all unknown.
-    #[serde(default)]
+    /// Trace context stamped when the attempt is created.
     pub trace: crate::Trace,
 }
 impl AttemptRecord {
-    /// Usage attributable to this attempt, excluding legacy Codex session totals.
+    /// Usage attributable to this attempt; unmarked Codex totals are session-wide.
     pub fn effective_usage(&self) -> UsageRecord {
         if self
             .applied_route
@@ -1563,14 +1540,10 @@ pub struct AdmissionTicket {
     pub disk_floor_bytes: u64,
     /// Spacing for this lane's class, fixed at submission.
     pub startup_spacing_ms: u64,
-    /// Absent on tickets from before lane classes, which decode as writers.
-    #[serde(default)]
     pub lane_class: LaneClass,
     pub quota_permit: Option<String>,
     pub admission_deadline: WallTime,
-    /// The provider's wall-clock allowance once it starts, in seconds. Absent
-    /// (zero) on tickets from before runtime deadlines were recorded.
-    #[serde(default)]
+    /// The provider's wall-clock allowance once it starts, in seconds.
     pub runtime_seconds: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1583,7 +1556,6 @@ pub struct RunEvent {
     pub attempt_id: AttemptId,
     pub revision: u64,
     pub change: AttemptState,
-    #[serde(default)]
     pub trace: crate::Trace,
 }
 #[cfg(test)]
@@ -1600,7 +1572,8 @@ mod tests {
             "attempt_number":1, "revision":1, "generation":1,
             "requested_route":{"kind":"named","name":"fixture"},
             "authority_digest":Digest::from_bytes([3; 32]), "queued_at":WallTime::from_micros(1)?,
-            "state":{"state":"queued"}, "usage":{},
+            "state":{"state":"queued"}, "usage":{}, "trace":{},
+            "read_only_writable":[], "protected_paths":[],
             "prompt":{"path":{"encoding":"utf8","path":"prompt"},
                 "digest":CanonicalV1::file_digest(b"fixture"),"bytes":7,"complete":true,"redacted":false}
         }))?;
@@ -1629,13 +1602,6 @@ mod tests {
         ));
         assert!(floors(serde_json::json!({"effective":true})));
         assert!(floors(serde_json::json!({})));
-        // Older shapes are not interpreted as format-2 authority.
-        assert!(floors(
-            serde_json::json!({"sandboxed":false,"source":"read_only"})
-        ));
-        assert!(floors(
-            serde_json::json!({"effective":true,"source":"read_only"})
-        ));
         Ok(())
     }
 
@@ -1712,61 +1678,6 @@ mod tests {
     }
 
     #[test]
-    fn request_with_a_removed_task_class_retains_its_sealed_digest()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let request = CanonicalRequest {
-            extra: Default::default(),
-            chair: None,
-            fresh_continuation: None,
-            schema_version: 1,
-            task: TaskRequest {
-                context: None,
-                extra: Default::default(),
-                build_heavy: false,
-                title: None,
-                profile: HarnessProfile {
-                    name: "rigorous".into(),
-                    ..HarnessProfile::default()
-                },
-                prompt_digest: CanonicalV1::file_digest(b"prompt"),
-                base: None,
-                head: None,
-                source_head: None,
-                base_ref: None,
-                route: RequestedRoute::Named {
-                    extra: Default::default(),
-                    name: "senior".into(),
-                    effort: None,
-                },
-                account: None,
-                authority_digest: Digest::from_bytes([5; 32]),
-                writer: None,
-                deliver: None,
-                provider_timeout_seconds: 60,
-                delivery_id: None,
-                access: LaneAccess::default(),
-            },
-            parent: None,
-            lane_depth: None,
-            parent_attempt: None,
-        };
-        let mut sealed = serde_json::to_value(&request)?;
-        assert!(sealed["task"].get("title").is_none());
-        assert!(sealed["task"].get("fallback").is_none());
-        let legacy: CanonicalRequest = serde_json::from_value(sealed.clone())?;
-        assert_eq!(serde_json::to_value(&legacy)?, sealed);
-        assert_eq!(legacy.digest()?, request.digest()?);
-        for task_class in [serde_json::Value::Null, serde_json::json!("mechanical")] {
-            sealed["task"]["profile"]["task_class"] = task_class;
-            let digest = CanonicalV1::record_digest("run-request", 1, &sealed)?;
-            let parsed: CanonicalRequest = serde_json::from_value(sealed.clone())?;
-            assert_eq!(parsed.digest()?, digest);
-            assert_eq!(serde_json::to_value(parsed)?, sealed);
-        }
-        Ok(())
-    }
-
-    #[test]
     fn new_profile_omits_task_class() -> Result<(), Box<dyn std::error::Error>> {
         let profile = HarnessProfile {
             name: "rigorous".into(),
@@ -1809,9 +1720,9 @@ mod tests {
     }
 
     #[test]
-    fn database_ipc_is_explicit_and_round_trips() {
-        let old: LaneAccess = serde_json::from_str("{}").expect("old access");
-        assert!(!old.database_ipc);
+    fn default_access_denies_database_ipc_and_explicit_access_round_trips() {
+        let defaults = LaneAccess::default();
+        assert!(!defaults.database_ipc);
         let access = LaneAccess {
             database_ipc: true,
             ..Default::default()

@@ -51,7 +51,7 @@ fn native_host_inventory_protects_aliases_and_later_worktrees()
     plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
         git_grants_digest: [0; 32],
         publishing: false,
-        common_git_dir: Some(primary.join(".git")),
+        common_git_dir: primary.join(".git"),
         cargo_cache: PathGrant {
             path: root.join("cache"),
             scope: PathScope::Subtree,

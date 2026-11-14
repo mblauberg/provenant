@@ -57,7 +57,7 @@ pub(super) fn verify_worktree_authority(
     let grants = WorktreeWriteGrants::derive(verified, selected_ref);
     grants.validate()?;
     validate_writer_cache(authority, verified, anchors.home)?;
-    if authority.common_git_dir() != Some(grants.common_git_dir.path.as_path()) {
+    if authority.common_git_dir() != grants.common_git_dir.path.as_path() {
         return Err(PermissionError::GitWriteAuthorityMissing);
     }
     if grants.digest(&authority.cargo_cache) != authority.git_grants_digest {

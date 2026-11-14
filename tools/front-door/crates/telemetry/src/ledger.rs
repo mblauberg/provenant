@@ -24,7 +24,7 @@ use thiserror::Error;
 /// Directory in the state root holding the segments.
 pub const DIRECTORY: &str = "usage-ledger";
 /// The one row format this build reads and writes.
-pub const FORMAT: &str = "provenant.usage-ledger.v1";
+pub const FORMAT: &str = "provenant.usage-ledger.v2";
 const LOCK: &str = "ledger.lock";
 /// Largest segment read. A segment holds one day of attempts.
 const SEGMENT_CAP: u64 = 64 << 20;
@@ -56,21 +56,10 @@ impl LedgerError {
 #[serde(rename_all = "snake_case")]
 pub enum Source {
     Settlement,
-    /// Read-only historical value retained so already-kept 1.x rows decode.
-    Backfill,
-}
-
-/// Format-1 identifiers, kept as opaque text. Nothing parses them back.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Labels {
-    pub run: Option<String>,
-    pub task: Option<String>,
 }
 
 /// Disjoint token counts, as the provider reported them. Unknown stays absent.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Tokens {
     pub uncached_input: Option<u64>,
     pub cache_read: Option<u64>,
@@ -82,7 +71,6 @@ pub struct Tokens {
 
 /// API-equivalent cost at settlement, from the bundled price table.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Cost {
     /// Known cost in millionths of a microdollar, unrounded, so totals round once.
     pub picodollars: u64,
@@ -96,15 +84,13 @@ pub struct Cost {
 
 /// One terminal attempt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Row {
     pub format: String,
     pub source: Source,
     pub project: ProjectId,
-    pub graph: Option<String>,
-    pub node: Option<String>,
+    pub graph: String,
+    pub node: String,
     pub attempt: String,
-    pub labels: Labels,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -184,12 +170,9 @@ pub fn row(
         format: FORMAT.into(),
         source: Source::Settlement,
         project: fact.project_id,
-        graph: Some(key.graph().to_owned()),
-        node: Some(key.node().to_owned()),
+        graph: key.graph().to_owned(),
+        node: key.node().to_owned(),
         attempt: fact.attempt_id.to_string(),
-        // Old identifiers remain opaque strings when reading existing rows.
-        // New rows use graph/node above and never republish legacy IDs.
-        labels: Labels::default(),
         provider,
         model,
         effort: field(|r| &r.effort),

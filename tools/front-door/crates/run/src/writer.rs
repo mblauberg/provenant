@@ -189,31 +189,35 @@ fn resolve_writer_with(
             error.into()
         }
     })?;
+    let location = provenant_config::ProjectLocation::new(repo.common_git_dir()).map_err(error(
+        "resolve writer project binding",
+        Some(repo.common_git_dir()),
+    ))?;
+    let binding = provenant_config::lookup_project_at_state(state, &location)
+        .map_err(error(
+            "read writer project binding",
+            Some(repo.common_git_dir()),
+        ))?
+        .ok_or(RunError::Validation(
+            "writer custody project is not registered",
+        ))?;
+    let mut extra = provenant_records::ExtraFields::default();
+    extra.insert(
+        "custody_project".into(),
+        serde_json::json!(binding.project_id()),
+    );
     if !verify {
         if !path.starts_with(project) {
             return Err(RunError::unsafe_path(path, PathCheck::Containment));
         }
         return Ok(WriterRequest {
-            extra: Default::default(),
+            extra,
             project: project.to_path_buf(),
             worktree: path,
         });
     }
     let worktree = provenant_confinement::verify_worktree(&repo, &path)
         .map_err(worktrees::WorktreeError::from)?;
-    let location = provenant_config::ProjectLocation::new(repo.common_git_dir()).map_err(error(
-        "resolve writer project binding",
-        Some(repo.common_git_dir()),
-    ))?;
-    let mut extra = provenant_records::ExtraFields::default();
-    if let Some(binding) = provenant_config::lookup_project_at_state(state, &location).map_err(
-        error("read writer project binding", Some(repo.common_git_dir())),
-    )? {
-        extra.insert(
-            "custody_project".into(),
-            serde_json::json!(binding.project_id()),
-        );
-    }
     Ok(WriterRequest {
         extra,
         project: project.to_path_buf(),
@@ -716,38 +720,18 @@ fn writer_branch(worktree: &VerifiedWorktree) -> Result<GitRefName> {
     .map_err(error("parse writer branch", Some(&head_path)))
 }
 
-/// Persisted source-project custody binding. Older requests keep their original
-/// attribution namespace during recovery.
-pub(crate) fn writer_project_id(
-    request: &WriterRequest,
-    attribution: ProjectId,
-) -> Result<ProjectId> {
-    request
+/// Read the required source-project custody binding from a current writer request.
+pub(crate) fn writer_project_id(request: &WriterRequest) -> Result<ProjectId> {
+    let value = request
         .extra
         .get("custody_project")
-        .map(|value| {
-            serde_json::from_value(value.clone())
-                .map_err(|_| RunError::Validation("invalid writer custody project"))
-        })
-        .transpose()
-        .map(|project| project.unwrap_or(attribution))
+        .ok_or(RunError::Validation("writer custody project missing"))?;
+    serde_json::from_value(value.clone())
+        .map_err(|_| RunError::Validation("invalid writer custody project"))
 }
 
-/// Compare persisted writer identity, interpreting legacy custody as attribution.
-/// Callers retain the original request bytes when replaying an equivalent writer.
-pub fn equivalent_writer(
-    saved: &WriterRequest,
-    resolved: &WriterRequest,
-    attribution: ProjectId,
-) -> bool {
-    let mut saved = saved.clone();
-    let mut resolved = resolved.clone();
-    for writer in [&mut saved, &mut resolved] {
-        writer
-            .extra
-            .entry("custody_project".into())
-            .or_insert_with(|| serde_json::json!(attribution));
-    }
+/// Compare the complete persisted writer identity.
+pub fn equivalent_writer(saved: &WriterRequest, resolved: &WriterRequest) -> bool {
     saved == resolved
 }
 
@@ -758,7 +742,6 @@ impl crate::RunStore {
     pub(crate) fn attempt_writer_slot(
         &self,
         attempt: provenant_core::AttemptId,
-        project: ProjectId,
         call: &crate::Request<'_>,
     ) -> Result<Option<PathBuf>> {
         let request = self.request(attempt, call)?;
@@ -766,18 +749,14 @@ impl crate::RunStore {
             .task
             .writer
             .as_ref()
-            .map(|writer| self.writer_slot(writer, project))
+            .map(|writer| self.writer_slot(writer))
             .transpose()
     }
-    pub(crate) fn writer_slot(
-        &self,
-        writer: &WriterRequest,
-        attribution: ProjectId,
-    ) -> Result<PathBuf> {
+    pub(crate) fn writer_slot(&self, writer: &WriterRequest) -> Result<PathBuf> {
         Ok(self
             .writer_registry
             .join("worktrees")
-            .join(writer_project_id(writer, attribution)?.to_string())
+            .join(writer_project_id(writer)?.to_string())
             .join(worktrees::state_dir_name(&writer.worktree)))
     }
 }
@@ -847,21 +826,19 @@ pub fn prepare_writer_with_facts(
         "resolve writer project binding",
         Some(repo.common_git_dir()),
     ))?;
-    let custody_project = writer_project_id(request, project)?;
-    if request.extra.contains_key("custody_project") {
-        let binding = provenant_config::lookup_project_at_state(state, &location)
-            .map_err(error(
-                "read writer project binding",
-                Some(repo.common_git_dir()),
-            ))?
-            .ok_or(RunError::Validation(
-                "writer custody project is not registered",
-            ))?;
-        if binding.project_id() != custody_project {
-            return Err(RunError::Validation(
-                "writer custody project does not match its repository",
-            ));
-        }
+    let custody_project = writer_project_id(request)?;
+    let binding = provenant_config::lookup_project_at_state(state, &location)
+        .map_err(error(
+            "read writer project binding",
+            Some(repo.common_git_dir()),
+        ))?
+        .ok_or(RunError::Validation(
+            "writer custody project is not registered",
+        ))?;
+    if binding.project_id() != custody_project {
+        return Err(RunError::Validation(
+            "writer custody project does not match its repository",
+        ));
     }
     let state_dir = Directory::open_anchor(state)?;
     if custody_project != project {
@@ -1698,6 +1675,16 @@ mod cargo_setup_tests {
             Ok(String::from_utf8(output.stdout)?.trim().to_owned())
         };
         run(&["init", "-q"])?;
+        let home = root.join("home");
+        std::fs::create_dir(&home)?;
+        let mut roots = provenant_core::RootInputs::new(home, project.clone());
+        roots.state_dir = Some(state.clone());
+        let roots = roots.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let custody_project = provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(git_dir.clone())?,
+        )?
+        .project_id();
         std::fs::write(project.join("old name.txt"), "tracked")?;
         run(&["add", "old name.txt"])?;
         run(&["commit", "--allow-empty", "-qm", "initial"])?;
@@ -1879,14 +1866,15 @@ mod cargo_setup_tests {
                         start.wait();
                         entered.send(()).map_err(|error| error.to_string())?;
                         let request = WriterRequest {
-                            extra: Default::default(),
+                            extra: [("custody_project".into(), serde_json::json!(custody_project))]
+                                .into(),
                             project: project.clone(),
                             worktree: writer.worktree.path().to_path_buf(),
                         };
                         let preparation = prepare_writer_with_facts(
                             &request,
                             &state,
-                            ProjectId::from_bytes([1; 16]),
+                            custody_project,
                             &worktrees::RepoFacts::default(),
                         );
                         prepared.send(()).map_err(|error| error.to_string())?;
@@ -3028,7 +3016,7 @@ pub(crate) fn settle_launch_staging(attempt: &Directory) -> Result<()> {
     Ok(())
 }
 
-/// Preserve pre-upgrade launch evidence on replay without weakening its check.
+/// Preserve sealed current launch ownership evidence on replay.
 pub(crate) fn seal_writer_ownership(
     attempt: &Directory,
     tree: &provenant_confinement::VerifiedWorktree,
@@ -3046,13 +3034,9 @@ pub(crate) fn seal_writer_ownership(
         crate::artifacts::read_sealed(attempt, "writer-owned.json", crate::RECORD_LIMIT)?
     {
         let prior: WriterOwnership = crate::db::decode(&raw)?;
-        let fields: serde_json::Value = crate::db::decode(&raw)?;
-        let has_owner = fields
-            .as_object()
-            .is_some_and(|object| object.contains_key("owner"));
         if prior.schema_version != 1
             || prior.lane_owned != ownership.lane_owned
-            || (has_owner && prior.owner != ownership.owner)
+            || prior.owner != ownership.owner
         {
             return Err(RunError::Conflict);
         }
@@ -3072,8 +3056,28 @@ pub(crate) fn seal_writer_ownership(
 pub(crate) struct WriterOwnership {
     pub schema_version: u64,
     pub lane_owned: bool,
-    #[serde(default)]
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
     pub owner: Option<worktrees::WorktreeOwner>,
+}
+
+#[cfg(test)]
+mod writer_ownership_shape_tests {
+    use super::WriterOwnership;
+
+    #[test]
+    fn writer_ownership_requires_owner_member_but_accepts_unknown_owner() {
+        let current = serde_json::json!({
+            "schema_version": 1,
+            "lane_owned": false,
+            "owner": null,
+        });
+        let parsed: WriterOwnership = serde_json::from_value(current.clone()).unwrap();
+        assert_eq!(parsed.owner, None);
+
+        let mut absent = current;
+        absent.as_object_mut().unwrap().remove("owner");
+        assert!(serde_json::from_value::<WriterOwnership>(absent).is_err());
+    }
 }
 
 #[cfg(test)]
@@ -3178,7 +3182,7 @@ mod custody_admission_tests {
             worktree: temp.path().join("checkout"),
         };
         assert_eq!(
-            store.writer_slot(&writer, context.project_id)?,
+            store.writer_slot(&writer)?,
             root.join("worktrees")
                 .join(source_project.to_string())
                 .join(worktrees::state_dir_name(&writer.worktree))

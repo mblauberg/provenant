@@ -307,7 +307,7 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
             AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
                 git_grants_digest: [7; 32],
                 publishing: false,
-                common_git_dir: Some("/fixture/git".into()),
+                common_git_dir: "/fixture/git".into(),
                 cargo_cache: PathGrant {
                     path: root.join("cache"),
                     scope: PathScope::Subtree,

@@ -240,7 +240,7 @@ fn publication_holder_commits_decoded_success_only_with_exit_zero_and_observed_i
                 "cancel.json",
                 &crate::db::bytes(&serde_json::json!({
                     "schema_version": 1, "scope": observed.scope,
-                    "requester": store.context.actor_id, "request_id": "legacy-late-cancel",
+                    "requester": store.context.actor_id, "request_id": "unobserved-late-cancel",
                 "reason": provenant_supervisor::machine::StopReason::ExplicitCancellation
                 }))?,
                 RECORD_LIMIT,
@@ -400,7 +400,7 @@ fn writer_private_temporary_directories_are_removed_after_terminal_and_withdrawa
         let store = RunStore::open(&context, &call)?;
         let mut run = input();
         run.request.task.writer = Some(WriterRequest {
-            extra: Default::default(),
+            extra: crate::tests::writer_extra(),
             project: temp.path().join("checkout"),
             worktree: temp.path().join("checkout/.worktrees/lane"),
         });

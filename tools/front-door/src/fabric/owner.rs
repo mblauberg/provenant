@@ -2683,13 +2683,11 @@ impl BoundGraphOwner<'_> {
                     Path::new(worktree.ok_or(FacadeError::StateCorrupt)?),
                 )
                 .map_err(run_error)?;
-                if !previous_task.writer.as_ref().is_some_and(|previous| {
-                    provenant_run::equivalent_writer(
-                        previous,
-                        &writer,
-                        self.factory.context.identity.project,
-                    )
-                }) {
+                if !previous_task
+                    .writer
+                    .as_ref()
+                    .is_some_and(|previous| provenant_run::equivalent_writer(previous, &writer))
+                {
                     return Err(FacadeError::Conflict);
                 }
                 store

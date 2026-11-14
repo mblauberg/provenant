@@ -216,6 +216,11 @@ pub(super) struct LockedWorktree {
     pub(super) writer: Option<LockGuard>,
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static FAIL_WRITER_GATE_INITIALISATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Canonical paths locate exclusion slots, never identity records. Keep slots
 /// after removal so concurrent callers cannot lock different inodes.
 pub(super) fn writer_directory(
@@ -223,14 +228,57 @@ pub(super) fn writer_directory(
     path: &Path,
 ) -> Result<Directory, WorktreeError> {
     let name = state_dir_name(path);
-    match project_state.mkdir(&name, 0o700) {
-        Ok(()) => project_state.sync()?,
-        Err(error) if error.is_exists() => {}
+    match project_state.open_verified_directory(&name) {
+        Ok(directory) => {
+            drop(
+                provenant_supervisor::custody::writer_observation_guard(&directory)
+                    .map_err(|_| WorktreeError::UnknownWriter)?,
+            );
+            return Ok(directory);
+        }
+        Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error.into()),
     }
+    // Publish only a fully initialised slot. A crash during setup leaves an
+    // unpublished staging directory rather than a permanently unusable slot.
+    let stage = provenant_os::fs::temporary_name()?;
+    project_state.mkdir(&stage, 0o700)?;
+    let staged = project_state.open_verified_directory(&stage)?;
+    let payload = provenant_os::fs::PayloadTree::claim(project_state, &stage, &staged.metadata()?)?;
+    let initialise = || -> Result<(), WorktreeError> {
+        #[cfg(test)]
+        if FAIL_WRITER_GATE_INITIALISATION.with(|failure| failure.replace(false)) {
+            return Err(WorktreeError::UnknownWriter);
+        }
+        provenant_supervisor::custody::prepare_writer_observation(&staged)
+            .map_err(|_| WorktreeError::UnknownWriter)?;
+        staged.sync()?;
+        Ok(())
+    };
+    if let Err(error) = initialise() {
+        // Preserve the initial error if cleanup also fails. A hard crash can
+        // leave this unpublished directory, but it contains no reservation.
+        let _ = payload.unlink(OsStr::new("writer-probe.lock"));
+        let _ = project_state.rmdir(&stage);
+        return Err(error);
+    }
+    match project_state.rename_noreplace(&stage, project_state, &name) {
+        Ok(()) => project_state.sync()?,
+        Err(error) => {
+            // This unpublished private tree cannot be a live writer slot.
+            payload.unlink(OsStr::new("writer-probe.lock"))?;
+            project_state.rmdir(&stage)?;
+            project_state.sync()?;
+            if !error.is_exists() {
+                return Err(error.into());
+            }
+        }
+    }
     let directory = project_state.open_verified_directory(&name)?;
-    provenant_supervisor::custody::prepare_writer_observation(&directory)
-        .map_err(|_| WorktreeError::UnknownWriter)?;
+    drop(
+        provenant_supervisor::custody::writer_observation_guard(&directory)
+            .map_err(|_| WorktreeError::UnknownWriter)?,
+    );
     Ok(directory)
 }
 
@@ -567,12 +615,6 @@ pub fn writer_holder(project_state: &Directory, path: &Path) -> Option<provenant
         .filter(|record| record.custody_directory() == Some(slot.as_path()));
     let holder = matches.next()?.scope.attempt;
     matches.next().is_none().then_some(holder)
-}
-
-/// Initialise a selected admission slot's observer gate, including legacy
-/// slots. Read-only inventory never calls this mutating upgrade.
-pub fn prepare_writer_probe(project_state: &Directory, path: &Path) -> Result<(), WorktreeError> {
-    writer_directory(project_state, path).map(|_| ())
 }
 
 /// Observe exclusion under the short probe gate. Writer acquisition waits for

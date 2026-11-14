@@ -29,7 +29,7 @@ pub struct CapturedResult {
     pub handoff: Result<Option<crate::handoff::Handoff>, &'static str>,
     /// Exactly one well-formed verdict among the lines outside fenced blocks
     /// that start with `VERDICT:` (after emphasis or list markers; not
-    /// blockquotes), wherever it sits. Independent of the legacy required-line contract.
+    /// blockquotes), wherever it sits. Independent of the required-line contract.
     pub verdict: Option<Box<str>>,
     /// Declarations were seen but are not exactly one well-formed verdict.
     pub verdict_invalid: bool,

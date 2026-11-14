@@ -9,7 +9,7 @@ published API prices) from terminal attempts and native sessions. Cost is an
 estimate, never a bill. The [telemetry runbook](../runbooks/telemetry.md) owns
 use. Paths are relative to `tools/front-door/`.
 Trace exports identify attempts by graph and node when the fact has that
-context; missing labels stay unknown instead of exposing legacy IDs.
+context; missing context stays unknown.
 
 ## A report cannot touch a lane
 
@@ -22,18 +22,21 @@ nothing.
 
 ## The usage ledger outlives the run store
 
-One append-only ledger row per terminal attempt, priced at settlement and kept
-with no age limit. The settlement reaction appends it, so a retried settlement
-adds nothing; an unreadable price table leaves the reaction pending rather than
-writing an unpriced row. Unrecognised lines are reported, never skipped.
-`telemetry cost` and `telemetry value` are the only producers of cost and read
-only this ledger. New rows identify work by graph and node. Historical 1.x
-`run` and `task` labels remain opaque text when read; no current command
-reconstructs them from run history.
+One append-only format-2 ledger row per terminal attempt, priced at settlement
+and kept with no age limit. The settlement reaction appends it, so a retried
+settlement adds nothing; an unreadable price table leaves the reaction pending
+rather than writing an unpriced row. Unrecognised lines are reported, never
+skipped. `telemetry cost` and `telemetry value` are the only producers of cost
+and read only this ledger. Each row carries its required work graph and node.
+The format-1 reset must discard `usage-ledger/`, the prior schema-1 `ingest/`
+segments and `ingest-cursors.json`. Format 2 reads only the format-2 ledger and
+schema-2 ingest rows. Removing the old ingest cursors lets later requests replay
+transcripts they select instead of skipping them by a matching old cursor digest;
+any `since` bound on that request still applies. The reset may also remove the
+inert single-file `ingest.jsonl` and `ingest.jsonl.unmigrated` paths.
 - Why: lane usage cannot be regenerated once run history is dropped, and one
   reader of one ledger cannot disagree with itself.
 - Test: `crates/telemetry/src/ledger/tests.rs::a_settled_attempt_appends_one_row_even_when_settlement_is_retried`;
-  `::a_kept_1x_ledger_row_decodes_old_ids_as_opaque_labels`;
   `::an_unrecognised_line_is_reported_by_segment_and_line`;
   `src/settlement.rs::tests::settlement_writes_one_priced_ledger_row_and_a_failed_append_stays_pending`;
   `crates/telemetry/src/ledger/tests.rs::settled_cost_for_a_past_window_equals_the_telemetry_report`;
