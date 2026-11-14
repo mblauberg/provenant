@@ -138,7 +138,7 @@
   "host_land_settings": {
     "path": "domains.pr.land",
     "settings": {
-      "poll_seconds": {"type": "int", "allowed": "seconds, 1 or more", "default": "30", "effect": "Initial delay between pending land CI samples; later delays double up to four times this value. A per-command --poll overrides it."},
+      "poll_seconds": {"type": "int", "allowed": "seconds, 1 or more", "default": "30", "effect": "The bundled default leaves adapter cadence in control; any configured value or --poll selects a fixed interval for CI, gate, and post-merge waits, even when it equals the bundled default."},
       "integration": {"type": "enum", "allowed": "batch, single or forge_queue", "default": "batch", "effect": "Integration strategy."},
       "batch_size": {"type": "int", "allowed": "1 or more", "default": "8", "effect": "Maximum pull requests in a batch."},
       "batch_wait_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "30", "effect": "Maximum batch collection time."},
@@ -172,7 +172,7 @@
       "local_gate.mode": {"type": "enum", "allowed": "warn, enforce or off", "default": "warn", "effect": "Fast pre-push gate behaviour."},
       "local_gate.commands": {"type": "string_list", "allowed": "commands", "default": "empty", "effect": "Fast pre-push command plan."},
       "local_gate.timeout_seconds": {"type": "int", "allowed": "1 or more seconds", "default": "60", "effect": "Fast pre-push gate timeout."},
-      "projects.{project}.poll_seconds": {"type": "int", "allowed": "seconds, 1 or more", "default": "inherited", "effect": "Override poll_seconds for this project; omitted fields inherit lower layers."},
+      "projects.{project}.poll_seconds": {"type": "int", "allowed": "seconds, 1 or more", "default": "inherited", "effect": "Set a fixed interval for CI, gate, and post-merge waits; omitted fields inherit lower layers."},
       "projects.{project}.integration": {"type": "enum", "allowed": "batch, single or forge_queue", "default": "inherited", "effect": "Override integration for this project; omitted fields inherit lower layers."},
       "projects.{project}.batch_size": {"type": "int", "allowed": "1 or more", "default": "inherited", "effect": "Override batch_size for this project; omitted fields inherit lower layers."},
       "projects.{project}.batch_wait_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "inherited", "effect": "Override batch_wait_seconds for this project; omitted fields inherit lower layers."},
@@ -206,7 +206,7 @@
       "projects.{project}.local_gate.mode": {"type": "enum", "allowed": "warn, enforce or off", "default": "inherited", "effect": "Override local_gate.mode for this project; omitted fields inherit lower layers."},
       "projects.{project}.local_gate.commands": {"type": "string_list", "allowed": "commands", "default": "inherited", "effect": "Override local_gate.commands for this project; omitted fields inherit lower layers."},
       "projects.{project}.local_gate.timeout_seconds": {"type": "int", "allowed": "1 or more seconds", "default": "inherited", "effect": "Override local_gate.timeout_seconds for this project; omitted fields inherit lower layers."},
-      "tiers.{tier}.poll_seconds": {"type": "int", "allowed": "seconds, 1 or more", "default": "inherited", "effect": "Override poll_seconds for this risk tier; omitted fields inherit lower layers."},
+      "tiers.{tier}.poll_seconds": {"type": "int", "allowed": "seconds, 1 or more", "default": "inherited", "effect": "Set a fixed interval for CI, gate, and post-merge waits; omitted fields inherit lower layers."},
       "tiers.{tier}.integration": {"type": "enum", "allowed": "batch, single or forge_queue", "default": "inherited", "effect": "Override integration for this risk tier; omitted fields inherit lower layers."},
       "tiers.{tier}.batch_size": {"type": "int", "allowed": "1 or more", "default": "inherited", "effect": "Override batch_size for this risk tier; omitted fields inherit lower layers."},
       "tiers.{tier}.batch_wait_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "inherited", "effect": "Override batch_wait_seconds for this risk tier; omitted fields inherit lower layers."},

@@ -130,7 +130,7 @@ pub enum Command {
         /// Wait for this head's CI (default 1 hour; maximum 4 hours)
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "1h", catalog_duration())]
         wait: Option<u64>,
-        /// Initial CI poll interval in seconds (overrides domains.pr.land.poll_seconds, default 30)
+        /// Set a fixed interval in seconds for CI, gate, and post-merge waits; bundled defaults use adapter cadence
         #[arg(long, catalog_u64_range = 1..)]
         poll: Option<u64>,
         /// Show the resolved landing policy without landing

@@ -162,6 +162,8 @@ pub struct GhForge {
     /// Adapter-owned cadence from the shared observer; caller settings remain
     /// the fallback for forge implementations without an observer.
     observation_interval: Option<Duration>,
+    /// Explicit resolved landing cadence wins over the observer's adaptive value.
+    poll_interval_override: Option<Duration>,
     budget: Duration,
     deadline: Option<std::time::Instant>,
 }
@@ -172,6 +174,7 @@ impl GhForge {
             state: state.to_owned(),
             repository: None,
             observation_interval: None,
+            poll_interval_override: None,
             budget: Duration::from_secs(120),
             deadline: None,
         }
@@ -185,6 +188,9 @@ impl GhForge {
                 .unwrap_or_else(|| std::time::Instant::now() + self.budget),
             retry_command: "provenant land".into(),
         }
+    }
+    fn poll_interval(&self) -> Option<Duration> {
+        self.poll_interval_override.or(self.observation_interval)
     }
     fn repository_name(&mut self) -> Result<String, LandingError> {
         if let Some(repository) = &self.repository {
@@ -283,7 +289,7 @@ impl GhForge {
         object_id(head)?;
         let pull = self.pull_request(number)?;
         let observation_interval = self
-            .observation_interval
+            .poll_interval()
             .ok_or_else(|| LandingError::Failed("forge observation cadence unavailable".into()))?;
         let membership = pull.stack.ok_or(LandingError::PublicationUnknown)?;
         let members = self.stack_members(membership.number)?;
@@ -598,6 +604,9 @@ impl Forge for GhForge {
         self.repository = None;
         self.observation_interval = None;
     }
+    fn set_poll_interval_override(&mut self, interval: Option<Duration>) {
+        self.poll_interval_override = interval;
+    }
     fn repository_identity(&mut self) -> Result<String, LandingError> {
         let repository = self.json("repos/{owner}/{repo}")?;
         let url = repository["html_url"]
@@ -666,7 +675,7 @@ impl Forge for GhForge {
         Ok(latest.into_values().flatten().collect())
     }
     fn observation_interval(&self) -> Option<Duration> {
-        self.observation_interval
+        self.poll_interval()
     }
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError> {
         let commit = object_id(commit)?;
@@ -1527,6 +1536,9 @@ impl GateRunner for CheckGate {
         self.project = path.to_owned();
         self.forge.set_project_path(path);
     }
+    fn set_poll_interval_override(&mut self, interval: Option<Duration>) {
+        self.forge.set_poll_interval_override(interval);
+    }
     #[allow(clippy::disallowed_methods)]
     fn gate(
         &mut self,
@@ -1664,6 +1676,32 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn explicit_poll_override_precedes_adaptive_interval_and_gate_forwards_it() {
+        let adaptive = Duration::from_secs(5);
+        let fixed = Duration::from_secs(30);
+        let mut forge = GhForge::new(Path::new("project"), Path::new("state"));
+        forge.observation_interval = Some(adaptive);
+        assert_eq!(Forge::observation_interval(&forge), Some(adaptive));
+        Forge::set_poll_interval_override(&mut forge, Some(fixed));
+        assert_eq!(Forge::observation_interval(&forge), Some(fixed));
+        Forge::set_project_path(&mut forge, Path::new("candidate-worktree"));
+        assert_eq!(Forge::observation_interval(&forge), Some(fixed));
+        forge.observation_interval = Some(adaptive);
+        Forge::set_poll_interval_override(&mut forge, None);
+        assert_eq!(Forge::observation_interval(&forge), Some(adaptive));
+
+        let mut gate = CheckGate::new(Path::new("project"), Path::new("state"));
+        gate.forge.observation_interval = Some(adaptive);
+        GateRunner::set_poll_interval_override(&mut gate, Some(fixed));
+        assert_eq!(Forge::observation_interval(&gate.forge), Some(fixed));
+        GateRunner::set_project_path(&mut gate, Path::new("candidate-worktree"));
+        assert_eq!(Forge::observation_interval(&gate.forge), Some(fixed));
+        gate.forge.observation_interval = Some(adaptive);
+        GateRunner::set_poll_interval_override(&mut gate, None);
+        assert_eq!(Forge::observation_interval(&gate.forge), Some(adaptive));
+    }
 
     #[test]
     fn async_stack_result_distinguishes_merged_pending_and_unknown() {

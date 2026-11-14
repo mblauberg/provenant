@@ -80,11 +80,11 @@ command catalogue owns the list of codes and their meanings.
 Waiting observes work; timeout or cancellation does not stop it. A target
 settles by its own state, so an older settlement cannot satisfy a wait for new
 work. Local graph waiters share one filesystem event source (inotify or kqueue)
-for settlement logs. When that source is unavailable, the result reports why
+for settlement logs and store changes. When that source is unavailable, the result reports why
 and rereads at `domains.wait.local_interval_ms`. Peer or relayed rows also use
 paced rereads at that setting because the relay socket has no remote event
 subscription; the result identifies that source. Pull requests use forge
-observation. Settlement events are emitted as they are observed.
+observation. Settlement events are emitted as they are observed. Expiry reports the last observed state and marks the wait as timed out; it does not extend the read budget.
 With `--json`, wait emits JSONL events followed by a terminal command-result envelope, including without `--follow`.
 
 - Why: a reader must neither terminate healthy work nor wake on stale evidence.
@@ -158,6 +158,12 @@ target rules, risk tier and invocation resolve into one saved plan with sources.
 `--explain --json` reports repository, target, effective plan, capability decisions
 and unavailable alternatives. An unavailable execution returns its landing record
 ID and typed alternatives without silently selecting another strategy.
+
+Landing CI, candidate gate, and post-merge waits use the forge observer's adaptive
+cadence when `poll_seconds` comes from the bundled default. Supplying `poll_seconds`
+at any configuration layer or using `land --poll` selects that fixed interval for
+all three waits. Source provenance decides this, so an explicit value is fixed even when it
+matches the bundled default.
 
 The `command` strategy invokes `land.command.argv` in the repository checkout,
 with the full pending intent as JSON on stdin. Its required declaration includes

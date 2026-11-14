@@ -64,6 +64,15 @@ fn request_dir(state: &Path, key: provenant_core::Digest) -> PathBuf {
     state.join("landing").join("requests").join(key.to_string())
 }
 
+fn fixed_poll_interval(
+    source_layer: Option<&str>,
+    request_poll_seconds: Option<u64>,
+    resolved_poll_seconds: u64,
+) -> Option<std::time::Duration> {
+    (request_poll_seconds.is_some() || source_layer.is_some_and(|layer| layer != "bundled"))
+        .then(|| std::time::Duration::from_secs(resolved_poll_seconds))
+}
+
 fn record_path(state: &Path, id: &LandingId) -> PathBuf {
     request_dir(state, id.request).join(format!("{id}.json"))
 }
@@ -459,6 +468,18 @@ impl Owner<'_> {
         if let Some(poll) = context.request.policy.poll_seconds {
             settings.poll_seconds = poll;
         }
+        let poll_interval_override = fixed_poll_interval(
+            policy
+                .fields
+                .get("poll_seconds")
+                .map(|field| field.source.layer.as_str()),
+            context.request.policy.poll_seconds,
+            settings.poll_seconds,
+        );
+        self.forge
+            .set_poll_interval_override(poll_interval_override);
+        self.runner
+            .set_poll_interval_override(poll_interval_override);
         let mut gate = (*gate).clone();
         gate.timeout_seconds = context
             .request
@@ -1128,6 +1149,24 @@ mod tests {
                 review_proof: ReviewProof::Policy,
             })
             .collect()
+    }
+
+    #[test]
+    fn poll_interval_uses_source_layer_and_request_presence_not_value_comparison() {
+        let default = Some(std::time::Duration::from_secs(30));
+        assert_eq!(fixed_poll_interval(Some("bundled"), None, 30), None);
+        for layer in ["host", "repository", "project", "tier", "invocation"] {
+            assert_eq!(
+                fixed_poll_interval(Some(layer), None, 30),
+                default,
+                "{layer}"
+            );
+        }
+        assert_eq!(fixed_poll_interval(Some("bundled"), Some(30), 30), default);
+        assert_eq!(
+            fixed_poll_interval(Some("project"), Some(7), 7),
+            Some(std::time::Duration::from_secs(7))
+        );
     }
 
     #[test]
