@@ -122,8 +122,7 @@ fn gc_idle_output_requires_ignored_idle_and_free_writer() -> Result<(), Box<dyn 
         let test_context = TestContext::new(&fixture)?;
         let context = test_context.context();
         let created = gc_owned_lane(&test_context, &context, "idle-output")?;
-        let retirement = HostRetirementFixture::new(&test_context)?;
-        fs::create_dir_all(created.path.join("target"))?;
+            fs::create_dir_all(created.path.join("target"))?;
         fs::write(created.path.join("target/cache"), "output")?;
         let lanes = list(&context, &cancel())?;
         if scenario == "untracked" {
@@ -163,8 +162,8 @@ fn gc_idle_output_requires_ignored_idle_and_free_writer() -> Result<(), Box<dyn 
             &lanes,
             &WorktreeGcPolicy {
                 include_foreign: false,
-                retirement_port: Some(&retirement),
-                retirement_feeds: Some(&retirement),
+                retirement_port: None,
+                retirement_feeds: None,
                 // Output retention alone: the lane itself is never retired.
                 mode: CollectionMode::Outputs,
                 proof: None,
@@ -939,14 +938,13 @@ fn gc_reclaims_unmanaged_output_but_keeps_worktree() -> Result<(), Box<dyn Error
         .find(|lane| lane.path == canonical)
         .ok_or("missing unmanaged fixture worktree")?;
     lane.dirty = WorktreeCondition::Ignored;
-    let retirement = HostRetirementFixture::new(&test_context)?;
     let report = collect(
         &context,
         &[lane],
         &WorktreeGcPolicy {
             include_foreign: true,
-            retirement_port: Some(&retirement),
-            retirement_feeds: Some(&retirement),
+            retirement_port: None,
+            retirement_feeds: None,
             // Output retention alone reclaims the output and keeps the tree.
             mode: CollectionMode::Outputs,
             proof: None,

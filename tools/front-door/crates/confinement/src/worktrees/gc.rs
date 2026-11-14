@@ -1225,7 +1225,12 @@ fn collect_impl(
                 ));
                 return Err(WorktreeError::UnknownWriter);
             }
-            if !dry && (policy.retirement_port.is_none() || policy.retirement_feeds.is_none()) {
+            // Only retiring a worktree needs the durable owner; output-only
+            // collection records no retirement.
+            if !dry
+                && policy.mode == CollectionMode::Worktrees
+                && (policy.retirement_port.is_none() || policy.retirement_feeds.is_none())
+            {
                 row.detail = Some("durable retirement owner unavailable".into());
                 return Ok(());
             }
