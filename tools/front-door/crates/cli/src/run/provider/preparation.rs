@@ -3329,7 +3329,8 @@ pub(super) fn prepare_candidates(
             }
             let policy = provenant_config::GithubPolicy::read(&roots.state, project_id)
                 .map_err(|error| error.to_string())?;
-            let publishing = spec.configure_publishing(scratch, &git, gh, &home, &policy);
+            let publishing =
+                spec.configure_publishing(scratch, &git, gh, &home, &policy, writer.is_some());
             if let Err(error) = publishing {
                 let class = error.boundary_class();
                 if class != provenant_records::diagnostic::BoundaryClass::None {
@@ -3338,6 +3339,20 @@ pub(super) fn prepare_candidates(
                 reasons.push(setup_skip(&label, error.to_string()));
                 continue;
             }
+        }
+        // Every writer receives the declared command policy, even when full
+        // publishing setup (which also changes Git credentials) was not used.
+        if writer.is_some()
+            && !gh_attempted
+            && let Some(gh) = publishing_gh
+                .as_ref()
+                .cloned()
+                .or_else(|| locate("gh").ok())
+        {
+            let policy = provenant_config::GithubPolicy::read(&roots.state, project_id)
+                .map_err(|error| error.to_string())?;
+            spec.configure_github_policy(scratch, &gh, &home, &policy, true)
+                .map_err(|error| error.to_string())?;
         }
         if git_context.is_some()
             && let Some(argument) = adapter_spec.and_then(|spec| spec.context_directory_arg)

@@ -2160,6 +2160,16 @@ impl crate::RunStore {
             .parent()
             .ok_or(RunError::Validation("writer evidence missing"))?;
         let evidence = Directory::open_anchor(parent)?;
+        if let Some(slot) = fence.custody_directory()
+            && provenant_supervisor::custody::pending_writer_import(
+                &Directory::open_anchor(slot)?,
+                true,
+            )
+            .map_err(error("read retained import", Some(slot)))?
+                == Some(scope)
+        {
+            return Ok(true);
+        }
         let Some(raw) =
             crate::artifacts::read_sealed(&evidence, "import-retained.json", crate::RECORD_LIMIT)?
         else {
@@ -2218,6 +2228,12 @@ impl crate::RunStore {
         let mut retained_scope = None;
         let checked = (|| -> Result<()> {
             call.check()?;
+            if let Some(scope) = provenant_supervisor::custody::pending_writer_import(&slot, true)
+                .map_err(error("read slot retained import", None))?
+            {
+                retained_scope = Some(scope);
+                return Ok(());
+            }
             let listing = provenant_supervisor::custody::list_writer_reservations_in_slot(&slot)
                 .map_err(error("list predecessor writer reservations", None))?;
             if !listing.issues.is_empty() {

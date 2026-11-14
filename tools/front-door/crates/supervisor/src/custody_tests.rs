@@ -69,8 +69,14 @@ fn check_release_fence_fixture(slot_root: bool) -> TestResult {
         evidence_path.join("reservation.json")
     };
     let marker_path = evidence_path.join("import-retained.json");
+    let marker = serde_json::to_vec(&serde_json::json!({"schema_version":1, "scope":scope}))?;
     std::fs::write(&reservation_path, fixture.as_bytes())?;
-    std::fs::write(&marker_path, b"retained import evidence")?;
+    let marker_source = if slot_root {
+        path.join("import-retained.json")
+    } else {
+        marker_path.clone()
+    };
+    std::fs::write(&marker_source, &marker)?;
     let source = if slot_root { &slot } else { &evidence };
     let decoded: Reservation = read_record(source, "reservation.json", RECORD_LIMIT)?;
     validate_anchor(source, &decoded)?;
@@ -94,7 +100,13 @@ fn check_release_fence_fixture(slot_root: bool) -> TestResult {
     } else {
         assert_eq!(std::fs::read(&reservation_path)?, fixture.as_bytes());
     }
-    assert_eq!(std::fs::read(&marker_path)?, b"retained import evidence");
+    assert_eq!(std::fs::read(&marker_path)?, marker);
+    assert_eq!(pending_writer_import(&evidence, false)?, Some(scope));
+    if slot_root {
+        // Also preserve the split layout left by the old cutover ordering.
+        std::fs::remove_file(&marker_path)?;
+        assert_eq!(pending_writer_import(&slot, true)?, Some(scope));
+    }
     assert_eq!(
         std::fs::read(worktree.join("uncommitted.txt"))?,
         b"uncommitted work"

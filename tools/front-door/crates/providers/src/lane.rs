@@ -157,6 +157,7 @@ impl crate::LaunchSpec {
         gh: &Path,
         home: &Path,
         policy: &provenant_config::GithubPolicy,
+        writer: bool,
     ) -> Result<(), ProviderError> {
         let text = |path: &Path| -> Result<String, ProviderError> {
             if !path.is_absolute() {
@@ -192,27 +193,22 @@ impl crate::LaunchSpec {
                 .unwrap_or_else(|| home.join(".config/gh"))
         };
         let gh_config = shell_quote(&text(&gh_config_root)?);
-        let gh = format!("GH_CONFIG_DIR={gh_config} {}", shell_quote(&gh_path));
+        let gh_credential = format!("GH_CONFIG_DIR={gh_config} {}", shell_quote(&gh_path));
         let config = scratch.join("publishing.gitconfig");
         let config_text = format!(
             "[credential]\n\thelper =\n\thelper = {}\n\tinteractive = false\n",
-            serde_json::to_string(&format!("!{gh} auth git-credential"))
+            serde_json::to_string(&format!("!{gh_credential} auth git-credential"))
                 .map_err(|_| ProviderError::Malformed)?,
         );
         let include = shell_quote(&format!("include.path={}", text(&config)?));
         self.git_wrapper.scrub = true;
         self.git_wrapper.include = Some(include);
         self.write_git_wrapper(&scratch.join("bin"), git)?;
-        self.setup.extend([
-            SetupStep::WriteFile {
-                path: config,
-                bytes: config_text.into_bytes(),
-            },
-            SetupStep::WriteExecutable {
-                path: scratch.join("bin/gh"),
-                bytes: gh_wrapper(&gh_path, &gh_config, policy).into_bytes(),
-            },
-        ]);
+        self.configure_github_policy(scratch, gh, home, policy, writer)?;
+        self.setup.extend([SetupStep::WriteFile {
+            path: config,
+            bytes: config_text.into_bytes(),
+        }]);
         // Cursor and Agy do not use LaneRuntime::grant for Git.
         self.profile
             .spec
@@ -229,6 +225,63 @@ impl crate::LaunchSpec {
                 self.profile.spec.tool_exec_roots.push(subtree(core));
             }
         }
+        Ok(())
+    }
+
+    /// Install the advisory GitHub command policy without changing Git's
+    /// credential helper. Unsandboxed writers use this same shim as
+    /// publishing setup; read-only lanes pass `writer = false` and retain the
+    /// existing GitHub CLI behaviour.
+    pub fn configure_github_policy(
+        &mut self,
+        scratch: &Path,
+        gh: &Path,
+        home: &Path,
+        policy: &provenant_config::GithubPolicy,
+        writer: bool,
+    ) -> Result<(), ProviderError> {
+        let text = |path: &Path| -> Result<String, ProviderError> {
+            if !path.is_absolute() {
+                return Err(ProviderError::InvalidPath);
+            }
+            let value = path.to_str().ok_or(ProviderError::InvalidPath)?;
+            if value.chars().any(char::is_control) {
+                return Err(ProviderError::InvalidPath);
+            }
+            Ok(value.to_owned())
+        };
+        let gh_path = text(gh)?;
+        let _ = text(scratch)?;
+        let gh_config_root = self
+            .env
+            .iter()
+            .find(|(key, _)| key == "GH_CONFIG_DIR")
+            .map(|(_, value)| PathBuf::from(value))
+            .unwrap_or_else(|| home.join(".config/gh"));
+        let gh_config = shell_quote(&text(&gh_config_root)?);
+        let bin = scratch.join("bin");
+        let path_index = self
+            .env
+            .iter()
+            .position(|(key, _)| key == "PATH")
+            .ok_or(ProviderError::InvalidPath)?;
+        let path = &self.env[path_index].1;
+        let next_path = if std::env::split_paths(path).next().as_deref() == Some(bin.as_path()) {
+            path.clone()
+        } else {
+            std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(path)))
+                .map_err(|_| ProviderError::InvalidPath)?
+        };
+
+        let create = SetupStep::CreateDir(bin);
+        if !self.setup.contains(&create) {
+            self.setup.push(create);
+        }
+        self.setup.push(SetupStep::WriteExecutable {
+            path: scratch.join("bin/gh"),
+            bytes: gh_wrapper(&gh_path, &gh_config, policy, writer).into_bytes(),
+        });
+        self.env[path_index].1 = next_path;
         self.profile
             .spec
             .process_executables
@@ -492,8 +545,16 @@ fn install_git(
     Ok(())
 }
 
-fn gh_wrapper(gh: &str, gh_config: &str, policy: &provenant_config::GithubPolicy) -> String {
+fn gh_wrapper(
+    gh: &str,
+    gh_config: &str,
+    policy: &provenant_config::GithubPolicy,
+    writer: bool,
+) -> String {
     let mut guard = String::new();
+    if writer && !policy.allow_ci_dispatch {
+        guard.push_str(CI_DISPATCH_DENY_GUARD);
+    }
     for verb in &policy.deny_verbs {
         let words: Vec<_> = verb.split_whitespace().collect();
         if words.is_empty() {
@@ -523,6 +584,57 @@ fn gh_wrapper(gh: &str, gh_config: &str, policy: &provenant_config::GithubPolicy
         shell_quote(gh)
     )
 }
+
+const CI_DISPATCH_DENY_GUARD: &str = r#"deny_ci_dispatch() {
+  root_command=
+  skip_next=false
+  for item do
+    if [ "$skip_next" = true ]; then skip_next=false; continue; fi
+    case "$item" in
+      --repo|-R|--hostname|--template|-t|--jq|-q|--config|--app)
+        skip_next=true
+        continue
+        ;;
+      --*=*|-*) continue ;;
+    esac
+    if [ -z "$root_command" ]; then
+      case "$item" in workflow|run) root_command=$item ;; *) break ;; esac
+      continue
+    fi
+    case "$root_command $item" in
+      'workflow run'|'run rerun') return 0 ;;
+      *) break ;;
+    esac
+  done
+
+  api_seen=false
+  endpoint=
+  skip_next=false
+  for item do
+    if [ "$skip_next" = true ]; then skip_next=false; continue; fi
+    case "$item" in
+      -X|-H|-f|-F|-q|-t|--method|--header|--field|--raw-field|--jq|--template|--cache|--hostname|--input|--preview|--repo|-R|--config|--app)
+        skip_next=true
+        continue
+        ;;
+      --*=*|-X?*|-H?*|-f?*|-F?*|-q?*|-*) continue ;;
+    esac
+    if ! $api_seen; then
+      case "$item" in api) api_seen=true; continue ;; *) return 1 ;; esac
+    fi
+    endpoint=$item
+    break
+  done
+  case "$endpoint" in *\?*) endpoint=${endpoint%%\?*} ;; esac
+  while [ "${endpoint%/}" != "$endpoint" ]; do endpoint=${endpoint%/}; done
+  case "$endpoint" in */dispatches|dispatches) return 0 ;; esac
+  return 1
+}
+if deny_ci_dispatch "$@"; then
+  printf '%s\n' 'github.deny_ci_dispatch' >&2
+  exit 1
+fi
+"#;
 
 pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
@@ -1421,7 +1533,7 @@ mod tests {
         input.provenant.git = &git;
         input.home = &home;
         let mut spec = registration.adapter.prepare(input)?;
-        spec.configure_publishing(&scratch, &git, &gh, &home, &Default::default())?;
+        spec.configure_publishing(&scratch, &git, &gh, &home, &Default::default(), true)?;
         for step in &spec.setup {
             match step {
                 SetupStep::CreateDir(path) if path.starts_with(&scratch) => {
@@ -1758,10 +1870,11 @@ mod tests {
         let policy = provenant_config::GithubPolicy {
             deny_verbs: vec!["release create".into()],
             deny_labels: vec![" ci ".into(), "".into(), "needs review".into()],
+            allow_ci_dispatch: false,
         };
         fs::write(
             &shim,
-            gh_wrapper(real_gh.to_str().unwrap(), "'/tmp'", &policy),
+            gh_wrapper(real_gh.to_str().unwrap(), "'/tmp'", &policy, true),
         )?;
         fs::set_permissions(&shim, fs::Permissions::from_mode(0o700))?;
         let executor = SystemExecutor::new(1)?;
@@ -1797,6 +1910,139 @@ mod tests {
         );
         assert!(run(&["pr", "create", "--title", "docs"])?.termination == Termination::Exit(0));
         assert!(run(&["release", "view"])?.termination == Termination::Exit(0));
+        Ok(())
+    }
+
+    #[test]
+    fn writer_ci_dispatch_is_denied_by_default_and_host_grant_is_explicit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
+        let temp = tempfile::tempdir()?;
+        let real_gh = temp.path().join("real-gh");
+        fs::write(&real_gh, "#!/bin/sh\nprintf '<%s>\\n' \"$@\"\n")?;
+        fs::set_permissions(&real_gh, fs::Permissions::from_mode(0o700))?;
+        let executor = SystemExecutor::new(1)?;
+        let run = |policy: &provenant_config::GithubPolicy, writer, args: &[&str]| {
+            let shim = temp
+                .path()
+                .join(if writer { "writer-gh" } else { "reader-gh" });
+            fs::write(
+                &shim,
+                gh_wrapper(real_gh.to_str().unwrap(), "'/tmp'", policy, writer),
+            )?;
+            fs::set_permissions(&shim, fs::Permissions::from_mode(0o700))?;
+            let argv: Vec<_> = std::iter::once(shim.as_os_str().to_owned())
+                .chain(args.iter().map(OsString::from))
+                .collect();
+            Ok::<_, Box<dyn std::error::Error>>(executor.execute(ExecOptions::new(
+                &argv,
+                temp.path(),
+                Duration::from_secs(5),
+            ))?)
+        };
+        let default_policy: provenant_config::GithubPolicy = serde_json::from_str("{}")?;
+        for args in [
+            vec!["workflow", "run", "ci.yml"],
+            vec!["run", "rerun", "123"],
+            vec!["--hostname", "api", "api", "/repos/o/r/dispatches"],
+            vec![
+                "api",
+                "--config",
+                "api",
+                "--method",
+                "POST",
+                "/repos/o/r/dispatches",
+            ],
+            vec![
+                "--repo",
+                "owner/repo",
+                "workflow",
+                "run",
+                "ci.yml",
+                "--ref",
+                "branch",
+            ],
+            vec![
+                "--hostname",
+                "github.com",
+                "run",
+                "rerun",
+                "123",
+                "--failed",
+            ],
+            vec![
+                "api",
+                "--method",
+                "POST",
+                "/repos/o/r/actions/workflows/ci.yml/dispatches?ref=main",
+            ],
+            vec![
+                "api",
+                "/repos/o/r/actions/runs/123/dispatches/?ref=main",
+                "--method=POST",
+            ],
+            vec![
+                "--repo",
+                "o/r",
+                "api",
+                "-X",
+                "POST",
+                "repos/o/r/dispatches/",
+            ],
+            vec![
+                "api",
+                "--repo",
+                "o/r",
+                "--method",
+                "POST",
+                "repos/o/r/dispatches",
+            ],
+        ] {
+            let output = run(&default_policy, true, &args)?;
+            assert_eq!(output.termination, Termination::Exit(1));
+            assert_eq!(output.stderr.bytes, b"github.deny_ci_dispatch\n");
+        }
+
+        for args in [
+            vec!["api", "--method", "GET", "/repos/o/r/actions/runs"],
+            vec![
+                "pr",
+                "create",
+                "--title",
+                "api",
+                "--body",
+                "/repos/o/r/dispatches",
+            ],
+        ] {
+            assert_eq!(
+                run(&default_policy, true, &args)?.termination,
+                Termination::Exit(0)
+            );
+        }
+
+        // Read-only lanes keep their existing GitHub CLI behaviour.
+        let output = run(&default_policy, false, &["workflow", "run", "ci.yml"])?;
+        assert_eq!(output.termination, Termination::Exit(0));
+        assert!(
+            output
+                .stdout
+                .bytes
+                .windows(b"<workflow>\n<run>\n".len())
+                .any(|w| w == b"<workflow>\n<run>\n")
+        );
+
+        let granted: provenant_config::GithubPolicy =
+            serde_json::from_str(r#"{"allow_ci_dispatch":true}"#)?;
+        let output = run(&granted, true, &["workflow", "run", "ci.yml"])?;
+        assert_eq!(output.termination, Termination::Exit(0));
+        assert!(
+            output
+                .stdout
+                .bytes
+                .windows(b"<workflow>\n<run>\n".len())
+                .any(|w| w == b"<workflow>\n<run>\n")
+        );
         Ok(())
     }
 
@@ -1844,6 +2090,7 @@ mod tests {
                 Path::new("/fixture/gh"),
                 Path::new("/fixture/home"),
                 &provenant_config::GithubPolicy::default(),
+                true,
             );
             assert!(
                 result.is_ok(),
@@ -1988,7 +2235,7 @@ mod tests {
         let mut spec = Codex.prepare(input)?;
         spec.env
             .push(("GH_CONFIG_DIR".into(), gh_store.as_os_str().to_owned()));
-        spec.configure_publishing(&scratch, &git, &gh, &home, &Default::default())?;
+        spec.configure_publishing(&scratch, &git, &gh, &home, &Default::default(), true)?;
         // Apply only the generated publishing setup; adapter-specific auth
         // setup belongs to the existing provider tests.
         fs::create_dir_all(scratch.join("bin"))?;

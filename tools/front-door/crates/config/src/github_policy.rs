@@ -12,6 +12,10 @@ pub struct GithubPolicy {
     pub deny_verbs: Vec<String>,
     #[serde(default)]
     pub deny_labels: Vec<String>,
+    /// Let writer lanes invoke GitHub Actions dispatch operations through the
+    /// configured `gh` shim. This is an advisory host policy, not a boundary.
+    #[serde(default)]
+    pub allow_ci_dispatch: bool,
 }
 
 impl GithubPolicy {
