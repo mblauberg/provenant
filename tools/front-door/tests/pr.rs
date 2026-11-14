@@ -485,7 +485,7 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                 Some("UNKNOWN") => None,
                 _ => Some(true),
             };
-            let body = serde_json::json!({"state":if merged {"closed"} else {"open"}, "head":{"sha":next,"ref":"feature","repo":{"full_name":"owner/repo"}}, "base":{"sha":HEAD,"ref":"main","repo":{"full_name":"owner/repo"}}, "mergeable":mergeable,"mergeable_state":"clean","merged_at":if merged {Some("2020-01-01T00:00:00Z")} else {None},"merge_commit_sha":null,"title":"fixture"});
+            let body = serde_json::json!({"state":if merged {"closed"} else {"open"}, "head":{"sha":next,"ref":"feature","repo":{"full_name":"owner/repo"}}, "base":{"sha":HEAD,"ref":"main","repo":{"full_name":"owner/repo"}}, "mergeable":mergeable,"mergeable_state":"clean","merged_at":if merged {Some("2020-01-01T00:00:00Z")} else {None},"merge_commit_sha":null,"title":"fixture","user":{"login":"fixture-author"}});
             io::stdout().write_all(&serde_json::to_vec(&body)?)?;
         }
         "pr view 1668 --json headRefOid" | "pr view 1668 --json headRefOid,mergeable" => {

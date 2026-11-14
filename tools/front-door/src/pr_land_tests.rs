@@ -1468,7 +1468,7 @@ pub(crate) fn pr_land_canonicalises_quoted_worktree_paths() -> Result {
 }
 
 pub(crate) fn pr_land_uses_writer_lock_and_preserves_attempt_recovery_evidence() -> Result {
-    pr_land_writer_cases(&["abandoned", "held", "malformed", "wrong_binding"])
+    pr_land_writer_cases(&["abandoned", "held", "malformed", "historical_binding"])
 }
 
 pub(crate) fn pr_land_writer_lock_preserves_dirty_and_output_cases() -> Result {
@@ -1529,7 +1529,7 @@ fn pr_land_writer_cases(cases: &[&str]) -> Result {
         let binding = WriterBinding::from_verified(
             writer.worktree.repo().root_dir(),
             writer.worktree.repo().private_dir(),
-            if case == "wrong_binding" {
+            if case == "historical_binding" {
                 "refs/heads/other"
             } else {
                 writer.branch.as_str()
@@ -1595,7 +1595,7 @@ fn pr_land_writer_cases(cases: &[&str]) -> Result {
             _ => {}
         }
         let value = land(&landing)?;
-        let removed = matches!(case, "abandoned" | "allowed_output");
+        let removed = matches!(case, "abandoned" | "allowed_output" | "historical_binding");
         assert_eq!(
             status(&value, "worktree")?,
             if removed { "done" } else { "refused" },
@@ -1603,6 +1603,26 @@ fn pr_land_writer_cases(cases: &[&str]) -> Result {
         );
         assert_eq!(landing.worktree.exists(), !removed);
         assert_eq!(branch_exists(&landing.rig, "feat")?, !removed);
+        if case == "historical_binding" {
+            let record = store.record(prepared.attempt_id, &call)?;
+            assert!(matches!(
+                record.state,
+                provenant_run::AttemptState::Terminal { .. }
+            ));
+            assert_eq!(
+                record.head.map(|head| head.to_string()),
+                Some(landing.head.clone())
+            );
+            let canonical = store.request(prepared.attempt_id, &call)?;
+            assert_eq!(
+                canonical
+                    .task
+                    .writer
+                    .as_ref()
+                    .map(|writer| writer.worktree.as_path()),
+                Some(landing.worktree.as_path())
+            );
+        }
         assert_eq!(
             fs::read(
                 state
