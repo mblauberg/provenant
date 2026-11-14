@@ -215,7 +215,9 @@ def check_references(root, document, commands, adrs, gone):
                            | flags(commands["provenant"]))
             if re.match(r"^(?:\$ )?provenant help\b", reference):
                 known_flags.add("--all")
-            for flag in dict.fromkeys(re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", reference)):
+            # Flags inside a shell substitution belong to another command.
+            own = re.sub(r"\$\((?:[^()]|\([^()]*\))*\)", "", reference)
+            for flag in dict.fromkeys(re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", own)):
                 if flag not in known_flags:
                     warn(display, line, "flag", flag, level)
                     failures += strict

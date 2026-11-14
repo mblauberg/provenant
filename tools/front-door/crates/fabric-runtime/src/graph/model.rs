@@ -967,8 +967,9 @@ pub struct NodeOutputs {
     pub result: Option<ResultOutput>,
     pub verdict: Option<String>,
     pub findings: Vec<Finding>,
-    /// Whether the full findings selection was observed and parsed.
-    #[serde(deserialize_with = "Option::deserialize")]
+    /// Whether the full findings selection was observed and parsed; absent
+    /// when no findings selection applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub findings_available: Option<bool>,
     pub branch: Option<String>,
     pub commit: Option<String>,

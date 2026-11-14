@@ -1052,7 +1052,7 @@ mod tests {
         let checkpoint = serde_json::from_value(serde_json::json!({
             "schema_version":1,"graph_id":"graph","plan_digest":"digest","nodes":[
                 {"id":"planner", "state":"succeeded", "attempts":[],
-                 "outputs":{"schema_version":2,"result":null,"verdict":null,"findings":[],"branch":null,"commit":null,"warnings":[],
+                 "outputs":{"schema_version":2,"result":null,"verdict":null,"findings":[],"findings_available":null,"branch":null,"commit":null,"warnings":[],
                     "plan":{"fallback_reason":"planner fragment invalid: invalid fragment"}}},
                 {"id":"planner--fallback--static", "state":"succeeded", "attempts":[]},
                 {"id":"synthesis", "state":"succeeded", "attempts":[]}

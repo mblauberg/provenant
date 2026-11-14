@@ -358,10 +358,10 @@ impl InstallReporter for PreviewReporter {
                 retire_disk_guard(&home).map_err(io::Error::other)?;
                 super::tick_agent::retire_gc(&home).map_err(io::Error::other)?;
             }
-            if super::tick_agent::eligible(&state, &home) {
-                if super::tick_agent::stop(&home).map_err(io::Error::other)? {
-                    self.stopped("dev.provenant.tick");
-                }
+            if super::tick_agent::eligible(&state, &home)
+                && super::tick_agent::stop(&home).map_err(io::Error::other)?
+            {
+                self.stopped("dev.provenant.tick");
             }
             Ok(())
         })
@@ -1278,10 +1278,10 @@ fn apply_install(
     if matches!(tick_agent, Some(super::tick_agent::Installed::Started)) {
         reporter.stopped_agents.remove("dev.provenant.tick");
     }
-    if result.is_ok() {
-        if let Some(message) = reporter.stopped_report(&state) {
-            let _ = writeln!(io::stderr().lock(), "{message}");
-        }
+    if result.is_ok()
+        && let Some(message) = reporter.stopped_report(&state)
+    {
+        let _ = writeln!(io::stderr().lock(), "{message}");
     }
     Ok(Applied {
         result,
