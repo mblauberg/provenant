@@ -19,6 +19,7 @@ pub(crate) mod owner;
 mod peer;
 pub(crate) mod run_owner;
 pub(crate) mod settlement;
+mod steer;
 
 pub(crate) use git_facts::*;
 pub(crate) use owner::*;
@@ -568,7 +569,7 @@ impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
     }
     fn inbox_owner(
         &mut self,
-        input: provenant_fabric_runtime::inbox::InboxInput,
+        mut input: provenant_fabric_runtime::inbox::InboxInput,
         host: Option<String>,
         budget: WaitBudget,
         cancel: &CancelToken,
@@ -605,11 +606,54 @@ impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
                 format!("inbox owner {host} is not configured"),
             )
         })?;
+        let mut peer_extra = Default::default();
+        if let InboxInput::Steer {
+            extra,
+            operation_id,
+            ..
+        } = &mut input
+            && extra.get("graph_steer") == Some(&serde_json::Value::Bool(true))
+        {
+            let required = [
+                "graph_steer",
+                "graph_launch_actor",
+                "graph_launch_operation",
+                "graph_origin_work_key",
+            ];
+            let valid = operation_id.is_some()
+                && extra.keys().all(|key| required.contains(&key.as_str()))
+                && extra
+                    .get("graph_launch_actor")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|actor| actor.parse::<provenant_core::ActorId>().ok())
+                    .is_some()
+                && extra
+                    .get("graph_launch_operation")
+                    .cloned()
+                    .and_then(|value| {
+                        serde_json::from_value::<provenant_core::OperationId>(value).ok()
+                    })
+                    .is_some()
+                && extra
+                    .get("graph_origin_work_key")
+                    .cloned()
+                    .and_then(|value| {
+                        serde_json::from_value::<provenant_records::WorkKey>(value).ok()
+                    })
+                    .is_some();
+            if !valid {
+                return Err(error(
+                    "steer_target_refused",
+                    "graph steer owner could not verify the accepted live attempt".into(),
+                ));
+            }
+            peer_extra = std::mem::take(extra);
+        }
         match remote.peer(
             &self.factory.clock,
             target,
             PeerAction::Inbox {
-                extra: Default::default(),
+                extra: peer_extra,
                 input,
             },
             budget,

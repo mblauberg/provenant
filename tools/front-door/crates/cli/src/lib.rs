@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 use provenant_core::edit_distance;
 pub mod accounts;
+pub mod brief;
 pub mod check;
 pub mod cloud;
 pub mod console;
@@ -285,6 +286,11 @@ pub const REMOVED: &[Removed] = &[
         &["run"],
         "prompt-stdin",
         "provenant run TEMPLATE --brief-file -",
+    ),
+    flag(
+        &["steer"],
+        "text-stdin",
+        "provenant steer TARGET --brief-file -",
     ),
     flag(&["retry"], "no-fallback", "provenant retry NAME/NODE#N"),
     verb(&["dispatch"], "provenant run TEMPLATE BRIEF"),
@@ -676,7 +682,7 @@ fn usage_example(argv: &[OsString]) -> Option<String> {
         "provenant land" | "provenant pr land" => Some("provenant land 2199 --wait".into()),
         "provenant route resolve" => Some("provenant route resolve senior".into()),
         "provenant output" => Some("provenant output fix-login/review".into()),
-        "provenant steer" => Some("provenant steer fix-login/implement --text-stdin".into()),
+        "provenant steer" => Some("provenant steer fix-login/implement --brief-file -".into()),
         "provenant run" => Some("provenant run task 'Meet the acceptance criteria'".into()),
         _ => {
             if let Some(core) = selected.get::<metadata::CoreCommand>() {
@@ -1211,7 +1217,7 @@ fn constraints(path: &str) -> Vec<String> {
         "provenant run" => &[
             "run needs a template; `provenant templates` lists them",
             "--set binds a string parameter as written and any other type as TOML; quote nothing for a string",
-            "--file reads a graph document; a plain text brief goes in --brief-file",
+            "--file reads a graph document; a plain text brief goes in BRIEF, --brief or --brief-file",
             "inside a lane, work joins the calling node's graph as a child",
         ],
         "provenant route resolve" => &[
@@ -1705,6 +1711,7 @@ mod tests {
         };
         assert_eq!(request.template.as_deref(), Some("explore"));
         assert_eq!(request.brief.as_deref(), Some("Inspect the code"));
+        assert_eq!(request.brief_text, None);
         assert_eq!(request.name.as_deref(), Some("inspect"));
         assert_eq!(request.route.as_deref(), Some("junior"));
         assert_eq!(request.over, ["cli", "runtime"]);
@@ -1718,6 +1725,35 @@ mod tests {
         invalid(&["run", "explore", "--file", "work.toml"]);
         invalid(&["run", "explore", "brief", "--brief-file", "brief.md"]);
         valid(&["run", "explore", "--brief-file", "-"]);
+        let Command::Run(named) = valid(&["run", "explore", "--brief", "Named brief"]).command
+        else {
+            panic!("run")
+        };
+        assert_eq!(named.brief_text.as_deref(), Some("Named brief"));
+        invalid(&["run", "explore", "positional", "--brief", "named"]);
+        valid(&[
+            "retry",
+            "fix-login/implement",
+            "--brief",
+            "Try the parser again",
+        ]);
+        valid(&["retry", "fix-login/implement", "--brief-file", "-"]);
+        invalid(&[
+            "retry",
+            "fix-login/implement",
+            "--brief",
+            "a",
+            "--brief-file",
+            "b",
+        ]);
+        invalid(&[
+            "retry",
+            "fix-login/implement",
+            "--brief-file",
+            "-",
+            "--extend",
+            "x=1",
+        ]);
         invalid(&["run", "explore", "--name", "Not_A_Name"]);
         valid(&["run", "explore", "--route", "writer=junior,review=senior"]);
         for removed in ["--use", "--tier", "--operation-id", "--wait"] {
@@ -2203,7 +2239,7 @@ mod tests {
     fn required_extras(words: &[String], flag: &str) -> Vec<&'static str> {
         let words: Vec<&str> = words.iter().map(String::as_str).collect();
         match (words.as_slice(), flag) {
-            (["steer"], _) => vec!["--text-stdin"],
+            (["steer"], _) => vec!["--brief-file", "-"],
             (["edit"], _) => vec!["--file", "patch.json"],
             (["pr", "open"], "--review") => {
                 vec!["--from-attempt", "fix-login", "--summary-file", "s.md"]
@@ -2411,11 +2447,26 @@ mod tests {
         invalid(&["disk", "report", "--dry-run"]);
     }
     #[test]
-    fn control_commands_require_piped_text_and_a_channel() {
+    fn control_commands_validate_brief_sources_and_channels() {
         let attempt = "fix-login/implement#1";
-        valid(&["steer", attempt, "--text-stdin", "--operation-id", "s-1"]);
-        invalid(&["steer", "11111111111111111111111111111111", "--text-stdin"]);
+        valid(&[
+            "steer",
+            attempt,
+            "--brief",
+            "Please continue",
+            "--operation-id",
+            "s-1",
+        ]);
+        valid(&["steer", attempt, "--brief-file", "-"]);
         invalid(&["steer", attempt]);
+        invalid(&["steer", attempt, "--brief", "a", "--brief-file", "b"]);
+        invalid(&[
+            "steer",
+            "11111111111111111111111111111111",
+            "--brief-file",
+            "-",
+        ]);
+        invalid(&["steer", attempt, "--text-stdin"]);
         valid(&[
             "chair",
             "message",
@@ -2426,7 +2477,7 @@ mod tests {
         ]);
         invalid(&["chair", "message", "chair-a", "--text-stdin"]);
         invalid(&["chair", "message", "chair-a", "--channel", "console"]);
-        invalid(&["steer", attempt, "--text-stdin", "--approve"]);
+        invalid(&["steer", attempt, "--brief-file", "-", "--approve"]);
     }
     #[test]
     fn mail_cursors_can_be_scoped_to_one_chair_session() {

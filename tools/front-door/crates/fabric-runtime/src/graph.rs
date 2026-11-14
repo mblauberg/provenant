@@ -19,6 +19,7 @@ mod asks;
 mod ci;
 pub use ci::{CiFailedCheck, CiTarget};
 mod budget;
+mod cancellation_intent;
 #[cfg(test)]
 #[path = "graph/checkpoint_tests.rs"]
 mod checkpoint_tests;
@@ -709,6 +710,37 @@ pub trait GraphJournal {
 
     fn load(&mut self, graph_id: &str) -> Result<Option<GraphCheckpoint>, Self::Error>;
     fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error>;
+
+    /// Apply and durably acknowledge any stop request that arrived outside the
+    /// graph lock. Implementations that have no independent control channel do
+    /// nothing.
+    fn apply_cancellation(
+        &mut self,
+        _document: &GraphDocument,
+        _checkpoint: &mut GraphCheckpoint,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+}
+
+fn apply_pending_cancellation<RunError, J: GraphJournal>(
+    document: &GraphDocument,
+    checkpoint: &mut GraphCheckpoint,
+    journal: &mut J,
+    resume: &mut bool,
+) -> Result<bool, GraphError<RunError, J::Error>>
+where
+    RunError: Error + 'static,
+{
+    let applied = journal
+        .apply_cancellation(document, checkpoint)
+        .map_err(GraphError::Journal)?;
+    if applied {
+        // A stop that arrived during a resume wins at this boundary. Do not
+        // clear its durable fence as part of the same in-flight operation.
+        *resume = false;
+    }
+    Ok(applied)
 }
 
 #[derive(Debug, Error)]
@@ -1394,54 +1426,74 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 )
                 .map_err(|error| GraphError::Invalid(error.to_string()))?;
             }
-            {
-                for (node, progress) in plan.nodes.iter().zip(&mut checkpoint.nodes) {
-                    // A loop round's worktree is advanced by earlier rounds;
-                    // its starting head becomes known only at that round.
-                    if plans::writer(node)
-                        && node
-                            .extra
-                            .get("provision_worktree")
-                            .and_then(serde_json::Value::as_bool)
-                            != Some(true)
-                        && node.round.is_none()
-                        && node
-                            .attempt
-                            .as_ref()
-                            .and_then(|spec| spec.new_worktree.as_ref())
-                            .is_none()
+            // Publish the generation before the first eager bind. A stop can
+            // then write an instance-bound request while a host owns the graph
+            // lock and is resolving or creating a worktree.
+            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+            for index in 0..plan.nodes.len() {
+                if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
+                    settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
+                    return Ok(transitions::graph_run(checkpoint));
+                }
+                let node = &plan.nodes[index];
+                // A loop round's worktree is advanced by earlier rounds; its
+                // starting head becomes known only at that round.
+                if plans::writer(node)
+                    && node
+                        .extra
+                        .get("provision_worktree")
+                        .and_then(serde_json::Value::as_bool)
+                        != Some(true)
+                    && node.round.is_none()
+                    && node
+                        .attempt
+                        .as_ref()
+                        .and_then(|spec| spec.new_worktree.as_ref())
+                        .is_none()
+                {
+                    let worktree = node
+                        .worktree
+                        .as_deref()
+                        .ok_or_else(|| GraphError::Invalid("writer worktree missing".into()))?;
+                    match owner.bind_writer_worktree(worktree) {
+                        Ok(binding) => {
+                            transitions::apply_writer_binding(
+                                node,
+                                &mut checkpoint.nodes[index],
+                                binding,
+                                document.schema_version >= 2,
+                            )
+                            .map_err(GraphError::Refused)?;
+                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        }
+                        // Contention waits in the launch loop, which owns the
+                        // persisted deadline; only a refusal fails the node here.
+                        Err(error) if next_attempt::launch_contention(&error) => {}
+                        Err(error) => {
+                            transitions::writer_binding_failed(
+                                &mut checkpoint.nodes[index],
+                                &node.id,
+                                &next_attempt::writer_binding_reason(&node.id, &error),
+                            );
+                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        }
+                    }
+                    // Save a successful binding before acknowledging the stop;
+                    // otherwise the physical bind could outlive its checkpoint.
+                    if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)?
                     {
-                        let worktree = node
-                            .worktree
-                            .as_deref()
-                            .ok_or_else(|| GraphError::Invalid("writer worktree missing".into()))?;
-                        let binding = match owner.bind_writer_worktree(worktree) {
-                            Ok(binding) => binding,
-                            // Contention waits in the launch loop, which owns the
-                            // persisted deadline; only a refusal fails the node here.
-                            Err(error) if next_attempt::launch_contention(&error) => continue,
-                            Err(error) => {
-                                transitions::writer_binding_failed(
-                                    progress,
-                                    &node.id,
-                                    &next_attempt::writer_binding_reason(&node.id, &error),
-                                );
-                                continue;
-                            }
-                        };
-                        transitions::apply_writer_binding(
-                            node,
-                            progress,
-                            binding,
-                            document.schema_version >= 2,
-                        )
-                        .map_err(GraphError::Refused)?;
+                        settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
+                        return Ok(transitions::graph_run(checkpoint));
                     }
                 }
             }
             // Pin named review bases while the admitted source locations are
             // still the ones selected for this execution.
             for index in 0..plan.nodes.len() {
+                if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
+                    settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
+                    return Ok(transitions::graph_run(checkpoint));
+                }
                 if !checkpoint.nodes[index].review_base_pending {
                     continue;
                 }
@@ -1463,6 +1515,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .filter(|base| base.parse::<provenant_core::GitOid>().is_ok())
                     .ok_or_else(|| GraphError::Refused(format!("node {}: review base could not be bound; correct the reference and rerun", node.id)))?;
                 transitions::apply_review_base(&mut checkpoint.nodes[index], base);
+                journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
+                    settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
+                    return Ok(transitions::graph_run(checkpoint));
+                }
             }
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
             checkpoint
@@ -1523,6 +1580,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     }
     if transitions::refresh_limit_notes(&mut checkpoint, document) {
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
+    }
+    if resume && apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
+        settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
+        return Ok(transitions::graph_run(checkpoint));
     }
     if resume {
         let mut resume_view = checkpoint.clone();
@@ -1595,6 +1656,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         if checkpoint.cancelled {
             close_resolved_asks(&mut checkpoint, owner, journal)?;
         }
+        if journal
+            .apply_cancellation(document, &mut checkpoint)
+            .map_err(GraphError::Journal)?
+        {
+            settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
+            return Ok(transitions::graph_run(checkpoint));
+        }
         transitions::apply_resume(&mut checkpoint, extensions)
             .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
         if extensions.iter().any(|e| e.starts_with("loop.")) {
@@ -1626,6 +1694,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
 
     let mut stopped_children = std::collections::BTreeSet::new();
     'schedule: loop {
+        if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
+            continue 'schedule;
+        }
         if let Some(next) = review::correct_verdict(document, &plan, &checkpoint, limits)
             .map_err(|error| GraphError::Refused(error.to_string()))?
         {
@@ -1732,6 +1803,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             &mut stopped_children,
         )?;
         for node_index in 0..plan.nodes.len() {
+            if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
+                continue 'schedule;
+            }
             if checkpoint.cancelled
                 && checkpoint.nodes[node_index]
                     .extra
@@ -2156,6 +2230,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 }
             }
             loop {
+                if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
+                    continue 'schedule;
+                }
                 let (route_index, settlement_retries) = match decide_next_attempt(
                     node,
                     &checkpoint.nodes[node_index],
@@ -2203,6 +2280,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         .launch_retry
                         .as_ref()
                         .and_then(|retry| retry.deadline);
+                    if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)?
+                    {
+                        continue 'schedule;
+                    }
                     if let Some(deadline) = owner
                         .begin_launch(node.access, prior)
                         .map_err(GraphError::Run)?
@@ -2232,6 +2313,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     && checkpoint.nodes[node_index].writer_binding.is_none()
                     && checkpoint.nodes[node_index].attempts.is_empty()
                 {
+                    if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)?
+                    {
+                        continue 'schedule;
+                    }
                     let path = node
                         .worktree
                         .as_deref()
@@ -2287,10 +2372,20 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                         let bound = checkpoint.bound_integration_base.clone();
                                         match bound {
                                             Some(source) => Some(source),
-                                            None => owner
-                                                .bind_writer_worktree(".")
-                                                .map_err(GraphError::Run)?
-                                                .map(|binding| binding.head),
+                                            None => {
+                                                if apply_pending_cancellation(
+                                                    document,
+                                                    &mut checkpoint,
+                                                    journal,
+                                                    &mut resume,
+                                                )? {
+                                                    continue 'schedule;
+                                                }
+                                                owner
+                                                    .bind_writer_worktree(".")
+                                                    .map_err(GraphError::Run)?
+                                                    .map(|binding| binding.head)
+                                            }
                                         }
                                     }
                                 }
@@ -2308,6 +2403,14 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             journal.save(&checkpoint).map_err(GraphError::Journal)?;
                             source
                         };
+                        if apply_pending_cancellation(
+                            document,
+                            &mut checkpoint,
+                            journal,
+                            &mut resume,
+                        )? {
+                            continue 'schedule;
+                        }
                         match owner.provision_child_worktree(path, &source) {
                             Ok(true) => {}
                             Ok(false) => {
@@ -2332,6 +2435,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 return Err(GraphError::Run(error));
                             }
                         }
+                    }
+                    if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)?
+                    {
+                        continue 'schedule;
                     }
                     let binding_result = if let Some(spec) = node
                         .attempt
@@ -2832,6 +2939,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 }
                 let continued = land::continued_branch(node, &checkpoint, &positions);
+                if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
+                    continue 'schedule;
+                }
                 let observation = match owner.observe_or_start(
                     &key,
                     NodeInput {
@@ -2915,6 +3025,22 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                     Err(error) => return Err(GraphError::Run(error)),
                 };
+                // The owner can be launching a process while a stop arrives.
+                // Persist its reference before any later owner query can fail;
+                // leave the intent pending until the full observation saves.
+                let observed_reference = match &observation {
+                    AttemptObservation::Pending { attempt_ref }
+                    | AttemptObservation::Unknown { attempt_ref }
+                    | AttemptObservation::Terminal { attempt_ref, .. } => attempt_ref.clone(),
+                };
+                if let Some(reference) = observed_reference
+                    && let Some(last) = checkpoint.nodes[node_index].attempts.last_mut()
+                    && last.key == key
+                    && last.attempt_ref.as_deref() != Some(reference.as_str())
+                {
+                    last.attempt_ref = Some(reference);
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                }
                 let warnings = owner.take_launch_warnings();
                 transitions::apply_launch_metadata(&mut checkpoint, node_index, warnings);
                 let applied_route = match &observation {
@@ -3196,6 +3322,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     continue 'schedule;
                 }
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
+                    continue 'schedule;
+                }
                 if let Some((next_expanded, next_plan, next_positions)) = appended {
                     (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
                     resume = false;

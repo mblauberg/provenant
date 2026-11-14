@@ -110,6 +110,19 @@ pub fn resolve_control(
     }
 }
 
+/// Build the shared refusal for a control receipt that cannot be delivered.
+pub fn unsupported_control_error(
+    receipt: &provenant_records::control::ControlReceipt,
+) -> CommandError {
+    CommandError {
+        diagnostic: None,
+        code: provenant_records::control::CONTROL_UNSUPPORTED.into(),
+        message: receipt.refusal_message(),
+        cause: None,
+        repair: Some(provenant_records::control::CONTROL_UNSUPPORTED_REPAIR.into()),
+    }
+}
+
 /// Compose Run's host lookup with the inbox owner without a runtime dependency.
 pub fn resolve_work(
     root: &provenant_core::StateRoot,
@@ -186,9 +199,17 @@ pub struct Steer {
     /// Attempt to steer, as NAME[/NODE[#N]]; a node steers its live attempt
     #[arg(value_name = "TARGET")]
     pub target: crate::Target,
-    /// Read the message from standard input (at most 4 KiB; input must finish within 5 seconds)
-    #[arg(long, required = true)]
-    pub text_stdin: bool,
+    /// Steering message
+    #[arg(
+        long,
+        value_name = "TEXT",
+        required_unless_present = "brief_file",
+        conflicts_with = "brief_file"
+    )]
+    pub brief: Option<String>,
+    /// Read the message from a file, or from standard input given `-`
+    #[arg(long, required_unless_present = "brief", conflicts_with = "brief")]
+    pub brief_file: Option<PathBuf>,
     #[arg(long)]
     pub operation_id: Option<OperationId>,
 }
@@ -1217,22 +1238,13 @@ pub fn run(
             if receipt.state == provenant_records::control::ControlState::Unsupported =>
         {
             // Refused before any side effect; the receipt still names the reason.
-            let message = receipt.refusal_message();
+            let error = unsupported_control_error(&receipt);
             let mut result = CommandResult::new(
                 path,
                 Outcome::Refused,
                 Some(InboxResult::Control { receipt }),
             );
-            result.error = Some(CommandError {
-            diagnostic: None,
-                code: provenant_records::control::CONTROL_UNSUPPORTED.into(),
-                message,
-                cause: None,
-                repair: Some(
-                    "Read `provenant help --all --json` provider_controls for what each provider supports; use `provenant retry` to continue a lane."
-                        .into(),
-                ),
-            });
+            result.error = Some(error);
             result
         }
         Ok(data) => CommandResult::new(path, Outcome::Ok, Some(data)),
@@ -1384,5 +1396,30 @@ mod tests {
                 matches!(error, Error::Remote { operation_id: Some(id), .. } if id == operation)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod unsupported_receipt_tests {
+    #[test]
+    fn unsupported_control_has_the_shared_code_message_and_retry_alternative() {
+        use provenant_records::control::*;
+        let receipt = ControlReceipt {
+            extra: Default::default(),
+            operation_id: "steer-refusal".parse().unwrap(),
+            control: ControlKind::Steer,
+            target: "attempt".into(),
+            launch: LaunchKind::Lane,
+            support: ControlSupport::Unsupported,
+            transport: None,
+            state: ControlState::Unsupported,
+            reason: "no live control path".into(),
+            message_id: None,
+        };
+        let error = super::unsupported_control_error(&receipt);
+        assert_eq!(error.code, CONTROL_UNSUPPORTED);
+        assert_eq!(error.message, receipt.refusal_message());
+        assert!(error.message.contains("retry"));
+        assert_eq!(error.repair.as_deref(), Some(CONTROL_UNSUPPORTED_REPAIR));
     }
 }

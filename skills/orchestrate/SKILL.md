@@ -32,7 +32,7 @@ provenant output NAME/NODE
 provenant trace NAME
 provenant retry NAME/NODE --brief TEXT
 provenant stop NAME --reason TEXT
-provenant steer NAME/NODE --text-stdin
+provenant steer NAME/NODE --brief-file -
 provenant land N --head SHA --wait
 provenant cloud launch --file brief.md --provider codex --environment ENV
 provenant cloud collect KEY

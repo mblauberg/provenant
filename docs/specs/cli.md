@@ -75,7 +75,7 @@ replacement.
 ### Core verbs
 
 ```text
-run TEMPLATE [BRIEF] [--name NAME] [--brief-file PATH] [--set PARAM=VALUE]...
+run TEMPLATE [BRIEF | --brief TEXT | --brief-file PATH] [--name NAME] [--set PARAM=VALUE]...
     [--host HOST] [--model MODEL | --route ROUTE] [--effort EFFORT]
     [--account ACCOUNT] [--mode read-only|worktree-write]
     [--worktree PATH | --branch BRANCH --base REF] [--write-scope PATH]...
@@ -87,8 +87,8 @@ output TARGET [--part PART] [--to FILE | --path] [--offset N | --tail N]
     [--max-bytes N]
 trace TARGET
 stop TARGET [--reason TEXT]
-retry TARGET [--brief TEXT | --extend KEY=VALUE...]
-steer TARGET --text-stdin [--operation-id ID]
+retry TARGET [--brief TEXT | --brief-file PATH | --extend KEY=VALUE...]
+steer TARGET (--brief TEXT | --brief-file PATH) [--operation-id ID]
 edit NAME --file PATCH
 templates [TEMPLATE] [--file PATH]
 land NUMBER... [--batch] [--shadow] [--tier TIER] [--head REV] [--wait[=SPAN]]
@@ -99,9 +99,13 @@ telemetry cost [TARGET] [--by route|account|model|graph|node] [--since WHEN]
 ```
 
 `run` needs a template, so a brief is never mistaken for a template name.
-`templates` lists the templates `run` accepts. `--file` takes a graph
-document and nothing else; `--brief-file` reads a brief from a file, or from
-standard input given `-`, and conflicts with `BRIEF`. Inside a lane, `run` adds
+`templates` lists the templates `run` accepts. A brief may be positional, use
+`--brief TEXT`, or use `--brief-file PATH`; choose one source. A path of `-`
+reads standard input and finishes within five seconds. `--file` takes a graph document and nothing else and
+cannot be combined with a brief. `retry --brief` and `retry --brief-file`
+replace a node's brief; a graph target must contain exactly one node. `steer`
+requires exactly one brief source. Brief files, text and stdin share a 1 MiB
+read limit; steer uses the existing 4 KiB control limit. Inside a lane, `run` adds
 a child node to the calling graph, and `--name` names that node. `--explain`
 inspects compilation without starting work.
 
@@ -268,6 +272,7 @@ These common removed spellings exit 2 with one line naming the replacement.
 | Spelling | Replacement |
 |---|---|
 | `dispatch`, `review`, `run --use` | `run TEMPLATE BRIEF` |
+| `steer --text-stdin` | `steer TARGET --brief-file -` |
 | `lanes` | `status` |
 | `resume`, `redo`, `retry --node` | `retry NAME/NODE` |
 | `continue` | `retry NAME/NODE#N` |

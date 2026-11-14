@@ -100,9 +100,9 @@ Fabric store first; older binaries refuse the added schema).
 
 ## Steering
 
-`provenant steer TARGET --text-stdin` and `provenant chair message SESSION
---text-stdin --channel CHANNEL` record up to 4 KiB of guidance as Fabric mail
-with no authority; both are refused inside a lane. `chair message` queues to
+`provenant steer TARGET --brief TEXT` or `--brief-file PATH`, and `provenant
+chair message SESSION --text-stdin --channel CHANNEL`, record up to 4 KiB of
+guidance as Fabric mail with no authority; both are refused inside a lane. `chair message` queues to
 that session's own mailbox, read with `provenant fabric mail read --session
 SESSION`. No lane adapter delivers `steer` live today: it refuses with
 `control_unsupported` and records nothing (`retry` is the continuation). Per-

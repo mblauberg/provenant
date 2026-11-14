@@ -132,8 +132,10 @@ pub enum HostNativeConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GraphConfig {
-    /// Minimum allowance for one writer binding, independent of settlement wait.
-    pub writer_launch_seconds: u64,
+    /// General command launch and read/wait allowance.
+    pub launch_wait_seconds: u64,
+    /// Allowance for one writer provisioning, independent of a reader wait.
+    pub writer_provision_seconds: u64,
     pub limits: GraphLimits,
     pub budget: GraphBudget,
     /// Backoff for pending CI observations; node overrides take precedence.
@@ -149,7 +151,8 @@ pub struct GraphConfig {
 impl Default for GraphConfig {
     fn default() -> Self {
         Self {
-            writer_launch_seconds: 55,
+            launch_wait_seconds: 55,
+            writer_provision_seconds: 55,
             limits: Default::default(),
             budget: Default::default(),
             ci_poll_backoff: Default::default(),
@@ -809,8 +812,16 @@ impl DomainConfig for FabricConfig {
                 reject(format!("plan.auto.{name}"));
             }
         }
-        if !(1..=14_400).contains(&self.graph.writer_launch_seconds) {
-            reject("graph.writer_launch_seconds".into());
+        for (key, seconds) in [
+            ("launch_wait_seconds", self.graph.launch_wait_seconds),
+            (
+                "writer_provision_seconds",
+                self.graph.writer_provision_seconds,
+            ),
+        ] {
+            if !(1..=14_400).contains(&seconds) {
+                reject(format!("graph.{key}"));
+            }
         }
         let limits = &self.graph.limits;
         for (name, value) in [
@@ -874,7 +885,8 @@ fn defaults(_profile: Profile) -> &'static str {
 /// boundary: recovery could raise a cap, lift a budget or swap a binary. Labels,
 /// peers' addresses and lane tuning recover to defaults.
 pub const FIELD_METADATA: &[FieldMetadata] = &[
-    FieldMetadata::int("graph.writer_launch_seconds", 1, 14_400),
+    FieldMetadata::int("graph.launch_wait_seconds", 1, 14_400),
+    FieldMetadata::int("graph.writer_provision_seconds", 1, 14_400),
     FieldMetadata::enumeration(
         "lanes.memory_pressure_threshold",
         &["warning", "critical", "never"],
@@ -895,7 +907,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("home_hosts.{host}", "string"),
 ];
 fn boundary(error: &SectionError) -> bool {
-    if error.code == "retired.bundle_bytes" {
+    if error.code.starts_with("retired.") {
         return false;
     }
     if error.code == "unknown_key"
@@ -921,7 +933,8 @@ fn boundary_existing(error: &SectionError) -> bool {
     };
     [
         "limits",
-        "graph.writer_launch_seconds",
+        "graph.launch_wait_seconds",
+        "graph.writer_provision_seconds",
         "graph.limits",
         "graph.budget",
         "graph.allowed_read_roots",
@@ -943,19 +956,26 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn writer_launch_allowance_defaults_and_validates() {
+    fn launch_allowances_validate_independently() {
         let mut config = config();
-        assert_eq!(config.graph.writer_launch_seconds, 55);
-        for seconds in [0, 14_401] {
-            config.graph.writer_launch_seconds = seconds;
-            assert!(
-                config
-                    .validate()
-                    .iter()
-                    .any(|e| e.field == "graph.writer_launch_seconds")
-            );
+        for field in ["launch_wait_seconds", "writer_provision_seconds"] {
+            for seconds in [0, 14_401] {
+                config.graph = GraphConfig::default();
+                if field == "launch_wait_seconds" {
+                    config.graph.launch_wait_seconds = seconds;
+                } else {
+                    config.graph.writer_provision_seconds = seconds;
+                }
+                assert!(
+                    config
+                        .validate()
+                        .iter()
+                        .any(|error| error.field == format!("graph.{field}"))
+                );
+            }
         }
-        config.graph.writer_launch_seconds = 2;
+        config.graph.launch_wait_seconds = 2;
+        config.graph.writer_provision_seconds = 120;
         assert!(config.validate().is_empty());
     }
 
@@ -1430,6 +1450,24 @@ mod tests {
         let loaded =
             provenant_config::load_with_domains(&roots, Some(&retired[..]), &sections).unwrap();
         assert!(format!("{:?}", loaded.warnings).contains("limit_ceiling"));
+        let retired = b"schema_version=1\n[domains.fabric.graph]\nwriter_launch_seconds=123\n";
+        let loaded =
+            provenant_config::load_with_domains(&roots, Some(&retired[..]), &sections).unwrap();
+        let warning = loaded
+            .warnings
+            .iter()
+            .find(|warning| warning.message.contains("writer_launch_seconds"))
+            .unwrap();
+        assert!(warning.message.contains("launch_wait_seconds"));
+        assert!(warning.message.contains("writer_provision_seconds"));
+        assert_eq!(
+            loaded.domains.fabric.graph.launch_wait_seconds,
+            config().graph.launch_wait_seconds
+        );
+        assert_eq!(
+            loaded.domains.fabric.graph.writer_provision_seconds,
+            config().graph.writer_provision_seconds
+        );
         let unknown =
             b"schema_version = 1\n[domains.fabric.graph.limits]\nunknown_limit = 1\nnodes = 10\n";
         let loaded =

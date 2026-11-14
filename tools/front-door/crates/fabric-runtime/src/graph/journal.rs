@@ -125,7 +125,37 @@ pub struct FileJournal {
     pub(super) _lock: LockGuard,
 }
 
+/// One graph or node cancellation scope and its optional reason.
+#[derive(Clone, Copy, Debug)]
+pub struct CancellationTarget<'a> {
+    pub graph_id: &'a str,
+    pub node: Option<&'a str>,
+    pub reason: Option<&'a str>,
+}
+
 impl FileJournal {
+    /// Persist cancellation without waiting for the graph's journal lock.
+    pub fn request_cancellation(
+        root: &StateRoot,
+        project: ProjectId,
+        target: CancellationTarget<'_>,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<String, JournalError> {
+        super::cancellation_intent::record(root, project, target, budget, cancel, clock)
+    }
+
+    /// Whether one particular stop request still awaits graph-lock acknowledgement.
+    pub fn cancellation_request_pending(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+        request_id: &str,
+    ) -> Result<bool, JournalError> {
+        super::cancellation_intent::pending(root, project, graph_id, request_id)
+    }
+
     /// Read complete event records in order, ignoring a torn final record.
     pub fn read_events(
         root: &StateRoot,
@@ -250,6 +280,36 @@ impl FileJournal {
             cancel,
             clock,
         )?;
+        let stored = load_checkpoint(&graphs_dir, graph_id)?;
+        let (extra, execution) = stored.map_or_else(
+            || (Default::default(), None),
+            |stored| (stored.extra, Some(stored.execution)),
+        );
+        Ok(Self {
+            extra,
+            graph_id: graph_id.to_owned(),
+            directory: graphs_dir,
+            execution,
+            _lock: lock,
+        })
+    }
+
+    /// Try the graph lock once. Stop uses this after writing its independent
+    /// intent so it can return a pending receipt while a launch owns the lock.
+    pub fn try_open(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+    ) -> Result<Self, JournalError> {
+        if !valid_identifier(graph_id) {
+            return Err(JournalError::InvalidGraphId);
+        }
+        let root_dir = Directory::open_anchor(root.as_path())?;
+        let fabric_dir = open_or_create(&root_dir, OsStr::new("fabric"))?;
+        let graphs_dir = open_or_create(&fabric_dir, OsStr::new("graphs"))?;
+        let graphs_dir = open_or_create(&graphs_dir, OsStr::new(&project.to_string()))?;
+        let lock_name = format!("graph-{graph_id}.lock");
+        let lock = graphs_dir.try_lock(OsStr::new(&lock_name), LockMode::Exclusive)?;
         let stored = load_checkpoint(&graphs_dir, graph_id)?;
         let (extra, execution) = stored.map_or_else(
             || (Default::default(), None),
@@ -914,6 +974,14 @@ impl GraphJournal for FileJournal {
             return Err(JournalError::GraphMismatch);
         }
         Ok(load_checkpoint(&self.directory, graph_id)?.map(|stored| stored.checkpoint))
+    }
+
+    fn apply_cancellation(
+        &mut self,
+        document: &GraphDocument,
+        checkpoint: &mut GraphCheckpoint,
+    ) -> Result<bool, Self::Error> {
+        super::cancellation_intent::acknowledge(self, document, checkpoint)
     }
 
     fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {

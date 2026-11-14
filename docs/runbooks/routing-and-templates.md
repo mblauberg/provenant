@@ -153,9 +153,10 @@ brief = "Meet the approved acceptance criteria and run the named checks."
 
 `provenant run --file delivery.toml --explain`, inspect authority
 and gates, then submit without `--explain`. `wait` only bounds observation.
-A launch from `run` or the scheduler's `tick`, including binding a writer, may
-take up to `domains.fabric.graph.writer_launch_seconds` (default 55); a busy
-registry returns `writer_lock_busy`.
+A launch from `run` or the scheduler's `tick` uses
+`domains.fabric.graph.launch_wait_seconds` (default 55). Each writer provisioning
+uses its own `domains.fabric.graph.writer_provision_seconds` allowance (default
+55), independently of reader waits; a busy registry returns `writer_lock_busy`.
 
 - Repository templates live in `.provenant/templates/`; layers are bundled,
   user, repository, inline. A leaf template has a brief, tier, access and

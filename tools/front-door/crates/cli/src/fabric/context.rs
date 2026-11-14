@@ -472,10 +472,18 @@ impl Context {
         // the attempt, even when another agent later resumes its graph.
         // Keep that namespace under the authenticated sending host rather
         // than adopting a caller-supplied actor ID on the receiving host.
-        let agent = if let PeerAction::Submit { extra, .. }
-        | PeerAction::Receipt { extra, .. }
-        | PeerAction::CancelSubmission { extra, .. } = &action
-        {
+        let graph_extra = match &action {
+            PeerAction::Submit { extra, .. }
+            | PeerAction::Receipt { extra, .. }
+            | PeerAction::CancelSubmission { extra, .. } => Some(extra),
+            PeerAction::Inbox { extra, .. }
+                if extra.get("graph_steer") == Some(&serde_json::Value::Bool(true)) =>
+            {
+                Some(extra)
+            }
+            _ => None,
+        };
+        let agent = if let Some(extra) = graph_extra {
             match extra.get("graph_launch_actor") {
                 Some(value) => {
                     let actor = value
@@ -485,6 +493,11 @@ impl Context {
                             PeerFailure::from(FacadeError::InvalidInput { detail: None })
                         })?;
                     format!("graph-{actor}")
+                }
+                None if extra.get("graph_steer").is_some() => {
+                    return Err(PeerFailure::from(FacadeError::InvalidInput {
+                        detail: None,
+                    }));
                 }
                 None => self.identity.inbox.agent.clone(),
             }

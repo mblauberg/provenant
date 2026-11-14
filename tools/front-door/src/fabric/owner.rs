@@ -4262,7 +4262,7 @@ mod journal_error_tests {
             mcp_project: None,
             workers: &provenant_confinement::worktrees::SystemWorkerObserver,
         };
-        factory.context.config.graph.writer_launch_seconds = 12;
+        factory.context.config.graph.writer_provision_seconds = 12;
         let cancel = CancelToken::new();
         let settlement = WaitBudget::cli(factory.clock.mono_now(), 1)?;
         let mut owner = BoundGraphOwner {

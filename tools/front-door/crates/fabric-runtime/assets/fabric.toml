@@ -55,7 +55,8 @@ write_crates = 2 # a write scope spanning more crates than this turns it on
 batch_issues = 2 # this many distinct issues in one brief turns it on
 
 [graph]
-writer_launch_seconds = 55 # launch allowance for run and tick; minimum per writer binding
+launch_wait_seconds = 55 # general launch and read/wait allowance
+writer_provision_seconds = 55 # independent allowance for each writer provisioning
 ci_poll_overrides = {}
 
 [graph.ci_poll_backoff]

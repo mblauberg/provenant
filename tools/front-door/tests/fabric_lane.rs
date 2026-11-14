@@ -621,7 +621,7 @@ fn child_relay_honours_launch_allowance_longer_than_fifty_five_seconds() -> Resu
     host(&rig, &["fabric", "events", "read", "--json"])?;
     std::fs::write(
         rig.state.join("config.toml"),
-        "schema_version=1\n[domains.fabric.graph]\nwriter_launch_seconds=60\n",
+        "schema_version=1\n[domains.fabric.graph]\nlaunch_wait_seconds=60\n",
     )?;
     let attempt = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
     let relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(

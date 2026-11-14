@@ -1632,7 +1632,7 @@ fn writer_registry_timeout_is_bounded_and_reported() -> Result {
         OpenOptions::new()
             .append(true)
             .open(rig.state.join("config.toml"))?,
-        "\n[domains.fabric.graph]\nwriter_launch_seconds=2"
+        "\n[domains.fabric.graph]\nlaunch_wait_seconds=2\nwriter_provision_seconds=2"
     )?;
     let _cleanup = rig.process_cleanup();
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
@@ -1752,7 +1752,7 @@ fn expanded_writer_registry_wait_uses_launch_allowance() -> Result {
         OpenOptions::new()
             .append(true)
             .open(rig.state.join("config.toml"))?,
-        "\n[domains.fabric.graph]\nwriter_launch_seconds=2"
+        "\n[domains.fabric.graph]\nlaunch_wait_seconds=2\nwriter_provision_seconds=2"
     )?;
     let _cleanup = rig.process_cleanup();
     let key =
@@ -4277,7 +4277,7 @@ fn graph_launch_reports_provider_update_after_wait_budget() -> Result {
             .create(true)
             .append(true)
             .open(rig.state.join("config.toml"))?,
-        "\n[domains.fabric.graph]\nwriter_launch_seconds=2"
+        "\n[domains.fabric.graph]\nlaunch_wait_seconds=2\nwriter_provision_seconds=2"
     )?;
     let lock = provenant_os::provider_fence::acquire(
         &rig.state,

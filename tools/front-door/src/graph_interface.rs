@@ -1,5 +1,6 @@
 //! CLI documents for the shared graph service.
 use crate::fabric;
+use provenant_cli::brief::{BriefSource, read_brief, select_brief_source};
 use provenant_cli::{Edit, Globals, GraphRunArgs, Templates};
 use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{CancelToken, Clock, WaitBudget};
@@ -226,7 +227,9 @@ fn invoke(
     let result = (|| -> Result<Value, Box<dyn std::error::Error>> {
         if command == "run" && std::env::var_os(provenant_run::PARENT_ATTEMPT_ENV).is_some() {
             let factory = fabric::read_factory(globals, workers)?;
-            let wait_seconds = input["wait_seconds"].as_u64().unwrap_or(55).max(55);
+            let wait_seconds = input["wait_seconds"]
+                .as_u64()
+                .unwrap_or(factory.context.config.graph.launch_wait_seconds);
             let budget = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
             return Ok(factory.relay_document(&input, budget, &CancelToken::new())?);
         }
@@ -239,7 +242,7 @@ fn invoke(
         // configured launch allowance.
         let wait_seconds = input["wait_seconds"]
             .as_u64()
-            .unwrap_or(factory.context.config.graph.writer_launch_seconds);
+            .unwrap_or(factory.context.config.graph.launch_wait_seconds);
         let budget = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
         let local_branch = (command == "run" && input["host"].is_null())
             .then(|| input["branch"].as_str().map(str::to_owned))
@@ -443,33 +446,17 @@ fn bare_model_detail(model: &str, error: &BareModelError) -> String {
     }
 }
 
-/// The brief for `--brief-file`: a file, or standard input given `-`.
-fn read_brief(path: &Path) -> Result<String, Box<provenant_records::diagnostic::Diagnostic>> {
-    use std::io::Read;
-    let mut text = String::new();
-    let read = if path == Path::new("-") {
-        std::io::stdin().lock().read_to_string(&mut text)
-    } else {
-        std::fs::File::open(path).and_then(|mut file| file.read_to_string(&mut text))
-    };
-    if read.is_err() {
-        return Err(file_error(
-            "--brief-file",
-            path,
-            "brief could not be read as text",
-        ));
-    }
-    if text.trim().is_empty() {
-        return Err(file_error("--brief-file", path, "brief is empty"));
-    }
-    Ok(text)
-}
-
 fn run_input(
     request: GraphRunArgs,
 ) -> Result<Value, Box<provenant_records::diagnostic::Diagnostic>> {
     (|| {
         let sandbox = request.sandbox_override();
+        let brief_source = select_brief_source([
+            request.brief.map(BriefSource::Text),
+            request.brief_text.map(BriefSource::Text),
+            request.brief_file.map(BriefSource::file),
+        ])
+        .map_err(|error| cli_input_error(&error.to_string()))?;
         let model = request.model.map(model_selector).transpose()?;
         let mut input = json!({"op":"run","explain":request.explain,"detached":request.detached});
         for (field, value) in [
@@ -531,11 +518,13 @@ fn run_input(
             parameters["attempt.sandbox"] = json!(sandbox);
         }
         input["set"] = parameters;
-        if let Some(brief) = request.brief {
+        if let Some(source) = brief_source {
+            let brief = read_brief(source, provenant_cli::brief::MAX_BRIEF_BYTES)
+                .map_err(|error| cli_input_error(&error.to_string()))?;
+            if brief.trim().is_empty() {
+                return Err(cli_input_error("brief is empty"));
+            }
             input["brief"] = json!(brief);
-        }
-        if let Some(path) = request.brief_file {
-            input["brief"] = json!(read_brief(&path)?);
         }
         if let Some(path) = request.file {
             let text = std::fs::read_to_string(&path).map_err(|_| file_input_error(&path))?;
@@ -648,6 +637,7 @@ mod tests {
             account: None,
             name: None,
             brief: None,
+            brief_text: None,
             brief_file: None,
             template: None,
             route: None,
