@@ -701,7 +701,8 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
         return Err(run::RunError::RetainedWriterImport {
             fence: Box::new(fence),
             worktree,
-        }.into());
+        }
+        .into());
     }
     // Report any all-refused batch using its typed diagnostic where available.
     if let Some((attempt, reason, kind)) = started.iter().find_map(|started| match started {
