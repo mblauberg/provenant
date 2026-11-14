@@ -18,6 +18,53 @@ pub struct Manifest {
     pub flags: Vec<String>,
 }
 
+/// Select the project's Cargo build directory using the same workspace selector
+/// as the verification tiers. Read only data here: lane preparation must never
+/// invoke Cargo (or a writer-controlled compiler) outside confinement.
+pub fn cargo_build_directory(project: &Path) -> io::Result<Option<PathBuf>> {
+    #[derive(serde::Deserialize)]
+    struct Selection {
+        #[serde(default = "default_workspace")]
+        workspace: PathBuf,
+    }
+    fn default_workspace() -> PathBuf {
+        PathBuf::from(".")
+    }
+    let selection = project.join(".provenant/verify.json");
+    let workspace = match std::fs::read(&selection) {
+        Ok(bytes) => {
+            serde_json::from_slice::<Selection>(&bytes)
+                .map_err(io::Error::other)?
+                .workspace
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => default_workspace(),
+        Err(error) => return Err(error),
+    };
+    if workspace.is_absolute()
+        || workspace.components().any(|component| {
+            !matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(io::Error::other("Cargo workspace must be project-relative"));
+    }
+    let directory = project.join(workspace);
+    match std::fs::metadata(directory.join("Cargo.toml")) {
+        Ok(metadata) if metadata.is_file() => {
+            let directory = directory.canonicalize()?;
+            if !directory.starts_with(project.canonicalize()?) {
+                return Err(io::Error::other("Cargo workspace escapes the project"));
+            }
+            Ok(Some(directory))
+        }
+        Ok(_) => Err(io::Error::other("Cargo manifest is not a file")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 pub fn store_path(state: &Path) -> PathBuf {
     state.join("cargo-target-seeds")
 }
@@ -81,7 +128,7 @@ pub fn rustc_metadata(worktree: &Path) -> io::Result<(String, String)> {
     Ok((version, host))
 }
 
-/// Inspect the lane's explicit front-door pin as data, then run only the
+/// Inspect the lane's selected build directory's pin as data, then run only the
 /// corresponding host-owned compiler directly, outside the writer tree.
 /// Rustup overrides and non-release/custom toolchains are deliberately refused.
 /// A refusal is a stable snake_case code: it names the path taken and never
@@ -228,7 +275,21 @@ fn lane_release_pin(worktree: &Path, home: &Path) -> Result<String, &'static str
     {
         return Err(codes::RUSTUP_OVERRIDES_PRESENT);
     }
-    let dir = worktree.join("tools/front-door");
+    let build = cargo_build_directory(worktree)
+        .map_err(|_| codes::CARGO_WORKSPACE_UNREADABLE)?
+        .ok_or(codes::CARGO_WORKSPACE_MISSING)?;
+    // Rustup chooses the nearest pin, including pins above the build directory.
+    let dir = build
+        .ancestors()
+        .find(|directory| {
+            ["rust-toolchain", "rust-toolchain.toml"]
+                .iter()
+                .any(|name| {
+                    !matches!(std::fs::symlink_metadata(directory.join(name)),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound)
+                })
+        })
+        .ok_or(codes::TOOLCHAIN_PIN_ABSENT_OR_AMBIGUOUS)?;
     let modern = dir.join("rust-toolchain.toml");
     // A second pin could select a different compiler, so do not seed in its presence.
     match std::fs::symlink_metadata(dir.join("rust-toolchain")) {
@@ -273,13 +334,40 @@ mod lane_probe_tests {
     use super::*;
 
     #[test]
+    fn cargo_selection_uses_project_configuration_and_skips_non_cargo() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(cargo_build_directory(root.path()).unwrap().is_none());
+        std::fs::write(root.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        assert_eq!(
+            cargo_build_directory(root.path()).unwrap(),
+            Some(root.path().canonicalize().unwrap())
+        );
+        let nested = root.path().join("any/depth/workspace");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::create_dir(root.path().join(".provenant")).unwrap();
+        std::fs::write(
+            root.path().join(".provenant/verify.json"),
+            r#"{"workspace":"any/depth/workspace"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cargo_build_directory(root.path()).unwrap(),
+            Some(nested.canonicalize().unwrap())
+        );
+        std::fs::remove_file(nested.join("Cargo.toml")).unwrap();
+        assert!(cargo_build_directory(root.path()).unwrap().is_none());
+    }
+
+    #[test]
     fn accepts_only_explicit_fixed_pins_without_overrides() {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
         let worktree = root.path().join("writer");
-        let front = worktree.join("tools/front-door");
+        let front = worktree.clone();
         std::fs::create_dir_all(home.join(".rustup")).unwrap();
         std::fs::create_dir_all(&front).unwrap();
+        std::fs::write(front.join("Cargo.toml"), "[workspace]\n").unwrap();
         let settings = home.join(".rustup/settings.toml");
         std::fs::write(&settings, "[overrides]\n").unwrap();
         let modern = front.join("rust-toolchain.toml");
@@ -314,11 +402,12 @@ mod lane_probe_tests {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
         let writer = root.path().join("writer");
-        let front = writer.join("tools/front-door");
+        let front = writer.clone();
         let rustup = writer.join("evil-rustup");
         let bin = rustup.join("toolchains/1.99.1-test-host/bin");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&front).unwrap();
+        std::fs::write(front.join("Cargo.toml"), "[workspace]\n").unwrap();
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(
             front.join("rust-toolchain.toml"),
@@ -346,9 +435,10 @@ mod lane_probe_tests {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
         let worktree = root.path().join("writer");
-        let front = worktree.join("tools/front-door");
+        let front = worktree.clone();
         let bin = home.join(".rustup/toolchains/1.99.1-test-host/bin");
         std::fs::create_dir_all(&front).unwrap();
+        std::fs::write(front.join("Cargo.toml"), "[workspace]\n").unwrap();
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(home.join(".rustup/settings.toml"), "[overrides]\n").unwrap();
         std::fs::write(

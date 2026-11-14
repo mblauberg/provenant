@@ -608,6 +608,28 @@ impl RunStore {
         provenant_records::WorkKey::new(self.context.project_id, graph, node, attempt)
             .map_err(|_| RunError::Validation("attempt work key"))
     }
+    /// Resolve the work identity of a fenced writer, including another project
+    /// sharing this run store. The caller's project must not relabel its owner.
+    pub(crate) fn writer_owner_key(
+        &self,
+        id: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<provenant_records::WorkKey> {
+        call.check()?;
+        let (project, graph, node, attempt): (String, String, String, u32) = self
+            .db
+            .query_row(
+                "SELECT project,graph,node,attempt FROM attempts WHERE id=?1",
+                [id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?
+            .ok_or(RunError::NotFound)?;
+        let project = provenant_core::ProjectId::parse(&project)
+            .map_err(|_| RunError::Validation("attempt index project"))?;
+        provenant_records::WorkKey::new(project, graph, node, attempt)
+            .map_err(|_| RunError::Validation("attempt work key"))
+    }
     /// Resolve a worktree owner by its globally unique attempt ID. The owner
     /// can belong to another project scope; only its state is used for lineage.
     pub(crate) fn writer_owner_terminal(&self, id: AttemptId, call: &Request<'_>) -> Result<bool> {

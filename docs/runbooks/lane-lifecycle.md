@@ -67,6 +67,16 @@ configuration paths for initial launches and background retries alike. Missing
 GitHub tools, failed login lookup or access policy restrictions produce a warning;
 ordinary lane work can continue without publishing credentials.
 
+## Cargo seeding
+
+Cargo target seeds use the Cargo build directory selected by
+`.provenant/verify.json`'s `workspace`, defaulting to the project root. The host
+seed builder and writer preparation use that same selector, at any nesting depth.
+Preparation sets the lane-owned Cargo environment before checking the selected
+directory's Cargo configuration and ancestor configs; non-Cargo projects skip
+target seeding quietly. Seed build, publication and private APFS cloning follow
+the [Cargo target seed lifecycle](../specs/run.md#cargo-target-seed).
+
 ## Recovery
 
 Read `status TARGET`, `output TARGET` and `trace TARGET` before

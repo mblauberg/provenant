@@ -42,7 +42,8 @@ macro_rules! detail_codes {
     };
 }
 detail_codes! {
-    WORKTREE_LAYOUT_UNEXPECTED = "worktree_layout_unexpected",
+    CARGO_WORKSPACE_UNREADABLE = "cargo_workspace_unreadable",
+    CARGO_WORKSPACE_MISSING = "cargo_workspace_missing",
     CARGO_HOME_ENV_MISSING = "cargo_home_env_missing",
     CARGO_HOME_ENV_UNEXPECTED = "cargo_home_env_unexpected",
     CARGO_HOME_CONFIG_PRESENT = "cargo_home_config_present",
@@ -787,12 +788,20 @@ mod tests {
         let cache = tmp.path().join("cache");
         let state = tmp.path().join("state");
         let bin = home.join(".rustup/toolchains/1.99.1-test-host/bin");
-        std::fs::create_dir_all(worktree.join("tools/front-door")).unwrap();
+        let build = worktree.join("arbitrary/nested/cargo/workspace");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::create_dir_all(worktree.join(".provenant")).unwrap();
+        std::fs::write(
+            worktree.join(".provenant/verify.json"),
+            r#"{"workspace":"arbitrary/nested/cargo/workspace"}"#,
+        )
+        .unwrap();
+        std::fs::write(build.join("Cargo.toml"), "[workspace]\n").unwrap();
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::write(home.join(".rustup/settings.toml"), "[overrides]\n").unwrap();
         std::fs::write(
-            worktree.join("tools/front-door/rust-toolchain.toml"),
+            build.join("rust-toolchain.toml"),
             "[toolchain]\nchannel = '1.99.1'\n",
         )
         .unwrap();
@@ -805,10 +814,10 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&rustc, std::fs::Permissions::from_mode(0o755)).unwrap();
         generation(&state, "001", report, "test-host");
-        let env = [
-            ("RUSTUP_HOME".into(), home.join(".rustup").into_os_string()),
-            ("RUSTUP_AUTO_INSTALL".into(), "0".into()),
-        ];
+        // No ambient CARGO_HOME: the same finalisation used by handoff must
+        // make a fresh, arbitrarily nested Cargo project seedable.
+        let mut env = vec![];
+        crate::writer::lane_cargo_environment(&home, &cache, &mut env);
         let outcome = seed_target(
             true,
             &state,

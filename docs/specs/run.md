@@ -50,7 +50,8 @@ On the host, fetch `origin/main` first and build seeds only from a trusted
 `origin/main`. From the project, run `git fetch origin main` followed by
 `provenant worktree seed-build`. The command pins the local remote-tracking
 commit, checks it out in a disposable host checkout and runs `cargo build
---locked --all-targets` and `cargo test --locked --no-run` in `tools/front-door`.
+--locked --all-targets` and `cargo test --locked --no-run` in the Cargo workspace
+selected by `.provenant/verify.json`'s `workspace` (the project root by default).
 It publishes a successful generation under the state directory's
 `cargo-target-seeds/generations/`. The scheduled host refresh follows the daily
 collection's fetch; when collection is disabled, fetch and build manually.
@@ -62,7 +63,10 @@ fall back when the lane compiler cannot be verified, recording a stable
 `detail` code for the refusal (never an environment value). Mismatches
 and clone failures leave the target empty and are reported in
 `cargo-target-setup.json`. Existing targets are retained. Native and confined lanes receive the same
-Cargo home, rustup home and target selectors before verification. Compiler
+Cargo home, rustup home and target selectors before verification. Cargo
+configuration is checked from that selected build directory through its ancestors;
+the nearest rustup pin in that cone selects the verified host compiler. Non-Cargo
+projects skip target seeding quietly. Compiler
 metadata has a two-second process timeout; target selection, cloning and
 partial-stage cleanup share a further two-second cooperative budget, checked
 between filesystem operations. Store and seed-phase locks are non-blocking.

@@ -798,6 +798,7 @@ pub enum RefusalKind {
     RetainedImport {
         attempt: AttemptId,
         worktree: std::path::PathBuf,
+        key: provenant_records::WorkKey,
     },
 }
 
@@ -1392,14 +1393,24 @@ impl RunStore {
                                 format!("launch preparation failed: {message}"),
                                 RefusalKind::HandoffResource(fact),
                             ),
-                            HandOff::RetainedImport { attempt, worktree } => (
-                                RunError::RetainedWriterImport {
-                                    attempt,
-                                    worktree: worktree.clone(),
+                            HandOff::RetainedImport { attempt, worktree } => {
+                                match self.writer_owner_key(attempt, call) {
+                                    Ok(key) => (
+                                        RunError::RetainedWriterImport {
+                                            attempt,
+                                            key: key.clone(),
+                                            worktree: worktree.clone(),
+                                        }.to_string(),
+                                        RefusalKind::RetainedImport { attempt, key, worktree },
+                                    ),
+                                    // Missing owner evidence must not strand this newly
+                                    // claimed attempt in Starting or invent a work key.
+                                    Err(error) => (
+                                        format!("writer import retained for worktree {}, attempt {attempt}; work key unavailable: {error}", worktree.display()),
+                                        RefusalKind::HandoffBoundary(provenant_records::diagnostic::BoundaryClass::LaneGit),
+                                    ),
                                 }
-                                .to_string(),
-                                RefusalKind::RetainedImport { attempt, worktree },
-                            ),
+                            }
                             _ => unreachable!(),
                         };
                         // Cancellation decides the outcome, but an independent
