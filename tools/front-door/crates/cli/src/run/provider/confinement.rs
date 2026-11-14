@@ -226,14 +226,12 @@ pub(super) fn confinement_request(
             let mut inputs =
                 provenant_core::RootInputs::new(roots.home.to_owned(), roots.cwd.to_owned());
             inputs.state_dir = Some(roots.state.to_owned());
-            fixture_roots = inputs
-                .resolve(&provenant_os::fs::SystemPathResolver)
-                .map_err(|_| {
-                    provenant_confinement::permissions::PermissionError::AnchorMismatchAt {
-                        path: roots.state.to_owned(),
-                        stage: "host state root binding",
-                    }
-                })?;
+            fixture_roots = provenant_os::fs::bind_roots(&inputs).map_err(|_| {
+                provenant_confinement::permissions::PermissionError::AnchorMismatchAt {
+                    path: roots.state.to_owned(),
+                    stage: "host state root binding",
+                }
+            })?;
             &fixture_roots
         }
     };

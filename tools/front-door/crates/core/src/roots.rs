@@ -46,13 +46,16 @@ pub trait PathResolver {
     fn resolve_existing_ancestor(&self, path: &Path) -> io::Result<PathBuf>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootInputs {
     pub state_dir: Option<PathBuf>,
     pub environment_state_dir: Option<PathBuf>,
     pub home: PathBuf,
     pub checkout: PathBuf,
     pub workspaces: Vec<PathBuf>,
+    /// Existing Git markers, private directories and common directories,
+    /// captured by the OS edge. Release assets need not be a checkout.
+    pub git_metadata: Vec<PathBuf>,
     pub old_roots: Vec<PathBuf>,
 }
 impl RootInputs {
@@ -63,11 +66,17 @@ impl RootInputs {
             home,
             checkout,
             workspaces: Vec::new(),
+            git_metadata: Vec::new(),
             old_roots: Vec::new(),
         }
     }
+    /// Resolve captured inputs without filesystem discovery. Production OS
+    /// binding supplies existing Git metadata before entering this pure core.
     pub fn resolve(&self, resolver: &impl PathResolver) -> Result<Roots, RootError> {
-        StateRoot::resolve(self, resolver).map(|state| Roots { state })
+        StateRoot::resolve(self, resolver).map(|state| Roots {
+            state,
+            inputs: self.clone(),
+        })
     }
 }
 
@@ -75,8 +84,15 @@ impl RootInputs {
 pub enum RootError {
     #[error("root input must be an absolute path with only normal components: {path}")]
     InvalidPath { path: PathBuf },
-    #[error("state root is a protected location: {path}")]
-    Protected { path: PathBuf },
+    #[error(
+        "state root {path} overlaps protected location {protected} ({boundary:?}; source: {policy_source})"
+    )]
+    Protected {
+        path: PathBuf,
+        protected: PathBuf,
+        boundary: RootBoundary,
+        policy_source: &'static str,
+    },
     #[error("cannot bind root input: {path}")]
     Resolution {
         path: PathBuf,
@@ -86,10 +102,44 @@ pub enum RootError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StateRoot(PathBuf);
+pub struct StateRoot {
+    path: PathBuf,
+    warnings: Vec<RootWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootWarning {
+    pub path: PathBuf,
+    pub protected: PathBuf,
+    pub source: &'static str,
+}
+impl RootWarning {
+    pub fn message(&self) -> String {
+        format!(
+            "state root {} overlaps advisory location {} (source: {}); proceeding",
+            self.path.display(),
+            self.protected.display(),
+            self.source
+        )
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Roots {
     pub state: StateRoot,
+    inputs: RootInputs,
+}
+impl Roots {
+    /// Rebind only the state candidate against the captured root context. No
+    /// environment is re-read and no workspace or old-root boundary is lost.
+    pub fn with_state_dir(
+        &self,
+        candidate: PathBuf,
+        resolver: &impl PathResolver,
+    ) -> Result<Self, RootError> {
+        let mut inputs = self.inputs.clone();
+        inputs.state_dir = Some(candidate);
+        inputs.resolve(resolver)
+    }
 }
 impl StateRoot {
     pub fn resolve(inputs: &RootInputs, resolver: &impl PathResolver) -> Result<Self, RootError> {
@@ -101,19 +151,11 @@ impl StateRoot {
             .cloned()
             .unwrap_or_else(|| inputs.home.join(DEFAULT_STATE_SUFFIX));
         absolute_normal(&candidate)?;
-        let mut protected = vec![
-            inputs.checkout.clone(),
-            inputs.home.join(".agents"),
-            inputs.home.join(".local/state/agent-harness"),
-            inputs.home.join(".local/state/provenant"),
-            inputs.home.join(LEGACY_V1_STATE_SUFFIX),
-        ];
-        protected.extend(inputs.workspaces.iter().map(|p| p.join(".agent-run")));
-        protected.extend(inputs.old_roots.iter().cloned());
-        for path in &protected {
-            absolute_normal(path)?;
+        let protected = protected_roots(inputs);
+        for root in &protected {
+            absolute_normal(&root.path)?;
         }
-        refuse(&candidate, &inputs.home, &protected)?;
+        let mut warnings = classify(&candidate, &protected)?;
         let resolve = |path: &Path| -> Result<PathBuf, RootError> {
             let bound = resolver.resolve_existing_ancestor(path).map_err(|source| {
                 RootError::Resolution {
@@ -124,17 +166,31 @@ impl StateRoot {
             absolute_normal(&bound)?;
             Ok(bound)
         };
-        let bound_home = resolve(&inputs.home)?;
         let bound_protected = protected
-            .iter()
-            .map(|path| resolve(path))
-            .collect::<Result<Vec<_>, _>>()?;
+            .into_iter()
+            .map(|root| {
+                Ok(ProtectedRoot {
+                    path: resolve(&root.path)?,
+                    ..root
+                })
+            })
+            .collect::<Result<Vec<_>, RootError>>()?;
         let bound = resolve(&candidate)?;
-        refuse(&bound, &bound_home, &bound_protected)?;
-        Ok(Self(bound))
+        for warning in classify(&bound, &bound_protected)? {
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+        }
+        Ok(Self {
+            path: bound,
+            warnings,
+        })
     }
     pub fn as_path(&self) -> &Path {
-        &self.0
+        &self.path
+    }
+    pub fn warnings(&self) -> &[RootWarning] {
+        &self.warnings
     }
 }
 impl AsRef<Path> for StateRoot {
@@ -154,19 +210,93 @@ fn absolute_normal(path: &Path) -> Result<(), RootError> {
     }
     Ok(())
 }
-fn refuse(candidate: &Path, home: &Path, protected: &[PathBuf]) -> Result<(), RootError> {
-    if candidate.parent().is_none()
-        || candidate == home
-        || candidate
-            .components()
-            .any(|c| c.as_os_str() == ".agent-run")
-        || protected.iter().any(|root| candidate.starts_with(root))
-    {
-        return Err(RootError::Protected {
+/// Hard holds are restricted to actual credentials, Git metadata and other
+/// stores. An ordinary directory carries no boundary merely by being a parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootBoundary {
+    Credentials,
+    GitIsolation,
+    DataIntegrity,
+}
+
+#[derive(Debug, Clone)]
+struct ProtectedRoot {
+    path: PathBuf,
+    boundary: Option<RootBoundary>,
+    source: &'static str,
+}
+
+/// The sole declaration of protected locations and the boundary each owns.
+fn protected_roots(inputs: &RootInputs) -> Vec<ProtectedRoot> {
+    use RootBoundary::{Credentials, DataIntegrity, GitIsolation};
+    let mut roots = vec![
+        ProtectedRoot {
+            path: inputs.checkout.clone(),
+            boundary: None,
+            source: "root inputs: checkout",
+        },
+        ProtectedRoot {
+            path: inputs.home.join(".agents"),
+            boundary: Some(Credentials),
+            source: "built-in credential root",
+        },
+        ProtectedRoot {
+            path: inputs.home.join(".local/state/agent-harness"),
+            boundary: None,
+            source: "built-in retired agent-harness location",
+        },
+        ProtectedRoot {
+            path: inputs.home.join(".local/state/provenant"),
+            boundary: Some(DataIntegrity),
+            source: "built-in previous state root",
+        },
+        ProtectedRoot {
+            path: inputs.home.join(LEGACY_V1_STATE_SUFFIX),
+            boundary: Some(DataIntegrity),
+            source: "built-in 1.x state root",
+        },
+    ];
+    roots.extend(inputs.workspaces.iter().map(|path| ProtectedRoot {
+        path: path.clone(),
+        boundary: None,
+        source: "root inputs: workspace",
+    }));
+    roots.extend(inputs.git_metadata.iter().map(|path| ProtectedRoot {
+        path: path.clone(),
+        boundary: Some(GitIsolation),
+        source: "root inputs: existing Git metadata",
+    }));
+    roots.extend(inputs.old_roots.iter().map(|path| ProtectedRoot {
+        path: path.clone(),
+        boundary: Some(DataIntegrity),
+        source: "root inputs: old state root",
+    }));
+    roots
+}
+
+/// One decision for both lexical and bound paths. Containing a boundary is as
+/// unsafe as being inside it; advisory overlaps always warn and proceed.
+fn classify(candidate: &Path, protected: &[ProtectedRoot]) -> Result<Vec<RootWarning>, RootError> {
+    let mut warnings = Vec::new();
+    for root in protected {
+        if !candidate.starts_with(&root.path) && !root.path.starts_with(candidate) {
+            continue;
+        }
+        if let Some(boundary) = root.boundary {
+            return Err(RootError::Protected {
+                path: candidate.into(),
+                protected: root.path.clone(),
+                boundary,
+                policy_source: root.source,
+            });
+        }
+        warnings.push(RootWarning {
             path: candidate.into(),
+            protected: root.path.clone(),
+            source: root.source,
         });
     }
-    Ok(())
+    Ok(warnings)
 }
 
 #[cfg(test)]
@@ -179,7 +309,9 @@ mod tests {
         }
     }
     fn inputs() -> RootInputs {
-        RootInputs::new("/fixture/home".into(), "/fixture/checkout".into())
+        let mut inputs = RootInputs::new("/fixture/home".into(), "/fixture/checkout".into());
+        inputs.git_metadata.push(inputs.checkout.join(".git"));
+        inputs
     }
     #[test]
     fn explicit_selection_has_priority_and_never_falls_back_on_invalid_input() {
@@ -207,47 +339,103 @@ mod tests {
         }
     }
     #[test]
-    fn roots_refuse_home_checkout_old_roots_and_any_agent_run_component() {
+    fn protected_locations_enforce_only_their_declared_boundaries() -> Result<(), RootError> {
         let mut input = inputs();
         input.workspaces.push("/selected/workspace".into());
         input.old_roots.push("/explicit/old".into());
-        for forbidden in [
-            "/",
-            "/fixture/home",
-            "/fixture/checkout",
-            "/fixture/checkout/nested",
-            "/fixture/home/.agents/new",
-            "/fixture/home/.local/state/agent-harness/fabric",
-            "/fixture/home/.local/state/provenant/new",
-            "/selected/workspace/.agent-run/new",
-            "/any/.agent-run/tail",
-            "/explicit/old/new",
-        ] {
-            input.state_dir = Some(forbidden.into());
+        let declared = protected_roots(&input);
+        for root in &declared {
+            let mut candidates = vec![root.path.clone(), root.path.join("nested")];
+            if let Some(parent) = root.path.parent() {
+                candidates.push(parent.into());
+            }
+            for candidate in candidates {
+                input.state_dir = Some(candidate.clone());
+                let overlaps = |root: &&ProtectedRoot| {
+                    candidate.starts_with(&root.path) || root.path.starts_with(&candidate)
+                };
+                let boundary = declared
+                    .iter()
+                    .filter(overlaps)
+                    .any(|root| root.boundary.is_some());
+                match input.resolve(&Resolver) {
+                    Err(RootError::Protected {
+                        protected,
+                        boundary: actual,
+                        policy_source,
+                        ..
+                    }) => {
+                        assert!(boundary, "{candidate:?}");
+                        assert!(
+                            declared
+                                .iter()
+                                .filter(overlaps)
+                                .any(|root| root.path == protected
+                                    && root.boundary == Some(actual)
+                                    && root.source == policy_source)
+                        );
+                    }
+                    Ok(roots) => {
+                        assert!(!boundary, "{candidate:?}");
+                        for root in declared.iter().filter(overlaps) {
+                            assert!(
+                                roots
+                                    .state
+                                    .warnings()
+                                    .iter()
+                                    .any(|warning| warning.protected == root.path
+                                        && warning.source == root.source)
+                            );
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        // A filename alone establishes no live-state boundary. Siblings of
+        // declared roots also remain available for fresh stores and stages.
+        for allowed in ["/any/.agent-run/tail", "/explicit/old-sibling"] {
+            input.state_dir = Some(allowed.into());
+            assert!(input.resolve(&Resolver).is_ok());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn changing_the_candidate_preserves_all_captured_boundaries() -> Result<(), RootError> {
+        let mut input = inputs();
+        input.workspaces.push("/selected/workspace".into());
+        input.old_roots.push("/explicit/old".into());
+        let roots = input.resolve(&Resolver)?;
+        for root in protected_roots(&input)
+            .into_iter()
+            .filter(|root| root.boundary.is_some())
+        {
             assert!(
-                matches!(input.resolve(&Resolver), Err(RootError::Protected { .. })),
-                "{forbidden}"
+                matches!(roots.with_state_dir(root.path.join("nested"), &Resolver), Err(RootError::Protected { boundary, .. }) if Some(boundary) == root.boundary)
             );
         }
-        // 2.0 never writes the 1.x root, so no state root may lie inside it.
-        let legacy = Path::new("/fixture/home").join(LEGACY_V1_STATE_SUFFIX);
-        for forbidden in [legacy.clone(), legacy.join("nested")] {
-            input.state_dir = Some(forbidden);
-            assert!(matches!(
-                input.resolve(&Resolver),
-                Err(RootError::Protected { .. })
-            ));
-        }
-        input.state_dir = Some("/explicit/old-sibling".into());
-        assert!(input.resolve(&Resolver).is_ok());
+        let stage = input
+            .home
+            .join(".local/share/provenant/.v2.handoff-fixture");
+        assert_eq!(
+            roots
+                .with_state_dir(stage.clone(), &Resolver)?
+                .state
+                .as_path(),
+            stage
+        );
+        Ok(())
     }
+
     #[test]
-    fn canonical_aliases_are_checked_after_binding_and_failures_are_not_absence() {
-        struct Aliases;
+    fn canonical_aliases_are_checked_after_binding_and_failures_are_not_absence()
+    -> Result<(), RootError> {
+        struct Aliases(PathBuf);
         impl PathResolver for Aliases {
             fn resolve_existing_ancestor(&self, path: &Path) -> io::Result<PathBuf> {
                 if let Ok(tail) = path.strip_prefix("/alias") {
-                    return Ok(Path::new("/fixture/home/.agents").join(tail));
+                    return Ok(self.0.join(tail));
                 }
                 if path == Path::new("/unreadable") {
                     return Err(io::Error::from(io::ErrorKind::PermissionDenied));
@@ -256,15 +444,33 @@ mod tests {
             }
         }
         let mut input = inputs();
-        input.state_dir = Some("/alias/missing/tail".into());
-        assert!(matches!(
-            input.resolve(&Aliases),
-            Err(RootError::Protected { .. })
-        ));
+        input.workspaces.push("/selected/workspace".into());
+        input.old_roots.push("/explicit/old".into());
+        for root in protected_roots(&input) {
+            input.state_dir = Some("/alias/missing/tail".into());
+            match input.resolve(&Aliases(root.path.clone())) {
+                Err(RootError::Protected { boundary, .. }) => {
+                    assert_eq!(Some(boundary), root.boundary)
+                }
+                Ok(roots) => {
+                    assert!(root.boundary.is_none());
+                    assert!(
+                        roots
+                            .state
+                            .warnings()
+                            .iter()
+                            .any(|warning| warning.protected == root.path
+                                && warning.source == root.source)
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
         input.state_dir = Some("/unreadable".into());
         assert!(matches!(
-            input.resolve(&Aliases),
+            input.resolve(&Aliases("/unused".into())),
             Err(RootError::Resolution { .. })
         ));
+        Ok(())
     }
 }
