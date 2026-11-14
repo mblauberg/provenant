@@ -19,12 +19,21 @@ fn warning(
         return Ok(None);
     };
     let floor = settings.free_floor_for_total(state.total)?;
+    let source = if settings.free_floor.is_some() {
+        provenant_records::diagnostic::SettingSource::Configuration
+    } else {
+        provenant_records::diagnostic::SettingSource::ShippedDefault
+    };
     for sample in samples {
         let threshold = floor.saturating_mul(2).min(sample.total / 2);
         if sample.free < threshold {
             return Ok(Some(format!(
-                "Disk pressure: {} bytes free on {}, warning below {} bytes; run `provenant disk report` or `provenant gc`.",
-                sample.free, sample.name, threshold
+                "Disk pressure: {} bytes free on {}; gc.free_floor is {} bytes (source: {}); guardian warns below {} bytes. Run `provenant disk report` or `provenant gc`.",
+                sample.free,
+                sample.name,
+                floor,
+                source.description(),
+                threshold
             )));
         }
     }
@@ -84,7 +93,13 @@ impl DiskPressure for LaneDisk {
         let (state, cwd) = context.disk_roots();
         // Live policy: changes take effect on the next admission, guardian or
         // settlement observation, including percentage floor recalculation.
-        let floor = provenant_config::GcSettings::read(state)?.free_floor_bytes(state)?;
+        let settings = provenant_config::GcSettings::read(state)?;
+        let floor = settings.free_floor_bytes(state)?;
+        let source = if settings.free_floor.is_some() {
+            provenant_records::diagnostic::SettingSource::Configuration
+        } else {
+            provenant_records::diagnostic::SettingSource::ShippedDefault
+        };
         let free =
             provenant_confinement::disk::lane_available_bytes(state, &context.roots.home, cwd)?;
         // The guardian only warns; running builds always continue.
@@ -98,7 +113,10 @@ impl DiskPressure for LaneDisk {
                 "GUARDIAN_DISK",
                 provenant_records::policy::Facts {
                     violated: free < floor,
-                    detail: format!("free={free} bytes, gc.free_floor={floor} bytes"),
+                    detail: format!(
+                        "free={free} bytes, gc.free_floor={floor} bytes (source: {})",
+                        source.description()
+                    ),
                 },
             ),
             provenant_records::policy::Effect::Proceed
@@ -147,7 +165,8 @@ mod tests {
         )?
         .ok_or("missing warning")?;
         assert!(text.contains("checkout"));
-        assert!(text.len() <= 160);
+        assert!(text.contains("gc.free_floor is 100 bytes"));
+        assert!(text.contains("source: host configuration"));
         let invalid = provenant_config::GcSettings {
             free_floor: Some("bad".into()),
             ..Default::default()

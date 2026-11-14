@@ -136,10 +136,7 @@ impl PermissionError {
             | Self::ProtectedOverlap
             | Self::InvalidReadOnlyPolicy
             | Self::ProcessPolicyMissing
-            | Self::NonUtf8Path
-            | Self::BackendUnavailable
-            | Self::BackendNotAvailable(_)
-            | Self::NestedConfinementUnsupported => B::Authority,
+            | Self::NonUtf8Path => B::Authority,
             _ => B::None,
         }
     }
@@ -224,11 +221,12 @@ mod repository_error_tests {
                 PermissionError::ProfileTooLarge { bytes: 2, limit: 1 },
                 B::None,
             ),
-            (PermissionError::BackendUnavailable, B::Authority),
+            (PermissionError::BackendUnavailable, B::None),
             (
                 PermissionError::BackendNotAvailable(super::AvailabilityReason::ProbeFailed),
-                B::Authority,
+                B::None,
             ),
+            (PermissionError::NestedConfinementUnsupported, B::None),
         ] {
             assert_eq!(error.boundary_class(), expected, "{error:?}");
         }

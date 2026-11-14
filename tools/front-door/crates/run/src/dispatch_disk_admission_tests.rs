@@ -48,31 +48,25 @@ fn resource_pressure_and_busy_caps_never_queue_default_admission() -> TestResult
 }
 
 #[test]
-fn strict_disk_floor_refuses_without_waiting_and_can_be_disabled() -> TestResult {
-    for (strength, refuses) in [("refuse", true), ("off", false)] {
+fn ordinary_disk_floor_never_refuses_admission() -> TestResult {
+    for strength in [None, Some("refuse"), Some("off")] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context(temp.path())?, &call)?;
+        let policy = strength.map_or_else(String::new, |strength| {
+            format!("[knobs]\n'policy.ADMISSION_DISK'='{strength}'\n")
+        });
         std::fs::write(
             store.writer_registry.join("config.toml"),
-            format!(
-                "schema_version=1\n[knobs]\n'policy.ADMISSION_DISK'='{strength}'\n[gc]\nfree_floor='100B'\n"
-            ),
+            format!("schema_version=1\n{policy}[gc]\nfree_floor='100B'\n"),
         )?;
         let id = starting(&store, &lane(80, true), &call)?;
         let attempt = store.attempt_dir(id, false)?;
         let mut facts = HostFacts::new(100);
         facts.disk = 99;
-        let result = store.admit(id, &attempt, &facts, &clock, &cancel);
-        if refuses {
-            assert!(matches!(
-                result,
-                Err(RunError::Admission(AdmissionError::Disk { .. }))
-            ));
-        } else {
-            assert!(matches!(result?.state, AttemptState::Running { .. }));
-        }
+        let running = store.admit(id, &attempt, &facts, &clock, &cancel)?;
+        assert!(matches!(running.state, AttemptState::Running { .. }));
     }
     Ok(())
 }

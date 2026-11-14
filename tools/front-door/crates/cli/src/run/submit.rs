@@ -279,11 +279,9 @@ pub fn submit(
     submit_with_host(session, edge, submission, call, None)
 }
 
-/// A failed writer disk precheck: either the volumes could not be observed, or
-/// the measured free space is below the floor. Only the latter is `DiskFloor`.
+/// A measured crossing of the advisory writer disk floor.
 #[derive(Debug)]
 pub(super) enum DiskCheck {
-    Unobserved(String),
     Low {
         path: PathBuf,
         available: u64,
@@ -296,7 +294,6 @@ pub(super) enum DiskCheck {
 impl From<DiskCheck> for String {
     fn from(check: DiskCheck) -> Self {
         match check {
-            DiskCheck::Unobserved(message) => message,
             DiskCheck::Low {
                 path,
                 available,
@@ -397,6 +394,11 @@ pub(super) fn check_writer_disk_with(
 }
 
 #[allow(clippy::print_stderr)]
+enum DiskObservation {
+    Unavailable(String),
+    Low(DiskCheck),
+}
+
 pub(super) fn check_writer_disk_with_collection(
     settings: &provenant_config::GcSettings,
     state: &Path,
@@ -405,14 +407,14 @@ pub(super) fn check_writer_disk_with_collection(
     mut available: impl FnMut(&Path) -> Result<u64, String>,
     mut collect: impl FnMut() -> u64,
 ) -> Result<(), DiskCheck> {
-    let observed = (|| -> Result<(), DiskCheck> {
+    let observed = (|| -> Result<(), DiskObservation> {
         let floor = settings
             .free_floor_bytes(state)
-            .map_err(|error| DiskCheck::Unobserved(error.to_string()))?;
+            .map_err(|error| DiskObservation::Unavailable(error.to_string()))?;
         let cache = home.join("Library/Caches/provenant-lane-cargo");
         let (mut limiting, mut minimum) = (worktree, u64::MAX);
         for path in [worktree, state, cache.as_path()] {
-            let bytes = available(path).map_err(DiskCheck::Unobserved)?;
+            let bytes = available(path).map_err(DiskObservation::Unavailable)?;
             if bytes < minimum {
                 (limiting, minimum) = (path, bytes);
             }
@@ -421,13 +423,13 @@ pub(super) fn check_writer_disk_with_collection(
             let reclaimed = if settings.schedule { collect() } else { 0 };
             minimum = u64::MAX;
             for path in [worktree, state, cache.as_path()] {
-                let bytes = available(path).map_err(DiskCheck::Unobserved)?;
+                let bytes = available(path).map_err(DiskObservation::Unavailable)?;
                 if bytes < minimum {
                     (limiting, minimum) = (path, bytes);
                 }
             }
             if minimum < floor {
-                return Err(DiskCheck::Low {
+                return Err(DiskObservation::Low(DiskCheck::Low {
                     path: limiting.to_path_buf(),
                     available: minimum,
                     floor,
@@ -437,19 +439,20 @@ pub(super) fn check_writer_disk_with_collection(
                     } else {
                         provenant_records::diagnostic::SettingSource::ShippedDefault
                     },
-                });
+                }));
             }
         }
         Ok(())
     })();
     match observed {
-        Err(DiskCheck::Unobserved(message)) => {
+        Err(DiskObservation::Unavailable(message)) => {
             eprintln!(
                 "provenant: writer disk observation unavailable; continuing without the disk floor check: {message}"
             );
             Ok(())
         }
-        result => result,
+        Err(DiskObservation::Low(check)) => Err(check),
+        Ok(()) => Ok(()),
     }
 }
 
@@ -564,56 +567,53 @@ fn submit_with_launcher(
         {
             if let Some(path) = &task.worktree {
                 let writer = run::resolve_writer(edge.roots.state.as_path(), edge.cwd, path)?;
-                check_writer_disk(
+                if let Err(check) = check_writer_disk(
                     &config.gc,
                     edge.roots.state.as_path(),
                     &writer.worktree,
                     &writer.project,
                     edge.home,
-                )
-                .or_else(|check| {
+                ) {
                     let profile = config.dispatch_profile(&submission.knobs);
-                    let dispatch = profile.as_ref().map(provenant_config::policy::dispatch).unwrap_or_default();
-                    let policy = config.domains.policy.resolve_with_knobs(&session.context.project_id.to_string(), &config.knobs, &dispatch);
-                    let (code, detail) = match &check {
-                        DiskCheck::Low { .. } => (
-                            "LAUNCH_DISK",
-                            "writer disk observation is below its configured floor",
-                        ),
-                        DiskCheck::Unobserved(_) => (
-                            "SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE",
-                            "writer disk space could not be observed",
-                        ),
+                    let dispatch = profile
+                        .as_ref()
+                        .map(provenant_config::policy::dispatch)
+                        .unwrap_or_default();
+                    let policy = config.domains.policy.resolve_with_knobs(
+                        &session.context.project_id.to_string(),
+                        &config.knobs,
+                        &dispatch,
+                    );
+                    let DiskCheck::Low {
+                        available,
+                        floor,
+                        reclaimed,
+                        origin,
+                        ..
+                    } = &check;
+                    let detail = format!(
+                        "disk space: {available} bytes available; gc.free_floor is {floor} bytes (source: {}); bounded GC reported {reclaimed} bytes reclaimed; dispatch is proceeding",
+                        origin.description()
+                    );
+                    use provenant_records::policy::Effect;
+                    let warning = match policy.check(
+                        "LAUNCH_DISK",
+                        provenant_records::policy::Facts::violation(detail),
+                    ) {
+                        Effect::Proceed => None,
+                        Effect::Warn(message) => Some(message),
+                        Effect::Refuse(diagnostic) => Some(format!(
+                            "{}; continuing",
+                            diagnostic
+                                .detail
+                                .unwrap_or_else(|| "disk floor remains advisory".into())
+                        )),
                     };
-                    let effect = policy.check(code, provenant_records::policy::Facts::violation(detail));
-                    if effect.blocks() { Err(check) } else {
+                    if let Some(message) = warning {
                         use std::io::Write;
-                        if let Some(message) = effect.message() { let _ = writeln!(std::io::stderr().lock(), "warning: {message}"); }
-                        Ok(())
+                        let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
                     }
-                })
-                .map_err(|check| {
-                    let (kind, status) = match &check {
-                        DiskCheck::Low { .. } => (ErrorKind::DiskFloor, Status::Refused),
-                        DiskCheck::Unobserved(_) => (ErrorKind::Io, Status::Error),
-                    };
-                    let projection = match &check {
-                        DiskCheck::Low { path, available, floor, reclaimed, origin } => {
-                            let path = provenant_records::diagnostic::safe_path(path, provenant_records::diagnostic::Destination::Local)
-                                .unwrap_or_else(|| "the limiting volume".into());
-                            Some(provenant_records::diagnostic::Diagnostic::new(kind.code()).category(kind.category())
-                                .detail(format!("insufficient disk space on {path}: {available} bytes available, floor {floor} bytes; gc.free_floor from {}; bounded GC reported {reclaimed} bytes reclaimed", origin.description()))
-                                .next(format!("run `provenant gc --free-floor {floor}B` before dispatching a writer"))
-                                .fact(provenant_records::diagnostic::DiagnosticFact::DiskPressure { available: *available, floor: *floor, reclaimed: *reclaimed, origin: *origin }))
-                        }
-                        DiskCheck::Unobserved(_) => Some(provenant_records::diagnostic::Diagnostic::new(kind.code()).category(kind.category())
-                            .detail("disk observation failed").next("restore the host disk observation before retrying")
-                            .fact(provenant_records::diagnostic::DiagnosticFact::DiskUnobserved)),
-                    };
-                    let mut fail = Fail::new(status, kind, projection.as_ref().and_then(|p| p.detail.clone()).unwrap_or_default());
-                    fail.projection = projection.map(Box::new);
-                    fail
-                })?;
+                }
             }
         }
     }

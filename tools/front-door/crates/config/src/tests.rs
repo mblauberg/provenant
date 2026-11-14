@@ -327,14 +327,19 @@ fn assert_gc_settings_parse_defaults_and_warnings() {
         default_config.origins["gc.graph_checkpoint_days"],
         Origin::Compiled { .. }
     ));
-    let defaults = serde_json::to_value(default_config).unwrap();
+    let defaults = serde_json::to_value(&default_config).unwrap();
     assert_eq!(defaults["gc"]["schedule"], true);
     assert_eq!(defaults["gc"]["idle_days"], 7);
     assert_eq!(defaults["gc"]["graph_checkpoint_days"], 90);
     assert!(defaults["gc"]["free_floor"].is_null());
+    assert!(defaults["gc"]["critical_floor"].is_null());
+    assert!(matches!(
+        default_config.origins["gc.critical_floor"],
+        Origin::Compiled { .. }
+    ));
     let config = load(
         &roots(),
-        Some(&b"schema_version=1\n[gc]\nschedule=false\nidle_days=14\ngraph_checkpoint_days=30\nfree_floor='20G'"[..]),
+        Some(&b"schema_version=1\n[gc]\nschedule=false\nidle_days=14\ngraph_checkpoint_days=30\nfree_floor='20G'\ncritical_floor='2G'"[..]),
     )
     .unwrap();
     let value = serde_json::to_value(&config).unwrap();
@@ -346,6 +351,11 @@ fn assert_gc_settings_parse_defaults_and_warnings() {
         Origin::User { .. }
     ));
     assert_eq!(value["gc"]["free_floor"], "20G");
+    assert_eq!(value["gc"]["critical_floor"], "2G");
+    assert!(matches!(
+        config.origins["gc.critical_floor"],
+        Origin::User { .. }
+    ));
     test_support::assert_leaf_origins(&config);
     let configured = load(&roots(), Some(b"schema_version=1\n[gc]\nalert_below='20G'\n[gc.projects.example]\nregenerable=['target','node_modules']\nkeep=['web/target']".as_slice())).unwrap();
     assert_eq!(
@@ -361,6 +371,8 @@ fn assert_gc_settings_parse_defaults_and_warnings() {
         ("graph_checkpoint_days=3651", "graph_checkpoint_days_range"),
         ("schedule='yes'", "type"),
         ("free_floor='bad'", "invalid_cache_size"),
+        ("critical_floor='bad'", "invalid_cache_size"),
+        ("free_floor='1G'\ncritical_floor='2G'", "critical_floor_below_free_floor"),
         ("alert_below='bad'", "invalid_cache_size"),
         (
             "projects.p.regenerable=['../target']",

@@ -263,10 +263,17 @@ code = "LAUNCH_DISK"
 site = "run/src/launch.rs#Providers::check_policy"
 boundary = "none"
 strength = "warn"
-refusable = true
 knob = "policy.LAUNCH_DISK"
 threshold = "gc.free_floor"
-justification = "Writer launch may warns when available storage remains below the configured free-space floor after collection."
+justification = "The advisory gc.free_floor warns with the measured bytes and setting source; a low floor never blocks launch."
+
+[[rule]]
+code = "CRITICAL_DISK"
+site = "src/build_slot.rs#check_critical_disk"
+boundary = "data_integrity"
+strength = "refuse"
+threshold = "gc.critical_floor"
+justification = "A measured critical free-space threshold is a data-integrity boundary for starting a new lane build; its configured or shipped source is retained with the typed outcome."
 
 [[rule]]
 code = "DISPATCH_PREPAREDPROVIDER_CHECK_POLICY_AUTHORITY"
@@ -283,15 +290,6 @@ strength = "warn"
 knob = "policy.RUN_WRITER_GC_SETTINGS_NONE"
 threshold = "gc.free_floor"
 justification = "An unreadable GC configuration warns and uses compiled defaults; an unavailable disk policy context warns and skips the check."
-
-[[rule]]
-code = "SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE"
-site = "cli/src/run/submit.rs#check_writer_disk_with_collection"
-boundary = "none"
-strength = "warn"
-refusable = true
-knob = "policy.SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE"
-justification = "An unobservable disk floor or available space warns and allows dispatch; measured low space retains the configurable floor."
 
 [[rule]]
 code = "LAUNCH_RUNSTORE_START_INNER_AUTHORITY"
@@ -512,20 +510,6 @@ site = "confinement/src/permissions/render.rs#sbpl_path"
 boundary = "authority"
 strength = "refuse"
 justification = "Required paths must be encoded losslessly to enforce the requested permissions; optional discoveries warn and are omitted."
-
-[[rule]]
-code = "PROBE_SYSTEM_BACKEND_CREDENTIALS"
-site = "confinement/src/permissions/probe.rs#system_backend_with_limits_and_policy"
-boundary = "credentials"
-strength = "refuse"
-justification = "Without an enforcing sandbox the lane could read credential stores outside its selected authentication grants."
-
-[[rule]]
-code = "PROBE_SYSTEM_BACKEND_GIT_ISOLATION"
-site = "confinement/src/permissions/probe.rs#system_backend_with_limits_and_policy"
-boundary = "git_isolation"
-strength = "refuse"
-justification = "Without an enforcing sandbox a writer could modify the real Git administrative and common directories."
 
 [[rule]]
 code = "REPO_VERIFY_WORKTREE_GIT_ISOLATION"
@@ -921,10 +905,9 @@ code = "ADMISSION_DISK"
 site = "run/src/admission.rs#RunStore::admit"
 boundary = "none"
 strength = "warn"
-refusable = true
 knob = "policy.ADMISSION_DISK"
 threshold = "gc.free_floor"
-justification = "The effective disk floor is configured or shipped; its source and value accompany the observation."
+justification = "The advisory gc.free_floor warns with measured bytes and setting source; a low floor never blocks admission."
 
 [[rule]]
 code = "ADMISSION_SPACING"
@@ -935,16 +918,6 @@ refusable = true
 knob = "policy.ADMISSION_SPACING"
 threshold = "domains.fabric.lanes.start_spacing_ms"
 justification = "Startup spacing is configured; a lane of the same class started within the window, and the start is still recorded."
-
-[[rule]]
-code = "BUILD_DISK"
-site = "src/build_slot.rs#check_disk"
-boundary = "none"
-strength = "warn"
-refusable = true
-knob = "policy.BUILD_DISK"
-threshold = "gc.free_floor"
-justification = "A new build samples its output volume once against the configured or shipped floor; running builds are never signalled."
 
 [[rule]]
 code = "GUARDIAN_DISK"

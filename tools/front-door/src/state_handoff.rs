@@ -186,18 +186,16 @@ fn transfer_receipt(path: &Path) -> io::Result<()> {
 /// Validate the staged bytes with their runtime owners before stopping anything.
 /// Config remains TOML at the same schema version; host-id remains 32 hex bytes.
 /// Neither needs a legacy codec. Invalid input is a preflight error.
-fn validate_stage(plan: &Handoff, stage: &Path) -> io::Result<()> {
-    let home = provenant_core::default_state_home(&plan.to)
-        .ok_or_else(|| io::Error::other("handoff destination is not the default root"))?;
-    let mut inputs = provenant_core::RootInputs::new(home.to_path_buf(), home.to_path_buf());
-    inputs.state_dir = Some(stage.to_path_buf());
-    let roots = inputs
-        .resolve(&provenant_os::fs::SystemPathResolver)
+fn validate_stage(
+    stage: &Path,
+    environment: &crate::roots::Resolved,
+) -> io::Result<()> {
+    let roots = crate::roots::state_candidate(environment, stage.to_path_buf())
         .map_err(io::Error::other)?;
     provenant_config::config_show(&roots, &provenant_cli::domains::SECTIONS)
         .map_err(io::Error::other)?;
     provenant_config::lookup_host(&roots).map_err(io::Error::other)?;
-    let targets = provenant_config::Targets::new(roots, home, &[]);
+    let targets = provenant_config::Targets::new(roots, &environment.home, &[]);
     // This invokes the complete install ownership validator, including selectors.
     provenant_config::installed_binary(&targets).map_err(io::Error::other)?;
     Ok(())
@@ -208,6 +206,7 @@ fn validate_stage(plan: &Handoff, stage: &Path) -> io::Result<()> {
 /// Nothing under `plan.from` is written.
 pub(crate) fn run(
     plan: &Handoff,
+    environment: &crate::roots::Resolved,
     stop_agents: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<Handoff> {
     let parent = plan
@@ -254,7 +253,7 @@ pub(crate) fn run(
         ) {
             std::fs::File::open(directory)?.sync_all()?;
         }
-        validate_stage(plan, &stage).map_err(|error| {
+        validate_stage(&stage, environment).map_err(|error| {
             io::Error::other(format!(
                 "handoff preflight failed; agents left running: {error}"
             ))
@@ -317,6 +316,24 @@ mod tests {
         Ok(files)
     }
 
+    fn resolved_environment(home: &Path) -> Result<crate::roots::Resolved> {
+        let assets = home.join("product");
+        let project = home.join("checkout");
+        std::fs::create_dir_all(&assets)?;
+        std::fs::create_dir_all(&project)?;
+        let mut inputs = provenant_core::RootInputs::new(home.to_path_buf(), assets.clone());
+        inputs.workspaces.push(project.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        Ok(crate::roots::Resolved {
+            assets,
+            home: home.to_path_buf(),
+            project,
+            roots,
+            claude_config: None,
+            codex_home: None,
+        })
+    }
+
     fn legacy_home() -> Result<(tempfile::TempDir, PathBuf, PathBuf)> {
         let temp = tempfile::tempdir()?;
         let home = temp.path().canonicalize()?;
@@ -350,8 +367,10 @@ mod tests {
         let legacy = home.join(provenant_core::LEGACY_V1_STATE_SUFFIX);
         let before = tree(&legacy)?;
         let plan = plan(&state, &home)?.ok_or("hand-off planned")?;
+        let environment = resolved_environment(&home)?;
+        assert_ne!(environment.assets, environment.home);
         let mut stopped = false;
-        let done = run(&plan, || {
+        let done = run(&plan, &environment, || {
             assert!(!state.exists(), "agents stop before the root exists");
             stopped = true;
             Ok(())
@@ -415,7 +434,7 @@ mod tests {
             let plan = plan(&state, &home)?.ok_or("hand-off planned")?;
             let mut stopped = false;
             assert!(
-                run(&plan, || {
+                run(&plan, &resolved_environment(&home)?, || {
                     stopped = true;
                     Ok(())
                 })
@@ -432,7 +451,14 @@ mod tests {
     fn a_failed_agent_stop_copies_nothing() -> Result {
         let (_temp, home, state) = legacy_home()?;
         let plan = plan(&state, &home)?.ok_or("hand-off planned")?;
-        assert!(run(&plan, || Err(io::Error::other("still running"))).is_err());
+        assert!(
+            run(
+                &plan,
+                &resolved_environment(&home)?,
+                || Err(io::Error::other("still running"))
+            )
+            .is_err()
+        );
         assert!(!state.exists());
         Ok(())
     }

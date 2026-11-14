@@ -342,31 +342,22 @@ fn writer_gc_settings(
 }
 
 fn disk_policy_refusal(error: DiskCheck) -> Box<run::PrepareRefusal> {
-    let resource = match &error {
-        DiskCheck::Low {
-            available,
-            floor,
-            origin,
-            ..
-        } => Some(provenant_records::diagnostic::ResourceFact::Disk {
-            free: *available,
-            floor: *floor,
-            origin: *origin,
-        }),
-        DiskCheck::Unobserved(_) => None,
-    };
-    let cause = match &error {
-        DiskCheck::Low { .. } => provenant_records::run::TerminalCause::DiskFloor,
-        DiskCheck::Unobserved(_) => {
-            provenant_records::run::TerminalCause::DiskObservationUnavailable
-        }
-    };
-    let policy_code = match &error {
-        DiskCheck::Low { .. } => "LAUNCH_DISK",
-        DiskCheck::Unobserved(_) => "SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE",
-    };
-    let mut refusal = run::PrepareRefusal::boxed(cause, String::from(error));
-    refusal.policy_code = Some(policy_code.into());
+    let DiskCheck::Low {
+        available,
+        floor,
+        origin,
+        ..
+    } = &error;
+    let resource = Some(provenant_records::diagnostic::ResourceFact::Disk {
+        free: *available,
+        floor: *floor,
+        origin: *origin,
+    });
+    let mut refusal = run::PrepareRefusal::boxed(
+        provenant_records::run::TerminalCause::DiskFloor,
+        String::from(error),
+    );
+    refusal.policy_code = Some("LAUNCH_DISK".into());
     refusal.resource = resource;
     refusal
 }

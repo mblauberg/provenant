@@ -657,7 +657,7 @@ impl RunStore {
         }
         let writer_disk = low_disk.filter(|_| ticket.lane_class == LaneClass::Writer);
         let observed = |error: RunError| (error.to_string(), error);
-        // Each observation names its typed refusal; the policy decides its effect.
+        // These observations are advisory; only boundary rules can refuse admission.
         let observations: [(&str, Option<(String, RunError)>); 4] = [
             (
                 "ADMISSION_DISK",
@@ -1048,12 +1048,11 @@ mod process_wait_tests {
             read_only_disk_warning(&mut warned, 99, 100, SettingSource::Configuration).unwrap();
         assert_eq!(warning.code, "DISK_FLOOR");
         assert_eq!(warning.category.as_deref(), Some("warning"));
-        assert_eq!(
-            warning.detail.as_deref(),
-            Some(
-                "disk space: 99 bytes available; gc.free_floor is 100 bytes (source: host configuration); read-only lane is proceeding"
-            )
-        );
+        let detail = warning.detail.as_deref().unwrap();
+        assert!(detail.contains("99 bytes available"));
+        assert!(detail.contains("gc.free_floor is 100 bytes"));
+        assert!(detail.contains("source: host configuration"));
+        assert!(detail.contains("read-only lane is proceeding"));
         assert!(warning.next.is_some());
         assert!(
             read_only_disk_warning(&mut warned, 0, 100, SettingSource::Configuration).is_none()

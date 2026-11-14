@@ -8,8 +8,8 @@ use provenant_os::exec::{ExecOptions, ExecOutcome, StreamPolicy, Termination};
 #[cfg(target_os = "macos")]
 use provenant_os::fs::FileKind;
 #[cfg(any(target_os = "macos", all(test, feature = "snapshot")))]
-use provenant_records::policy::Effect;
-use provenant_records::policy::{Facts, Policy};
+use provenant_records::policy::{Effect, Facts};
+use provenant_records::policy::Policy;
 #[cfg(target_os = "macos")]
 use std::ffi::OsString;
 #[cfg(target_os = "macos")]
@@ -100,9 +100,7 @@ pub fn system_backend_with_limits_and_policy(
 ) -> Result<Box<dyn ConfinementBackend>, PermissionError> {
     #[cfg(target_os = "macos")]
     {
-        match probe_sandbox(context)
-            .map_err(|error| backend_boundary_error(error, "sandbox probe failed before launch"))?
-        {
+        match probe_sandbox(context)? {
             Availability::Available {
                 backend: BackendKind::MacOsSbpl,
             } => Ok(Box::new(MacOsSandboxBackend {
@@ -110,35 +108,20 @@ pub fn system_backend_with_limits_and_policy(
                 limits,
                 policy: policy.clone(),
             })),
-            Availability::Unavailable { reason } => Err(backend_boundary_error(
-                PermissionError::BackendNotAvailable(reason),
-                "sandbox probe did not establish an enforcing backend",
-            )),
+            Availability::Unavailable { reason } => {
+                Err(PermissionError::BackendNotAvailable(reason))
+            }
         }
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (context, limits, policy);
-        Err(backend_boundary_error(
-            PermissionError::BackendNotAvailable(AvailabilityReason::UnsupportedPlatform),
-            "this platform has no enforcing sandbox backend",
+        Err(PermissionError::BackendNotAvailable(
+            AvailabilityReason::UnsupportedPlatform,
         ))
     }
 }
 
-fn backend_boundary_error(error: PermissionError, detail: &str) -> PermissionError {
-    let policy = Policy::default();
-    let error = policy.boundary_error(
-        "PROBE_SYSTEM_BACKEND_CREDENTIALS",
-        Facts::violation(detail),
-        error,
-    );
-    policy.boundary_error(
-        "PROBE_SYSTEM_BACKEND_GIT_ISOLATION",
-        Facts::violation(detail),
-        error,
-    )
-}
 
 #[cfg(target_os = "macos")]
 pub(super) struct MacOsSandboxBackend {

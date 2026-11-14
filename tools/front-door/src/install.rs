@@ -1080,7 +1080,7 @@ fn apply_install(
             // Preflight and stage all handoff inputs before stopping 1.x.
             // A failed preflight stops nothing; a failed stop publishes nothing.
             let home = environment.home.clone();
-            match crate::state_handoff::run(&plan, || reporter.stop_legacy_agents(&plan.to, &home))
+            match crate::state_handoff::run(&plan, &environment, || reporter.stop_legacy_agents(&plan.to, &home))
             {
                 Ok(copied) => Some(copied),
                 Err(error) => {

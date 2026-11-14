@@ -234,6 +234,9 @@ pub fn resolve(
         std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).map(PathBuf::from);
     inputs.workspaces.push(project.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    for warning in roots.state.warnings() {
+        eprintln!("warning: {}", warning.message());
+    }
     Ok(Resolved {
         assets,
         home,
@@ -242,6 +245,16 @@ pub fn resolve(
         claude_config: std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
         codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
     })
+}
+
+/// Resolve a candidate state directory against the same install context that
+/// selected the command roots. Only the candidate changes; home, product root
+/// and workspace remain bound to the resolved environment.
+pub fn state_candidate(environment: &Resolved, candidate: PathBuf) -> Result<Roots, RootError> {
+    let mut inputs = RootInputs::new(environment.home.clone(), environment.assets.clone());
+    inputs.state_dir = Some(candidate);
+    inputs.workspaces.push(environment.project.clone());
+    Ok(inputs.resolve(&provenant_os::fs::SystemPathResolver)?)
 }
 
 /// Bind a child store's `state_dir` with its resolved parent's `home` and

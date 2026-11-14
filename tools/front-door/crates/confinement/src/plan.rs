@@ -205,10 +205,7 @@ impl ConfinedPlan {
             ));
         }
         if p.nested_confinement {
-            return Err(plan_boundary_error(
-                "PLAN_CONFINEDPLAN_NEW_AUTHORITY",
-                PermissionError::NestedConfinementUnsupported.into(),
-            ));
+            return Err(PermissionError::NestedConfinementUnsupported.into());
         }
         for grant in &p.write_roots {
             if let Some(policy) = &p.policy {

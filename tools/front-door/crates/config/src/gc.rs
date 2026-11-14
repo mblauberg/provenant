@@ -546,6 +546,8 @@ pub struct GcSettings {
     pub idle_days: u64,
     pub graph_checkpoint_days: u64,
     pub free_floor: Option<String>,
+    /// Critical free-space floor for new builds; defaults below `free_floor`.
+    pub critical_floor: Option<String>,
     /// Total lane Cargo cache cap; defaults to 32 GiB.
     pub lane_cargo_cache_max: Option<String>,
     pub alert_below: Option<String>,
@@ -559,11 +561,24 @@ impl Default for GcSettings {
             idle_days: 7,
             graph_checkpoint_days: 90,
             free_floor: None,
+            critical_floor: None,
             lane_cargo_cache_max: None,
             alert_below: None,
             projects: BTreeMap::new(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourcedBytes {
+    pub bytes: u64,
+    pub source: provenant_records::diagnostic::SettingSource,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskFloors {
+    pub free: SourcedBytes,
+    pub critical: SourcedBytes,
 }
 
 impl GcSettings {
@@ -612,6 +627,43 @@ impl GcSettings {
             .map_err(std::io::Error::other)
     }
 
+    /// Resolve warning and critical free-space thresholds for the sampled volume.
+    /// The critical threshold is always below the advisory threshold.
+    pub fn disk_floors_for_total(&self, total: u64) -> std::io::Result<DiskFloors> {
+        use provenant_records::diagnostic::SettingSource;
+        let free = self.free_floor_for_total(total)?;
+        if free == 0 {
+            return Err(std::io::Error::other("gc.free_floor must be greater than zero"));
+        }
+        let critical = match self.critical_floor.as_deref() {
+            Some(size) => parse_cache_size(size).map_err(std::io::Error::other)?,
+            None => (free / 2).min(2 * 1024_u64.pow(3)),
+        };
+        if critical >= free {
+            return Err(std::io::Error::other(
+                "gc.critical_floor must be below gc.free_floor",
+            ));
+        }
+        Ok(DiskFloors {
+            free: SourcedBytes {
+                bytes: free,
+                source: if self.free_floor.is_some() {
+                    SettingSource::Configuration
+                } else {
+                    SettingSource::ShippedDefault
+                },
+            },
+            critical: SourcedBytes {
+                bytes: critical,
+                source: if self.critical_floor.is_some() {
+                    SettingSource::Configuration
+                } else {
+                    SettingSource::ShippedDefault
+                },
+            },
+        })
+    }
+
     /// Total bound includes busy caches, which remain protected even above it.
     pub fn lane_cargo_cache_max_bytes(&self) -> std::io::Result<u64> {
         self.lane_cargo_cache_max
@@ -630,7 +682,17 @@ impl GcSettings {
             return Err("graph_checkpoint_days_range");
         }
         if let Some(size) = &self.free_floor {
+            if parse_cache_size(size)? == 0 {
+                return Err("free_floor_positive");
+            }
+        }
+        if let Some(size) = &self.critical_floor {
             parse_cache_size(size)?;
+            if let Some(free_floor) = &self.free_floor
+                && parse_cache_size(size)? >= parse_cache_size(free_floor)?
+            {
+                return Err("critical_floor_below_free_floor");
+            }
         }
         if let Some(size) = &self.lane_cargo_cache_max {
             parse_cache_size(size)?;
@@ -957,6 +1019,37 @@ mod tests {
         let invalid: super::GcSettings =
             toml_edit::de::from_str("lane_cargo_cache_max = 'invalid'").unwrap();
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn disk_floors_are_ordered_and_keep_each_setting_source() {
+        use provenant_records::diagnostic::SettingSource;
+        let defaults = super::GcSettings::default()
+            .disk_floors_for_total(1024 * 1024 * 1024 * 1024)
+            .unwrap();
+        assert!(defaults.free.bytes > defaults.critical.bytes);
+        assert_eq!(defaults.free.source, SettingSource::ShippedDefault);
+        assert_eq!(defaults.critical.source, SettingSource::ShippedDefault);
+        assert!(defaults.critical.bytes <= 2 * 1024_u64.pow(3));
+
+        let configured = super::GcSettings {
+            free_floor: Some("20G".into()),
+            critical_floor: Some("2G".into()),
+            ..Default::default()
+        }
+        .disk_floors_for_total(1024 * 1024 * 1024 * 1024)
+        .unwrap();
+        assert_eq!(configured.free.bytes, 20 * 1024_u64.pow(3));
+        assert_eq!(configured.critical.bytes, 2 * 1024_u64.pow(3));
+        assert_eq!(configured.free.source, SettingSource::Configuration);
+        assert_eq!(configured.critical.source, SettingSource::Configuration);
+
+        let invalid = super::GcSettings {
+            free_floor: Some("1G".into()),
+            critical_floor: Some("2G".into()),
+            ..Default::default()
+        };
+        assert!(invalid.disk_floors_for_total(1024 * 1024 * 1024 * 1024).is_err());
     }
 
     #[test]

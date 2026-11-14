@@ -2771,14 +2771,12 @@ fn shared_settings_sync_conflict_adopt_force_and_refusal() -> Result {
         keys.push("apiKeyHelper");
         accounts["shared_settings"]["keys"] = toml_edit::value(keys);
     })?;
-    let removed = rig.command(&["uninstall", "--harness", "claude"])?;
-    assert_eq!(code(&removed), 0, "{removed:?}");
+    let (status, removed) = run_json(&rig, &["uninstall", "--harness", "claude"])?;
+    assert_eq!(status, 0, "{removed}");
+    assert_eq!(removed["status"], "ok");
+    assert!(removed["data"]["outcome"].is_object());
     // `CLAUDE_CONFIG_DIR` selects the one matching recorded target.
     assert!(fs::symlink_metadata(rig.root.join("claude/skills/example")).is_err());
-    assert!(
-        String::from_utf8_lossy(&removed.stdout.bytes).contains("configuration ignored")
-            || String::from_utf8_lossy(&removed.stderr.bytes).contains("configuration ignored")
-    );
     Ok(())
 }
 

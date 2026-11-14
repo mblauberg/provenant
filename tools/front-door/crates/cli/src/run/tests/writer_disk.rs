@@ -1,60 +1,6 @@
 use super::*;
 
 #[test]
-fn disk_policy_refusal_uses_resource_projection() {
-    use provenant_records::diagnostic::{ResourceFact, SettingSource};
-    let refusal = crate::run::disk_policy_refusal(crate::run::DiskCheck::Low {
-        path: "/tmp/example".into(),
-        available: 1,
-        floor: 2,
-        reclaimed: 0,
-        origin: SettingSource::Configuration,
-    });
-    let fact = refusal.resource.expect("disk fact");
-    let kind = run::RefusalKind::PolicyResource(fact);
-    let failure = check_launch_policy(&[run::Started::Refused {
-        attempt: AttemptId::from_bytes([1; 16]),
-        kind,
-        reason: "local path and other source text".into(),
-    }])
-    .expect_err("disk floor must refuse");
-    assert_eq!(failure.kind, ErrorKind::Refused);
-    let diagnostic = failure.projection.expect("resource projection");
-    assert_eq!(diagnostic.code, "REFUSED");
-    assert!(
-        diagnostic
-            .detail
-            .as_deref()
-            .unwrap()
-            .contains("gc.free_floor")
-    );
-    assert!(
-        diagnostic
-            .detail
-            .as_deref()
-            .unwrap()
-            .contains("host configuration")
-    );
-    assert!(diagnostic.next.is_some());
-    assert!(!diagnostic.detail.as_deref().unwrap().contains("local path"));
-    assert!(
-        check_launch_policy(&[
-            run::Started::Refused {
-                attempt: AttemptId::from_bytes([2; 16]),
-                kind: run::RefusalKind::PolicyResource(ResourceFact::Disk {
-                    free: 1,
-                    floor: 2,
-                    origin: SettingSource::Configuration,
-                }),
-                reason: "low disk".into(),
-            },
-            run::Started::Launched(AttemptId::from_bytes([3; 16])),
-        ])
-        .is_ok()
-    );
-}
-
-#[test]
 fn retained_import_refusal_carries_custody_and_recovery_targets() {
     let attempt = AttemptId::from_bytes([4; 16]);
     let fence = provenant_supervisor::custody::PendingImport {
@@ -368,7 +314,7 @@ fn writer_samples_missing_roots_without_creating_them() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(), String> {
+fn writer_disk_floor_facts_keep_measurement_source() -> Result<(), String> {
     use provenant_records::run::TerminalCause;
     let settings = provenant_config::GcSettings {
         free_floor: Some("100B".into()),
@@ -383,11 +329,11 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
     )
     .err()
     .ok_or("writer accepted insufficient disk")?;
-    let refusal = disk_policy_refusal(check);
-    assert_eq!(refusal.terminal_cause, TerminalCause::DiskFloor);
-    assert_eq!(refusal.policy_code.as_deref(), Some("LAUNCH_DISK"));
+    let warning = disk_policy_refusal(check);
+    assert_eq!(warning.terminal_cause, TerminalCause::DiskFloor);
+    assert_eq!(warning.policy_code.as_deref(), Some("LAUNCH_DISK"));
     assert_eq!(
-        refusal.resource,
+        warning.resource,
         Some(provenant_records::diagnostic::ResourceFact::Disk {
             free: 99,
             floor: 100,
@@ -400,27 +346,7 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
             .contains("provenant gc --apply")
     );
     assert!(!TerminalCause::DiskFloor.detail().contains("access grants"));
-    let unobserved = disk_policy_refusal(DiskCheck::Unobserved("HOST_ERROR_SENTINEL".into()));
-    assert_eq!(
-        unobserved.policy_code.as_deref(),
-        Some("SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE")
-    );
-    assert_eq!(
-        unobserved.terminal_cause,
-        TerminalCause::DiskObservationUnavailable
-    );
-    assert!(unobserved.terminal_note.is_none());
-    assert!(
-        !TerminalCause::DiskObservationUnavailable
-            .detail()
-            .contains("HOST_ERROR_SENTINEL")
-    );
-    assert!(
-        TerminalCause::DiskObservationUnavailable
-            .detail()
-            .contains("restore the host disk observation")
-    );
-    Ok(())
+
 }
 
 #[test]
