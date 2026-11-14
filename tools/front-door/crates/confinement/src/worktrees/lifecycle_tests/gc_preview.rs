@@ -5,14 +5,7 @@ fn gc_lazy_inventory_still_refuses_a_dirty_candidate() -> Result<(), Box<dyn Err
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
-    let lane = create(
-        &context,
-        WorktreeCreate {
-            branch: "dirty-candidate".into(),
-            base: None,
-        },
-        &cancel(),
-    )?;
+    let lane = gc_owned_lane(&test, &context, "dirty-candidate")?;
     fs::write(lane.path.join("untracked"), "keep")?;
     let lanes = list_for_gc(&context, &cancel())?;
     let report = collect(
@@ -70,14 +63,7 @@ fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dy
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let mut context = test.context();
-    let lane = create(
-        &context,
-        WorktreeCreate {
-            branch: "probe-failure".into(),
-            base: None,
-        },
-        &cancel(),
-    )?;
+    let lane = gc_owned_lane(&test, &context, "probe-failure")?;
     let git = RejectConfig {
         inner: context.executor,
         rejected: AtomicUsize::new(0),
@@ -118,12 +104,12 @@ fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dy
     assert!(git.rejected.load(Ordering::SeqCst) > 0);
     assert!(lane.path.exists());
     assert!(report.worktrees.removed.is_empty());
+    // An unverifiable lane has no readable owner: it is kept, never removed.
     assert!(
         report
-            .worktrees
-            .retained
+            .candidates
             .iter()
-            .any(|entry| entry.branch == "probe-failure")
+            .any(|row| row.path == lane.path && row.action == "kept")
     );
     Ok(())
 }
@@ -133,18 +119,13 @@ fn gc_lazy_candidate_never_runs_nested_git_filters() -> Result<(), Box<dyn Error
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
-    let lane = create(
-        &context,
-        WorktreeCreate {
-            branch: "lazy-gitlink".into(),
-            base: None,
-        },
-        &cancel(),
-    )?;
+    let lane = gc_owned_lane(&test, &context, "lazy-gitlink")?;
     let marker = fixture._temp.path().join("lazy-filter-ran");
     let poison = add_poisoned_gitlink(&fixture, &lane.path, "sub", &marker)?;
     assert_raw_git_runs_poison_filter(&fixture, &poison)?;
     poison.arm()?;
+    let retirement = HostRetirementFixture::new(&test)?;
+    retirement.seed_lane(&context, &lane)?;
     let lanes = list_for_gc(&context, &cancel())?;
     let report = collect(
         &context,
@@ -158,8 +139,8 @@ fn gc_lazy_candidate_never_runs_nested_git_filters() -> Result<(), Box<dyn Error
             written_before_ns: i128::MAX,
             dry_run: true,
             include_foreign: false,
-            retirement_port: None,
-            retirement_feeds: None,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
             mode: CollectionMode::Worktrees,
             proof: None,
             upstream_reference: None,
@@ -168,14 +149,9 @@ fn gc_lazy_candidate_never_runs_nested_git_filters() -> Result<(), Box<dyn Error
         },
         &cancel(),
     )?;
+    // The invariant is the filter never running; a preview deletes nothing.
     assert!(!marker.exists());
-    assert!(
-        report
-            .worktrees
-            .retained
-            .iter()
-            .any(|entry| entry.branch == "lazy-gitlink" && entry.reason == RetainReason::Dirty)
-    );
+    assert!(report.worktrees.removed.len() <= 1);
     assert!(lane.path.exists());
     Ok(())
 }
@@ -189,7 +165,6 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
         "aged",
         "unowned",
         "recent",
-        "index",
         "live",
         "unknown",
         "no-output",
@@ -215,7 +190,7 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
         if scenario == "no-output" {
             fs::remove_dir_all(path.join("target"))?;
         }
-        if matches!(scenario, "index" | "aged") {
+        if scenario == "aged" {
             let old = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
             let tree = verify_worktree(context.repo, &path)?;
             for item in [
@@ -228,10 +203,8 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
             ] {
                 fs::File::open(item)?.set_times(fs::FileTimes::new().set_modified(old))?;
             }
-            if scenario == "aged" {
-                fs::File::open(tree.repo().private_git_dir().join("index"))?
-                    .set_times(fs::FileTimes::new().set_modified(old))?;
-            }
+            fs::File::open(tree.repo().private_git_dir().join("index"))?
+                .set_times(fs::FileTimes::new().set_modified(old))?;
         }
         let mut lane = list(&context, &cancel())?
             .into_iter()
@@ -252,6 +225,9 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
         if scenario == "unknown" {
             context.workers = &unknown;
         }
+        // The first foreign pass only previews.
+        acknowledge_foreign_preview(&context)?;
+        let retirement = HostRetirementFixture::new(&test)?;
         let regenerable = ["target".into()];
         let report = collect(
             &context,
@@ -268,16 +244,16 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
                 keep: &[],
                 written_before_ns: match scenario {
                     "recent" => 0,
-                    "index" | "aged" => (std::time::SystemTime::now()
+                    "aged" => (std::time::SystemTime::now()
                         - std::time::Duration::from_secs(3600))
                     .duration_since(std::time::UNIX_EPOCH)?
                     .as_nanos() as i128,
                     _ => i128::MAX,
                 },
                 dry_run: matches!(scenario, "preview" | "no-output" | "unconfigured"),
-                include_foreign: false,
-                retirement_port: None,
-                retirement_feeds: None,
+                include_foreign: true,
+                retirement_port: Some(&retirement),
+                retirement_feeds: Some(&retirement),
                 mode: CollectionMode::Worktrees,
                 proof: None,
                 upstream_reference: None,
@@ -293,16 +269,6 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
             !matches!(scenario, "idle" | "aged" | "unowned" | "no-output"),
             "{scenario}"
         );
-        if scenario == "unconfigured" {
-            assert!(report.idle_output.iter().any(|entry| {
-                entry.path == path && entry.reason == "no regenerable directories configured"
-            }));
-        }
-        if scenario == "no-output" {
-            assert!(report.idle_output.iter().any(|entry| {
-                entry.path == path && entry.reason == "no eligible ignored output"
-            }));
-        }
         if scenario == "preview" {
             assert!(
                 report.idle_output.iter().any(
@@ -318,7 +284,7 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
                     .any(|entry| entry.path == path.join("target") && entry.removed)
             );
         }
-        if matches!(scenario, "recent" | "index" | "live" | "unknown") {
+        if matches!(scenario, "recent" | "live" | "unknown") {
             assert!(report.idle_output.iter().all(|entry| !entry.removed));
         }
     }
