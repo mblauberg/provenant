@@ -14,7 +14,9 @@ pub const PORTS_CONFIG: &str = ".provenant/ports.json";
 pub const PORTS_SCHEMA_VERSION: u16 = 2;
 
 mod evidence;
-pub use evidence::{PortEvidenceError, record_port_command};
+pub use evidence::{
+    PortCommandReceiptProof, PortEvidenceError, port_command_receipt_proof, record_port_command,
+};
 const MAX_PORTS_BYTES: u64 = 65_536;
 const BRANCH_TOKEN: &str = "<branch>";
 
@@ -79,7 +81,7 @@ impl PortCommand {
 
 /// Typed result from executing a repository command port. The bounded process
 /// capture is retained as evidence; callers decide whether to render it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PortCommandDisposition {
     Succeeded,

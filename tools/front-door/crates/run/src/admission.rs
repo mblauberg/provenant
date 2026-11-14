@@ -426,7 +426,10 @@ impl RunStore {
     ) -> Result<()> {
         self.write(call, |tx| {
             let old = self.record(id, call)?;
-            if !matches!(old.state, AttemptState::Queued { .. }) {
+            if !matches!(
+                old.state,
+                AttemptState::Queued { .. } | AttemptState::Starting { .. }
+            ) {
                 return Err(RunError::Conflict);
             }
             let mut next = old.clone();
@@ -435,6 +438,161 @@ impl RunStore {
             update_attempt(tx, &old, &next)
         })
     }
+    /// Claim launch ownership before running repository admission or provider
+    /// preparation. The launcher liveness lock is held by the caller across this
+    /// transition and until handoff or unwind completes.
+    pub(crate) fn claim_starting_for_preparation(
+        &self,
+        expected: &AttemptRecord,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        let id = expected.attempt_id;
+        self.write(call, |tx| {
+            let old = self.record(id, call)?;
+            if old.state != expected.state
+                || !matches!(old.state, AttemptState::Queued { .. })
+                || old.revision != expected.revision
+                || old.key != expected.key
+            {
+                return Err(RunError::Conflict);
+            }
+            let mut ticket = self.ticket(tx, id)?;
+            let mut next = old.clone();
+            next.revision = next.revision.checked_add(1).ok_or(RunError::Conflict)?;
+            next.generation = next.generation.checked_add(1).ok_or(RunError::Conflict)?;
+            next.state = AttemptState::Starting {
+                extra: Default::default(),
+            };
+            next.admission_deadline = Some(ticket.admission_deadline);
+            ticket.generation = next.generation;
+            update_attempt(tx, &old, &next)?;
+            tx.execute(
+                "UPDATE admission SET record=?1 WHERE attempt=?2",
+                params![bytes(&ticket)?, id.to_string()],
+            )?;
+            Ok(next)
+        })
+    }
+
+    /// Record resolved launch facts while retaining the generation claimed by
+    /// `claim_starting_for_preparation`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_starting_launch(
+        &self,
+        expected: &AttemptRecord,
+        route: &RouteRecord,
+        writable: &[String],
+        write_grants: &AppliedWriteGrants,
+        head: Option<GitOid>,
+        priority: u8,
+        limits: &provenant_records::LaneLimits,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        if !valid_read_only_writable(writable) {
+            return Err(RunError::Validation("invalid read-only writable paths"));
+        }
+        if !crate::reader::valid_write_grants(&write_grants.grants) {
+            return Err(RunError::Validation("invalid write grants"));
+        }
+        let id = expected.attempt_id;
+        let runtime_seconds = limits
+            .deadline_seconds
+            .as_ref()
+            .map_or(0, |limit| limit.value);
+        self.write(call, |tx| {
+            let old = self.record(id, call)?;
+            if !matches!(old.state, AttemptState::Starting { .. })
+                || old.generation != expected.generation
+                || old.revision != expected.revision
+                || old.key != expected.key
+            {
+                return Err(RunError::Conflict);
+            }
+            let mut ticket = self.ticket(tx, id)?;
+            let class = Service::lane_class(
+                ticket.lane_class == LaneClass::Writer,
+                &[],
+                &write_grants.grants,
+            );
+            if class != ticket.lane_class {
+                ticket.lane_class = class;
+                ticket.startup_spacing_ms =
+                    provenant_config::LaneBuildSettings::read(&self.writer_registry)
+                        .unwrap_or_default()
+                        .start_spacing_ms
+                        .unwrap_or_else(|| self.policy.spacing_ms(class));
+            }
+            let mut next = old.clone();
+            next.revision = next.revision.checked_add(1).ok_or(RunError::Conflict)?;
+            next.read_only_writable = writable.to_vec();
+            next.write_grants = write_grants.grants.clone();
+            next.git_grants_digest = write_grants.git_grants_digest;
+            next.head = head;
+            next.requested_priority = Some(priority);
+            next.priority = None;
+            next.limits = Some(limits.clone());
+            next.resolved_route = Some(route.clone());
+            next.applied_route = Some(route.clone());
+            next.admission_deadline = Some(ticket.admission_deadline);
+            if runtime_seconds > 0 {
+                ticket.runtime_seconds = runtime_seconds;
+            }
+            update_attempt(tx, &old, &next)?;
+            tx.execute(
+                "UPDATE admission SET record=?1 WHERE attempt=?2",
+                params![bytes(&ticket)?, id.to_string()],
+            )?;
+            Ok(next)
+        })
+    }
+
+    /// Requeue a preparation owner after a failed admission attempt only when
+    /// release is proven and no cancellation request won the publication fence.
+    pub(crate) fn requeue_starting_after_admission_skip(
+        &self,
+        expected: &AttemptRecord,
+        call: &Request<'_>,
+    ) -> Result<Option<AttemptRecord>> {
+        let dir = self.attempt_dir(expected.attempt_id, false)?;
+        let publication = dir.lock(
+            std::ffi::OsStr::new("publication.lock"),
+            LockMode::Exclusive,
+            call.lock_budget(),
+            call.cancel,
+            call.clock,
+        )?;
+        let current = self.record(expected.attempt_id, call)?;
+        if !matches!(current.state, AttemptState::Starting { .. })
+            || current.generation != expected.generation
+        {
+            return Err(RunError::Conflict);
+        }
+        let binding = current
+            .extra
+            .get(crate::launch::ADMISSION_PORT_BINDING_FIELD)
+            .cloned()
+            .map(serde_json::from_value::<crate::launch::AdmissionPortBinding>)
+            .transpose()
+            .map_err(|_| RunError::Validation("stored repository admission binding"))?;
+        if let Some(binding) = binding
+            && (!binding.valid() || binding.phase != crate::launch::AdmissionPhase::Released)
+        {
+            return Err(RunError::Conflict);
+        }
+        if crate::store::cancel_requested(&dir, Self::scope(&current)) {
+            drop(publication);
+            return Ok(None);
+        }
+        let mut next = current.clone();
+        next.revision = next.revision.checked_add(1).ok_or(RunError::Conflict)?;
+        next.state = AttemptState::Queued {
+            extra: Default::default(),
+        };
+        self.write(call, |tx| update_attempt(tx, &current, &next))?;
+        drop(publication);
+        self.record(current.attempt_id, call).map(Some)
+    }
+
     /// Advance an integration fixture through the real launch transition without
     /// spawning a guardian. Custody fixtures require a nonzero generation.
     #[cfg(feature = "fixture")]

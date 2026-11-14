@@ -39,9 +39,9 @@ mod project_binding;
 pub use ports::{
     CommandExitCodes, ExitDisposition, Integration, LandBackend, LandPort, PORTS_CONFIG,
     PORTS_SCHEMA_VERSION, PackagePath, Port, PortBackend, PortBackendKind, PortCommand,
-    PortCommandDisposition, PortCommandExecution, PortEvidenceError, PortSource, PortTable,
-    VerifyPort, VerifySelection, VerifyTier, WorktreeLayoutPort, execute_port_command,
-    record_port_command,
+    PortCommandDisposition, PortCommandExecution, PortCommandReceiptProof, PortEvidenceError,
+    PortSource, PortTable, VerifyPort, VerifySelection, VerifyTier, WorktreeLayoutPort,
+    execute_port_command, port_command_receipt_proof, record_port_command,
 };
 mod release;
 mod repository_policy;

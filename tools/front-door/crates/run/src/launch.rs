@@ -502,9 +502,8 @@ fn check_preparation_refusal(
 }
 
 impl RunStore {
-    /// Only the launcher that commits Queued -> Starting reports the resolved
-    /// policy. Preparation and sealing can retry or race without duplicating
-    /// this attempt's report, including a retained fresh-start plan.
+    /// Persist final plan facts for the launcher that already claimed
+    /// Queued -> Starting before any external admission or provider work.
     #[allow(clippy::too_many_arguments)]
     fn claim_launch(
         &self,
@@ -522,13 +521,13 @@ impl RunStore {
             .and_then(|confinement| confinement.plan.permissions().read_only.as_ref())
             .map(|grants| grants.writable_paths())
             .unwrap_or_default();
-        let record = self.mark_starting_with_priority(
+        let record = self.record_starting_launch(
             expected,
             &plan.route,
             writable,
             grants,
             plan.observed_head,
-            Some(priority),
+            priority,
             limits,
             call,
         )?;
@@ -797,7 +796,7 @@ pub enum Started {
         reason: String,
         kind: RefusalKind,
     },
-    /// Repository admission was unavailable; the queued attempt remains eligible.
+    /// Repository admission was unavailable; release proof controls retry eligibility.
     Skipped {
         attempt: AttemptId,
         reason: String,
@@ -864,7 +863,7 @@ impl AdmissionPortBinding {
         self.lease_epoch != 0 && self.command_digest == self.command.digest()
     }
 
-    pub(crate) fn can_transition_to(&self, next: AdmissionPhase, queued: bool) -> bool {
+    pub(crate) fn can_transition_to(&self, next: AdmissionPhase, active_owner: bool) -> bool {
         matches!(
             (self.phase, next),
             (AdmissionPhase::AcquirePending, AdmissionPhase::Acquired)
@@ -874,7 +873,7 @@ impl AdmissionPortBinding {
                 )
                 | (AdmissionPhase::Acquired, AdmissionPhase::ReleasePending)
                 | (AdmissionPhase::ReleasePending, AdmissionPhase::Released)
-        ) || (queued
+        ) || (active_owner
             && self.phase == AdmissionPhase::Released
             && next == AdmissionPhase::AcquirePending)
     }
@@ -902,14 +901,6 @@ pub(crate) fn mark_admission_release_pending(record: &mut AttemptRecord) -> Resu
     Ok(())
 }
 
-pub(crate) fn ignore_admission_phase(record: &mut AttemptRecord) -> bool {
-    if let Some(value) = record.extra.get_mut(ADMISSION_PORT_BINDING_FIELD)
-        && let Some(binding) = value.as_object_mut()
-    {
-        return binding.remove("phase").is_some();
-    }
-    false
-}
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RefusalKind {
     Policy,
@@ -1315,7 +1306,7 @@ impl RunStore {
             &provenant_core::CancelToken,
         ) -> bool,
     ) -> (AttemptRecord, Option<String>) {
-        let (mut record, binding) = match self.admission_binding(request, record, call) {
+        let (record, binding) = match self.admission_binding(request, record, call) {
             Ok(value) => value,
             Err(_) => {
                 return (
@@ -1324,10 +1315,31 @@ impl RunStore {
                 );
             }
         };
+        self.admission_skip_with_phase_bound(request, &record, binding, call, run_phase)
+    }
+
+    fn admission_skip_with_phase_bound(
+        &self,
+        request: &CanonicalRequest,
+        record: &AttemptRecord,
+        binding: Option<AdmissionPortBinding>,
+        call: &Request<'_>,
+        run_phase: &mut dyn FnMut(
+            &CanonicalRequest,
+            AttemptId,
+            &AdmissionPortBinding,
+            AdmissionPhase,
+            &provenant_core::CancelToken,
+        ) -> bool,
+    ) -> (AttemptRecord, Option<String>) {
+        let mut record = record.clone();
         let Some(mut binding) = binding else {
             return (record, None);
         };
-        if !matches!(record.state, AttemptState::Queued { .. }) {
+        if !matches!(
+            record.state,
+            AttemptState::Queued { .. } | AttemptState::Starting { .. }
+        ) {
             return (
                 record,
                 Some("attempt state changed during repository admission".into()),
@@ -1373,6 +1385,16 @@ impl RunStore {
             );
         }
 
+        let cancelled_before_acquire = call.cancel.is_cancelled()
+            || self
+                .attempt_dir(record.attempt_id, false)
+                .is_ok_and(|dir| crate::store::cancel_requested(&dir, Self::scope(&record)));
+        if cancelled_before_acquire {
+            return (
+                record,
+                Some("cancellation requested before repository admission".into()),
+            );
+        }
         let acquired = run_phase(
             request,
             record.attempt_id,
@@ -1394,7 +1416,10 @@ impl RunStore {
             .and_then(|value| serde_json::from_value::<AdmissionPortBinding>(value.clone()).ok())
             .map(|binding| binding.phase);
         if current_phase == Some(AdmissionPhase::Acquired)
-            && matches!(current.state, AttemptState::Queued { .. })
+            && matches!(
+                current.state,
+                AttemptState::Queued { .. } | AttemptState::Starting { .. }
+            )
         {
             return (current, None);
         }
@@ -1425,7 +1450,10 @@ impl RunStore {
         }
         (
             self.record(current.attempt_id, call).unwrap_or(current),
-            Some("repository admission port skipped this attempt; it remains queued".into()),
+            Some(
+                "repository admission skipped this attempt; cleanup must complete before retry"
+                    .into(),
+            ),
         )
     }
 
@@ -1443,6 +1471,26 @@ impl RunStore {
             let _ = self.set_temporary_retained(record.attempt_id, true, call);
         }
         released
+    }
+
+    fn admission_release_receipt_confirmed(
+        &self,
+        attempt: AttemptId,
+        binding: &AdmissionPortBinding,
+    ) -> bool {
+        let key = format!("{attempt}:{}", binding.lease_epoch);
+        provenant_config::port_command_receipt_proof(
+            &self.writer_registry,
+            "admission",
+            binding.source,
+            "release",
+            &key,
+            binding.command_digest,
+            &binding.command.exit_codes.success,
+        )
+        .ok()
+        .flatten()
+        .is_some_and(|proof| proof.successful_exit)
     }
 
     fn release_admission_with_phase(
@@ -1485,6 +1533,12 @@ impl RunStore {
             _ => return false,
         };
         if binding.phase == AdmissionPhase::Released {
+            return true;
+        }
+        if matches!(current.state, AttemptState::Terminal { .. })
+            && binding.phase == AdmissionPhase::ReleasePending
+            && self.admission_release_receipt_confirmed(record.attempt_id, &binding)
+        {
             return true;
         }
         if binding.phase != AdmissionPhase::ReleasePending {
@@ -1535,17 +1589,97 @@ impl RunStore {
             );
             return false;
         }
+        if matches!(current.state, AttemptState::Terminal { .. }) {
+            return self.admission_release_receipt_confirmed(record.attempt_id, &binding);
+        }
         match self.record_admission_phase(&current, AdmissionPhase::Released, call) {
             Ok(_) => true,
-            Err(_) => self
-                .record(record.attempt_id, call)
-                .ok()
-                .and_then(|current| current.extra.get(ADMISSION_PORT_BINDING_FIELD).cloned())
-                .and_then(|value| serde_json::from_value::<AdmissionPortBinding>(value).ok())
-                .is_some_and(|binding| {
-                    binding.valid() && binding.phase == AdmissionPhase::Released
-                }),
+            Err(_) => {
+                let latest = match self.record(record.attempt_id, call) {
+                    Ok(latest) => latest,
+                    Err(_) => return false,
+                };
+                if matches!(latest.state, AttemptState::Terminal { .. }) {
+                    return self.admission_release_receipt_confirmed(record.attempt_id, &binding);
+                }
+                let Some(value) = latest.extra.get(ADMISSION_PORT_BINDING_FIELD) else {
+                    return false;
+                };
+                let latest_binding: AdmissionPortBinding =
+                    match serde_json::from_value(value.clone()) {
+                        Ok(binding) if binding.valid() => binding,
+                        _ => return false,
+                    };
+                latest_binding.phase == AdmissionPhase::Released
+                    || (latest_binding.phase == AdmissionPhase::ReleasePending
+                        && self
+                            .record_admission_phase(&latest, AdmissionPhase::Released, call)
+                            .is_ok())
+            }
         }
+    }
+
+    fn settle_starting_refusal(
+        &self,
+        id: AttemptId,
+        reason: &str,
+        finished_at: provenant_core::WallTime,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        self.withdraw_with_preparation_failure(
+            id,
+            crate::store::Withdrawal {
+                expected: AttemptState::Starting {
+                    extra: Default::default(),
+                },
+                outcome: Outcome::Rejected,
+                reason,
+                finished_at,
+                failure: None,
+                terminal_cause: Some(TerminalCause::HandoffRefused),
+                terminal_note: None,
+            },
+            call,
+        )?;
+        Ok(())
+    }
+
+    fn cancel_preparation_if_requested(
+        &self,
+        id: AttemptId,
+        record: &AttemptRecord,
+        attempt_dir: &provenant_os::fs::Directory,
+        finished_at: provenant_core::WallTime,
+        call: &Request<'_>,
+    ) -> Result<bool> {
+        if !call.cancel.is_cancelled()
+            && !crate::store::cancel_requested(attempt_dir, Self::scope(record))
+        {
+            return Ok(false);
+        }
+        // Cancellation stops preparation, but its owner must still settle and
+        // release custody under a fresh bounded store request.
+        let cleanup_cancel = provenant_core::CancelToken::new();
+        let cleanup_call = Request {
+            clock: call.clock,
+            cancel: &cleanup_cancel,
+        };
+        self.withdraw_with_preparation_failure(
+            id,
+            crate::store::Withdrawal {
+                expected: AttemptState::Starting {
+                    extra: Default::default(),
+                },
+                outcome: Outcome::Cancelled,
+                reason: "cancelled before launch",
+                finished_at,
+                failure: None,
+                terminal_cause: None,
+                terminal_note: None,
+            },
+            &cleanup_call,
+        )?;
+        Ok(true)
     }
 
     fn start_inner(
@@ -1647,14 +1781,93 @@ impl RunStore {
             {
                 continue;
             }
+            // Freeze the repository command while the attempt is still queued,
+            // then publish Starting under the launcher's liveness lock before
+            // running any repository command or provider preparation.
+            let (bound_record, admission_binding) =
+                match self.admission_binding(&request, &record, call) {
+                    Ok(value) => value,
+                    Err(reason) => {
+                        use std::io::Write as _;
+                        let _ = writeln!(
+                            std::io::stderr().lock(),
+                            "warning: repository admission skipped {id}: {reason}"
+                        );
+                        started.push(Started::Skipped {
+                            attempt: id,
+                            reason: reason.to_owned(),
+                        });
+                        continue;
+                    }
+                };
+            record = bound_record;
+            let attempt_dir = self.attempt_dir(id, true)?;
+            let _launcher = match attempt_dir.try_lock(
+                std::ffi::OsStr::new("launcher.lock"),
+                provenant_os::fs::LockMode::Exclusive,
+            ) {
+                Ok(guard) => guard,
+                Err(provenant_os::fs::FsError::LockTimeout { .. }) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            record = match self.claim_starting_for_preparation(&record, call) {
+                Ok(record) => record,
+                Err(RunError::Conflict) => continue,
+                Err(error) => return Err(error),
+            };
+            if self.cancel_preparation_if_requested(id, &record, &attempt_dir, now()?, call)? {
+                started.push(Started::Refused {
+                    attempt: id,
+                    reason: "cancelled before launch".into(),
+                    kind: RefusalKind::Preparation,
+                });
+                continue;
+            }
             let mut effective_task = self.effective_launch_task(&request, task);
             self.seal_parent_sandbox(&request, &mut effective_task, call);
             let task = &effective_task;
-            let (admitted_record, skipped) = self.admission_skip(&request, &record, call);
+            let (admitted_record, skipped) = self.admission_skip_with_phase_bound(
+                &request,
+                &record,
+                admission_binding,
+                call,
+                &mut |request, attempt, binding, phase, cancel| {
+                    self.run_admission_phase(request, attempt, binding, phase, cancel)
+                },
+            );
             record = admitted_record;
             if let Some(reason) = skipped {
-                if !matches!(record.state, AttemptState::Queued { .. }) {
+                if self.cancel_preparation_if_requested(id, &record, &attempt_dir, now()?, call)? {
+                    started.push(Started::Refused {
+                        attempt: id,
+                        reason: "cancelled before launch".into(),
+                        kind: RefusalKind::Preparation,
+                    });
                     continue;
+                }
+                match self.requeue_starting_after_admission_skip(&record, call) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        if self.cancel_preparation_if_requested(
+                            id,
+                            &record,
+                            &attempt_dir,
+                            now()?,
+                            call,
+                        )? {
+                            started.push(Started::Refused {
+                                attempt: id,
+                                reason: "cancelled before launch".into(),
+                                kind: RefusalKind::Preparation,
+                            });
+                            continue;
+                        }
+                        continue;
+                    }
+                    // A failed release keeps the Starting record fenced for
+                    // reconcile; it is never re-enqueued while custody is unknown.
+                    Err(RunError::Conflict) => {}
+                    Err(error) => return Err(error),
                 }
                 use std::io::Write as _;
                 let _ = writeln!(
@@ -1667,6 +1880,14 @@ impl RunStore {
                 });
                 continue;
             }
+            if self.cancel_preparation_if_requested(id, &record, &attempt_dir, now()?, call)? {
+                started.push(Started::Refused {
+                    attempt: id,
+                    reason: "cancelled before launch".into(),
+                    kind: RefusalKind::Preparation,
+                });
+                continue;
+            }
             let prompt = match self
                 .artifact_bytes(&record.prompt, RECORD_LIMIT)
                 .and_then(|bytes| {
@@ -1675,6 +1896,20 @@ impl RunStore {
                 }) {
                 Ok(prompt) => prompt,
                 Err(error) => {
+                    if self.cancel_preparation_if_requested(
+                        id,
+                        &record,
+                        &attempt_dir,
+                        now()?,
+                        call,
+                    )? {
+                        started.push(Started::Refused {
+                            attempt: id,
+                            reason: "cancelled before launch".into(),
+                            kind: RefusalKind::Preparation,
+                        });
+                        continue;
+                    }
                     let code = if matches!(
                         &error,
                         RunError::ArtifactMismatch(_) | RunError::TooLarge { .. }
@@ -1690,14 +1925,13 @@ impl RunStore {
                         ),
                         error,
                     );
-                    // A prompt the host cannot read back ends the attempt here;
-                    // leaving it Queued would meet the same unreadable input on
-                    // every later start.
+                    // The live preparation owner settles unreadable input; it
+                    // must not leave a stale Starting row for another launcher.
                     let reason = format!("stored prompt unreadable: {error}");
                     match self.withdraw_with_preparation_failure(
                         id,
                         crate::store::Withdrawal {
-                            expected: AttemptState::Queued {
+                            expected: AttemptState::Starting {
                                 extra: Default::default(),
                             },
                             outcome: Outcome::Rejected,
@@ -1727,10 +1961,27 @@ impl RunStore {
                 .as_path()
                 .join(format!("attempts/{id}"));
             let prompt = output_prompt(&directory, &prompt);
-            let attempt_dir = self.attempt_dir(id, false)?;
-            crate::artifacts::subdir(&attempt_dir, std::ffi::OsStr::new("scratch"), true)?;
-            crate::artifacts::subdir(&attempt_dir, std::ffi::OsStr::new("provider-state"), true)?;
-            crate::artifacts::subdir(&attempt_dir, std::ffi::OsStr::new("tmp"), true)?;
+            let mut staging_failure = None;
+            for child in ["scratch", "provider-state", "tmp"] {
+                if let Err(error) =
+                    crate::artifacts::subdir(&attempt_dir, std::ffi::OsStr::new(child), true)
+                {
+                    staging_failure = Some(provenant_confinement::redact::bounded_line(
+                        &format!("launch staging failed: {error}"),
+                        240,
+                    ));
+                    break;
+                }
+            }
+            if let Some(reason) = staging_failure {
+                self.settle_starting_refusal(id, &reason, now()?, call)?;
+                started.push(Started::Refused {
+                    attempt: id,
+                    reason,
+                    kind: RefusalKind::Preparation,
+                });
+                continue;
+            }
             let base = self
                 .context
                 .state_root
@@ -1757,9 +2008,24 @@ impl RunStore {
                     "warning: lane priority unavailable ({reason}); using compiled domains.fabric.lanes.priority default {fallback}");
                 fallback
             });
-            let prepared = check_launch_policy(providers, task, &policy)
-                .map(|()| priority)
-                .map_err(|refusal| {
+            let launch_policy = check_launch_policy(providers, task, &policy);
+            if self.cancel_preparation_if_requested(id, &record, &attempt_dir, now()?, call)? {
+                started.push(Started::Refused {
+                    attempt: id,
+                    reason: "cancelled before launch".into(),
+                    kind: RefusalKind::Preparation,
+                });
+                continue;
+            }
+            let prepared = match launch_policy {
+                Ok(()) => providers
+                    .prepare(task, &prompt, &paths, resume.as_ref())
+                    .map(|plan| (plan, priority))
+                    .map_err(|reason| {
+                        let refusal = check_preparation_refusal(&policy, reason);
+                        Box::new((refusal.kind(), refusal))
+                    }),
+                Err(refusal) => {
                     let kind = if let Some(fact) = refusal.resource {
                         RefusalKind::PolicyResource(fact)
                     } else if refusal.boundary_class
@@ -1769,23 +2035,50 @@ impl RunStore {
                     } else {
                         RefusalKind::Policy
                     };
-                    Box::new((kind, refusal))
-                })
-                .and_then(|priority| {
-                    providers
-                        .prepare(task, &prompt, &paths, resume.as_ref())
-                        .map(|plan| (plan, priority))
-                        .map_err(|reason| {
-                            let refusal = check_preparation_refusal(&policy, reason);
-                            Box::new((refusal.kind(), refusal))
-                        })
+                    Err(Box::new((kind, refusal)))
+                }
+            };
+            if self.cancel_preparation_if_requested(id, &record, &attempt_dir, now()?, call)? {
+                started.push(Started::Refused {
+                    attempt: id,
+                    reason: "cancelled before launch".into(),
+                    kind: RefusalKind::Preparation,
                 });
+                continue;
+            }
             let (mut plan, priority) = match prepared {
                 Ok(prepared) => prepared,
                 Err(refused) => {
+                    if self.cancel_preparation_if_requested(
+                        id,
+                        &record,
+                        &attempt_dir,
+                        now()?,
+                        call,
+                    )? {
+                        started.push(Started::Refused {
+                            attempt: id,
+                            reason: "cancelled before launch".into(),
+                            kind: RefusalKind::Preparation,
+                        });
+                        continue;
+                    }
                     let (kind, refusal) = *refused;
-                    if !refusal.skipped_routes.is_empty() {
-                        self.record_skipped_routes(id, &refusal.skipped_routes, call)?;
+                    if !refusal.skipped_routes.is_empty()
+                        && let Err(error) =
+                            self.record_skipped_routes(id, &refusal.skipped_routes, call)
+                    {
+                        let reason = provenant_confinement::redact::bounded_line(
+                            &format!("launch preparation failed: {error}"),
+                            240,
+                        );
+                        self.settle_starting_refusal(id, &reason, now()?, call)?;
+                        started.push(Started::Refused {
+                            attempt: id,
+                            reason,
+                            kind: RefusalKind::Preparation,
+                        });
+                        continue;
                     }
                     let outcome = if refusal.auth_required() {
                         Outcome::AuthRequired
@@ -1818,7 +2111,7 @@ impl RunStore {
                     match self.withdraw_with_preparation_failure(
                         id,
                         crate::store::Withdrawal {
-                            expected: AttemptState::Queued {
+                            expected: AttemptState::Starting {
                                 extra: Default::default(),
                             },
                             outcome,
@@ -1832,8 +2125,8 @@ impl RunStore {
                     ) {
                         Ok(Some(_)) => crate::writer::settle_launch_staging(&attempt_dir)?,
                         Ok(None) => continue,
-                        // Another launcher or cancellation changed the attempt
-                        // while provider preparation was in progress.
+                        // The attempt changed while this preparation owner was
+                        // settling its refusal.
                         Err(RunError::Conflict) => continue,
                         Err(error) => return Err(error),
                     }
@@ -1845,7 +2138,36 @@ impl RunStore {
                     continue;
                 }
             };
-            plan.bind_sandbox_backend(call.cancel, &policy)?;
+            let sandbox_binding = plan.bind_sandbox_backend(call.cancel, &policy);
+            if self.cancel_preparation_if_requested(id, &record, &attempt_dir, now()?, call)? {
+                started.push(Started::Refused {
+                    attempt: id,
+                    reason: "cancelled before launch".into(),
+                    kind: RefusalKind::Preparation,
+                });
+                continue;
+            }
+            if let Err(error) = sandbox_binding {
+                if self.cancel_preparation_if_requested(id, &record, &attempt_dir, now()?, call)? {
+                    started.push(Started::Refused {
+                        attempt: id,
+                        reason: "cancelled before launch".into(),
+                        kind: RefusalKind::Preparation,
+                    });
+                    continue;
+                }
+                let reason = provenant_confinement::redact::bounded_line(
+                    &format!("launch preparation failed: {error}"),
+                    240,
+                );
+                self.settle_starting_refusal(id, &reason, now()?, call)?;
+                started.push(Started::Refused {
+                    attempt: id,
+                    reason,
+                    kind: RefusalKind::Preparation,
+                });
+                continue;
+            }
             let limits = plan.limits.clone();
             set_lane_environment(&mut plan.environment, request.lane_depth.unwrap_or(1), id);
             let limit = providers.write_grant_limit(&policy).checked(&policy);
@@ -1856,6 +2178,20 @@ impl RunStore {
             let write_grants = match write_grants {
                 Ok(grants) => grants,
                 Err(error) => {
+                    if self.cancel_preparation_if_requested(
+                        id,
+                        &record,
+                        &attempt_dir,
+                        now()?,
+                        call,
+                    )? {
+                        started.push(Started::Refused {
+                            attempt: id,
+                            reason: "cancelled before launch".into(),
+                            kind: RefusalKind::Preparation,
+                        });
+                        continue;
+                    }
                     let kind = match error {
                         WriteGrantError::InvalidPath => RefusalKind::InvalidWriteGrantPath,
                         WriteGrantError::Policy(fact) => RefusalKind::WriteGrantsLimit(fact),
@@ -1864,7 +2200,7 @@ impl RunStore {
                     match self.withdraw_with_preparation_failure(
                         id,
                         crate::store::Withdrawal {
-                            expected: AttemptState::Queued {
+                            expected: AttemptState::Starting {
                                 extra: Default::default(),
                             },
                             outcome: Outcome::Rejected,
@@ -1891,21 +2227,22 @@ impl RunStore {
                     continue;
                 }
             };
-            if !plan.skipped_routes.is_empty() {
-                self.record_skipped_routes(id, &plan.skipped_routes, call)?;
+            if !plan.skipped_routes.is_empty()
+                && let Err(error) = self.record_skipped_routes(id, &plan.skipped_routes, call)
+            {
+                let reason = provenant_confinement::redact::bounded_line(
+                    &format!("launch preparation failed: {error}"),
+                    240,
+                );
+                self.settle_starting_refusal(id, &reason, now()?, call)?;
+                started.push(Started::Refused {
+                    attempt: id,
+                    reason,
+                    kind: RefusalKind::Preparation,
+                });
+                continue;
             }
-            // Capture errors leave the claim available to this or another launcher.
-            self.seal_work(&record, &plan, call)?;
-            // Establish launcher liveness before publishing Starting. Reaping can
-            // then distinguish a live pre-custody handoff from an abandoned one.
-            let _launcher = match attempt_dir.try_lock(
-                std::ffi::OsStr::new("launcher.lock"),
-                provenant_os::fs::LockMode::Exclusive,
-            ) {
-                Ok(guard) => guard,
-                Err(provenant_os::fs::FsError::LockTimeout { .. }) => continue,
-                Err(error) => return Err(error.into()),
-            };
+            record = self.record(id, call)?;
             let record = match self.claim_launch(
                 &record,
                 &plan,
@@ -1917,9 +2254,62 @@ impl RunStore {
             ) {
                 Ok(record) => record,
                 // A concurrent start already took this attempt.
-                Err(RunError::Conflict) => continue,
-                Err(error) => return Err(error),
+                Err(RunError::Conflict) => {
+                    if self.cancel_preparation_if_requested(
+                        id,
+                        &record,
+                        &attempt_dir,
+                        now()?,
+                        call,
+                    )? {
+                        started.push(Started::Refused {
+                            attempt: id,
+                            reason: "cancelled before launch".into(),
+                            kind: RefusalKind::Preparation,
+                        });
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    let reason = provenant_confinement::redact::bounded_line(
+                        &format!("launch preparation failed: {error}"),
+                        240,
+                    );
+                    self.settle_starting_refusal(id, &reason, now()?, call)?;
+                    started.push(Started::Refused {
+                        attempt: id,
+                        reason,
+                        kind: RefusalKind::Preparation,
+                    });
+                    continue;
+                }
             };
+            if self.cancel_preparation_if_requested(id, &record, &attempt_dir, now()?, call)? {
+                started.push(Started::Refused {
+                    attempt: id,
+                    reason: "cancelled before launch".into(),
+                    kind: RefusalKind::Preparation,
+                });
+                continue;
+            }
+            if let Err(error) = self.seal_work(&record, &plan, call) {
+                if self.cancel_preparation_if_requested(id, &record, &attempt_dir, now()?, call)? {
+                    started.push(Started::Refused {
+                        attempt: id,
+                        reason: "cancelled before launch".into(),
+                        kind: RefusalKind::Preparation,
+                    });
+                    continue;
+                }
+                let reason = format!("launch preparation failed: {error}");
+                self.settle_starting_refusal(id, &reason, now()?, call)?;
+                started.push(Started::Refused {
+                    attempt: id,
+                    reason,
+                    kind: RefusalKind::Preparation,
+                });
+                continue;
+            }
             started.push(
                 match self.hand_off(
                     task,
@@ -2378,7 +2768,8 @@ mod policy_reporting_tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let run = input();
         store.create(&run, &call)?;
-        let expected = store.record(run.attempt_id, &call)?;
+        let expected =
+            store.claim_starting_for_preparation(&store.record(run.attempt_id, &call)?, &call)?;
         let grant = |path: &str| PathGrant {
             path: path.into(),
             scope: PathScope::Subtree,
@@ -2522,7 +2913,7 @@ pub(crate) mod hand_off;
 mod resource_status_tests {
     use super::*;
     use crate::tests::{call, clock, context, input};
-    use provenant_core::CancelToken;
+    use provenant_core::{CancelToken, Clock as _};
     use provenant_records::diagnostic::{
         LaneLimit, PressureLevel, PressureThreshold, ResourceFact, SettingSource,
     };
@@ -2624,7 +3015,9 @@ mod admission_port_lifecycle_tests {
     use super::*;
     use crate::tests::{call, clock, context, input};
     use provenant_core::CancelToken;
-    use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor, Termination};
+    use provenant_os::exec::{
+        CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
+    };
     use std::{collections::VecDeque, sync::Mutex};
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -2872,6 +3265,255 @@ mod admission_port_lifecycle_tests {
             serde_json::from_value(record.extra[ADMISSION_PORT_BINDING_FIELD].clone())?;
         assert_eq!(fenced.phase, AdmissionPhase::Released);
         assert!(observed.contains(&(AdmissionPhase::ReleasePending, fenced.lease_epoch)));
+        Ok(())
+    }
+    #[test]
+    fn starting_owner_waits_for_release_proof_and_unwinds_cancellation() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let project = temp.path().join("project");
+        let project_ports = project.join(".provenant/ports.json");
+        std::fs::create_dir_all(project_ports.parent().ok_or("ports parent missing")?)?;
+        std::fs::create_dir_all(context.state_root.as_path())?;
+        std::fs::write(&project_ports, declaration("repo-gate-bound", "project"))?;
+        std::fs::write(
+            context.state_root.as_path().join("ports.json"),
+            r#"{"schema_version":2}"#,
+        )?;
+
+        let mut input = input();
+        let attempt = input.attempt_id;
+        input.request.task.writer = Some(provenant_records::run::WriterRequest {
+            extra: crate::tests::writer_extra(),
+            project: project.clone(),
+            worktree: project.join("lane"),
+        });
+        crate::tests::rekey(&mut input);
+        store.create(&input, &call)?;
+        let request = store.request(attempt, &call)?;
+        let queued = store.record(attempt, &call)?;
+        let (queued, frozen) = store
+            .admission_binding(&request, &queued, &call)
+            .map_err(|error| std::io::Error::other(error.to_owned()))?;
+        let frozen = frozen.ok_or("project admission command was not bound")?;
+        let attempt_dir = store.attempt_dir(attempt, true)?;
+        let launcher = attempt_dir.try_lock(
+            std::ffi::OsStr::new("launcher.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        let starting = store.claim_starting_for_preparation(&queued, &call)?;
+        assert!(matches!(starting.state, AttemptState::Starting { .. }));
+        assert!(starting.resolved_route.is_none());
+
+        // A configuration rotation after the owner claim cannot replace the
+        // declaration already bound to this attempt.
+        std::fs::write(&project_ports, r#"{"schema_version":2}"#)?;
+        std::fs::write(
+            context.state_root.as_path().join("ports.json"),
+            declaration("repo-gate-rotated", "host"),
+        )?;
+        let mut calls = Vec::new();
+        let (pending, skipped) = store.admission_skip_with_phase_bound(
+            &request,
+            &starting,
+            Some(frozen),
+            &call,
+            &mut |_, _, binding, phase, _| {
+                calls.push((binding.command.argv[0].clone(), phase));
+                false
+            },
+        );
+        assert!(skipped.is_some());
+        assert!(matches!(pending.state, AttemptState::Starting { .. }));
+        assert!(
+            calls
+                .iter()
+                .all(|(program, _)| program == "repo-gate-bound")
+        );
+        assert!(matches!(
+            store.requeue_starting_after_admission_skip(&pending, &call),
+            Err(RunError::Conflict)
+        ));
+        assert!(matches!(
+            store.record(attempt, &call)?.state,
+            AttemptState::Starting { .. }
+        ));
+
+        let binding: AdmissionPortBinding =
+            serde_json::from_value(pending.extra[ADMISSION_PORT_BINDING_FIELD].clone())?;
+        let (released, skipped) = store.admission_skip_with_phase_bound(
+            &request,
+            &pending,
+            Some(binding),
+            &call,
+            &mut |_, _, _, phase, _| phase == AdmissionPhase::ReleasePending,
+        );
+        assert!(skipped.is_some());
+        let queued = store
+            .requeue_starting_after_admission_skip(&released, &call)?
+            .ok_or("cancellation unexpectedly won the requeue fence")?;
+        assert!(matches!(queued.state, AttemptState::Queued { .. }));
+        drop(launcher);
+
+        let launcher = attempt_dir.try_lock(
+            std::ffi::OsStr::new("launcher.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        let starting = store.claim_starting_for_preparation(&queued, &call)?;
+        custody::request_stop(
+            attempt_dir.try_clone()?,
+            RunStore::scope(&starting),
+            starting.verified_owner.unwrap_or(context.actor_id),
+            provenant_supervisor::machine::StopReason::ExplicitCancellation,
+        )?;
+        assert!(
+            store
+                .requeue_starting_after_admission_skip(&starting, &call)?
+                .is_none()
+        );
+        assert!(matches!(
+            store.record(attempt, &call)?.state,
+            AttemptState::Starting { .. }
+        ));
+        drop(launcher);
+        assert!(store.cancel_preparation_if_requested(
+            attempt,
+            &starting,
+            &attempt_dir,
+            clock.wall_now()?,
+            &call,
+        )?);
+        assert!(matches!(
+            store.record(attempt, &call)?.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Cancelled,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn caller_cancellation_still_settles_the_preparation_owner() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let clock = clock();
+        let never = CancelToken::new();
+        let inspection = call(&clock, &never);
+        let store = RunStore::open(&context, &inspection)?;
+        let input = input();
+        let attempt = input.attempt_id;
+        store.create(&input, &inspection)?;
+        let queued = store.record(attempt, &inspection)?;
+        let directory = store.attempt_dir(attempt, true)?;
+        let _launcher = directory.try_lock(
+            std::ffi::OsStr::new("launcher.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        let starting = store.claim_starting_for_preparation(&queued, &inspection)?;
+        let cancelled = CancelToken::new();
+        cancelled.cancel();
+        let cancelled_call = call(&clock, &cancelled);
+        assert!(store.cancel_preparation_if_requested(
+            attempt,
+            &starting,
+            &directory,
+            clock.wall_now()?,
+            &cancelled_call,
+        )?);
+        assert!(matches!(
+            store.record(attempt, &inspection)?.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Cancelled,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_admission_release_uses_receipt_without_mutating_attempt() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let input = input();
+        let attempt = input.attempt_id;
+        store.create(&input, &call)?;
+        let queued = store.record(attempt, &call)?;
+        let command = provenant_config::PortCommand {
+            argv: vec![
+                temp.path()
+                    .join("not-executed-admission-command")
+                    .display()
+                    .to_string(),
+            ],
+            exit_codes: provenant_config::CommandExitCodes {
+                success: vec![0],
+                unknown: vec![75],
+                other: provenant_config::ExitDisposition::Refused,
+            },
+        };
+        let binding = AdmissionPortBinding::new(provenant_config::PortSource::Project, &command);
+        store.record_admission_binding(&queued, serde_json::to_value(&binding)?, &call)?;
+        let terminal = store
+            .withdraw(
+                attempt,
+                AttemptState::Queued {
+                    extra: Default::default(),
+                },
+                Outcome::Cancelled,
+                "cancel before preparation",
+                clock.wall_now()?,
+                &call,
+            )?
+            .ok_or("attempt did not settle")?;
+        let terminal_binding: AdmissionPortBinding =
+            serde_json::from_value(terminal.extra[ADMISSION_PORT_BINDING_FIELD].clone())?;
+        assert_eq!(terminal_binding.phase, AdmissionPhase::ReleasePending);
+
+        // A matching sidecar receipt proves an idempotent release while the
+        // immutable terminal AttemptRecord remains byte-for-byte unchanged.
+        let key = format!("{attempt}:{}", terminal_binding.lease_epoch);
+        let execution = provenant_config::PortCommandExecution {
+            command_digest: terminal_binding.command_digest,
+            disposition: provenant_config::PortCommandDisposition::Succeeded,
+            outcome: Some(ExecOutcome {
+                termination: Termination::Exit(0),
+                stdout: CapturedStream::default(),
+                stderr: CapturedStream::default(),
+                timed_out: false,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 1,
+            }),
+        };
+        provenant_config::record_port_command(
+            context.state_root.as_path(),
+            "admission",
+            terminal_binding.source,
+            "release",
+            &key,
+            &execution,
+        )?;
+        assert!(store.admission_release_receipt_confirmed(attempt, &terminal_binding));
+        assert!(
+            store.release_admission_with_phase(&terminal, &call, &mut |_, _, _, _, _| panic!(
+                "confirmed receipt must avoid re-running release"
+            ),)
+        );
+        assert!(matches!(
+            store.record_admission_phase(&terminal, AdmissionPhase::Released, &call),
+            Err(RunError::Conflict)
+        ));
+        assert_eq!(store.record(attempt, &call)?, terminal);
         Ok(())
     }
 }

@@ -613,17 +613,10 @@ impl RunStore {
             let mut decision = current.clone();
             decision.settlement_receipts = None;
             decision.custody_pending = None;
-            // Delivery and the admission command phase are post-commit receipts;
-            // the frozen command identity remains part of the terminal decision.
+            // Delivery is a post-commit receipt. Admission phase stays frozen
+            // in the terminal decision; release outcome lives in the port receipt.
             decision.delivery = pending.delivery.clone();
-            let changed_phase = crate::launch::ignore_admission_phase(&mut decision);
-            let mut pending_decision = pending.clone();
-            let pending_has_phase = crate::launch::ignore_admission_phase(&mut pending_decision);
-            if changed_phase && pending_has_phase {
-                // A terminal admission-phase receipt advances the row revision
-                // without changing the sealed terminal decision.
-                decision.revision = pending_decision.revision;
-            }
+            let pending_decision = pending.clone();
             return if decision == pending_decision {
                 Ok((current, false))
             } else {
@@ -1052,9 +1045,14 @@ impl RunStore {
             terminal_cause,
             terminal_note,
         } = withdrawal;
-        if failure.is_some() && !matches!(expected, AttemptState::Queued { .. }) {
+        if failure.is_some()
+            && !matches!(
+                expected,
+                AttemptState::Queued { .. } | AttemptState::Starting { .. }
+            )
+        {
             return Err(RunError::Validation(
-                "preparation evidence requires queued attempt",
+                "preparation evidence requires an unlaunched attempt",
             ));
         }
         if !matches!(
@@ -1264,8 +1262,14 @@ impl RunStore {
         if binding.phase == phase {
             return Ok(expected.clone());
         }
-        let queued = matches!(&expected.state, AttemptState::Queued { .. });
-        if !binding.can_transition_to(phase, queued) {
+        if matches!(expected.state, AttemptState::Terminal { .. }) {
+            return Err(RunError::Conflict);
+        }
+        let active_owner = matches!(
+            &expected.state,
+            AttemptState::Queued { .. } | AttemptState::Starting { .. }
+        );
+        if !binding.can_transition_to(phase, active_owner) {
             return Err(RunError::Conflict);
         }
         if binding.phase == crate::launch::AdmissionPhase::Released

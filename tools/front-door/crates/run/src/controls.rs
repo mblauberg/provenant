@@ -2136,20 +2136,57 @@ impl RunStore {
                 _ => {}
             }
             let dir = self.attempt_dir(id, false)?;
-            let unlaunched = matches!(record.state, AttemptState::Starting { .. })
-                && matches!(
-                    custody::reattach(dir.try_clone()?, Self::scope(&record)),
+            let mut starting_request = None;
+            let unlaunched = if matches!(record.state, AttemptState::Starting { .. }) {
+                // Serialize cancellation publication with the launch owner's
+                // Starting -> Queued admission-skip transition. A stale read of
+                // Starting must not leave a queued attempt with an orphaned stop.
+                let publication = dir.lock(
+                    std::ffi::OsStr::new("publication.lock"),
+                    provenant_os::fs::LockMode::Exclusive,
+                    call.lock_budget(),
+                    call.cancel,
+                    call.clock,
+                )?;
+                let current = self.record(id, call)?;
+                if current.state != record.state {
+                    drop(publication);
+                    continue;
+                }
+                let scope = Self::scope(&current);
+                let unlaunched = matches!(
+                    custody::reattach(dir.try_clone()?, scope),
                     Err(CustodyError::Filesystem(ref error)) if error.is_not_found()
                 );
+                starting_request = Some(custody::request_stop(
+                    dir.try_clone()?,
+                    scope,
+                    current.verified_owner.unwrap_or(self.context.actor_id),
+                    StopReason::ExplicitCancellation,
+                ));
+                drop(publication);
+                unlaunched
+            } else {
+                false
+            };
+            if let Some(Err(error)) = starting_request.as_ref() {
+                return Ok(CancelReceipt::Unobservable {
+                    reason: error.to_string(),
+                });
+            }
             let stopped = match custody::reattach(dir.try_clone()?, Self::scope(&record)) {
                 Ok(handle) => custody::stop(&handle, StopReason::ExplicitCancellation),
                 Err(CustodyError::Filesystem(error)) if error.is_not_found() => {
-                    custody::request_stop(
-                        dir,
-                        Self::scope(&record),
-                        record.verified_owner.unwrap_or(self.context.actor_id),
-                        StopReason::ExplicitCancellation,
-                    )
+                    if let Some(request) = starting_request {
+                        request
+                    } else {
+                        custody::request_stop(
+                            dir,
+                            Self::scope(&record),
+                            record.verified_owner.unwrap_or(self.context.actor_id),
+                            StopReason::ExplicitCancellation,
+                        )
+                    }
                 }
                 Err(error) => Err(error),
             };

@@ -5,7 +5,7 @@ use provenant_os::{
     fs::{Directory, PublishMode},
 };
 use provenant_records::{CanonicalV1, FileDigest};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{ffi::OsStr, path::Path};
 
 #[derive(Debug, thiserror::Error)]
@@ -18,6 +18,10 @@ pub enum PortEvidenceError {
     Open(#[source] provenant_os::fs::FsError),
     #[error("cannot encode command evidence")]
     Encode(#[source] serde_json::Error),
+    #[error("cannot read command evidence")]
+    Read(#[source] provenant_os::fs::FsError),
+    #[error("cannot decode command evidence")]
+    Decode(#[source] serde_json::Error),
     #[error("cannot publish command evidence")]
     Publish(#[source] provenant_os::fs::FsError),
 }
@@ -26,7 +30,7 @@ pub enum PortEvidenceError {
 #[serde(transparent)]
 struct PortName(&'static str);
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum CommandPortBackend {
     RepositoryCommand,
@@ -45,6 +49,26 @@ struct PortCommandReceipt {
     elapsed_micros: Option<u64>,
     stdout_digest: Option<FileDigest>,
     capture_complete: bool,
+    timed_out: bool,
+    cancelled: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PortCommandReceiptView {
+    owner: String,
+    backend: CommandPortBackend,
+    source: PortSource,
+    phase: String,
+    request_key_digest: FileDigest,
+    command_digest: FileDigest,
+    outcome: PortCommandDisposition,
+    exit_code: Option<i64>,
+    elapsed_micros: Option<u64>,
+    stdout_digest: Option<FileDigest>,
+    capture_complete: bool,
+    timed_out: bool,
+    cancelled: bool,
 }
 
 impl PortCommandExecution {
@@ -114,6 +138,78 @@ pub fn record_port_command(
     Ok(())
 }
 
+/// Typed result from a matching command receipt. Admission decisions use the
+/// declared exit code; capture completeness remains separate for response ports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortCommandReceiptProof {
+    pub successful_exit: bool,
+    pub capture_complete: bool,
+}
+
+/// Read the latest content-free receipt matching the frozen declaration and
+/// request key. A missing or mismatched receipt is `None`.
+pub fn port_command_receipt_proof(
+    state: &Path,
+    owner: &str,
+    source: PortSource,
+    phase: &str,
+    key: &str,
+    command_digest: FileDigest,
+    success_codes: &[i32],
+) -> Result<Option<PortCommandReceiptProof>, PortEvidenceError> {
+    let owner = PortTable::PORT_NAMES
+        .iter()
+        .copied()
+        .find(|name| *name == owner)
+        .ok_or(PortEvidenceError::PortName)?;
+    if phase.is_empty()
+        || phase.len() > 64
+        || !phase
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(PortEvidenceError::Phase);
+    }
+    let request_key_digest = CanonicalV1::file_digest(key.as_bytes());
+    let name = format!("port-command-{owner}-{phase}-{request_key_digest}.json");
+    let directory = match Directory::open_anchor(state) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(PortEvidenceError::Open(error)),
+    };
+    let raw = match directory.read_bounded(OsStr::new(&name), 4096) {
+        Ok(raw) => raw,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(PortEvidenceError::Read(error)),
+    };
+    let receipt: PortCommandReceiptView =
+        serde_json::from_slice(&raw).map_err(PortEvidenceError::Decode)?;
+    if receipt.owner != owner
+        || !matches!(receipt.backend, CommandPortBackend::RepositoryCommand)
+        || receipt.source != source
+        || receipt.phase != phase
+        || receipt.request_key_digest != request_key_digest
+        || receipt.command_digest != command_digest
+        || !matches!(
+            receipt.outcome,
+            PortCommandDisposition::Succeeded | PortCommandDisposition::Unknown
+        )
+    {
+        return Ok(None);
+    }
+    let _evidence_metadata = (receipt.elapsed_micros, receipt.stdout_digest);
+    let successful_exit = !receipt.timed_out
+        && !receipt.cancelled
+        && receipt
+            .exit_code
+            .and_then(|code| i32::try_from(code).ok())
+            .is_some_and(|code| success_codes.contains(&code));
+    Ok(Some(PortCommandReceiptProof {
+        successful_exit,
+        capture_complete: receipt.capture_complete,
+    }))
+}
+
 fn receipt(
     owner: PortName,
     source: PortSource,
@@ -144,6 +240,8 @@ fn receipt(
         elapsed_micros: execution_outcome.map(|value| value.elapsed_micros),
         stdout_digest: execution_outcome.map(|value| CanonicalV1::file_digest(&value.stdout.bytes)),
         capture_complete: execution.capture_complete(),
+        timed_out: execution_outcome.is_some_and(|outcome| outcome.timed_out),
+        cancelled: execution_outcome.is_some_and(|outcome| outcome.cancelled),
     }
 }
 
@@ -237,5 +335,77 @@ mod tests {
         .unwrap();
         assert_eq!(value["outcome"], "unknown");
         assert_eq!(value["capture_complete"], false);
+    }
+    #[test]
+    fn success_proof_uses_declared_exit_even_when_capture_is_incomplete() {
+        let state = tempfile::tempdir().unwrap();
+        let execution = execution(b"partial", true);
+        record_port_command(
+            state.path(),
+            "admission",
+            PortSource::Project,
+            "release",
+            "attempt:epoch-1",
+            &execution,
+        )
+        .unwrap();
+        assert!(!execution.capture_complete());
+        assert!(
+            port_command_receipt_proof(
+                state.path(),
+                "admission",
+                PortSource::Project,
+                "release",
+                "attempt:epoch-1",
+                execution.command_digest,
+                &[0],
+            )
+            .unwrap()
+            .is_some_and(|proof| proof.successful_exit && !proof.capture_complete)
+        );
+        assert!(
+            port_command_receipt_proof(
+                state.path(),
+                "admission",
+                PortSource::Host,
+                "release",
+                "attempt:epoch-1",
+                execution.command_digest,
+                &[0],
+            )
+            .unwrap()
+            .is_none()
+        );
+        for (key, timed_out, cancelled) in [
+            ("attempt:timeout", true, false),
+            ("attempt:cancelled", false, true),
+        ] {
+            let mut interrupted = execution(b"", false);
+            let outcome = interrupted.outcome.as_mut().expect("outcome present");
+            outcome.timed_out = timed_out;
+            outcome.cancelled = cancelled;
+            record_port_command(
+                state.path(),
+                "admission",
+                PortSource::Project,
+                "release",
+                key,
+                &interrupted,
+            )
+            .unwrap();
+            assert!(
+                port_command_receipt_proof(
+                    state.path(),
+                    "admission",
+                    PortSource::Project,
+                    "release",
+                    key,
+                    interrupted.command_digest,
+                    &[0],
+                )
+                .unwrap()
+                .is_some_and(|proof| !proof.successful_exit)
+            );
+        }
     }
 }
