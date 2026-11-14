@@ -176,7 +176,7 @@ pub(crate) fn execute_bounded(
     Ok(output.stdout.bytes)
 }
 
-fn quote_alternate(path: &Path) -> String {
+pub(crate) fn quote_alternate(path: &Path) -> String {
     let mut value = String::from("\"");
     for byte in path.as_os_str().as_encoded_bytes() {
         match byte {

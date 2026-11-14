@@ -78,7 +78,9 @@ fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
             crate::launch::subtree(plan.permissions().scratch.path.join("read-only-git")),
         ]
     );
-    assert!(spec.env.iter().all(|(name, _)| name != "CARGO_HOME"));
+    assert!(spec.env.iter().any(|(name, value)|
+        name == "CARGO_HOME" && value == plan.permissions().scratch.path.join("cargo-home").as_os_str()
+    ));
     Ok(())
 }
 

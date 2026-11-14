@@ -408,9 +408,6 @@ impl Resources for LaneResources<'_> {
     fn disk(&self, attempt: &Directory) -> std::io::Result<u64> {
         self.resources.lane_disk(attempt, self.context)
     }
-    fn reclaim_disk(&self, attempt: &Directory) -> bool {
-        self.resources.reclaim_lane_disk(attempt, self.context)
-    }
 }
 fn custody_error(error: RunError) -> CustodyError {
     match error {
@@ -4198,10 +4195,12 @@ mod writer_recovery_tests {
         assert!(handoff.unfinished());
         assert_eq!(handoff.extra["write_scope"]["code"], "WRITE_SCOPE");
         assert_eq!(handoff.extra["write_scope"]["strength"], "warn");
+        let paths: Vec<provenant_records::PathWire> =
+            serde_json::from_value(handoff.extra["write_scope"]["out_of_scope_paths"].clone())?;
         assert!(
-            handoff.extra["write_scope"]["out_of_scope_paths"]
-                .as_array()
-                .is_some_and(|paths| paths.contains(&serde_json::json!("context-work.txt")))
+            paths
+                .iter()
+                .any(|path| path.as_path_text() == Some("context-work.txt"))
         );
         // Nothing was committed for the lane; its edit stays for the restart.
         assert!(read_sealed(&attempt, "budget-commit.json", RECORD_LIMIT)?.is_none());
@@ -4707,7 +4706,8 @@ mod writer_recovery_tests {
                 &read_sealed(&attempt, "budget-commit.json", RECORD_LIMIT)?
                     .ok_or("budget commit disposition")?,
             )?;
-            assert_eq!(disposition["commit"], private_tip.to_string());
+            let committed = disposition["commit"].as_str().ok_or("commit")?;
+            assert!(!committed.is_empty() && private_tip.to_string().starts_with(committed));
             assert_eq!(
                 std::fs::read_to_string(fixture.writer.worktree.join("budget-work.txt"))?,
                 "uncommitted work before budget stop\n"

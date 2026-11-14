@@ -878,13 +878,6 @@ fn terminal_verifies_private_objects_before_publication()
             let scratch = attempt_path.join("tmp/candidate-0");
             let objects = scratch.join("git-objects");
             std::fs::create_dir_all(objects.join("info"))?;
-            std::fs::write(
-                objects.join("info/alternates"),
-                format!(
-                    "{}\n",
-                    fixture.writer.project.join(".git/objects").display()
-                ),
-            )?;
             let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
             let executor = SystemExecutor::new(1)?;
             let runtime =
@@ -896,6 +889,11 @@ fn terminal_verifies_private_objects_before_publication()
                 &provenant_core::CancelToken::new(),
             )?;
             let worktree = provenant_confinement::verify_worktree(&repo, &fixture.writer.worktree)?;
+            let shared_objects = worktree.repo().common_git_dir().join("objects");
+            std::fs::write(
+                objects.join("info/alternates"),
+                format!("{}\n", crate::objects::quote_alternate(&shared_objects)),
+            )?;
             let base =
                 crate::objects::resolve_ref(&executable, worktree.repo(), "refs/heads/lane")?;
             crate::objects::prepare_refs(

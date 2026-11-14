@@ -1175,9 +1175,13 @@ extend: Vec::new(),
         // writer attempt rather than the unrelated resume fixture lineage.
         let writer = provenant_run::prepare_writer(
             &provenant_run::WriterRequest {
-                extra: Default::default(), project: fixture.rig.project.clone(),
+                extra: [("custody_project".into(), serde_json::json!(fixture.settled.project_id))]
+                    .into(),
+                project: fixture.rig.project.clone(),
                 worktree: fixture.worktree.clone(),
-            }, fixture.roots.state.as_path(), fixture.settled.project_id,
+            },
+            fixture.roots.state.as_path(),
+            fixture.settled.project_id,
         )?;
         let mut lane_owner = worktrees::load_owner(&writer.worktree)?.ok_or("lane owner")?;
         lane_owner.attempt_id = Some(attempt_1);
