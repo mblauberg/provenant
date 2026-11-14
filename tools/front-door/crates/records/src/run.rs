@@ -33,6 +33,10 @@ pub const RESULT_LIMIT: u64 = 4 * 1024 * 1024;
 pub const CAPTURE_LIMIT: u64 = 64 * 1024 * 1024;
 pub const OUTPUT_LIMIT: u64 = 65536;
 
+/// Attempt metadata needed by its owner but omitted from public projections.
+pub const REPOSITORY_ADMISSION_BINDING_FIELD: &str = "repository_admission_binding";
+pub const PRIVATE_ATTEMPT_EXTRA_FIELDS: &[&str] = &[REPOSITORY_ADMISSION_BINDING_FIELD];
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanonicalRequest {
     #[serde(flatten)]
@@ -1538,6 +1542,31 @@ pub struct AttemptRecord {
     /// Trace context stamped when the attempt is created.
     pub trace: crate::Trace,
 }
+
+/// Encode the public form of an attempt, retaining all public extra metadata.
+pub fn public_attempt_value(
+    record: &AttemptRecord,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let mut value = serde_json::to_value(record)?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        <serde_json::Error as serde::ser::Error>::custom("attempt record must be an object")
+    })?;
+    for field in PRIVATE_ATTEMPT_EXTRA_FIELDS {
+        object.remove(*field);
+    }
+    Ok(value)
+}
+
+/// Serialize an attempt for read-only owner and peer projections.
+pub fn serialize_public_attempt<S: serde::Serializer>(
+    record: &AttemptRecord,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    public_attempt_value(record)
+        .map_err(serde::ser::Error::custom)?
+        .serialize(serializer)
+}
+
 impl AttemptRecord {
     /// Usage attributable to this attempt; unmarked Codex totals are session-wide.
     pub fn effective_usage(&self) -> UsageRecord {

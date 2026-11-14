@@ -58,8 +58,12 @@ impl From<AttemptRecord> for AttemptSummary {
             }
             _ => None,
         };
+        let mut extra = record.extra;
+        for field in provenant_records::run::PRIVATE_ATTEMPT_EXTRA_FIELDS {
+            extra.remove(*field);
+        }
         Self {
-            extra: record.extra,
+            extra,
             key: record.key,
             attempt_id: record.attempt_id,
             state: projected.state,
@@ -133,7 +137,7 @@ pub enum RunResult {
 }
 
 fn encode_attempt(record: &AttemptRecord) -> Result<serde_json::Value, serde_json::Error> {
-    let mut value = serde_json::to_value(record)?;
+    let mut value = provenant_records::run::public_attempt_value(record)?;
     let seconds = provenant_records::wire::provider_seconds(record.provider_ms);
     let object = value.as_object_mut().ok_or_else(|| {
         <serde_json::Error as serde::ser::Error>::custom("attempt record must be an object")
@@ -334,6 +338,50 @@ mod tests {
         assert_eq!(
             decode_attempt(wire).unwrap().provider_silent_for_ms.0,
             Some(1_800_000)
+        );
+    }
+
+    #[test]
+    fn public_detail_and_summary_hide_only_private_attempt_metadata() {
+        let mut record = attempt();
+        let binding = serde_json::json!({"command":{"argv":["admission-check"]}});
+        record.extra.insert(
+            provenant_records::run::REPOSITORY_ADMISSION_BINDING_FIELD.into(),
+            binding.clone(),
+        );
+        record.extra.insert(
+            "visible_extension".into(),
+            serde_json::json!({"kept": true}),
+        );
+
+        // The stored record keeps the private lifecycle binding.
+        assert_eq!(
+            serde_json::to_value(&record).unwrap()
+                [provenant_records::run::REPOSITORY_ADMISSION_BINDING_FIELD],
+            binding
+        );
+
+        let detail = encode_attempt(&record).unwrap();
+        assert!(
+            detail
+                .get(provenant_records::run::REPOSITORY_ADMISSION_BINDING_FIELD)
+                .is_none()
+        );
+        assert_eq!(
+            detail["visible_extension"],
+            serde_json::json!({"kept": true})
+        );
+
+        let summary =
+            serde_json::to_value(AttemptSummary::from(record)).expect("summary projection");
+        assert!(
+            summary
+                .get(provenant_records::run::REPOSITORY_ADMISSION_BINDING_FIELD)
+                .is_none()
+        );
+        assert_eq!(
+            summary["visible_extension"],
+            serde_json::json!({"kept": true})
         );
     }
 

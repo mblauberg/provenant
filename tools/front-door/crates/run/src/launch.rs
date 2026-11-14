@@ -814,7 +814,8 @@ pub enum Started {
     },
 }
 
-pub(crate) const ADMISSION_PORT_BINDING_FIELD: &str = "repository_admission_binding";
+pub(crate) const ADMISSION_PORT_BINDING_FIELD: &str =
+    provenant_records::run::REPOSITORY_ADMISSION_BINDING_FIELD;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
