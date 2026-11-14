@@ -10,7 +10,7 @@ is in scope even when it is not conventional application code.
 
 ## Supported versions
 
-Security fixes go to the latest 1.x release only.
+Security fixes go to the latest release only.
 
 ## Reporting
 
