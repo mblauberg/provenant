@@ -218,6 +218,33 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
             }),
         diagnostics
     );
+    if let Some(warning) = route.extra.get("effort_warning") {
+        text.push_str(&format!(
+            "warning: effort {} for {} dropped; source={}\n",
+            warning["requested"], warning["model"], warning["source"]
+        ));
+    }
+    if let Some(policy) = route
+        .pool_selection
+        .as_ref()
+        .and_then(|receipt| receipt.extra.get("capability_policy"))
+    {
+        text.push_str(&format!(
+            "capability policy={} source={}\n",
+            policy["policy"], policy["source"]
+        ));
+        if let Some(excluded) = policy["below_minimum"].as_array() {
+            for member in excluded {
+                text.push_str(&format!(
+                    "  {}: capability {} below {} ({})\n",
+                    member["model"], member["capability"], member["minimum"], member["disposition"]
+                ));
+            }
+        }
+        if let Some(warning) = policy["warning"].as_str() {
+            text.push_str(&format!("warning: {warning}\n"));
+        }
+    }
     for record in &preview.recorded_readiness {
         text.push_str(&format!(
             "recorded readiness {} [{}] for {}: {}\n",

@@ -678,6 +678,10 @@ mod admission_tests {
         let snapshot = record.snapshot.as_mut().unwrap();
         snapshot.account = record.account.clone();
         snapshot.windows.clear();
+        snapshot.details = Some(crate::QuotaDetails {
+            plan: Some("go".into()),
+            ..Default::default()
+        });
         let raw = [record];
         let check = |records: &[AccountRecord], now| {
             Admission {

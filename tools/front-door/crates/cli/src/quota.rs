@@ -1362,7 +1362,7 @@ pub fn recorded_login_rows(roots: &Roots) -> Result<Vec<AccountRow>, String> {
 }
 fn recorded_login_rows_inner(roots: &Roots) -> Result<Vec<AccountRow>, EdgeError> {
     let domains = crate::config_reads::read_for(roots, "quota")?.domains;
-    let accounts = domains.accounts.with_derived_accounts();
+    let accounts = domains.accounts.unique_accounts();
     let mut configured: Vec<_> = accounts
         .entries
         .values()

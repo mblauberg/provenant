@@ -821,3 +821,51 @@ fn reset_reference_uses_fresh_reset_and_reports_unknown_or_stale_fallback()
     }
     Ok(())
 }
+
+#[test]
+fn registered_opencode_plans_select_independently_of_account_keys()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let mut config = RoutingConfig::default();
+    config
+        .pacing
+        .providers
+        .insert("opencode_free".into(), PacingPolicy::Pace);
+    let spec = provenant_records::AdapterSpec::get("opencode").ok_or("adapter")?;
+    let records: Vec<_> = spec
+        .account_model_plans
+        .iter()
+        .enumerate()
+        .map(|(index, plan)| AvailabilityRecord {
+            adapter: spec.name.into(),
+            plan: Some(plan.plan.into()),
+            account_key: Some(format!("registered-{index}")),
+            observed_models: vec![],
+            ..availability()
+        })
+        .collect();
+    let access = opencode_access();
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    for entry in catalogue
+        .models()
+        .iter()
+        .filter(|entry| entry.model.adapter() == spec.name)
+    {
+        let serving = records
+            .iter()
+            .find(|record| spec.account_serves_model(record.plan.as_deref(), entry.model.model()))
+            .ok_or("serving plan")?;
+        let route = resolve(&request(entry.model.as_str())?, &ctx)?;
+        assert_eq!(route.account_key, serving.account_key);
+        if entry.free {
+            let preview = pacing_preview(&entry.model, &ctx);
+            assert!(preview.iter().all(
+                |p| p.account == serving.account_key && matches!(p.policy, PacingPolicy::Pace)
+            ));
+            assert!(!preview.is_empty());
+        }
+    }
+    Ok(())
+}

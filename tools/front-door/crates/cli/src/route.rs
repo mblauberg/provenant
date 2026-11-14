@@ -48,7 +48,7 @@ pub fn provider_check_routes(
             pool: None,
         },
     )
-    .map(|(routes, accounts)| (routes, accounts.with_derived_accounts()))
+    .map(|(routes, accounts)| (routes, accounts.unique_accounts()))
     .map_err(|error| error.to_string())
 }
 

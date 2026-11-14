@@ -1653,6 +1653,7 @@ mod stale_readiness_tests {
             fixture_ref: "installed/agy/version".into(),
             catalogue_revision: "revision".into(),
             account_key: Some("account".into()),
+            plan: None,
             observed_models: vec!["Gemini Flash".into(), "GPT-OSS 120B (Medium)".into()],
             observed_unix_seconds: 10,
             expires_unix_seconds: 400,
@@ -1668,6 +1669,7 @@ mod stale_readiness_tests {
             None
         );
         let unknown = provenant_providers::AvailabilityRecord {
+            plan: None,
             observed_models: vec![],
             ..record
         };
@@ -1693,6 +1695,7 @@ mod stale_readiness_tests {
             fixture_ref: "installed/claude/version".into(),
             catalogue_revision: "revision".into(),
             account_key: Some("account".into()),
+            plan: None,
             observed_models: vec![],
             observed_unix_seconds: 10,
             expires_unix_seconds: 20,
@@ -1842,6 +1845,7 @@ mod stale_readiness_tests {
             fixture_ref: "installed/codex/version".into(),
             catalogue_revision: catalogue.revision().into(),
             account_key: Some("work".into()),
+            plan: None,
             observed_models: vec![],
             observed_unix_seconds: 10,
             expires_unix_seconds: 20,
@@ -2019,6 +2023,7 @@ mod stale_readiness_tests {
             fixture_ref: "installed/claude/version".into(),
             catalogue_revision: "revision".into(),
             account_key: Some(entry.key.clone()),
+            plan: None,
             observed_models: vec![],
             observed_unix_seconds: 10,
             expires_unix_seconds: 20,
@@ -2473,7 +2478,7 @@ pub(super) fn prepare_candidates(
         available_provider_leases(roots.state.as_path(), &eligible, wait, &clock, cancel)
             .map_err(|error| error.to_string())?;
     let eligible = |name: &str| provider_leases.contains_key(name);
-    let settings = config.domains.accounts.with_derived_accounts();
+    let settings = config.domains.accounts.unique_accounts();
     let credential_roots = credential_roots(registry, &home, &settings)?;
     let github_roots = github_roots(registry);
     let protected_worktrees = protected_worktrees(registry, &source, &git)?;
@@ -2562,7 +2567,7 @@ pub(super) fn prepare_candidates(
             });
         }
     }
-    // Include a distinct Zen identity for an unregistered local OpenCode login.
+    // Enumerate only actual identities; never derive a second plan from a login.
     let settings = provenant_providers::accounts::Settings {
         entries: entries
             .into_iter()
@@ -2571,7 +2576,7 @@ pub(super) fn prepare_candidates(
             .collect(),
         ..Default::default()
     }
-    .with_derived_accounts();
+    .unique_accounts();
     let entries: Vec<_> = settings.entries.into_values().collect();
     let timestamp = clock.unix_seconds();
     let diagnostic_records = crate::quota::read_cache(roots).unwrap_or_default();
@@ -5024,6 +5029,7 @@ mod candidate_walk_regressions {
             fixture_ref: "fixture".into(),
             catalogue_revision: "fixture".into(),
             account_key: Some(key.into()),
+            plan: None,
             observed_models: vec![],
             observed_unix_seconds: 0,
             expires_unix_seconds: 1,

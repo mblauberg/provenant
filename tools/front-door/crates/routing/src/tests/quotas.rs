@@ -362,6 +362,7 @@ fn opencode_zen_and_go_use_separate_account_identities() -> Result<(), Box<dyn s
             let mut record = availability();
             record.adapter = "opencode".into();
             record.account_key = Some(key.into());
+            record.plan = Some(key.into());
             record
         })
         .collect();
@@ -438,6 +439,7 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
         expires_unix_seconds: observation.expires_unix_seconds,
     };
     raw.snapshot.details = Some(QuotaDetails {
+        plan: Some("go".into()),
         source: Some("local-ledger".into()),
         coverage: Some("partial".into()),
         ..QuotaDetails::default()
@@ -789,6 +791,7 @@ fn opencode_zen_pool_does_not_inherit_go_pacing_quota() -> Result<(), Box<dyn st
             let mut record = availability();
             record.adapter = "opencode".into();
             record.account_key = Some(key.into());
+            record.plan = Some(key.into());
             record
         })
         .collect();

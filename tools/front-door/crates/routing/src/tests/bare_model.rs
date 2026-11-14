@@ -123,6 +123,7 @@ fn pool_excludes_unsupported_effort_but_exact_and_user_pool_allow_it()
         fixture_ref: "test".into(),
         catalogue_revision: catalogue.revision().into(),
         account_key: Some("opaque-account".into()),
+        plan: None,
         observed_models: vec![target.model().to_owned()],
         observed_unix_seconds: 0,
         expires_unix_seconds: 10_000,

@@ -513,11 +513,18 @@ pub fn report(
             })
             .collect();
         let free_pool = provenant_records::AdapterSpec::get(&record.account.adapter)
-            .and_then(|spec| spec.free_account.map(|(key, _)| (key, spec.free_pool)))
-            .filter(|(key, _)| record.account.account_key == *key)
-            .map(|(_, pool)| pool);
+            .filter(|spec| {
+                spec.is_free_plan(
+                    record
+                        .snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.details.as_ref())
+                        .and_then(|details| details.plan.as_deref()),
+                )
+            })
+            .and_then(|spec| spec.free_pool);
         let in_free = |refusal: &&crate::RefusalRow| {
-            free_pool.is_some_and(|pool| refusal.pool.as_deref() == pool)
+            free_pool.is_some_and(|pool| refusal.pool.as_deref() == Some(pool))
         };
         let free_refused = refusals.iter().any(|refusal| in_free(&refusal));
         // A free-pool refusal or a spent plan usage limit makes the whole
@@ -2020,64 +2027,97 @@ mod transition_tests {
 mod zen_tests {
     use super::*;
 
-    #[test]
-    fn zen_quota_row_reflects_observed_refusals_separately_from_go() {
-        let accounts: Vec<_> = ["go", "zen"]
-            .into_iter()
-            .map(|key| AccountScope {
-                adapter: "opencode".into(),
-                account_key: key.into(),
-                label: key.into(),
-            })
-            .collect();
-        let mut records: Vec<_> = accounts.iter().cloned().map(AccountRecord::empty).collect();
-        records[1].refusals.push(crate::Refusal {
-            extra: Default::default(),
-            account: accounts[1].clone(),
-            model: "opencode/beam-free".into(),
-            pool: Some("opencode-free".into()),
-            observed_unix_seconds: 100,
-            resets_unix_seconds: None,
+    fn registered_record(account: AccountScope, plan: &str, observed: i64) -> AccountRecord {
+        let mut record = AccountRecord::empty(account.clone());
+        record.snapshot = Some(crate::QuotaSnapshot {
+            schema_version: 1,
+            account,
+            revision: 0,
+            status: QuotaStatus::Unknown,
+            observed_unix_seconds: observed,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: Some(crate::QuotaDetails {
+                plan: Some(plan.into()),
+                ..Default::default()
+            }),
+            windows: vec![],
         });
-        let detections = [Detection {
-            adapter: "opencode".into(),
-            accounts: Some(accounts),
-            status: QuotaStatus::Available,
-        }];
-        for (now, expected) in [(101, QuotaStatus::Exhausted), (3700, QuotaStatus::Unknown)] {
-            let report = report(
-                crate::source::TEST_POLICIES,
-                &records,
-                &detections,
-                &QuotaQuery { adapter: None },
-                now,
-                "report.json".into(),
-            )
-            .unwrap();
-            assert_eq!(report.accounts.len(), 2);
-            assert_eq!(report.accounts[0].status, QuotaStatus::Unknown);
-            assert_eq!(report.accounts[1].status, expected);
-            assert_eq!(report.accounts[1].resets_at, None);
-            assert_eq!(report.accounts[1].free_pool_refusal, now == 101);
-        }
-        records[1].last_error = Some(ProbeFailure::Auth);
-        for (now, expected) in [
-            (101, QuotaStatus::Exhausted),
-            (3700, QuotaStatus::AuthRequired),
-        ] {
-            let report = report(
-                crate::source::TEST_POLICIES,
-                &records,
-                &detections,
-                &QuotaQuery { adapter: None },
-                now,
-                "report.json".into(),
-            )
-            .unwrap();
-            let row = &report.accounts[1];
-            assert_eq!(row.status, expected);
-            assert_eq!(row.error, Some(ProbeFailure::Auth));
-            assert_eq!(row.free_pool_refusal, now == 101);
+        record
+    }
+
+    #[test]
+    fn free_refusal_reporting_follows_registered_plan_not_account_key() {
+        let spec = provenant_records::AdapterSpec::get("opencode").unwrap();
+        for now in [101, 3700] {
+            for error in [None, Some(ProbeFailure::Auth)] {
+                let records: Vec<_> = spec
+                    .account_model_plans
+                    .iter()
+                    .enumerate()
+                    .map(|(index, plan)| {
+                        let account = AccountScope {
+                            adapter: spec.name.into(),
+                            account_key: format!("identity-{index}"),
+                            label: plan.plan.into(),
+                        };
+                        let mut record = registered_record(account.clone(), plan.plan, now);
+                        record.last_error = error;
+                        record.refusals.push(crate::Refusal {
+                            extra: Default::default(),
+                            account,
+                            model: "opencode/beam-free".into(),
+                            pool: spec.free_pool.map(str::to_owned),
+                            observed_unix_seconds: 100,
+                            resets_unix_seconds: None,
+                        });
+                        record
+                    })
+                    .collect();
+                let detections = [Detection {
+                    adapter: spec.name.into(),
+                    accounts: Some(records.iter().map(|r| r.account.clone()).collect()),
+                    status: QuotaStatus::Available,
+                }];
+                let report = report(
+                    crate::source::TEST_POLICIES,
+                    &records,
+                    &detections,
+                    &QuotaQuery { adapter: None },
+                    now,
+                    "report.json".into(),
+                )
+                .unwrap();
+                for record in &records {
+                    let row = report
+                        .accounts
+                        .iter()
+                        .find(|row| row.account == record.account)
+                        .unwrap();
+                    let plan = record
+                        .snapshot
+                        .as_ref()
+                        .unwrap()
+                        .details
+                        .as_ref()
+                        .unwrap()
+                        .plan
+                        .as_deref();
+                    let refused = spec.is_free_plan(plan) && now == 101;
+                    assert_eq!(row.free_pool_refusal, refused);
+                    assert_eq!(
+                        row.status,
+                        if refused {
+                            QuotaStatus::Exhausted
+                        } else if error.is_some() {
+                            QuotaStatus::AuthRequired
+                        } else {
+                            QuotaStatus::Unknown
+                        }
+                    );
+                    assert_eq!(row.resets_at, None);
+                }
+            }
         }
     }
 
@@ -2129,7 +2169,7 @@ mod zen_tests {
             account_key: "zen".into(),
             label: "zen".into(),
         };
-        let mut record = AccountRecord::empty(account.clone());
+        let mut record = registered_record(account.clone(), "zen", 100);
         record.refusals.push(crate::Refusal {
             extra: Default::default(),
             account: account.clone(),

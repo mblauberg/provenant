@@ -850,7 +850,10 @@ pub(super) fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<D
                                         .is_some_and(|spec| spec.allowance_prefix.is_some())
                                     && snapshot_governs(
                                         &route.adapter,
-                                        &r.account.account_key,
+                                        r.snapshot
+                                            .as_ref()
+                                            .and_then(|s| s.details.as_ref())
+                                            .and_then(|d| d.plan.as_deref()),
                                         &model,
                                     )))
                     })
