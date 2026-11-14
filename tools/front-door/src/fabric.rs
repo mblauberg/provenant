@@ -850,24 +850,25 @@ pub fn events(
                 }
             };
             unavailable.extend(coverage.unknown_hosts);
-            let result = if budget.remaining(factory.clock.mono_now()).as_micros() == 0 {
+            let remaining = budget.remaining(factory.clock.mono_now());
+            let no_budget = remaining.as_micros() == 0;
+            let remote = factory.context.in_lane && factory.context.remote_home();
+            let result = if no_budget && remote {
                 EventsResult::empty_timeout(page.after)
             } else {
                 let input = EventsInput::Read {
                     extra: Default::default(),
                     after: page.after,
                     limit: page.limit,
-                    wait_seconds: None,
+                    wait_seconds: no_budget.then_some(0),
                 };
                 let observation: Result<EventsResult, Box<dyn std::error::Error>> =
-                    if factory.context.in_lane && factory.context.remote_home() {
+                    if remote {
                         provenant_fabric_runtime::relay::ToolCall::Events(input, None)
                             .relay_within(
                                 &factory.context.lane_relay_socket()?,
                                 &cancel,
-                                std::time::Duration::from_micros(
-                                    budget.remaining(factory.clock.mono_now()).as_micros(),
-                                ),
+                                std::time::Duration::from_micros(remaining.as_micros()),
                             )
                             .map_err(Into::into)
                             .and_then(|value| serde_json::from_value(value).map_err(Into::into))
