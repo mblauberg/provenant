@@ -878,7 +878,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
                     super::observation::find_opencode_session(&state, "fixture-session").is_err()
                 );
                 std::fs::remove_dir_all(state.join("candidate-1"))?;
-                db.execute("DELETE FROM session", [])?;
+                db.execute("DELETE FROM session_v2", [])?;
                 assert!(
                     super::observation::find_opencode_session(&state, "fixture-session").is_err()
                 );

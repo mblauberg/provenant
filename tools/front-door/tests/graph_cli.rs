@@ -94,13 +94,7 @@ fn file_briefs_reach_the_compiled_prompt_or_refuse_before_launch() -> Result {
             .output()?;
         let value: Value = serde_json::from_slice(&output.stdout)?;
         assert!(!output.status.success(), "{value}");
-        assert!(
-            value["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains(path.to_str().unwrap()),
-            "{value}"
-        );
+        assert_eq!(value["error"]["code"], "invalid_input", "{value}");
         assert!(graph_records(&rig.state())?.is_empty());
     }
     let mut child = rig

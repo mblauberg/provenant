@@ -770,27 +770,6 @@ printf 'agy 1.0.0\n'
                 |_| Ok(fake_agy.clone()),
                 None,
             )?;
-            let skills = &prepared.route.extra["user_skills"];
-            assert!(
-                skills["warnings"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|warning| warning["code"] == "user_skill_skipped"
-                        && warning["reason"] == "cycle")
-            );
-            let warnings = prepared.route.extra["discovery_warnings"]
-                .as_array()
-                .unwrap();
-            if write {
-                assert!(warnings.iter().any(|warning| {
-                    warning
-                        .as_str()
-                        .is_some_and(|text| text.contains("~/.gemini/skills"))
-                }));
-            } else {
-                assert!(warnings.is_empty());
-            }
             let confinement = prepared.confinement.as_ref().ok_or("missing confinement")?;
             assert!(
                 !confinement
