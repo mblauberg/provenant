@@ -195,6 +195,7 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         project_id: r.project_id,
         terminal_state: outcome.into(),
         cause_source,
+        settlement_reason: r.settlement_reason,
         account_identity,
         exit_code,
         queued_at: r.queued_at,

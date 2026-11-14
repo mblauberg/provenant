@@ -61,24 +61,21 @@ preference always expires.
   `crates/routing/src/policy.rs::bundled_fields_and_peak_schedule_can_be_overridden_per_account`;
   `crates/routing/src/tests/preferences.rs::model_choice_selects_only_eligible_pool_members_before_expiry`
 
-## Capability eligibility and selection preferences
+## Capability and selection preferences
 
-Every bundled tier declares a capability policy. A minimum excludes weaker
-members before weighted, standby and exploration selection. Configuration can
-lower or disable the floor. If no otherwise eligible member meets it, the
-declared fallback relaxes the floor with a warning; it never adds a hard hold.
-Receipts and route explanations name the effective policy, source and every
-below-floor member, including when the floor was relaxed. Exact model pins
-remain explicit choices.
+Capability never excludes a listed pool member. Capability preferences rank
+members alongside account load and outcome priors; configuration can adjust
+those weights. Exact model pins remain explicit choices.
 
 Account load and outcome priors rank eligible members. Priors use attributed,
 comparable quality outcomes, with exploration among eligible members;
-infrastructure failures are not quality observations. Missing outcome evidence
-stays neutral. Account ranking scales reset-adjusted usable headroom by sourced
+host failures are not quality observations, while a validated successful
+completed-before-budget result remains one. Missing outcome evidence stays
+neutral. Account ranking scales reset-adjusted usable headroom by sourced
 penalties and divides by one plus live lanes.
 
-- Why: role tiers need a quality baseline that remains overridable without starving a route when its portfolio changes.
-- Test: `crates/routing/src/tests/quality.rs::catalogue_tiers_enforce_declared_capability_eligibility`; `crates/routing/src/tests/quality.rs::capability_overrides_change_eligibility_and_empty_floor_warns`; `crates/routing/src/tests/quality.rs::outcome_priors_and_exploration_rank_eligible_members`; `crates/routing/src/tests/quality.rs::account_ranking_uses_reset_adjusted_headroom_and_live_load_independent_of_order`; `crates/telemetry/src/tests.rs::route_priors_count_only_attributed_comparable_quality_outcomes`
+- Why: capability is a preference, while attributed comparable outcomes supply the evidence that adjusts declared route weights.
+- Test: `crates/routing/src/tests/quality.rs::outcome_priors_and_exploration_rank_eligible_members`; `crates/routing/src/tests/quality.rs::account_ranking_uses_reset_adjusted_headroom_and_live_load_independent_of_order`; `crates/telemetry/src/tests.rs::route_priors_count_only_attributed_comparable_quality_outcomes`
 
 ## Capacity is not quota
 

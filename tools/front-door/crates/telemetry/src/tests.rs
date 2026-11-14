@@ -51,6 +51,7 @@ fn fact(number: u64, input: Option<u64>) -> AttemptFact {
         project_id: ProjectId::from_bytes([2; 16]),
         terminal_state: AttemptOutcome::Succeeded,
         cause_source: provenant_records::run::CauseSource::Provider,
+        settlement_reason: None,
         account_identity: provenant_records::AccountIdentity::unknown(),
         exit_code: Some(0),
         queued_at: WallTime::from_micros(0).unwrap(),
@@ -1634,8 +1635,31 @@ fn route_priors_count_only_attributed_comparable_quality_outcomes() {
         true,
     );
     host_failure.fact.cause_source = provenant_records::run::CauseSource::Host;
+    let mut completed_before_budget = evidence(
+        10,
+        AttemptOutcome::Succeeded,
+        Some("senior"),
+        Some("review"),
+        false,
+        true,
+    );
+    completed_before_budget.fact.cause_source = provenant_records::run::CauseSource::Host;
+    completed_before_budget.fact.settlement_reason =
+        Some(provenant_records::run::SettlementReason::CompletedBeforeBudget);
+    let identity_only = evidence(
+        11,
+        AttemptOutcome::Succeeded,
+        Some("senior"),
+        Some("review"),
+        crate::route_outcomes::provider_work_incomplete(&[
+            provenant_records::run::PartialSignal::IdentityUnobserved,
+        ]),
+        true,
+    );
     let rows = priors([
         host_failure,
+        completed_before_budget,
+        identity_only,
         evidence(
             1,
             AttemptOutcome::Succeeded,
@@ -1703,7 +1727,7 @@ fn route_priors_count_only_attributed_comparable_quality_outcomes() {
     ])
     .unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!((rows[0].successes, rows[0].failures), (1, 2));
+    assert_eq!((rows[0].successes, rows[0].failures), (3, 2));
     assert_eq!(rows[0].role, "review");
     assert!(!rows[0].source.is_empty());
 }

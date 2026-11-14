@@ -52,6 +52,27 @@ fn exact_route(route: &provenant_records::RouteFact) -> Option<String> {
     })
 }
 
+/// Account identity evidence is independent of whether provider work finished.
+/// Q1 keeps unobserved accounts unknown; it must not invent model failures.
+pub fn provider_work_incomplete(signals: &[provenant_records::run::PartialSignal]) -> bool {
+    signals
+        .iter()
+        .any(|signal| *signal != provenant_records::run::PartialSignal::IdentityUnobserved)
+}
+
+// Host stops still describe who stopped the process. A settlement declaration
+// that certifies completed work supplies quality evidence without turning a
+// host failure into a model failure or relabelling the stop as provider-caused.
+fn has_quality_outcome(fact: &AttemptFact) -> bool {
+    use provenant_records::run::{CauseSource, SettlementTerminalOutcome};
+    fact.cause_source == CauseSource::Provider
+        || (fact.cause_source == CauseSource::Host
+            && fact.terminal_state == AttemptOutcome::Succeeded
+            && fact.settlement_reason.is_some_and(|reason| {
+                reason.rule().terminal_outcome == SettlementTerminalOutcome::Succeeded
+            }))
+}
+
 pub fn priors(
     evidence: impl IntoIterator<Item = Evidence>,
 ) -> Result<Vec<Prior>, crate::TelemetryError> {
@@ -60,7 +81,7 @@ pub fn priors(
         if index as u64 >= crate::MAX_ATTEMPTS {
             return Err(crate::TelemetryError::TooLarge("100,000 selected attempts"));
         }
-        if item.fact.cause_source != provenant_records::run::CauseSource::Provider {
+        if !has_quality_outcome(&item.fact) {
             continue;
         }
         let Some(pool) = item.pool else {
@@ -156,7 +177,7 @@ pub fn report(
         if index as u64 >= crate::MAX_ATTEMPTS {
             return Err(crate::TelemetryError::TooLarge("100,000 selected attempts"));
         }
-        if item.fact.cause_source != provenant_records::run::CauseSource::Provider {
+        if !has_quality_outcome(&item.fact) {
             continue;
         }
         let route = item.fact.resolved_route.as_ref();

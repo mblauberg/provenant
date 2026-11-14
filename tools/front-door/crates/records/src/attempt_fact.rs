@@ -101,6 +101,9 @@ pub struct AttemptFact {
     pub terminal_state: AttemptOutcome,
     /// Source of the settlement cause, or an explicit unavailable state.
     pub cause_source: crate::run::CauseSource,
+    /// Sealed settlement declaration, retained independently of the stop source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settlement_reason: Option<crate::run::SettlementReason>,
     /// Verified account identity for this attempt, or explicit unknown evidence.
     pub account_identity: crate::AccountIdentity,
     pub exit_code: Option<i64>,

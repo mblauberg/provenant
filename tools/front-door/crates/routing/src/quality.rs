@@ -1,4 +1,4 @@
-//! Declared capability eligibility and immutable preference evidence.
+//! Capability preferences and immutable quality evidence.
 use crate::{ModelId, Workload};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -10,55 +10,6 @@ pub enum Capability {
     General,
     Strong,
     Frontier,
-}
-
-/// Advisory eligibility floor for a named route. Exact model requests are pins.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
-pub enum CapabilityPolicy {
-    #[default]
-    Disabled,
-    Minimum {
-        minimum: Capability,
-        fallback: CapabilityFallback,
-    },
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CapabilityFallback {
-    /// Relax the floor only when it leaves no otherwise eligible member.
-    WarnRelax,
-}
-impl CapabilityPolicy {
-    pub fn minimum(self) -> Option<Capability> {
-        match self {
-            Self::Disabled => None,
-            Self::Minimum { minimum, .. } => Some(minimum),
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum CapabilityDisposition {
-    Excluded,
-    Waived,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct CapabilityAssessment {
-    pub model: String,
-    pub capability: Capability,
-    pub minimum: Capability,
-    pub disposition: CapabilityDisposition,
-}
-#[derive(Debug, Serialize)]
-pub(crate) struct CapabilityDecision {
-    pub policy: CapabilityPolicy,
-    pub source: String,
-    pub below_minimum: Vec<CapabilityAssessment>,
-    pub relaxed: bool,
-    pub warning: Option<String>,
 }
 
 pub type CapabilityPreferences = BTreeMap<String, BTreeMap<Capability, u16>>;

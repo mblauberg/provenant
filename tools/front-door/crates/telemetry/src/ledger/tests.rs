@@ -63,6 +63,7 @@ fn fact(number: u64, day: i64, model: &str, input: Option<u64>) -> Result<Attemp
         project_id: ProjectId::from_bytes([2; 16]),
         terminal_state: AttemptOutcome::Succeeded,
         cause_source: provenant_records::run::CauseSource::Unavailable,
+        settlement_reason: None,
         account_identity: provenant_records::AccountIdentity::unknown(),
         exit_code: Some(0),
         queued_at: finished,

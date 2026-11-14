@@ -168,6 +168,7 @@ mod tests {
             project_id: ProjectId::from_bytes([4; 16]),
             terminal_state: AttemptOutcome::Succeeded,
             cause_source: provenant_records::run::CauseSource::Unavailable,
+            settlement_reason: None,
             account_identity: provenant_records::AccountIdentity::unknown(),
             exit_code: Some(0),
             queued_at: UtcMicros::from_micros(1).unwrap(),

@@ -59,7 +59,7 @@ and [command renderer](../../tools/front-door/src/pr/contributions.rs) define th
 ## What follows a stop
 
 Settlement classifies terminal outcome, sealed stop and graph node outcome together; no settlement sent to the chair succeeds a graph node.
-Each cause declares provider, host or owner source once; route-quality evidence uses provider-caused outcomes only.
+Each cause declares provider, host or owner source once. Route-quality evidence uses provider-caused outcomes and successful work certified by the settlement declaration; a host stop keeps its host source and host failures remain non-quality evidence. Missing account identity remains unknown usage attribution, not a model-quality failure.
 Each cause has one default next step, with one per-node override point. Pinned
 causes ignore overrides. A new route starts a fresh session. Unproved custody
 always goes to the chair; no successor writer starts while custody is uncertain.

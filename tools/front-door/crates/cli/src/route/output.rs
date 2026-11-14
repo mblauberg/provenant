@@ -203,12 +203,49 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
                 let details = receipt
                     .candidates
                     .iter()
-                    .flat_map(|candidate| {
-                        candidate
+                    .map(|candidate| {
+                        let prior = candidate.extra.get("outcome_prior");
+                        let evidence = prior.and_then(|prior| prior.get("evidence"));
+                        let evidence_count = prior
+                            .and_then(|prior| prior.get("evidence_count"))
+                            .and_then(|count| count.as_u64())
+                            .unwrap_or_default();
+                        let factor = prior
+                            .and_then(|prior| prior.get("factor_basis_points"))
+                            .and_then(|factor| factor.as_u64())
+                            .unwrap_or(10_000);
+                        let successes = evidence
+                            .and_then(|evidence| evidence.get("successes"))
+                            .and_then(|count| count.as_u64())
+                            .unwrap_or_default();
+                        let failures = evidence
+                            .and_then(|evidence| evidence.get("failures"))
+                            .and_then(|count| count.as_u64())
+                            .unwrap_or_default();
+                        let source = prior
+                            .and_then(|prior| prior.get("source"))
+                            .and_then(|source| source.as_str())
+                            .unwrap_or("unavailable");
+                        let capability = candidate.extra.get("capability_preference");
+                        let capability_weight = capability
+                            .and_then(|preference| preference.get("weight"))
+                            .and_then(|weight| weight.as_u64())
+                            .unwrap_or(1);
+                        let capability_source = capability
+                            .and_then(|preference| preference.get("source"))
+                            .and_then(|source| source.as_str())
+                            .unwrap_or("unavailable");
+                        let ranking = format!(
+                            "\n  {}: prior={factor}/10000 successes={successes} failures={failures} evidence_count={evidence_count} source={source} capability_weight={capability_weight} capability_source={capability_source}",
+                            candidate.model
+                        );
+                        let diagnostics = candidate
                             .exclusion
                             .iter()
                             .chain(candidate.pacing_detail.iter())
                             .map(|detail| format!("\n  {}: {detail}", candidate.model))
+                            .collect::<String>();
+                        format!("{ranking}{diagnostics}")
                     })
                     .collect::<String>();
                 format!(
@@ -223,27 +260,6 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
             "warning: effort {} for {} dropped; source={}\n",
             warning["requested"], warning["model"], warning["source"]
         ));
-    }
-    if let Some(policy) = route
-        .pool_selection
-        .as_ref()
-        .and_then(|receipt| receipt.extra.get("capability_policy"))
-    {
-        text.push_str(&format!(
-            "capability policy={} source={}\n",
-            policy["policy"], policy["source"]
-        ));
-        if let Some(excluded) = policy["below_minimum"].as_array() {
-            for member in excluded {
-                text.push_str(&format!(
-                    "  {}: capability {} below {} ({})\n",
-                    member["model"], member["capability"], member["minimum"], member["disposition"]
-                ));
-            }
-        }
-        if let Some(warning) = policy["warning"].as_str() {
-            text.push_str(&format!("warning: {warning}\n"));
-        }
     }
     for record in &preview.recorded_readiness {
         text.push_str(&format!(

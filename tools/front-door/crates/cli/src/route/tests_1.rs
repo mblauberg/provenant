@@ -672,6 +672,18 @@
         assert_ne!(data["adapter"], "claude");
         assert_eq!(data["allow_unknown_partial_headroom"]["value"], false);
         assert_eq!(data["allow_unknown_partial_headroom"]["source"], "default");
+        for candidate in data["pool_selection"]["candidates"]
+            .as_array()
+            .ok_or("pool candidates")?
+        {
+            let model = candidate["model"].as_str().ok_or("candidate model")?;
+            let prefix = format!("  {model}: prior=");
+            let line = text
+                .lines()
+                .find(|line| line.starts_with(&prefix))
+                .ok_or("candidate prior explanation")?;
+            assert!(line.contains("evidence_count="), "{line}");
+        }
         std::fs::write(
             roots.state.as_path().join("config.toml"),
             "schema_version=1\n[knobs]\n'routing.allow_unknown_partial_headroom'=true\n",

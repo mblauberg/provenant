@@ -1160,7 +1160,7 @@ pub enum TerminalEvidence {
     },
 }
 
-/// Who owns a settlement cause. Route quality uses provider causes only.
+/// Who owns a settlement cause, independently of any completed provider work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CauseSource {

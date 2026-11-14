@@ -280,9 +280,11 @@ fn publication_holder_accepts_exit_zero_or_completed_host_budget() -> TestResult
                 stop.handoff().unwrap().status,
                 provenant_records::handoff::HandoffStatus::Done
             );
+            let fact = store.attempt(id, &call)?;
+            assert_eq!(fact.cause_source, provenant_records::run::CauseSource::Host);
             assert_eq!(
-                store.attempt(id, &call)?.cause_source,
-                provenant_records::run::CauseSource::Host
+                fact.settlement_reason,
+                Some(provenant_records::run::SettlementReason::CompletedBeforeBudget)
             );
         }
         assert_eq!(store.finish(id, &dir, &observed, &fake, &call)?, record);

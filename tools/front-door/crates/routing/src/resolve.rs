@@ -2397,7 +2397,6 @@ fn resolve_inner(
 }
 
 struct ClassifiedPool {
-    capability_policy: Option<crate::quality::CapabilityDecision>,
     candidates: Vec<RouteSelectionCandidate>,
     routes: Vec<Option<RouteAlternative>>,
     weighted: Vec<(usize, u64)>,
@@ -2454,10 +2453,8 @@ fn classify_pool(
     context: &ValidatedContext<'_>,
     excluded_members: Excluded<'_>,
     avoid_cooling: bool,
-    minimum: Option<Capability>,
 ) -> Result<ClassifiedPool, RoutingError> {
     let mut classified = ClassifiedPool {
-        capability_policy: None,
         candidates: Vec::with_capacity(members.len()),
         routes: Vec::with_capacity(members.len()),
         weighted: Vec::new(),
@@ -2472,30 +2469,58 @@ fn classify_pool(
     };
     for member in members {
         let mut effort = request.effort.clone().or(member.effort.clone());
+        let mut factor_basis_points = NEUTRAL_FACTOR_BASIS_POINTS;
         let capability = context
             .catalogue
             .model(&member.model)
-            .map(|entry| entry.capability)
+            .map(|model| model.capability)
             .unwrap_or_default();
-        if let Some(minimum) = minimum.filter(|minimum| capability < *minimum) {
-            let detail = format!("capability {capability:?} below {minimum:?}");
-            classified
-                .exclusions
-                .push(format!("{}: {detail}", member.model.as_str()));
-            classified.candidates.push(RouteSelectionCandidate {
-                extra: Default::default(),
-                model: member.model.as_str().into(),
-                weight: member.weight,
-                factor_basis_points: NEUTRAL_FACTOR_BASIS_POINTS,
-                pacing_detail: None,
-                effort,
-                readiness: None,
-                exclusion: Some(detail),
+        let role = context
+            .selection_evidence
+            .map(|evidence| evidence.role(request.intent.workload, request.intent.writes))
+            .unwrap_or(if request.intent.workload == Workload::Review {
+                "review"
+            } else if request.intent.writes {
+                "writer"
+            } else {
+                "task"
             });
-            classified.routes.push(None);
-            continue;
-        }
-        let mut factor_basis_points = NEUTRAL_FACTOR_BASIS_POINTS;
+        let selector = if role == "review" || request.intent.workload == Workload::Review {
+            "review"
+        } else {
+            name
+        };
+        let (preferences, preference_source) = context
+            .config
+            .capability_preferences
+            .get(selector)
+            .map(|weights| (Some(weights), "config"))
+            .unwrap_or((
+                context.catalogue.capability_preferences.get(selector),
+                "catalogue",
+            ));
+        let capability_weight = preferences
+            .and_then(|weights| weights.get(&capability))
+            .copied()
+            .unwrap_or(1)
+            .max(1);
+        let observed_prior = context.selection_evidence.and_then(|evidence| {
+            evidence.priors.iter().find(|prior| {
+                prior.model == member.model && prior.pool == name && prior.role == role
+            })
+        });
+        let prior = context
+            .config
+            .outcome_priors
+            .enabled
+            .then_some(observed_prior)
+            .flatten();
+        let prior_factor = prior.map_or(10_000, RoutePrior::factor_basis_points);
+        let evidence_count =
+            observed_prior.map_or(0, |prior| prior.successes.saturating_add(prior.failures));
+        let mut ranking = provenant_records::ExtraFields::default();
+        ranking.insert("capability_preference".into(), serde_json::json!({"capability":capability,"weight":capability_weight,"selector":selector,"source":preference_source}));
+        ranking.insert("outcome_prior".into(), serde_json::json!({"enabled":context.config.outcome_priors.enabled,"role":role,"pool":name,"factor_basis_points":prior_factor,"evidence_count":evidence_count,"evidence":observed_prior,"source":if !context.config.outcome_priors.enabled {"config:disabled"} else if observed_prior.is_some() {"route_outcomes"} else {"no_evidence"}}));
         let spent = context
             .availability
             .iter()
@@ -2559,7 +2584,7 @@ fn classify_pool(
                 .exclusions
                 .push(format!("{}: {detail}", member.model.as_str()));
             classified.candidates.push(RouteSelectionCandidate {
-                extra: Default::default(),
+                extra: ranking.clone(),
                 model: member.model.as_str().into(),
                 weight: member.weight,
                 factor_basis_points,
@@ -2585,7 +2610,6 @@ fn classify_pool(
         let mut pacing_detail = None;
         let mut readiness = None;
         let mut option = None;
-        let mut ranking = provenant_records::ExtraFields::default();
         let exclusion = if let Some((kind, detail)) = exclusion {
             classified.exclusions.push(detail.to_owned());
             Some(kind.to_owned())
@@ -2613,7 +2637,7 @@ fn classify_pool(
                             .exclusions
                             .push(format!("{}: {detail}", member.model.as_str()));
                         classified.candidates.push(RouteSelectionCandidate {
-                            extra: Default::default(),
+                            extra: ranking.clone(),
                             model: member.model.as_str().into(),
                             weight: member.weight,
                             factor_basis_points,
@@ -2642,7 +2666,7 @@ fn classify_pool(
                             .exclusions
                             .push(format!("{}: read-only model policy", member.model.as_str()));
                         classified.candidates.push(RouteSelectionCandidate {
-                            extra: Default::default(),
+                            extra: ranking.clone(),
                             model: member.model.as_str().into(),
                             weight: member.weight,
                             factor_basis_points,
@@ -2663,56 +2687,6 @@ fn classify_pool(
                         context,
                     );
                     let cache_factor = model_policy.cache_factor_basis_points(request.intent);
-                    let capability = context
-                        .catalogue
-                        .model(&member.model)
-                        .map(|m| m.capability)
-                        .unwrap_or_default();
-                    let role = context
-                        .selection_evidence
-                        .map(|e| e.role(request.intent.workload, request.intent.writes))
-                        .unwrap_or(if request.intent.workload == Workload::Review {
-                            "review"
-                        } else if request.intent.writes {
-                            "writer"
-                        } else {
-                            "task"
-                        });
-                    let selector =
-                        if role == "review" || request.intent.workload == Workload::Review {
-                            "review"
-                        } else {
-                            name
-                        };
-                    let (preferences, source) = context
-                        .config
-                        .capability_preferences
-                        .get(selector)
-                        .map(|weights| (Some(weights), "config"))
-                        .unwrap_or((
-                            context.catalogue.capability_preferences.get(selector),
-                            "catalogue",
-                        ));
-                    let capability_weight = preferences
-                        .and_then(|weights| weights.get(&capability))
-                        .copied()
-                        .unwrap_or(1)
-                        .max(1);
-                    let prior = context
-                        .config
-                        .outcome_priors
-                        .enabled
-                        .then(|| {
-                            context.selection_evidence.and_then(|e| {
-                                e.priors.iter().find(|prior| {
-                                    prior.model == member.model
-                                        && prior.pool == name
-                                        && prior.role == role
-                                })
-                            })
-                        })
-                        .flatten();
-                    let prior_factor = prior.map_or(10_000, RoutePrior::factor_basis_points);
                     let load = context
                         .availability
                         .iter()
@@ -2735,8 +2709,6 @@ fn classify_pool(
                         "ranking_factor_basis_points".into(),
                         ranking_factor_basis_points.into(),
                     );
-                    ranking.insert("capability_preference".into(), serde_json::json!({"capability":capability,"weight":capability_weight,"selector":selector,"source":source}));
-                    ranking.insert("outcome_prior".into(), serde_json::json!({"enabled":context.config.outcome_priors.enabled,"role":role,"pool":name,"factor_basis_points":prior_factor,"evidence":prior,"source":if !context.config.outcome_priors.enabled {"config:disabled"} else if prior.is_some() {"route_outcomes"} else {"no_evidence"}}));
                     if let Some(load) = load {
                         ranking.insert("account_load".into(), serde_json::json!(load));
                     }
@@ -2744,7 +2716,7 @@ fn classify_pool(
                         && cooling(&member.model, resolved.account_key.as_deref(), context)
                     {
                         classified.candidates.push(RouteSelectionCandidate {
-                            extra: Default::default(),
+                            extra: ranking.clone(),
                             model: member.model.as_str().into(),
                             weight: member.weight,
                             factor_basis_points,
@@ -2931,99 +2903,6 @@ fn selection_receipt(
     }
 }
 
-/// The one deciding point for capability eligibility, including its declared relaxation.
-fn classify_with_capability_policy(
-    name: &str,
-    members: &[RoutePoolMember],
-    request: &RouteRequest,
-    context: &ValidatedContext<'_>,
-    excluded: Excluded<'_>,
-    avoid_cooling: bool,
-) -> Result<ClassifiedPool, RoutingError> {
-    let path = format!("domains.routing.capability_policy.{name}");
-    let (policy, source) = if let Some(policy) = context.config.capability_policy.get(name) {
-        (
-            *policy,
-            format!(
-                "{}:{path}",
-                context
-                    .config
-                    .preference_sources
-                    .get(&format!("{path}.mode"))
-                    .map(String::as_str)
-                    .unwrap_or("config")
-            ),
-        )
-    } else if let Some(policy) = context.catalogue.capability_policy.get(name) {
-        (*policy, format!("catalogue:capability_policy.{name}"))
-    } else {
-        (
-            CapabilityPolicy::Disabled,
-            "default:capability_policy.disabled".into(),
-        )
-    };
-    let mut classified = classify_pool(
-        name,
-        members,
-        request,
-        context,
-        excluded,
-        avoid_cooling,
-        policy.minimum(),
-    )?;
-    let relaxed = matches!(policy, CapabilityPolicy::Minimum { fallback: CapabilityFallback::WarnRelax, .. })
-        && classified.routes.iter().all(Option::is_none)
-        // Cooling is advisory: retry the qualified set before relaxing its floor.
-        && (!avoid_cooling || classify_pool(name, members, request, context, excluded, false, policy.minimum())?
-            .routes.iter().all(Option::is_none));
-    if relaxed {
-        classified = classify_pool(
-            name,
-            members,
-            request,
-            context,
-            excluded,
-            avoid_cooling,
-            None,
-        )?;
-    }
-    let below_minimum = members
-        .iter()
-        .filter_map(|member| {
-            let capability = context
-                .catalogue
-                .model(&member.model)
-                .map(|m| m.capability)
-                .unwrap_or_default();
-            policy
-                .minimum()
-                .filter(|minimum| capability < *minimum)
-                .map(|minimum| crate::quality::CapabilityAssessment {
-                    model: member.model.as_str().into(),
-                    capability,
-                    minimum,
-                    disposition: if relaxed {
-                        crate::quality::CapabilityDisposition::Waived
-                    } else {
-                        crate::quality::CapabilityDisposition::Excluded
-                    },
-                })
-        })
-        .collect();
-    classified.capability_policy = Some(crate::quality::CapabilityDecision {
-        policy,
-        source,
-        below_minimum,
-        relaxed,
-        warning: relaxed.then(|| {
-            format!(
-                "no otherwise eligible member meets {name} capability policy; warn_relax applied"
-            )
-        }),
-    });
-    Ok(classified)
-}
-
 fn classify_with_image_preference(
     name: &str,
     members: &[RoutePoolMember],
@@ -3032,8 +2911,7 @@ fn classify_with_image_preference(
     excluded: Excluded<'_>,
     avoid_cooling: bool,
 ) -> Result<ClassifiedPool, RoutingError> {
-    let mut classified =
-        classify_with_capability_policy(name, members, request, context, excluded, avoid_cooling)?;
+    let mut classified = classify_pool(name, members, request, context, excluded, avoid_cooling)?;
     let image = |index: usize| image_input_supported(&members[index].model, context);
     let has_ready_image = members
         .iter()
@@ -3178,11 +3056,6 @@ fn select_pool(
         .cloned()
         .ok_or(RoutingError::Catalogue)?;
     let mut receipt = selection_receipt(name, &classified, &draw, &route);
-    if let Some(policy) = &classified.capability_policy {
-        receipt
-            .extra
-            .insert("capability_policy".into(), serde_json::json!(policy));
-    }
     receipt.extra.insert(
         "weight_source".into(),
         if context.config.pools.contains_key(name) {

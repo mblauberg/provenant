@@ -279,8 +279,6 @@ pub struct RoutingConfig {
     #[serde(skip)]
     pub preference_sources: BTreeMap<String, String>,
     pub capability_preferences: crate::CapabilityPreferences,
-    /// Sparse per-route overrides; absent routes inherit the catalogue policy.
-    pub capability_policy: BTreeMap<String, crate::CapabilityPolicy>,
     pub outcome_priors: crate::OutcomePriorSettings,
     pub model_policy: crate::ModelPolicies,
     /// Override the bundled writer advice; omitted fields keep the bundled values.
@@ -349,7 +347,6 @@ struct BundledRoutingDefaults {
     model_exclusions: ModelExclusions,
     model_choices: Vec<ModelChoiceOverride>,
     capability_preferences: crate::CapabilityPreferences,
-    capability_policy: BTreeMap<String, crate::CapabilityPolicy>,
     outcome_priors: crate::OutcomePriorSettings,
     model_policy: crate::ModelPolicies,
     writer_advisory: Option<WriterAdvisoryOverride>,
@@ -384,7 +381,6 @@ impl Default for RoutingConfig {
                     model_choices: asset.model_choices,
                     preference_sources: BTreeMap::new(),
                     capability_preferences: asset.capability_preferences,
-                    capability_policy: asset.capability_policy,
                     outcome_priors: asset.outcome_priors,
                     model_policy: asset.model_policy,
                     writer_advisory: asset.writer_advisory,
@@ -658,17 +654,6 @@ impl DomainConfig for RoutingConfig {
                 detail: None,
                 field: "outcome_priors.exploration_percent".into(),
                 code: "range",
-            });
-        }
-        for name in self
-            .capability_policy
-            .keys()
-            .filter(|name| !identifier(name))
-        {
-            errors.push(SectionError {
-                detail: None,
-                field: format!("capability_policy.{name}"),
-                code: "selector",
             });
         }
         for (selector, weights) in &self.capability_preferences {
@@ -1120,12 +1105,6 @@ fn defaults(_: Profile) -> &'static str {
 /// Enforced model policy restrictions, including a retired schedule key in a
 /// restricting rule, are a boundary; other routing input recovers.
 pub const FIELD_METADATA: &[FieldMetadata] = &[
-    FieldMetadata::enumeration("capability_policy.{tier}.mode", &["disabled", "minimum"]),
-    FieldMetadata::enumeration(
-        "capability_policy.{tier}.minimum",
-        &["general", "strong", "frontier"],
-    ),
-    FieldMetadata::enumeration("capability_policy.{tier}.fallback", &["warn_relax"]),
     FieldMetadata::new("outcome_priors.enabled", "bool"),
     FieldMetadata::int("outcome_priors.exploration_percent", 0, 100),
     FieldMetadata::int("capability_preferences.{selector}.{capability}", 1, 100),
@@ -1383,12 +1362,10 @@ pub struct Catalogue {
     pub(crate) pacing: BTreeMap<String, PacingPolicy>,
     pub(crate) writer_advisory: WriterAdvisory,
     pub(crate) capability_preferences: crate::CapabilityPreferences,
-    pub(crate) capability_policy: BTreeMap<String, crate::CapabilityPolicy>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CatalogueAsset {
-    capability_policy: BTreeMap<String, crate::CapabilityPolicy>,
     #[serde(default)]
     capability_preferences: crate::CapabilityPreferences,
     schema_version: u64,
@@ -1466,7 +1443,6 @@ impl Catalogue {
         .map_err(|_| RoutingError::Catalogue)?;
         let value = Self {
             capability_preferences: asset.capability_preferences,
-            capability_policy: asset.capability_policy,
             schema_version: asset.schema_version,
             revision: asset.revision,
             models: asset.models,
