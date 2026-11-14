@@ -440,7 +440,7 @@ mod tests {
                 number,
                 head: format!("{number:040x}"),
                 approval: "approved".into(),
-                approval_evidence: None,
+                approval_evidence: Vec::new(),
                 accepted: None,
                 base_branch: "main".into(),
             })

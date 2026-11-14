@@ -200,15 +200,9 @@ fn custody_retains_evidence_links_and_extensions_after_settlement() {
         },
     };
     for state in [
-        CustodyState::Landed {
-            evidence: evidence.clone(),
-        },
+        CustodyState::Landed { evidence },
         CustodyState::Retired {
-            retirement: RetirementRecord {
-                reason: "landed".into(),
-                evidence,
-                retired_at: f.now(),
-            },
+            retirement_id: "retirement-1".into(),
         },
     ] {
         let record = ledger

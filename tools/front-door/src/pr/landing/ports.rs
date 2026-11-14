@@ -55,7 +55,52 @@ pub struct Reviews {
 pub trait ReviewRecords {
     fn reviews(&self, number: u64, head: &str) -> Result<Reviews, LandingError>;
 }
+/// Read review evidence in the operation's saved project scope, independent of
+/// the invoking process's current configuration or project binding.
+pub trait ReviewRecordSource {
+    fn reviews(
+        &self,
+        scope: &provenant_records::landing::ReviewScope,
+        number: u64,
+        head: &str,
+    ) -> Result<Reviews, LandingError>;
+}
+
+pub struct ScopedReviews<'a> {
+    pub source: &'a dyn ReviewRecordSource,
+    pub scope: &'a provenant_records::landing::ReviewScope,
+}
+impl ReviewRecords for ScopedReviews<'_> {
+    fn reviews(&self, number: u64, head: &str) -> Result<Reviews, LandingError> {
+        self.source.reviews(self.scope, number, head)
+    }
+}
+
 pub trait Forge {
+    /// Optional features are observed per repository; unknown never implies support.
+    fn capabilities(
+        &mut self,
+        _target: &str,
+    ) -> Result<provenant_records::landing::Capabilities, LandingError> {
+        Ok(provenant_records::landing::Capabilities::default())
+    }
+    /// Async submission/observation execute in 2.1. The port freezes their contract.
+    fn submit_landing(
+        &mut self,
+        _intent: &provenant_records::landing::PublishIntent,
+    ) -> Result<provenant_records::landing::Submission, LandingError> {
+        Err(LandingError::Unimplemented(
+            "asynchronous publication executes in 2.1",
+        ))
+    }
+    fn observe_landing(
+        &mut self,
+        _operation: &provenant_records::landing::OperationRef,
+    ) -> Result<provenant_records::landing::ForgeObservation, LandingError> {
+        Err(LandingError::Unimplemented(
+            "asynchronous observation executes in 2.1",
+        ))
+    }
     fn set_project_path(&mut self, _path: &std::path::Path) {}
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError>;
     /// The stack's pull requests in bottom-to-top order.
@@ -119,6 +164,14 @@ pub enum MergeTree {
     Conflict,
 }
 pub trait Repo {
+    /// Execute the repository publisher with the durable pending intent on stdin.
+    fn publish_command(
+        &mut self,
+        _command: &provenant_records::landing::RepositoryCommand,
+        _attempt: &PendingAttempt,
+    ) -> Result<PublishResult, LandingError> {
+        Err(LandingError::Unimplemented("repository command publisher"))
+    }
     fn project_path(&self) -> Option<&std::path::Path> {
         None
     }

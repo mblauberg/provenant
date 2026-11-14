@@ -44,6 +44,7 @@ pub use source::{SourceDigest, SourceDigestError, SourceInput, source_digest};
 pub use trace::Trace;
 
 pub mod inbox;
+pub mod landing;
 pub mod workflow;
 
 pub use install::{

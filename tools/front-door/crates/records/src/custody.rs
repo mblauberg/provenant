@@ -152,17 +152,12 @@ pub struct LandedEvidence {
     pub source: LandingSource,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RetirementRecord {
-    pub reason: String,
-    pub evidence: LandedEvidence,
-    pub retired_at: WallTime,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum CustodyState {
     Active,
     Landed { evidence: LandedEvidence },
-    Retired { retirement: RetirementRecord },
+    /// Points at `landing::RetirementRecord::id`, which owns the decision and step outcomes.
+    Retired { retirement_id: String },
     Released,
 }
 impl CustodyState {

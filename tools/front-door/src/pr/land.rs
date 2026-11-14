@@ -1027,7 +1027,6 @@ pub(crate) fn graph_land(
     request: &provenant_fabric_runtime::graph::LandRequest<'_>,
     workers: &dyn WorkerObserver,
 ) -> provenant_fabric_runtime::graph::LandObservation {
-    use super::landing::owner;
     use provenant_fabric_runtime::graph::LandObservation;
     let (branch, head) = (request.branch, request.head);
     let Ok(head) = head.parse::<GitOid>() else {
@@ -1057,24 +1056,27 @@ pub(crate) fn graph_land(
         project: Some(project.to_owned()),
     };
     let authority = match request.authority {
-        None => owner::Authority::Observe,
-        Some(provenant_fabric_runtime::graph::LandAuthority::Policy) => owner::Authority::Policy,
+        None => provenant_records::landing::Authority::Observe,
+        Some(provenant_fabric_runtime::graph::LandAuthority::Policy) => {
+            provenant_records::landing::Authority::Policy
+        }
         Some(provenant_fabric_runtime::graph::LandAuthority::Chair { .. }) => {
-            owner::Authority::Chair
+            provenant_records::landing::Authority::Chair
         }
     };
-    let land = owner::LandRequest {
-        members: vec![owner::LandMember {
+    let land = provenant_records::landing::LandRequest {
+        members: vec![provenant_records::landing::LandMember {
             pr: number,
             head: Some(head.to_string()),
             base: None,
             // The landing policy reads the graph's typed exact-head review record.
-            review_proof: owner::ReviewProof::Policy,
+            review_proof: provenant_records::landing::ReviewProof::Policy,
         }],
         authority,
-        policy: owner::PolicyChoice::default(),
+        policy: provenant_records::landing::PolicyChoice::default(),
+        ..Default::default()
     };
-    let submission = super::landing::prepare(&globals, None, None)
+    let submission = super::landing::prepare(&globals, None, None, None, None)
         .and_then(|prepared| super::landing::submit(&prepared, land, false, &globals, workers));
     let submission = match submission {
         Ok(submission) => submission,
@@ -1098,11 +1100,11 @@ pub(crate) fn graph_land(
 /// landed member succeeds; one that can still change is observed again.
 pub(crate) fn observation(
     number: u64,
-    outcome: Option<&super::landing::owner::MemberOutcome>,
+    outcome: Option<&provenant_records::landing::MemberOutcome>,
     failure: Option<&super::landing::LandingError>,
 ) -> provenant_fabric_runtime::graph::LandObservation {
-    use super::landing::owner::MemberOutcome;
     use provenant_fabric_runtime::graph::LandObservation;
+    use provenant_records::landing::MemberOutcome;
     match outcome {
         Some(MemberOutcome::Landed { .. }) => LandObservation::Merged {
             pull_request: Some(number),
@@ -1490,7 +1492,7 @@ esac
 
     #[test]
     fn a_member_outcome_maps_to_a_graph_observation() {
-        use crate::pr::landing::owner::MemberOutcome;
+        use provenant_records::landing::MemberOutcome;
         assert_eq!(
             observation(7, Some(&MemberOutcome::Landed { commit: None }), None),
             LandObservation::Merged {

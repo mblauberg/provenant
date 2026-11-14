@@ -218,6 +218,9 @@ impl ReviewRecords for FakeReviews {
 }
 #[derive(Default)]
 pub struct FakeRepo {
+    pub command_calls: Vec<PendingAttempt>,
+    pub command_result: Option<Result<PublishResult, LandingError>>,
+    pub command_publishes: bool,
     pub target: String,
     pub shared_target: Option<std::rc::Rc<std::cell::RefCell<String>>>,
     pub fail_fetch: Option<std::rc::Rc<std::cell::Cell<bool>>>,
@@ -245,6 +248,27 @@ pub struct FakeRepo {
     pub local_followed: Vec<u64>,
 }
 impl Repo for FakeRepo {
+    fn publish_command(
+        &mut self,
+        _command: &provenant_records::landing::RepositoryCommand,
+        attempt: &PendingAttempt,
+    ) -> Result<PublishResult, LandingError> {
+        self.command_calls.push(attempt.clone());
+        if self.command_publishes {
+            self.target = attempt.candidate.commit.clone();
+        }
+        self.command_result.take().unwrap_or_else(|| {
+            Ok(PublishResult {
+                landed: attempt
+                    .candidate
+                    .steps
+                    .iter()
+                    .map(|step| step.commit.clone())
+                    .collect(),
+                alarms: Vec::new(),
+            })
+        })
+    }
     fn follow_local(&mut self, pr: &EligiblePr) -> Result<bool, LandingError> {
         self.local_followed.push(pr.number);
         if self.fail_local || self.fail_local_at == Some(pr.number) {
