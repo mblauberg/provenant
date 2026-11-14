@@ -330,31 +330,45 @@ fn path_rules(scan: &mut Scan, path: &str) -> Result<(), CheckError> {
 }
 
 type Match = (&'static str, usize, &'static str);
-const BYTE_RULES: &[(&str, &str)] = &[
-    ("release.home-path", "personal absolute home path"),
-    ("release.private-key", "possible private key"),
-    ("release.github-token", "possible GitHub token"),
-    ("release.openai-key", "possible OpenAI key"),
-    ("release.anthropic-key", "possible Anthropic key"),
-    ("release.aws-key", "possible AWS access key"),
+// Metadata and byte patterns share one definition so matcher indices cannot drift.
+const BYTE_RULES: &[(&str, &str, &str)] = &[
+    (
+        "release.home-path",
+        "personal absolute home path",
+        r"(?-u)(?:^|[^A-Za-z0-9._-])/(?:Users|home)/[A-Za-z0-9._-]+/",
+    ),
+    // Regex syntax separates the marker parts in the executable being scanned.
+    (
+        "release.private-key",
+        "possible private key",
+        r"(?-u)-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----",
+    ),
+    (
+        "release.github-token",
+        "possible GitHub token",
+        r"(?-u)(?:^|[^A-Za-z0-9_])(?:gho_|ghp_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]{20,}(?:$|[^A-Za-z0-9_])",
+    ),
+    (
+        "release.openai-key",
+        "possible OpenAI key",
+        r"(?-u)(?:^|[^A-Za-z0-9_])sk-[A-Za-z0-9_-]{20,}(?:$|[^A-Za-z0-9_])",
+    ),
+    (
+        "release.anthropic-key",
+        "possible Anthropic key",
+        r"(?-u)(?:^|[^A-Za-z0-9_])sk-ant-[A-Za-z0-9_-]{20,}(?:$|[^A-Za-z0-9_])",
+    ),
+    (
+        "release.aws-key",
+        "possible AWS access key",
+        r"(?-u)(?:^|[^A-Za-z0-9_])AKIA[A-Z0-9]{16}(?:$|[^A-Za-z0-9_])",
+    ),
 ];
-static BYTE_MATCHERS: std::sync::LazyLock<regex::bytes::RegexSet> = std::sync::LazyLock::new(
-    || {
-        // Keep the private-key marker assembled at runtime so the scanner does
-        // not find its own literal pattern in the executable it inspects.
-        let kinds = ["", "RSA ", "EC ", "OPENSSH ", "DSA ", "ENCRYPTED "];
-        let private_key = format!("(?-u)-----BEGIN (?:{})PRIVATE KEY-----", kinds.join("|"));
-        regex::bytes::RegexSet::new([
-            r"(?-u)(?:^|[^A-Za-z0-9._-])/(?:Users|home)/[A-Za-z0-9._-]+/",
-            private_key.as_str(),
-            r"(?-u)(?:^|[^A-Za-z0-9_])(?:gho_|ghp_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]{20,}(?:$|[^A-Za-z0-9_])",
-            r"(?-u)(?:^|[^A-Za-z0-9_])sk-[A-Za-z0-9_-]{20,}(?:$|[^A-Za-z0-9_])",
-            r"(?-u)(?:^|[^A-Za-z0-9_])sk-ant-[A-Za-z0-9_-]{20,}(?:$|[^A-Za-z0-9_])",
-            r"(?-u)(?:^|[^A-Za-z0-9_])AKIA[A-Z0-9]{16}(?:$|[^A-Za-z0-9_])",
-        ])
-        .expect("release byte rules are valid")
-    },
-);
+static BYTE_MATCHERS: std::sync::LazyLock<regex::bytes::RegexSet> =
+    std::sync::LazyLock::new(|| {
+        regex::bytes::RegexSet::new(BYTE_RULES.iter().map(|(_, _, pattern)| *pattern))
+            .expect("release byte rules are valid")
+    });
 fn identity_email(identity: &str) -> Option<&str> {
     let open = identity.rfind('<')?;
     let close = identity[open + 1..].find('>')? + open + 1;
@@ -412,7 +426,7 @@ fn byte_matches(bytes: &[u8]) -> Vec<Match> {
         .matches(bytes)
         .iter()
         .map(|index| {
-            let (rule, message) = BYTE_RULES[index];
+            let (rule, message, _) = BYTE_RULES[index];
             (rule, 1, message)
         })
         .collect()
