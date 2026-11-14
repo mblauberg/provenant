@@ -72,6 +72,7 @@ fn private_state_cannot_expose_credentials_or_alias_the_source() {
     let temp = fixture();
     let mut input = request(temp.path());
     input.agy_state = None;
+    input.permissions.credential_roots = provenant_core::CredentialRoots::for_home(temp.path());
     input.permissions.private_state.as_mut().unwrap().path = temp.path().join(".gemini");
     assert!(ConfinedPlan::new(input).is_err());
 

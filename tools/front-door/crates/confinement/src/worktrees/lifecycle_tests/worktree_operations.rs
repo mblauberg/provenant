@@ -793,20 +793,25 @@ fn gitlinks_make_remove_and_prune_require_review() -> Result<(), Box<dyn Error>>
     }
     direct_poison.arm()?;
     merged_poison.arm()?;
-    assert!(matches!(
-        remove_with_port(
-            &test_context,
-            &context,
-            WorktreeRemove::Name {
-                name: "feature/direct-gitlink".to_owned(),
-                discard: false,
-                integration: None,
-                expected_head: None,
-            },
-            &cancellation,
-        ),
-        Err(WorktreeError::UnknownWriter)
-    ));
+    let refused = remove_with_port(
+        &test_context,
+        &context,
+        WorktreeRemove::Name {
+            name: "feature/direct-gitlink".to_owned(),
+            discard: false,
+            integration: None,
+            expected_head: None,
+        },
+        &cancellation,
+    );
+    // Any custody-unknown refusal is correct: the nested Git store cannot be
+    // proven, so removal must stop without running its filters.
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(WorktreeError::is_custody_unknown),
+        "{refused:?}"
+    );
     assert!(
         !direct_marker.exists(),
         "worktree removal ran a nested clean filter"
@@ -1288,14 +1293,8 @@ fn submodule_cleanup_requires_clean_retained_heads_and_surviving_git_stores()
         let fixture = Fixture::new()?;
         let owner = TestContext::new(&fixture)?;
         let context = owner.context();
-        let lane = create(
-            &context,
-            WorktreeCreate {
-                branch: "submodule-proof".into(),
-                base: None,
-            },
-            &cancel(),
-        )?;
+        // An owned lane, so only the submodule proof decides the outcome.
+        let lane = gc_owned_lane(&owner, &context, "submodule-proof")?;
         let child = lane.path.join("sub");
         fs::create_dir(&child)?;
         let store = if case == "store_inside_tree" {
@@ -1365,6 +1364,8 @@ fn submodule_cleanup_requires_clean_retained_heads_and_surviving_git_stores()
         if case == "dirty" {
             fs::write(child.join("note"), b"untracked data")?;
         }
+        let retirement = HostRetirementFixture::new(&owner)?;
+        retirement.seed_lane(&context, &lane)?;
         let policy = WorktreeGcPolicy {
             mode: CollectionMode::Worktrees,
             proof: None,
@@ -1377,18 +1378,23 @@ fn submodule_cleanup_requires_clean_retained_heads_and_surviving_git_stores()
             written_before_ns: i128::MAX,
             dry_run: false,
             include_foreign: true,
-            retirement_port: None,
-            retirement_feeds: None,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
             integration_patterns: &[],
             excluded_paths: &[],
         };
-        let _ = collect(
+        let outcome = collect(
             &context,
             &list_for_gc(&context, &cancel())?,
             &policy,
             &cancel(),
         )?;
-        assert_eq!(lane.path.exists(), case != "retained");
+        assert_eq!(
+            lane.path.exists(),
+            case != "retained",
+            "{case}: {:#?}",
+            outcome
+        );
         assert!(store.is_dir());
     }
     Ok(())

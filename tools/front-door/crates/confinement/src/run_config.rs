@@ -1153,15 +1153,10 @@ mod tests {
         assert_eq!(fields(&["/a/$HOME"]), ["writer_writes.0"]);
         assert_eq!(fields(&["/a/../b"]), ["writer_writes.0"]);
         assert_eq!(fields(&["/Users/a"]), ["writer_writes.0"]);
-        assert_eq!(
-            fields(&["/Users/a/.ssh/x", "/Users/a/p"]),
-            ["writer_writes.0"]
-        );
-        assert_eq!(fields(&["/Users/a/.aws"]), ["writer_writes.0"]);
-        assert_eq!(
-            fields(&["/Users/a/Archives/git-preservation"]),
-            ["writer_writes.0"]
-        );
+        assert_eq!(fields(&["/Users/a", "/Users/a/p"]), ["writer_writes.0"]);
+        // Credential names carry no meaning here: the declared table refuses
+        // concrete stores at launch (`validate_extra_write`).
+        assert!(fields(&["/Users/a/.ssh/x", "/Volumes/b/.aws"]).is_empty());
     }
     #[test]
     fn defaults_match_the_section_asset_and_the_compiled_list() {
@@ -1229,13 +1224,7 @@ writer_writes = []
         assert_eq!(paths("inherit"), [PathBuf::from("/host/locks")]);
         assert_eq!(paths("other"), [PathBuf::from("/host/locks")]);
         assert!(config.validate().is_empty());
-        for path in [
-            "relative",
-            "/a/b c",
-            "/a/$HOME",
-            "/a/../b",
-            "/Users/a/.ssh/x",
-        ] {
+        for path in ["relative", "/a/b c", "/a/$HOME", "/a/../b", "/Users/a"] {
             let mut bad = config.clone();
             bad.projects.get_mut("a").unwrap().writer_writes = Some(vec![path.into()]);
             assert_eq!(
@@ -1521,10 +1510,11 @@ mod policy_tests {
             assert_eq!(policy.mandatory(), &mandatory);
             assert_eq!(policy.warnings()[0].code, "type");
         }
-        // Authority settings retain their existing refusal semantics.
+        // Authority settings retain their existing refusal semantics; the
+        // credential table applies at launch, where the host home is known.
         std::fs::write(
             state.path().join("config.toml"),
-            "schema_version=1\n[domains.run]\nwriter_writes=['/fixture/home/.ssh']\n[domains.run.host_policy]\nnetwork='open'\n",
+            "schema_version=1\n[domains.run]\nwriter_writes=['relative']\n[domains.run.host_policy]\nnetwork='open'\n",
         )?;
         assert!(RunConfig::read(state.path()).is_err());
         Ok(())
@@ -1566,11 +1556,17 @@ mod policy_tests {
             .chain(roots.git())
             .chain([roots.state(), roots.source()])
         {
+            // An exact store is a file: it and every enclosing path are
+            // refused, while a "child" of it names nothing reachable.
+            let child = (root.scope == PathScope::Subtree).then(|| root.path.join("child"));
             for path in [
-                root.path.clone(),
-                root.path.join("child"),
-                root.path.parent().expect("parent").to_owned(),
-            ] {
+                Some(root.path.clone()),
+                child,
+                Some(root.path.parent().expect("parent").to_owned()),
+            ]
+            .into_iter()
+            .flatten()
+            {
                 assert!(
                     roots
                         .validate_extra_write(&PathGrant {

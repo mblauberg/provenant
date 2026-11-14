@@ -126,15 +126,22 @@ fn large_profiles_render_without_truncation() -> Result<(), Box<dyn std::error::
         path: PathBuf::from(format!("/fixture/reads/{index}/{}", "x".repeat(width))),
         scope: PathScope::Subtree,
     };
-    grants.reads = (0..1000).map(|index| root(index, 100)).collect();
-    let source = render(&grants)?;
-    for grant in &grants.reads {
-        assert!(source.contains(grant.path.to_str().expect("fixture UTF-8")));
-    }
-    grants.reads = (0..4000).map(|index| root(index, 200)).collect();
-    let expanded = render(&grants)?;
-    for grant in &grants.reads {
-        assert!(expanded.contains(grant.path.to_str().expect("fixture UTF-8")));
+    // One pass over the rendered quoted paths, not one substring scan per
+    // grant: the check stays linear in the profile size.
+    let rendered = |source: &str| {
+        source
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect::<std::collections::HashSet<_>>()
+    };
+    for (count, width) in [(1000, 100), (4000, 200)] {
+        grants.reads = (0..count).map(|index| root(index, width)).collect();
+        let paths = rendered(&render(&grants)?);
+        for grant in &grants.reads {
+            assert!(paths.contains(grant.path.to_str().expect("fixture UTF-8")));
+        }
     }
     Ok(())
 }

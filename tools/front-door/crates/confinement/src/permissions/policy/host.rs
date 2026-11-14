@@ -676,10 +676,12 @@ mod tests {
                 scope: PathScope::Exact,
             };
             assert!(mandatory.credentials().contains(&credential));
-            assert!(matches!(
-                mandatory.validate_extra_write(&credential),
-                Err(PermissionError::CredentialRootAt { .. })
-            ));
+            assert_eq!(
+                mandatory
+                    .validate_extra_write(&credential)
+                    .map_err(|error| error.boundary_class()),
+                Err(provenant_records::diagnostic::BoundaryClass::Credentials)
+            );
         }
         Ok(())
     }
@@ -1452,7 +1454,9 @@ mod tests {
             std::os::unix::fs::symlink(&target, &path)?;
             targets.push(exact(target));
         }
-        let mut credentials = endpoints[1..7]
+        // Credential meaning comes only from declarations: the registered
+        // stores, including the synthetic agy home, are declared here.
+        let mut credentials = endpoints[1..8]
             .iter()
             .map(|(store, _)| credential_store(store.clone()))
             .collect::<Vec<_>>();
@@ -1477,10 +1481,12 @@ mod tests {
                     .any(|grant| grant.path == store.join(endpoint)),
                 "endpoint must be revalidated"
             );
-            assert!(matches!(
-                inventory.validate_extra_write(target),
-                Err(PermissionError::CredentialRootAt { .. })
-            ));
+            assert_eq!(
+                inventory
+                    .validate_extra_write(target)
+                    .map_err(|error| error.boundary_class()),
+                Err(provenant_records::diagnostic::BoundaryClass::Credentials)
+            );
         }
         assert!(inventory.github().contains(&targets[8]));
         assert!(inventory.non_exempt().contains(&targets[9]));

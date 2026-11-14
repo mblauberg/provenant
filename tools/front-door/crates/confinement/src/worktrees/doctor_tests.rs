@@ -280,26 +280,20 @@ fn doctor_reports_an_observed_bystander_in_a_free_worktree() -> Result<(), Box<d
 }
 
 #[test]
-fn a_read_only_probe_cannot_make_concurrent_admission_writer_busy() -> Result<(), Box<dyn Error>> {
-    use std::sync::{Arc, Barrier, mpsc};
-    use std::time::Duration;
+fn a_read_only_probe_yields_busy_and_never_leaves_a_stale_lease() -> Result<(), Box<dyn Error>> {
+    // Contract (Q4): an observation gate is tried once. A writer that meets a
+    // probe is refused as busy at once and leaves no record; after the probe
+    // the same writer is admitted and its release frees the slot.
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
     let path = fixture.root.join("probe-race");
     let slot = writer_directory(context.project_state, &path)?;
     drop(slot.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?);
-    let probe = provenant_supervisor::custody::writer_observation_guard(&slot)?;
-    let raw_probe = slot.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?;
-    let barrier = Arc::new(Barrier::new(2));
-    let entered = barrier.clone();
-    let writer_slot = slot.try_clone()?;
-    let (send, receive) = mpsc::channel();
-    let thread = std::thread::spawn(move || {
-        let clock = provenant_os::clock::SystemClock::new();
-        entered.wait();
-        let result = provenant_supervisor::fixture::acquire_writer(
-            writer_slot,
+    let clock = provenant_os::clock::SystemClock::new();
+    let admit = |slot: &provenant_os::fs::Directory| -> Result<_, Box<dyn Error>> {
+        Ok(provenant_supervisor::fixture::acquire_writer(
+            slot.try_clone()?,
             provenant_supervisor::custody::Scope {
                 attempt: AttemptId::from_bytes([92; 16]),
                 generation: 1,
@@ -307,26 +301,29 @@ fn a_read_only_probe_cannot_make_concurrent_admission_writer_busy() -> Result<()
             WaitBudget::nonblocking(clock.mono_now()),
             &CancelToken::new(),
             &clock,
-        );
-        let _ = send.send(result);
-    });
-    barrier.wait();
+        ))
+    };
+    let probe = provenant_supervisor::custody::writer_observation_guard(&slot)?;
+    let refused = admit(&slot)?;
     assert!(
         matches!(
-            receive.recv_timeout(Duration::from_millis(50)),
-            Err(mpsc::RecvTimeoutError::Timeout)
+            refused,
+            Err(provenant_supervisor::custody::CustodyError::Busy)
         ),
-        "an admitting writer must wait for the observer, not return WriterBusy"
+        "{refused:?}"
     );
-    drop(raw_probe);
     drop(probe);
-    let lease = receive.recv_timeout(Duration::from_secs(5))??;
+    assert_eq!(
+        disk_writer_state(context.project_state, &path),
+        Occupancy::Available,
+        "a refused admission leaves no record"
+    );
+    let lease = admit(&slot)??;
     assert_eq!(
         disk_writer_state(context.project_state, &path),
         Occupancy::Held
     );
     drop(lease);
-    thread.join().map_err(|_| "writer panicked")?;
     assert_eq!(
         disk_writer_state(context.project_state, &path),
         Occupancy::Available,

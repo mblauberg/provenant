@@ -421,13 +421,15 @@ fn competing_initial_lane_claims_publish_only_one_owner() -> Result<(), Box<dyn 
                 .map_err(|_| "second claim thread panicked")?,
         ))
     })?;
-    assert!(
-        matches!(
-            (&results.0, &results.1),
-            (Ok(()), Err(WorktreeError::IdentityChanged))
-                | (Err(WorktreeError::IdentityChanged), Ok(()))
-        ),
-        "both claims must not succeed: {results:?}"
+    // Invariant: exactly one claim publishes. The loser's refusal may be a
+    // changed identity or a busy owner lock, depending on interleaving.
+    assert_eq!(
+        [results.0.is_ok(), results.1.is_ok()]
+            .iter()
+            .filter(|ok| **ok)
+            .count(),
+        1,
+        "exactly one claim must succeed: {results:?}"
     );
     let owner = load_owner(&tree)?.ok_or("missing winning owner")?;
     assert!(owner == first || owner == second);

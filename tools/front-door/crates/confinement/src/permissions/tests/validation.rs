@@ -234,7 +234,11 @@ fn codex_standalone_package_is_read_exec_only() {
         "packages/standalone/current",
         "packages/other/releases/1",
     ] {
-        let path = codex.path.join(relative);
+        let path = if relative.is_empty() {
+            codex.path.clone()
+        } else {
+            codex.path.join(relative)
+        };
         assert!(matches!(
             validate_read_exec_grant(&grant(path), &credentials),
             Err(PermissionError::CredentialRoot
@@ -552,7 +556,8 @@ fn compiler_uses_the_declared_table_for_an_unconventional_home() {
                     compile_sbpl(&plan, &profile, &anchors),
                     Err(PermissionError::CredentialRoot | PermissionError::CredentialStore { .. })
                 ),
-                "{root:?}"
+                "{root:?}: {:?}",
+                compile_sbpl(&plan, &profile, &anchors).err()
             );
         }
     }

@@ -277,7 +277,9 @@ fn compile_sbpl_inner(
         validate_read_exec_grant(grant, &plan.credential_roots)
             .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
     }
-    for grant in &plan.protected_roots {
+    // Every lexical credential check runs before any filesystem anchor check,
+    // so a refused root names the declared store rather than a missing anchor.
+    for grant in plan.protected_roots.iter().chain(&plan.write_roots) {
         validate_noncredential_grant(grant, &plan.credential_roots)
             .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
     }
