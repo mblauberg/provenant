@@ -5,7 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const DEFAULT_SOURCE_WRITES: bool = false;
+/// Lanes download and update sources in the shared host stores unless the
+/// owner turns it off; the setting and its source show in launch evidence.
+pub const DEFAULT_SOURCE_WRITES: bool = true;
 pub const SOURCE_WRITES_KNOB: &str = "domains.fabric.lanes.cargo_source_writes";
 pub const SOURCE_DIRECTORIES: &[&str] = &[
     "registry/index",
@@ -102,7 +104,7 @@ impl CargoHome {
     }
 
     pub fn source_writes(&self) -> impl Iterator<Item = PathGrant> + '_ {
-        // The opt-in covers the source stores, including Cargo's store metadata
+        // The setting covers the source stores, including Cargo's store metadata
         // and initialisation. It never widens to the Cargo home or its config.
         let stores: std::collections::BTreeSet<_> = self
             .sources()
@@ -204,7 +206,7 @@ mod tests {
             for source in binding.sources() {
                 assert_eq!(
                     writes.iter().any(|grant| grant.overlaps(&source)),
-                    setting == Some(true)
+                    setting.unwrap_or(DEFAULT_SOURCE_WRITES)
                 );
             }
             for credential in binding.credentials() {

@@ -26,12 +26,13 @@ Adapter-selected homes and launching-shell values cannot replace that binding.
 The launch's `cargo_home` diagnostic names both the path source and the effective
 `domains.fabric.lanes.cargo_source_writes` setting source.
 
-Registry index, cache and sources and Git databases and checkouts are read-only
-by default. Cargo can write only its package-cache locks and global-cache database
-(including its rollback journal). `cargo_source_writes = true` permits downloads
-and source updates; Cargo also needs open network access to fetch. The default
-runs Cargo offline; a missing dependency fails, and the Cargo shim names the knob
-and suggests fetching on the host. Cargo credentials (`credentials` and
+Lanes share the host's registry index, cache and sources and Git databases and
+checkouts, and may write them by default, so a lane fetches what it needs once for
+every later build. Cargo's package-cache locks and global-cache database (including
+its rollback journal) are always writable. Cargo runs online whenever the lane has
+open network access. `cargo_source_writes = false` makes the source stores
+read-only and runs Cargo offline; a missing dependency then fails, and the Cargo
+shim names the knob, its source and suggests fetching on the host. Cargo credentials (`credentials` and
 `credentials.toml`) remain mandatory read/write denials, including relocated homes.
 Host `config` and `config.toml` are read-only data; target seeding checks them with
 the same compiler-selection validation as checked-in Cargo configuration.

@@ -15,7 +15,7 @@ fn opencode_writer_uses_host_cargo_home_and_private_build_outputs()
     // Without Rust installed the lane keeps system tools and the resolved host Cargo home.
     let spec = prepare(&home, &plan)?;
     assert_eq!(cargo_home_path(&spec), home.join(".cargo"));
-    assert_read_only_cargo_access(&spec);
+    assert_declared_cargo_access(&spec);
     std::fs::create_dir_all(home.join(".cargo/bin"))?;
     std::fs::create_dir_all(home.join(".rustup/toolchains"))?;
     let spec = prepare(&home, &plan)?;
@@ -34,7 +34,7 @@ fn opencode_writer_uses_host_cargo_home_and_private_build_outputs()
         .and_then(|target| target.parent().map(Path::to_path_buf))
         .expect("private target cache");
     assert_eq!(env("CARGO_HOME"), Some(home.join(".cargo")));
-    assert_read_only_cargo_access(&spec);
+    assert_declared_cargo_access(&spec);
     assert_eq!(env("CARGO_TARGET_DIR"), Some(cache.join("target")));
     assert!(cache.ends_with("fixture"), "{cache:?}");
     for root in [
@@ -76,7 +76,7 @@ fn opencode_writer_uses_host_cargo_home_and_private_build_outputs()
         ]
     );
     assert_eq!(cargo_home_path(&spec), home.join(".cargo"));
-    assert_read_only_cargo_access(&spec);
+    assert_declared_cargo_access(&spec);
     Ok(())
 }
 

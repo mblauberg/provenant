@@ -1027,7 +1027,10 @@ fn a_stop_at_the_runtime_deadline_settles_as_a_typed_timeout() -> TestResult {
     };
     let record = store.finish(id, &dir, &observed, &fake, &call)?;
     let AttemptState::Terminal {
-        outcome, reason, ..
+        outcome,
+        reason,
+        extra,
+        ..
     } = record.state
     else {
         return Err("not terminal".into());
@@ -1037,6 +1040,8 @@ fn a_stop_at_the_runtime_deadline_settles_as_a_typed_timeout() -> TestResult {
         reason.as_deref(),
         Some("runtime deadline exceeded: provider stopped after 3600s")
     );
+    // The host's kill signal is the deadline, not a provider crash.
+    assert_eq!(extra.get("terminal_cause"), None);
     Ok(())
 }
 

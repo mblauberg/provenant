@@ -436,18 +436,22 @@ fn fabric_profiles_only_read_database_and_allow_only_the_attempt_socket()
 fn cargo_permissions_follow_the_declared_access_for_each_profile_case()
 -> Result<(), Box<dyn std::error::Error>> {
     let cargo = CargoHome::resolve(Path::new(HOME), |_| None)?;
-    assert!(!cargo.source_writes);
-    let tracking: Vec<_> = cargo.tracking().collect();
-    assert!(tracking.iter().all(|grant| grant.scope == PathScope::Exact));
-    let expected_writes: BTreeSet<_> = tracking
-        .iter()
-        .map(|grant| format!("(allow file-write* (literal \"{}\"))", grant.path.display()))
-        .collect();
     assert!(
         cargo
-            .sources()
-            .all(|source| { !cargo.writes().any(|write| write.overlaps(&source)) })
+            .tracking()
+            .all(|grant| grant.scope == PathScope::Exact)
     );
+    let expected_writes: BTreeSet<_> = cargo
+        .writes()
+        .map(|grant| match grant.scope {
+            PathScope::Exact => {
+                format!("(allow file-write* (literal \"{}\"))", grant.path.display())
+            }
+            PathScope::Subtree => {
+                format!("(allow file-write* (subpath \"{}\"))", grant.path.display())
+            }
+        })
+        .collect();
 
     for case in cases()? {
         let rendered = render(&case.plan, &case.profile, Path::new(HOME))?;

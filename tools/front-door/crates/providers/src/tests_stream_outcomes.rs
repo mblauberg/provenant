@@ -57,40 +57,34 @@ fn assert_cargo_credentials_ungranted(spec: &LaunchSpec) {
     }
 }
 
-fn assert_read_only_cargo_access(spec: &LaunchSpec) {
-    use provenant_confinement::permissions::{PathGrant, PathScope};
+/// The Cargo home grants follow the binding's declared access: tracking files
+/// always, the source stores exactly when source writes are on, nothing else.
+fn assert_declared_cargo_access(spec: &LaunchSpec) {
+    let binding = spec.cargo_home().expect("finalised Cargo binding");
     let home = cargo_home_path(spec);
     let receipt = spec.cargo_home_receipt();
-    assert_eq!(receipt["source_writes"], false);
+    assert_eq!(receipt["source_writes"], binding.source_writes);
     let writes = &spec.profile.spec.tool_writes;
-    let tracking: Vec<_> = provenant_confinement::cargo::TRACKING_FILES
-        .iter()
-        .map(|name| PathGrant {
-            path: home.join(name),
-            scope: PathScope::Exact,
-        })
-        .collect();
-    for grant in &tracking {
+    let declared: Vec<_> = binding.writes().collect();
+    for grant in binding.tracking().chain(binding.source_writes()) {
         assert!(
-            writes.contains(grant),
-            "Cargo tracking write grant missing: {grant:?}"
+            writes.contains(&grant),
+            "declared Cargo write grant missing: {grant:?}"
         );
     }
     for grant in writes.iter().filter(|grant| grant.path.starts_with(&home)) {
         assert!(
-            tracking.contains(grant),
+            declared.contains(grant),
             "undeclared Cargo home write grant: {grant:?}"
         );
     }
-    for name in provenant_confinement::cargo::SOURCE_DIRECTORIES {
-        let source = PathGrant {
-            path: home.join(name),
-            scope: PathScope::Subtree,
-        };
-        assert!(
-            writes.iter().all(|grant| !grant.overlaps(&source)),
-            "default Cargo source write grant: {source:?}"
-        );
+    if !binding.source_writes {
+        for source in binding.sources() {
+            assert!(
+                writes.iter().all(|grant| !grant.overlaps(&source)),
+                "Cargo source write grant while source writes are off: {source:?}"
+            );
+        }
     }
     assert_cargo_credentials_ungranted(spec);
 }
@@ -1128,7 +1122,7 @@ fn claude_network_on_enables_web_tools_and_codex_toolchain_without_writer_grants
             assert!(launch.profile.spec.deny_keychain_access);
             // Sources stay read-only by default; Cargo can update only the
             // declared tracking files. The credentials boundary remains active.
-            assert_read_only_cargo_access(&launch);
+            assert_declared_cargo_access(&launch);
             let cargo_home = cargo_home_path(&launch);
             for name in provenant_confinement::cargo::SOURCE_DIRECTORIES {
                 assert!(
@@ -1265,7 +1259,7 @@ fn claude_network_on_without_complete_rust_keeps_public_system_tools()
             )
         })?;
         assert_eq!(cargo_home_path(&launch), home.join(".cargo"));
-        assert_read_only_cargo_access(&launch);
+        assert_declared_cargo_access(&launch);
         assert!(
             launch
                 .profile
@@ -1337,7 +1331,7 @@ fn rust_less_hosts_keep_repository_execution_in_the_rendered_profile()
             _ => crate::codex::Codex.prepare(input)?,
         };
         assert_eq!(cargo_home_path(&launch), home.join(".cargo"));
-        assert_read_only_cargo_access(&launch);
+        assert_declared_cargo_access(&launch);
         let spec = &launch.profile.spec;
         assert!(
             spec.runtime_reads

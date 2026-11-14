@@ -434,7 +434,7 @@ fn claude_writer_shell_has_private_config_and_rust_tools() -> Result<(), Provide
         );
     }
     assert_eq!(cargo_home_path(&launch), Path::new("/fixture/home/.cargo"));
-    assert_read_only_cargo_access(&launch);
+    assert_declared_cargo_access(&launch);
     // Claude's env scrub drops GIT_CONFIG_GLOBAL from Bash, so scratch git is a
     // wrapper that sets it, and its directory is executable.
     assert!(launch.setup.iter().any(|step| matches!(

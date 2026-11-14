@@ -3,7 +3,9 @@ fn cargo_source_setting_controls_host_binding_grants_and_offline_mode() -> Resul
 {
     use provenant_confinement::permissions::NetworkAccess;
     let prompt = Prompt::new("fixture".into());
-    let route = route("codex", "fixture-model");
+    let mut route = route("codex", "fixture-model");
+    // The fixture passes no account, so the route names none either.
+    route.account_key = None;
     for network in [
         NetworkAccess::Provider,
         NetworkAccess::Local,
@@ -17,11 +19,13 @@ fn cargo_source_setting_controls_host_binding_grants_and_offline_mode() -> Resul
             Path::new("/fixture/repo"),
             None,
         ))?;
-        assert_read_only_cargo_access(&spec);
+        assert_declared_cargo_access(&spec);
+        // Source writes are on by default, so Cargo is online wherever the network is.
+        let offline = !provenant_confinement::cargo::DEFAULT_SOURCE_WRITES
+            || network != NetworkAccess::Open;
         assert!(
-            spec.env
-                .iter()
-                .any(|(key, value)| key == "CARGO_NET_OFFLINE" && value == "true"),
+            spec.env.iter().any(|(key, value)| key == "CARGO_NET_OFFLINE"
+                && value == offline.to_string().as_str()),
             "{network:?}"
         );
     }
@@ -34,12 +38,10 @@ fn cargo_source_setting_controls_host_binding_grants_and_offline_mode() -> Resul
     assert_eq!(home, Path::new("/fixture/custom-cargo"));
     let receipt = spec.cargo_home_receipt();
     assert_eq!(receipt["source"], "host CARGO_HOME");
-    assert_read_only_cargo_access(&spec);
-    assert!(
-        spec.env
-            .iter()
-            .any(|(key, value)| key == "CARGO_NET_OFFLINE" && value == "true")
-    );
+    assert_eq!(receipt["source_writes_source"], "compiled default");
+    assert_declared_cargo_access(&spec);
+    assert!(spec.env.iter().any(|(key, value)| key == "CARGO_NET_OFFLINE"
+        && value == (!provenant_confinement::cargo::DEFAULT_SOURCE_WRITES).to_string().as_str()));
 
     for (network, offline) in [
         (NetworkAccess::Provider, true),
@@ -88,7 +90,7 @@ fn cargo_source_setting_controls_host_binding_grants_and_offline_mode() -> Resul
             .iter()
             .any(|(key, value)| key == "CARGO_NET_OFFLINE" && value == "true")
     );
-    assert_read_only_cargo_access(&spec);
+    assert_declared_cargo_access(&spec);
     Ok(())
 }
 
@@ -127,7 +129,7 @@ fn codex_uses_host_cargo_home_with_private_build_outputs() {
     #[cfg(target_os = "macos")]
     assert!(reads.iter().any(|path| path == "/private/etc/ssl"));
     assert_eq!(cargo_home_path(&spec), Path::new("/fixture/home/.cargo"));
-    assert_read_only_cargo_access(&spec);
+    assert_declared_cargo_access(&spec);
     for dir in [
         "/fixture/home/.cargo/bin",
         "/fixture/home/.rustup/toolchains",
@@ -434,7 +436,7 @@ fn node_tool_stores_are_read_only() -> Result<(), ProviderError> {
                     .find(|(k, _)| k == key)
                     .map(|(_, v)| std::path::PathBuf::from(v))
             };
-            assert_read_only_cargo_access(&launch);
+            assert_declared_cargo_access(&launch);
             let cache = match access {
                 Access::ReadOnly => std::path::PathBuf::from("/fixture/scratch"),
                 _ => "/fixture/home/Library/Caches/provenant-lane-cargo/fixture".into(),
@@ -1329,7 +1331,7 @@ fn native_and_confined_writers_receive_the_same_seed_environment() -> Result<(),
         let launch = crate::codex::Codex.prepare(input)?;
         assert_eq!(cargo_home_path(&launch), Path::new("/fixture/home/.cargo"));
         if sandboxed {
-            assert_read_only_cargo_access(&launch);
+            assert_declared_cargo_access(&launch);
         }
         for (key, expected) in [
             (

@@ -180,8 +180,8 @@ target/build directories before seed validation.
 
 Sandboxed lanes use the minimal environment and staged skills, discover tool
 dependencies and credential aliases, and report inventory omissions in one
-actionable warning. Cargo registry and Git sources are read-only unless
-`domains.fabric.lanes.cargo_source_writes` is enabled. Cargo lock and cache-use
+actionable warning. Cargo registry and Git sources are writable unless
+`domains.fabric.lanes.cargo_source_writes` is turned off. Cargo lock and cache-use
 tracking files have exact write grants; Cargo credentials are always denied.
 The pnpm, npm and Node caches the host later runs unconfined stay read-only;
 build output and tool configuration use private lane caches.

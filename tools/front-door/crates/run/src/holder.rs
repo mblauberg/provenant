@@ -1649,7 +1649,12 @@ impl RunStore {
                 baseline_unknown,
             );
         }
-        if !cancelled && matches!(exit.termination, Some(Termination::Signal(_))) {
+        // A signal is a crash only when the host sent no stop: a deadline,
+        // budget or handoff kill keeps the stop's own cause (#3078).
+        if !cancelled
+            && exit.stop_reason.is_none()
+            && matches!(exit.termination, Some(Termination::Signal(_)))
+        {
             decoded.terminal_cause = Some(TerminalCause::ProcessCrash);
         }
         // Provider-owned session transcripts record tool output, so a printed

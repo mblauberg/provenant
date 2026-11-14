@@ -272,7 +272,11 @@ impl PrepareFixture {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
     }
     fn prepare(&self) -> Result<HostDeliveryContext> {
-        HostDeliveryContext::new(self.environment.clone()).prepare(&self.writer, &self.request)
+        // Production passes the state root explicitly, so a broken captured
+        // HOME is reported by its own environment check.
+        HostDeliveryContext::new(self.environment.clone())
+            .with_host_state(&self.root.join("state"))
+            .prepare(&self.writer, &self.request)
     }
     pub(crate) fn lane_git(
         &self,

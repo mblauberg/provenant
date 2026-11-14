@@ -1007,7 +1007,8 @@ impl LaunchSpec {
             .tool_writes
             .retain(|grant| !sources.contains(grant));
         binding.configure_source_writes(setting);
-        if !self.native_environment() && setting == Some(true) {
+        let source_writes = binding.source_writes;
+        if !self.native_environment() && source_writes {
             self.tool_requirements.writes.extend(sources.clone());
             if self.tool_requirements.applied {
                 self.profile.spec.tool_writes.extend(sources);
