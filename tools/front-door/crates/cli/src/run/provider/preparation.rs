@@ -2443,7 +2443,11 @@ pub(super) fn prepare_candidates(
     let mut refused_accounts = std::collections::BTreeSet::<(String, String)>::new();
     let mut candidate = 0usize;
     // A login resolved for one route serves every later route and the reader path.
-    let mut gh_login: Option<std::ffi::OsString> = None;
+    let mut gh_login: super::gh_auth::LoginCache = None;
+    // Whether a workflow in this checkout runs on pull request label events;
+    // the gh wrapper then says a label change starts CI (#3270).
+    let label_ci_warning =
+        publishing_gh.is_some() && provenant_config::label_events_trigger_ci(&cwd);
     loop {
         if queue.is_empty() {
             let next = if named_pool {
@@ -3024,7 +3028,9 @@ pub(super) fn prepare_candidates(
             run::lane_preamble(
                 &model_policy.guidance(),
                 &limits,
-                writer.is_some(),
+                writer
+                    .is_some()
+                    .then(|| run::ResolvedCiScope::resolve(&task.profile)),
                 writable_handoff.then_some(handoff.as_path())
             )
         );
@@ -3363,20 +3369,67 @@ pub(super) fn prepare_candidates(
             spec.configure_shell(scratch, adapter_spec);
         }
         let mut gh_attempted = false;
-        if publishing && !github_auth_permitted(&plan, &spec.profile.spec) {
+        // The one GitHub credential decision for this lane (gh_auth), with
+        // its delivery; the receipt records it below.
+        let mut gh_selection = super::gh_auth::Selection::new(
+            super::gh_auth::Delivery::None(
+                if publishing {
+                    "GitHub access not requested by this adapter"
+                } else {
+                    "publishing off or network closed"
+                }
+                .into(),
+            ),
+            false,
+        );
+        let gh_permitted = github_auth_permitted(&plan, &spec.profile.spec);
+        if publishing && !gh_permitted {
             let _ = writeln!(
                 std::io::stderr().lock(),
                 "warning: {label}: GitHub publishing credentials withheld by the access policy"
             );
+            gh_selection = super::gh_auth::Selection::new(
+                if sandbox.effective {
+                    super::gh_auth::Delivery::None("withheld by the access policy".into())
+                } else {
+                    // Nothing is injected, but an unsandboxed lane can still
+                    // read the user's login stores itself.
+                    super::gh_auth::Delivery::Ambient
+                },
+                false,
+            );
         }
+        let gh_policy = match publishing_gh
+            .as_ref()
+            .map(|_| provenant_config::GithubPolicy::read(&roots.state, project_id))
+        {
+            None => provenant_config::GithubPolicy::default(),
+            Some(Ok(policy)) => policy,
+            // Sandboxed publishing has always refused an unreadable policy.
+            Some(Err(error)) if sandbox.effective => return Err(error.to_string().into()),
+            Some(Err(error)) => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: {label}: GitHub policy unreadable, the gh wrapper applies no deny list: {error}"
+                );
+                provenant_config::GithubPolicy::default()
+            }
+        };
+        let gh_budget = limits.gh_invocations.as_ref();
+        let gh_shim = provenant_providers::GhShim {
+            policy: &gh_policy,
+            budget: gh_budget.map_or(0, |limit| limit.value),
+            budget_source: gh_budget.map_or("default", |limit| limit.source.as_str()),
+            label_ci_warning,
+        };
         if let Some(gh) = publishing_gh
             .as_ref()
-            .filter(|_| sandbox.effective && github_auth_permitted(&plan, &spec.profile.spec))
+            .filter(|_| sandbox.effective && gh_permitted)
         {
             // Resolve the login before composing gh's wrapper: token launches
             // use a private empty config directory, independent of host links.
             gh_attempted = true;
-            if let Some(warning) = super::gh_auth::inject(
+            let delivery = match super::gh_auth::inject(
                 &executor,
                 gh,
                 &home,
@@ -3385,11 +3438,13 @@ pub(super) fn prepare_candidates(
                 &mut gh_login,
                 &mut spec.env,
             ) {
-                let _ = writeln!(std::io::stderr().lock(), "warning: {label}: {warning}");
-            }
-            let policy = provenant_config::GithubPolicy::read(&roots.state, project_id)
-                .map_err(|error| error.to_string())?;
-            let publishing = spec.configure_publishing(scratch, &git, gh, &home, &policy);
+                Ok(origin) => super::gh_auth::Delivery::Injected(origin),
+                Err(warning) => {
+                    let _ = writeln!(std::io::stderr().lock(), "warning: {label}: {warning}");
+                    super::gh_auth::Delivery::None("login lookup failed".into())
+                }
+            };
+            let publishing = spec.configure_publishing(scratch, &git, gh, &home, &gh_shim);
             if let Err(error) = publishing {
                 let class = error.boundary_class();
                 if class != provenant_records::diagnostic::BoundaryClass::None {
@@ -3398,6 +3453,23 @@ pub(super) fn prepare_candidates(
                 reasons.push(setup_skip(&label, error.to_string()));
                 continue;
             }
+            gh_selection = super::gh_auth::Selection::new(delivery, true);
+        } else if let Some(gh) = publishing_gh.as_ref().filter(|_| !sandbox.effective) {
+            // An unsandboxed lane keeps the user's own gh login; the counting
+            // wrapper still fronts gh on its PATH. A wrapper that cannot be
+            // installed leaves gh unmediated, which the receipt says.
+            let mediated = match spec.configure_gh_shim(scratch, gh, &gh_shim) {
+                Ok(()) => true,
+                Err(error) => {
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "warning: {label}: gh wrapper unavailable, gh runs uncounted: {error}"
+                    );
+                    false
+                }
+            };
+            gh_selection =
+                super::gh_auth::Selection::new(super::gh_auth::Delivery::Ambient, mediated);
         }
         if git_context.is_some()
             && let Some(argument) = adapter_spec.and_then(|spec| spec.context_directory_arg)
@@ -3629,7 +3701,8 @@ pub(super) fn prepare_candidates(
             .or_else(|| reader_gh.then(|| locate("gh").ok()).flatten())
             && reader_gh
             && !gh_attempted
-            && let Some(warning) = super::gh_auth::inject(
+        {
+            let delivery = match super::gh_auth::inject(
                 &executor,
                 &gh,
                 &home,
@@ -3637,9 +3710,23 @@ pub(super) fn prepare_candidates(
                 cancel,
                 &mut gh_login,
                 &mut spec.env,
-            )
-        {
-            let _ = writeln!(std::io::stderr().lock(), "warning: {label}: {warning}");
+            ) {
+                Ok(origin) => super::gh_auth::Delivery::Injected(origin),
+                Err(warning) => {
+                    let _ = writeln!(std::io::stderr().lock(), "warning: {label}: {warning}");
+                    super::gh_auth::Delivery::None("login lookup failed".into())
+                }
+            };
+            gh_selection = super::gh_auth::Selection::new(delivery, false);
+        }
+        provider
+            .extra
+            .insert("github_credential".into(), gh_selection.receipt());
+        if writer.is_some() {
+            provider.extra.insert(
+                "ci_scope".into(),
+                run::ResolvedCiScope::resolve(&task.profile).receipt(),
+            );
         }
         if adapter_spec.is_some_and(|spec| {
             spec.github_auth == Some(provenant_records::GithubAuth::ShellEnvironment)

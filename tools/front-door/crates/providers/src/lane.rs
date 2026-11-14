@@ -154,7 +154,7 @@ impl crate::LaunchSpec {
         git: &Path,
         gh: &Path,
         home: &Path,
-        policy: &provenant_config::GithubPolicy,
+        shim: &GhShim<'_>,
     ) -> Result<(), ProviderError> {
         let text = |path: &Path| -> Result<String, ProviderError> {
             if !path.is_absolute() {
@@ -208,7 +208,13 @@ impl crate::LaunchSpec {
             },
             SetupStep::WriteExecutable {
                 path: scratch.join("bin/gh"),
-                bytes: gh_wrapper(&gh_path, &gh_config, policy).into_bytes(),
+                bytes: gh_wrapper(
+                    &gh_path,
+                    Some(&gh_config),
+                    &shell_quote(&text(&scratch.join(provenant_config::GH_INVOCATIONS_FILE))?),
+                    shim,
+                )
+                .into_bytes(),
             },
         ]);
         // Cursor and Agy do not use LaneRuntime::grant for Git.
@@ -236,6 +242,86 @@ impl crate::LaunchSpec {
             .runtime_reads
             .push(exact(Path::new(&gh_path)));
         Ok(())
+    }
+
+    /// Put the counting `gh` wrapper first on an unsandboxed lane's PATH. The
+    /// lane keeps the user's own gh configuration and login, exactly as a CLI
+    /// started by hand would; the wrapper only counts, advises and applies the
+    /// project's advisory deny list before running the host-selected `gh`.
+    pub fn configure_gh_shim(
+        &mut self,
+        scratch: &Path,
+        gh: &Path,
+        shim: &GhShim<'_>,
+    ) -> Result<(), ProviderError> {
+        let text = |path: &Path| -> Result<String, ProviderError> {
+            let value = path.to_str().ok_or(ProviderError::InvalidPath)?;
+            if !path.is_absolute() || value.chars().any(char::is_control) {
+                return Err(ProviderError::InvalidPath);
+            }
+            Ok(value.to_owned())
+        };
+        let gh_path = text(gh)?;
+        let counter = shell_quote(&text(&scratch.join(provenant_config::GH_INVOCATIONS_FILE))?);
+        let bin = scratch.join("bin");
+        let path_index = self
+            .env
+            .iter()
+            .position(|(key, _)| key == "PATH")
+            .ok_or(ProviderError::InvalidPath)?;
+        let path = &self.env[path_index].1;
+        let next_path = if std::env::split_paths(path).next().as_deref() == Some(bin.as_path()) {
+            path.clone()
+        } else {
+            std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(path)))
+                .map_err(|_| ProviderError::InvalidPath)?
+        };
+        let create = SetupStep::CreateDir(bin.clone());
+        if !self.setup.contains(&create) {
+            self.setup.push(create);
+        }
+        let wrapper = bin.join("gh");
+        self.setup.retain(
+            |step| !matches!(step, SetupStep::WriteExecutable { path, .. } if path == &wrapper),
+        );
+        self.setup.push(SetupStep::WriteExecutable {
+            path: wrapper,
+            bytes: gh_wrapper(&gh_path, None, &counter, shim).into_bytes(),
+        });
+        self.env[path_index].1 = next_path;
+        Ok(())
+    }
+}
+
+/// What the lane's `gh` wrapper does besides running the host-selected `gh`.
+/// Every part is advisory: the lane can run the real `gh` path or another
+/// API client directly, so the wrapper paces and informs, it does not bound.
+pub struct GhShim<'a> {
+    /// The project's advisory deny lists.
+    pub policy: &'a provenant_config::GithubPolicy,
+    /// Invocations after which, and at each multiple of which, the wrapper
+    /// prints one warning. 0 counts without warning.
+    pub budget: u64,
+    /// Where the budget came from, shown in the warning.
+    pub budget_source: &'a str,
+    /// A workflow in this repository runs on pull request label events, so a
+    /// label change starts CI: say so when a command changes labels.
+    pub label_ci_warning: bool,
+}
+
+impl Default for GhShim<'static> {
+    /// No deny list, the default budget, no label advisory.
+    fn default() -> Self {
+        static NO_POLICY: provenant_config::GithubPolicy = provenant_config::GithubPolicy {
+            deny_verbs: Vec::new(),
+            deny_labels: Vec::new(),
+        };
+        Self {
+            policy: &NO_POLICY,
+            budget: provenant_config::DEFAULT_GH_BUDGET,
+            budget_source: "default",
+            label_ci_warning: false,
+        }
     }
 }
 
@@ -490,8 +576,30 @@ fn install_git(
     Ok(())
 }
 
-fn gh_wrapper(gh: &str, gh_config: &str, policy: &provenant_config::GithubPolicy) -> String {
-    let mut guard = String::new();
+/// The lane's `gh` wrapper. `counter` is the quoted path of the invocation
+/// count file: one byte appended per call (`O_APPEND`, no lock), so its size
+/// is the count the host records at settlement. Only shell builtins run
+/// before the real `gh`, so a sandbox that admits `/bin/sh` admits the
+/// wrapper.
+fn gh_wrapper(gh: &str, gh_config: Option<&str>, counter: &str, shim: &GhShim<'_>) -> String {
+    let policy = shim.policy;
+    let mut guard = format!(
+        "gh_count_file={counter}\nif printf . >> \"$gh_count_file\" 2>/dev/null; then\n  gh_count_dots=\n  IFS= read -r gh_count_dots < \"$gh_count_file\" || :\n  gh_count=${{#gh_count_dots}}\n"
+    );
+    if shim.budget > 0 {
+        let warning = shell_quote(&format!(
+            "(lanes.gh_budget = {}, source: {}). The call proceeds; batch reads, avoid polling and prefer one gh api graphql query over many calls.",
+            shim.budget, shim.budget_source
+        ));
+        guard.push_str(&format!(
+            "  if [ \"$gh_count\" -gt 0 ] && [ $((gh_count % {budget})) -eq 0 ]; then\n    printf 'warning: provenant: this lane has run gh %s times %s\\n' \"$gh_count\" {warning} >&2\n  fi\n",
+            budget = shim.budget
+        ));
+    }
+    guard.push_str("fi\n");
+    if shim.label_ci_warning {
+        guard.push_str("case \"$1 $2\" in\n  'pr create'|'pr edit')\n    for gh_arg in \"$@\"; do\n      case $gh_arg in\n        --label|--label=*|--add-label|--add-label=*|--remove-label|--remove-label=*|-l|-l?*)\n          printf '%s\\n' 'warning: provenant: a pull request label change starts CI workflows in this repository; change labels only when you mean to run them' >&2\n          break ;;\n      esac\n    done ;;\nesac\n");
+    }
     for verb in &policy.deny_verbs {
         let words: Vec<_> = verb.split_whitespace().collect();
         if words.is_empty() {
@@ -516,8 +624,11 @@ fn gh_wrapper(gh: &str, gh_config: &str, policy: &provenant_config::GithubPolicy
         }
         guard.push_str("      case \"$value\" in *,*) value=${value#*,} ;; *) break ;; esac\n    done\n    shift\n  done\n}\ncheck_labels \"$@\"\n");
     }
+    let config = gh_config
+        .map(|config| format!("GH_CONFIG_DIR={config}\nexport GH_CONFIG_DIR\n"))
+        .unwrap_or_default();
     format!(
-        "#!/bin/sh\n{guard}GH_CONFIG_DIR={gh_config}\nexport GH_CONFIG_DIR\nexec {} \"$@\"\n",
+        "#!/bin/sh\n{guard}{config}exec {} \"$@\"\n",
         shell_quote(gh)
     )
 }
@@ -1695,9 +1806,20 @@ mod tests {
             deny_verbs: vec!["release create".into()],
             deny_labels: vec![" ci ".into(), "".into(), "needs review".into()],
         };
+        let counter = temp.path().join("count");
         fs::write(
             &shim,
-            gh_wrapper(real_gh.to_str().unwrap(), "'/tmp'", &policy),
+            gh_wrapper(
+                real_gh.to_str().unwrap(),
+                Some("'/tmp'"),
+                &shell_quote(counter.to_str().unwrap()),
+                &GhShim {
+                    policy: &policy,
+                    budget: 0,
+                    budget_source: "default",
+                    label_ci_warning: false,
+                },
+            ),
         )?;
         fs::set_permissions(&shim, fs::Permissions::from_mode(0o700))?;
         let executor = SystemExecutor::new(1)?;
@@ -1733,6 +1855,66 @@ mod tests {
         );
         assert!(run(&["pr", "create", "--title", "docs"])?.termination == Termination::Exit(0));
         assert!(run(&["release", "view"])?.termination == Termination::Exit(0));
+        Ok(())
+    }
+
+    /// The gh budget warns and never stops: every call runs, the count file
+    /// holds one byte per call, and a label change warns only when asked.
+    #[test]
+    fn gh_budget_counts_and_warns_without_stopping() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
+        let temp = tempfile::tempdir()?;
+        let real_gh = temp.path().join("real-gh");
+        fs::write(&real_gh, "#!/bin/sh\nexit 0\n")?;
+        fs::set_permissions(&real_gh, fs::Permissions::from_mode(0o700))?;
+        let policy = provenant_config::GithubPolicy::default();
+        let executor = SystemExecutor::new(1)?;
+        let shim_with = |name: &str, label_ci_warning: bool| -> std::io::Result<PathBuf> {
+            let shim = temp.path().join(name);
+            let counter = temp.path().join(format!("{name}.count"));
+            fs::write(
+                &shim,
+                gh_wrapper(
+                    real_gh.to_str().unwrap_or_default(),
+                    None,
+                    &shell_quote(counter.to_str().unwrap_or_default()),
+                    &GhShim {
+                        policy: &policy,
+                        budget: 2,
+                        budget_source: "launch",
+                        label_ci_warning,
+                    },
+                ),
+            )?;
+            fs::set_permissions(&shim, fs::Permissions::from_mode(0o700))?;
+            Ok(shim)
+        };
+        let run = |shim: &Path, args: &[&str]| {
+            let argv: Vec<_> = std::iter::once(shim.as_os_str().to_owned())
+                .chain(args.iter().map(OsString::from))
+                .collect();
+            executor.execute(ExecOptions::new(&argv, temp.path(), Duration::from_secs(5)))
+        };
+        let shim = shim_with("gh", false)?;
+        let mut warnings = 0;
+        for _ in 0..5 {
+            let output = run(&shim, &["pr", "edit", "1", "--add-label", "x"])?;
+            assert_eq!(output.termination, Termination::Exit(0));
+            let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+            assert!(!stderr.contains("label change"));
+            if stderr.contains("lanes.gh_budget = 2, source: launch") {
+                warnings += 1;
+            }
+        }
+        assert_eq!(warnings, 2);
+        assert_eq!(fs::metadata(temp.path().join("gh.count"))?.len(), 5);
+        let labelled = shim_with("labelled", true)?;
+        let output = run(&labelled, &["pr", "edit", "1", "--add-label", "x"])?;
+        assert_eq!(output.termination, Termination::Exit(0));
+        assert!(String::from_utf8_lossy(&output.stderr.bytes).contains("label change starts CI"));
+        let output = run(&labelled, &["pr", "view", "1"])?;
+        assert!(!String::from_utf8_lossy(&output.stderr.bytes).contains("label change"));
         Ok(())
     }
 
@@ -1779,7 +1961,12 @@ mod tests {
                 Path::new("/fixture/git/bin/git"),
                 Path::new("/fixture/gh"),
                 Path::new("/fixture/home"),
-                &provenant_config::GithubPolicy::default(),
+                &GhShim {
+                    policy: &provenant_config::GithubPolicy::default(),
+                    budget: 100,
+                    budget_source: "default",
+                    label_ci_warning: false,
+                },
             );
             assert!(
                 result.is_ok(),

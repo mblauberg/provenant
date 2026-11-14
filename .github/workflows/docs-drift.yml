@@ -7,10 +7,11 @@ on:
 
 permissions: {}
 
-# One writer updates one bot comment on the documentation epic.
+# One writer updates one bot comment on the documentation epic. A newer run
+# supersedes an older one, whose report would be stale.
 concurrency:
   group: docs-drift
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   report:

@@ -167,24 +167,40 @@ fn read_snapshot(attempt: &Directory) -> Result<Option<Handoff>> {
 /// The verification and slot-wait rules every writer lane is told. A writer's `cargo` commands
 /// that compile take one of the host's shared build slots, and a lane that
 /// stopped to report the wait cost a whole task (#2484).
-pub const BUILD_SLOT_GUIDANCE: &str = "Verification: where the repository has CI, CI runs the tests and lints on your pushed branch. Run at most one cheap compile check (`cargo check` on the one package you changed), then commit and push; do not run test suites, clippy or nextest locally, and do not restart a build that was stopped. The repository's test tiers (T0 to T3) describe what CI and a configured host run; they are not a checklist for you. A `cargo` command the host refuses because CI runs it is final: do not look for another way to run it.\nBuild slots: your `cargo` commands that compile wait for one of the host's shared build slots, and other lanes and projects hold them. A wait is normal and bounded; the command proceeds when a slot frees. Keep waiting. Do not stop, abandon the task or report review_required because a build is queued; use the time to review or plan.\n";
+pub const BUILD_SLOT_GUIDANCE: &str = "Verification: where the repository has CI, CI runs the tests and lints on pull requests and the integrated branch, not on every push; the CI scope line below says what CI, if any, you wait for. Run at most one cheap compile check (`cargo check` on the one package you changed), then commit and push; do not run test suites, clippy or nextest locally, and do not restart a build that was stopped. The repository's test tiers (T0 to T3) describe what CI and a configured host run; they are not a checklist for you. A `cargo` command the host refuses because CI runs it is final: do not look for another way to run it.\nBuild slots: your `cargo` commands that compile wait for one of the host's shared build slots, and other lanes and projects hold them. A wait is normal and bounded; the command proceeds when a slot frees. Keep waiting. Do not stop, abandon the task or report review_required because a build is queued; use the time to review or plan.\n";
 
 /// The reading rule every lane is told. Tool output stays in a lane's context and is
 /// paid for again on every later turn, so whole-file and large-range reads dominate its cost.
 pub const READING_GUIDANCE: &str = "Reading: locate before you read. Search with line numbers (`rg -n`), then read a bounded range of the lines you need; avoid whole-file `cat` or `sed` reads and unbounded `git diff` or `rg` output. Everything you print stays in your context and is paid for again on every later turn.\n";
 
-/// The text placed before a lane's task: model policy, the build-slot rule for
-/// writers only, the handoff file, then the reading rule.
+/// The text placed before a lane's task: model policy, then for writers
+/// (`ci_scope` is `Some`) the build-slot rule, the CI scope and the gh
+/// budget, then the handoff file and the reading rule.
 pub fn lane_preamble(
     model_guidance: &str,
     limits: &provenant_records::LaneLimits,
-    writer: bool,
+    ci_scope: Option<crate::ResolvedCiScope>,
     handoff: Option<&Path>,
 ) -> String {
+    let writer = ci_scope
+        .map(|scope| {
+            let budget = limits
+                .gh_invocations
+                .as_ref()
+                .map(|limit| {
+                    format!(
+                        "GitHub calls: gh commands through your gh wrapper are counted, with a warning after {} (source: {}; lanes.gh_budget). They spend the user's API quota: batch reads, do not poll, and prefer one gh api graphql query over many calls. The warning never stops a command.\n",
+                        limit.value,
+                        limit.source.as_str()
+                    )
+                })
+                .unwrap_or_default();
+            format!("{BUILD_SLOT_GUIDANCE}{}{budget}", scope.preamble())
+        })
+        .unwrap_or_default();
     format!(
-        "{model_guidance}\n{}{}{}{READING_GUIDANCE}",
+        "{model_guidance}\n{}{writer}{}{READING_GUIDANCE}",
         limits.preamble(),
-        if writer { BUILD_SLOT_GUIDANCE } else { "" },
         handoff.map(handoff_progress_guidance).unwrap_or_default()
     )
 }
@@ -206,18 +222,30 @@ mod tests {
     #[test]
     fn writer_preamble_states_the_slot_wait_rule_and_read_only_does_not() {
         let handoff = Path::new("/state/handoff.json");
-        let writer = lane_preamble("Model policy.", &Default::default(), true, Some(handoff));
+        let writer = lane_preamble(
+            "Model policy.",
+            &Default::default(),
+            Some(crate::ResolvedCiScope::resolve(&Default::default())),
+            Some(handoff),
+        );
         assert!(writer.contains("Build slots:"));
+        assert!(writer.contains("CI scope: none (source: default"));
+        assert!(!reader_has_ci_scope(handoff));
         assert!(writer.contains("Progress handoff JSON: /state/handoff.json"));
-        let reader = lane_preamble("Model policy.", &Default::default(), false, Some(handoff));
+        let reader = lane_preamble("Model policy.", &Default::default(), None, Some(handoff));
         assert!(!reader.contains("Build slots"));
         assert!(reader.starts_with("Model policy.\nProgress handoff JSON"));
         assert!(
-            !lane_preamble("Model policy.", &Default::default(), false, None)
+            !lane_preamble("Model policy.", &Default::default(), None, None)
                 .contains("handoff.json")
         );
         assert!(writer.contains("locate before you read"));
         assert!(reader.contains("locate before you read"));
+    }
+
+    fn reader_has_ci_scope(handoff: &Path) -> bool {
+        lane_preamble("Model policy.", &Default::default(), None, Some(handoff))
+            .contains("CI scope")
     }
 
     fn snapshot(status: &str) -> Vec<u8> {

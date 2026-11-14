@@ -416,7 +416,7 @@ fn cleared_preparation_injects_host_recorded_github_credentials()
     })?;
     let executor = provenant_os::exec::SystemExecutor::new(1)?;
     let mut environment = Vec::new();
-    let warning = super::gh_auth::inject(
+    let injected = super::gh_auth::inject(
         &executor,
         &gh,
         &home,
@@ -425,7 +425,7 @@ fn cleared_preparation_injects_host_recorded_github_credentials()
         &mut None,
         &mut environment,
     );
-    assert!(warning.is_none(), "{warning:?}");
+    assert!(injected.is_ok(), "{injected:?}");
     assert!(environment.contains(&("GH_TOKEN".into(), "fixture-secret".into())));
     assert!(environment.contains(&("GH_CONFIG_DIR".into(), config.into_os_string())));
     Ok(())

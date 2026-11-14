@@ -1627,7 +1627,14 @@ impl Factory {
                         Some(&context),
                         tier,
                     );
-                    writer_budgets.push(json!({"node":node.id,"tier":tier,"token_budget":token_budget,"budget_policy":policy}));
+                    writer_budgets.push(json!({
+                        "node": node.id,
+                        "tier": tier,
+                        "token_budget": token_budget,
+                        "budget_policy": policy,
+                        "gh_budget": provenant_run::gh_budget(&profile),
+                        "ci_scope": provenant_run::ResolvedCiScope::resolve(&profile).receipt(),
+                    }));
                 }
             }
             return Ok(

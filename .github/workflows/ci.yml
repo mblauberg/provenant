@@ -1,5 +1,9 @@
 name: CI
 
+# Trigger policy (#3273, #3270): pull requests, main and landing candidates
+# only. Pushes to lane branches start nothing; a lane's CI runs once its pull
+# request exists, and workflow_dispatch stays open for an explicit run.
+# `land/**` is the landing owner's candidate ref, which the land gate waits on.
 on:
   push:
     branches: [main, 'land/**']
@@ -28,6 +32,8 @@ env:
 #
 # Main runs share a separate group with cancellation disabled. The active run
 # finishes, and GitHub retains only the newest pending push for that group.
+# Cancelling there is unsafe: post-merge checks on the landed tip read a
+# cancelled ci-status as a failure, which can alarm or revert-forward.
 concurrency:
   group: ${{ github.ref == 'refs/heads/main' && format('ci-{0}-main', github.workflow) || format('ci-{0}-{1}', github.workflow, github.ref) }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}

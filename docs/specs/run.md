@@ -1162,6 +1162,49 @@ guard, not a security boundary: a lane can invoke the real `gh` directly.
   `crates/providers/src/lane.rs::github_policy_guards_labels_and_verb_prefixes`
 - Owner: `crates/config/src/github_policy.rs`; `crates/providers/src/lane.rs`
 
+## Lane GitHub credential, gh budget and CI scope
+
+Lane GitHub authority is the user's authority. Launch selects the credential
+through one seam (`CredentialSource`); today the only source is the user's own
+`gh` login, source `default`. A later minted App token is a new source, and a
+failed mint refuses rather than falling back to the user's login. Every lane's
+provider receipt records `github_credential`: identity, source, delivery
+(`injected` with the token's origin, `ambient` for an unsandboxed lane reading
+the host login, or `none` with the reason) and whether the `gh` shim mediates
+calls. Token bytes are never recorded.
+
+Unsandboxed writers with publishing also get the `gh` shim, so the deny list and
+the budget apply there too. The shim counts each call and warns on standard
+error at every multiple of `lanes.gh_budget` (default 100; 0 turns it off). It
+never stops a call. Settlement records `gh_invocations` (count, budget, source,
+over-budget) in usage. The lane can write its counter and can call the real
+`gh` or the API directly, so the count is advisory.
+
+`lanes.ci_scope` (`none`, `targeted` or `full`; default `none`, override with
+`--set attempt.ci_scope=...`) tells a writer what CI to run or wait for. The
+writer preamble states it, and the provider receipt and status show its value
+and source. It grants and removes no authority. When a repository's workflows
+run on label events, the shim warns before a `pr create` or `pr edit` that
+changes labels, because that change starts CI.
+
+CI cost is controlled in the workflow triggers, not by refusing lane calls. CI
+runs on pull requests, `main`, the landing owner's `land/**` candidates and
+manual dispatch, and superseded pull request runs are cancelled. Runs on `main`
+are not cancelled, because a cancelled run reads as a failed `ci-status` to
+post-merge follow-up.
+
+- Why (default): lanes spend the user's CI minutes and API quota under the
+  user's login; a receipt and an early warning keep that visible without new
+  refusals, and one seam lets a narrower credential replace the login later.
+- Test: `crates/cli/src/run/provider/gh_auth.rs::selection_receipt_names_identity_source_delivery_and_mediation`;
+  `crates/providers/src/lane.rs::gh_budget_counts_and_warns_without_stopping`;
+  `crates/run/src/ci_scope.rs::the_scope_and_its_source_come_from_the_sealed_profile`;
+  `crates/config/src/github_policy.rs::label_triggers_are_found_in_either_list_form_and_nothing_else`
+- Owner: `crates/cli/src/run/provider/gh_auth.rs`,
+  `crates/cli/src/run/provider/preparation.rs`, `crates/providers/src/lane.rs`,
+  `crates/run/src/ci_scope.rs`, `crates/run/src/gh_usage.rs`,
+  `.github/workflows/ci.yml`
+
 ## Writer hard-link boundary
 
 The sandbox profile carries `(deny file-link)`, so a lane cannot create a hard

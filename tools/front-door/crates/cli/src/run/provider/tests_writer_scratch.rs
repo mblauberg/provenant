@@ -1309,6 +1309,13 @@ printf 'agy 1.0.0\n'
             .any(|(key, value)| key == "GH_TOKEN" && value == "fixture-host-token")
     );
     assert!(!launch.environment.iter().any(|(key, _)| key == "GH_TOKEN"));
+    // One credential decision per lane, recorded with its source.
+    let credential = &publishing.route.extra["github_credential"];
+    assert_eq!(credential["identity"], "user");
+    assert_eq!(credential["source"], "default");
+    assert_eq!(credential["delivery"], "injected");
+    assert_eq!(credential["mediation"], "gh wrapper (advisory)");
+    assert!(!credential.to_string().contains("fixture-host-token"));
     let gh_config = publishing_paths.temporary.join("candidate-0/gh-config");
     assert!(gh_config.is_dir());
     assert!(
@@ -1320,6 +1327,7 @@ printf 'agy 1.0.0\n'
     assert_eq!(std::fs::read_dir(&gh_config)?.count(), 0);
     let gh_shim = std::fs::read_to_string(publishing_paths.temporary.join("candidate-0/bin/gh"))?;
     assert!(gh_shim.contains(gh_config.to_str().ok_or("gh config path")?));
+    assert!(gh_shim.contains(provenant_config::GH_INVOCATIONS_FILE));
     assert!(
         !gh_shim.contains(
             home.join(".config/gh")
