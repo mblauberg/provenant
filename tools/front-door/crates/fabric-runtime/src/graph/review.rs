@@ -268,6 +268,7 @@ pub(super) fn correct_verdict(
     plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     limits: &crate::config::GraphLimits,
+    worktree_layout: &provenant_config::WorktreeLayoutPort,
 ) -> Result<Option<GraphCheckpoint>, PatchError> {
     if checkpoint.cancelled || checkpoint.pause.is_some() {
         return Ok(None);
@@ -309,6 +310,7 @@ pub(super) fn correct_verdict(
             limits,
             scan: &patch::scan_for_secrets,
             journal: None,
+            worktree_layout: worktree_layout.clone(),
         },
     ) {
         // Admission is atomic: keep the failed attempt and fence further

@@ -171,6 +171,8 @@ resets or creates a worktree to satisfy a binding.
 - Why: scouts share read access while review and repair keep one immutable subject.
 - Test: `crates/fabric-runtime/src/graph/land_tests.rs::a_head_source_reviews_the_newest_continuation_and_lands_it`
 
+A relay admission stores one schema-versioned typed receipt with its request digest in the patch record; replay returns that receipt with `replayed=true`, independent of current worktree-layout configuration. A missing or malformed receipt is invalid.
+
 ### Writer continuation
 
 A writer that `continues` an upstream `pr` or `push` writer reuses its worktree

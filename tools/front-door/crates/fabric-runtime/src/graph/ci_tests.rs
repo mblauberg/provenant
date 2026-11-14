@@ -50,6 +50,9 @@ impl CiStatus for Owner {
 }
 impl AttemptOwner for Owner {
     type Error = Infallible;
+    fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+        provenant_config::PortTable::builtin().worktree_layout
+    }
     fn wall_now(&self) -> Option<provenant_core::WallTime> {
         provenant_core::WallTime::from_micros(self.wall_seconds.saturating_mul(1_000_000)).ok()
     }

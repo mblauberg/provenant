@@ -2347,6 +2347,9 @@ fn seed_graph_checkpoint(
     struct Pending(String, String);
     impl AttemptOwner for Pending {
         type Error = std::io::Error;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
         fn actor(&self) -> String {
             self.0.clone()
         }

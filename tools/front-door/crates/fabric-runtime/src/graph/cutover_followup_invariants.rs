@@ -87,6 +87,9 @@ impl CiStatus for Owner {
 }
 impl AttemptOwner for Owner {
     type Error = Infallible;
+    fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+        provenant_config::PortTable::builtin().worktree_layout
+    }
     fn actor(&self) -> String {
         "chair".into()
     }
@@ -350,8 +353,15 @@ fn depletion_keeps_the_pinned_account_and_refuses_a_higher_tier_candidate() {
         reads += 1;
         Ok(Some(facts.clone()))
     };
-    let (_, settled) = next_step::settle_stop(&document, &plan, &checkpoint, &limits, &mut lookup)
-        .expect("depletion stop must settle");
+    let (_, settled) = next_step::settle_stop(
+        &document,
+        &plan,
+        &checkpoint,
+        &limits,
+        &provenant_config::PortTable::builtin().worktree_layout,
+        &mut lookup,
+    )
+    .expect("depletion stop must settle");
     assert_eq!(reads, 1);
     assert_eq!(settled.nodes[0].state, NodeState::Failed);
     assert_eq!(
@@ -539,6 +549,8 @@ fn retry_context<'a>(
         scan: &patch::scan_for_secrets,
         journal: None,
         limits,
+
+        worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
     }
 }
 

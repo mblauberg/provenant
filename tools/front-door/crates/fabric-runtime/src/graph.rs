@@ -322,6 +322,10 @@ pub trait CiStatus {
 pub trait AttemptOwner {
     type Error: Error + 'static;
 
+    /// The worktree layout already resolved by this execution's project host.
+    /// Graph planning is pure and never probes the filesystem or selects a layout.
+    fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort;
+
     /// Read the admitted successor of a terminal attempt, without replacing
     /// the predecessor's identity or submitting another operation.
     fn continuation(
@@ -1131,6 +1135,7 @@ fn settle_stopped_writer<R: AttemptOwner, J: GraphJournal>(
     plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     limits: &crate::config::GraphLimits,
+    worktree_layout: &provenant_config::WorktreeLayoutPort,
 ) -> Result<
     Option<(
         GraphCheckpoint,
@@ -1145,9 +1150,14 @@ fn settle_stopped_writer<R: AttemptOwner, J: GraphJournal>(
             .depletion_facts(request)
             .map_err(|error| error.to_string())
     };
-    let Some((index, next)) =
-        next_step::settle_stop(document, plan, checkpoint, limits, &mut ladder)
-    else {
+    let Some((index, next)) = next_step::settle_stop(
+        document,
+        plan,
+        checkpoint,
+        limits,
+        worktree_layout,
+        &mut ladder,
+    ) else {
         return Ok(None);
     };
     let planned =
@@ -1330,6 +1340,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     extensions: &[String],
     observed_ci: &mut std::collections::BTreeSet<String>,
 ) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
+    let worktree_layout = owner.worktree_layout();
     let mut admission_policy = None::<provenant_records::policy::Policy>;
     let unbounded = crate::config::GraphLimits {
         nodes: usize::MAX,
@@ -1436,6 +1447,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         scan: &patch::scan_for_secrets,
                         journal: None,
                         limits,
+                        worktree_layout: worktree_layout.clone(),
                     },
                 )
                 .map_err(|error| GraphError::Invalid(error.to_string()))?;
@@ -1711,8 +1723,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
             continue 'schedule;
         }
-        if let Some(next) = review::correct_verdict(document, &plan, &checkpoint, limits)
-            .map_err(|error| GraphError::Refused(error.to_string()))?
+        if let Some(next) =
+            review::correct_verdict(document, &plan, &checkpoint, limits, &worktree_layout)
+                .map_err(|error| GraphError::Refused(error.to_string()))?
         {
             let next_expanded = plans::expand(document, &next.extensions, &next.expansions, limits)
                 .map_err(|error| GraphError::Invalid(error.to_string()))?;
@@ -1727,9 +1740,14 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             resume = false;
             continue 'schedule;
         }
-        if let Some((next, next_expanded, next_plan, next_positions)) =
-            settle_stopped_writer::<R, J>(document, owner, &plan, &checkpoint, limits)?
-        {
+        if let Some((next, next_expanded, next_plan, next_positions)) = settle_stopped_writer::<R, J>(
+            document,
+            owner,
+            &plan,
+            &checkpoint,
+            limits,
+            &worktree_layout,
+        )? {
             // A stop saved by an earlier host, or one the chair resumed.
             journal.save(&next).map_err(GraphError::Journal)?;
             checkpoint = next;
@@ -1767,8 +1785,15 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     .as_ref()
                                     .is_some_and(|spec| spec.fallback.is_some())))
                 })
-                && let Some((next_expanded, next_plan, next_positions)) =
-                    plans::settle(node, document, &expanded, &mut checkpoint, None, limits)
+                && let Some((next_expanded, next_plan, next_positions)) = plans::settle(
+                    node,
+                    document,
+                    &expanded,
+                    &mut checkpoint,
+                    None,
+                    limits,
+                    &worktree_layout,
+                )
             {
                 validate_expanded_rows(&checkpoint, &next_plan)?;
                 owner
@@ -2076,6 +2101,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                         scan: &patch::scan_for_secrets,
                                         journal: None,
                                         limits,
+                                        worktree_layout: worktree_layout.clone(),
                                     };
                                     let mut prospective = checkpoint.clone();
                                     let change = repair::panel_patch(
@@ -3296,6 +3322,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         &mut checkpoint,
                         node_index,
                         limits,
+                        &worktree_layout,
                     )
                     .map_err(GraphError::Refused)?;
                     journal.save(&checkpoint).map_err(GraphError::Journal)?;
@@ -3318,6 +3345,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         &mut checkpoint,
                         settled_result.as_deref(),
                         limits,
+                        &worktree_layout,
                     )
                 } else {
                     None
@@ -3331,7 +3359,14 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 // Save a writer's stop in the same transition as its restart
                 // or chair pause: a stop saved alone reads as settled work.
                 let stopped = if appended.is_none() {
-                    settle_stopped_writer::<R, J>(document, owner, &plan, &checkpoint, limits)?
+                    settle_stopped_writer::<R, J>(
+                        document,
+                        owner,
+                        &plan,
+                        &checkpoint,
+                        limits,
+                        &worktree_layout,
+                    )?
                 } else {
                     None
                 };
@@ -3382,6 +3417,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     &mut checkpoint,
                     None,
                     limits,
+                    &worktree_layout,
                 )
             {
                 validate_expanded_rows(&checkpoint, &next_plan)?;

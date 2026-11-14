@@ -29,6 +29,8 @@ pub struct Context {
     pub roots: Roots,
     pub identity: Identity,
     pub config: FabricConfig,
+    /// Project ports resolved once from the discovered project root.
+    pub port_table: provenant_config::PortTable,
     /// Origin captured with the effective graph configuration.
     pub graph_prompt_limit_source: provenant_fabric_runtime::graph::InputCapSource,
     pub graph_decide_timeout_source: provenant_fabric_runtime::graph::DecideTimeoutSource,
@@ -271,6 +273,11 @@ impl Context {
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
+        let project_root = discovered
+            .repository
+            .as_ref()
+            .map_or(discovered.location.common_dir(), |repo| repo.root_path());
+        let port_table = provenant_config::PortTable::read_project(project_root)?;
         let binding = if lane {
             provenant_config::lookup_project(&roots, &discovered.location)?
                 .ok_or(EdgeError::Invalid)?
@@ -302,6 +309,7 @@ impl Context {
             roots,
             identity,
             config,
+            port_table,
             graph_prompt_limit_source,
             graph_decide_timeout_source,
             in_lane: lane,
@@ -321,6 +329,11 @@ impl Context {
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
+        let project_root = discovered
+            .repository
+            .as_ref()
+            .map_or(discovered.location.common_dir(), |repo| repo.root_path());
+        let port_table = provenant_config::PortTable::read_project(project_root)?;
         let binding = provenant_config::lookup_project(&roots, &discovered.location)?
             .ok_or(EdgeError::Invalid)?;
         let host = provenant_config::lookup_host(&roots)?.ok_or(EdgeError::Invalid)?;
@@ -347,6 +360,7 @@ impl Context {
             roots,
             identity,
             config,
+            port_table,
             graph_prompt_limit_source,
             graph_decide_timeout_source,
             in_lane: in_lane(),
@@ -367,6 +381,11 @@ impl Context {
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
+        let project_root = discovered
+            .repository
+            .as_ref()
+            .map_or(discovered.location.common_dir(), |repo| repo.root_path());
+        let port_table = provenant_config::PortTable::read_project(project_root)?;
         let state_present = roots.state.as_path().try_exists()?;
         let binding = if state_present {
             provenant_config::lookup_project(&roots, &discovered.location)?
@@ -407,6 +426,7 @@ impl Context {
             roots,
             identity,
             config,
+            port_table,
             graph_prompt_limit_source,
             graph_decide_timeout_source,
             in_lane: in_lane(),
@@ -424,6 +444,7 @@ impl Context {
     ) -> Result<Self, EdgeError> {
         // Its working directory is the project's, as if started there.
         let cwd = binding.common_dir().parent().ok_or(EdgeError::Invalid)?;
+        let port_table = provenant_config::PortTable::read_project(cwd)?;
         let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
@@ -448,6 +469,7 @@ impl Context {
             roots,
             identity,
             config,
+            port_table,
             graph_prompt_limit_source,
             graph_decide_timeout_source,
             in_lane: in_lane(),

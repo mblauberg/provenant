@@ -34,10 +34,22 @@ fn submitted_implementation_preserves_its_compiled_topology_across_replays() {
                 "provenance":{"parameters":{"bounded":false}}
             }))
             .unwrap();
-            patch::submission(&mut document, "initial", &limits).unwrap();
+            patch::submission(
+                &mut document,
+                "initial",
+                &limits,
+                provenant_config::PortTable::builtin().worktree_layout,
+            )
+            .unwrap();
             let expected = document.nodes.clone();
             for replay in 0..=2 {
-                patch::submission(&mut document, &format!("round-{replay}"), &limits).unwrap();
+                patch::submission(
+                    &mut document,
+                    &format!("round-{replay}"),
+                    &limits,
+                    provenant_config::PortTable::builtin().worktree_layout,
+                )
+                .unwrap();
                 let submitted: patch::Patch =
                     serde_json::from_value(document.extra["submission_patch"].clone()).unwrap();
                 let resolvers = Default::default();
@@ -47,6 +59,8 @@ fn submitted_implementation_preserves_its_compiled_topology_across_replays() {
                     scan: &patch::scan_for_secrets,
                     journal: None,
                     limits: &limits,
+
+                    worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
                 };
                 document = patch::submit(&document.graph_id, &submitted, &context, None).unwrap();
                 assert_eq!(

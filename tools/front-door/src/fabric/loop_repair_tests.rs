@@ -16,6 +16,9 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
     }
     impl AttemptOwner for RoundOwner<'_, '_> {
         type Error = FacadeError;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
         fn actor(&self) -> String {
             self.bound.actor()
         }
@@ -73,7 +76,7 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
             lane_depth: 1,
             parent_attempt: None,
             task: provenant_run::DispatchTask {
-                    source_head: None,
+                source_head: None,
                 context: Some(provenant_records::run::WorkContext {
                     graph_id: Some("loop-settlement".into()),
                     node_id: Some("revise--r2--repair".into()),
@@ -87,7 +90,8 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
                 pinned_base: None,
                 head: None,
                 profile: Default::default(),
-                route: provenant_run::RequestedRoute::Model {extra: Default::default(),
+                route: provenant_run::RequestedRoute::Model {
+                    extra: Default::default(),
                     provider: "fixture".into(),
                     model: "fixture/model".into(),
                     effort: None,
@@ -120,16 +124,23 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
         &cancel,
         &factory.clock,
     )?;
-    journal.bind(graph::GraphExecution {review_base: None, extra: Default::default(),
+    journal.bind(graph::GraphExecution {
+        review_base: None,
+        extra: Default::default(),
         integration_base: None,
         directory: fixture.rig.project.clone(),
         document: document.clone(),
     })?;
-    let mut bound = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
+    let mut bound = BoundGraphOwner {
+        writer_launch_budget: None,
+        admission_timeout: None,
+        launch_warnings: Vec::new(),
+        repo_facts: Default::default(),
         integration_branch: None,
         factory: &factory,
         integration_base: None,
-        network: None, capability_overrides: Default::default(),
+        network: None,
+        capability_overrides: Default::default(),
         exclude: Vec::new(),
         budget,
         cancel: &cancel,
@@ -259,11 +270,16 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
         actor: &actor,
         ask: &ask,
     };
-    let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
+    let mut owner = BoundGraphOwner {
+        writer_launch_budget: None,
+        admission_timeout: None,
+        launch_warnings: Vec::new(),
+        repo_facts: Default::default(),
         integration_branch: None,
         factory: &factory,
         integration_base: None,
-        network: None, capability_overrides: Default::default(),
+        network: None,
+        capability_overrides: Default::default(),
         exclude: Vec::new(),
         budget,
         cancel: &cancel,
@@ -282,16 +298,15 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
         timeout: ask.timeout,
         request: filed.request,
     };
-    let scope = AskScope { actor: &actor, ask: &link };
+    let scope = AskScope {
+        actor: &actor,
+        ask: &link,
+    };
     assert_eq!(owner.node_ask(scope)?, None);
-    let service = InboxService::open(
-        &fixture.roots.state,
-        &original,
-        &factory.clock,
-        &cancel,
-    )?;
+    let service = InboxService::open(&fixture.roots.state, &original, &factory.clock, &cancel)?;
     let InboxResult::Listed { items, .. } = service.execute(
-        InboxInput::List {extra: Default::default(),
+        InboxInput::List {
+            extra: Default::default(),
             id: None,
             session: Some(ask.session.clone()),
             state: InboxFilter::All,
@@ -307,7 +322,8 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
     let ask = &items[0];
     assert_eq!(ask.chair_actor, original.inbox.actor);
     service.execute(
-        InboxInput::Answer {extra: Default::default(),
+        InboxInput::Answer {
+            extra: Default::default(),
             id: ask.id,
             action: AnswerAction::Choose,
             option_id: Some("accept".into()),
@@ -323,7 +339,8 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
     assert_eq!(reply.actor, actor);
     owner.close_node_ask(scope)?;
     let InboxResult::Item { item, .. } = service.execute(
-        InboxInput::List {extra: Default::default(),
+        InboxInput::List {
+            extra: Default::default(),
             id: Some(ask.id),
             session: None,
             state: InboxFilter::All,

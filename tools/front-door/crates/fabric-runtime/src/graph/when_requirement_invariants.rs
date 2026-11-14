@@ -19,6 +19,9 @@ impl GraphJournal for Journal {
 struct Owner;
 impl AttemptOwner for Owner {
     type Error = std::convert::Infallible;
+    fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+        provenant_config::PortTable::builtin().worktree_layout
+    }
     fn actor(&self) -> String {
         "chair".into()
     }

@@ -223,6 +223,7 @@ pub fn serve_with_read(
                 resolvers: &resolvers,
                 scan: &scan_for_secrets,
                 limits: &context.config.graph.limits,
+                worktree_layout: context.port_table.worktree_layout.clone(),
             };
             fn needs_parent_source(node: &Value) -> bool {
                 (node["access"] == "worktree_write"
@@ -395,6 +396,7 @@ pub fn serve_with_read(
                     resolvers: &resolvers,
                     scan: &scan_for_secrets,
                     limits: &context.config.graph.limits,
+                    worktree_layout: context.port_table.worktree_layout.clone(),
                 },
             )
             .map_err(patch_refused)?;
@@ -2559,6 +2561,8 @@ mod panel_tests {
                 limits: &limits,
                 scan: &|_| Ok(()),
                 journal: None,
+
+                worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
             },
         )
         .expect("relay resolvers expand the complete review composite");

@@ -177,6 +177,7 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
         &mut execution.document,
         "origin-lost-reply",
         &origin.context.config.graph.limits,
+        origin.context.port_table.worktree_layout.clone(),
     )?;
     struct LostReplyOwner {
         actor: String,
@@ -184,6 +185,9 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
     }
     impl graph::AttemptOwner for LostReplyOwner {
         type Error = FacadeError;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
         fn actor(&self) -> String {
             self.actor.clone()
         }

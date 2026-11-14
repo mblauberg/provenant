@@ -59,7 +59,12 @@ fn quota_alias_redraw_uses_graph_retry_keeps_spent_models_and_is_bounded() {
             .unwrap();
             assert_eq!(status.checkpoint.nodes[0].state, NodeState::Failed);
             assert!(owner.attempt_numbers.iter().all(Option::is_some));
-            assert!(owner.attempt_numbers.windows(2).all(|pair| pair[0] < pair[1]));
+            assert!(
+                owner
+                    .attempt_numbers
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+            );
             assert_eq!(owner.calls.len(), 3);
             assert!(owner.calls.iter().all(|(_, route)| route == &alias));
             assert_ne!(owner.calls[0].0, owner.calls[1].0);
@@ -79,7 +84,12 @@ fn quota_alias_redraw_uses_graph_retry_keeps_spent_models_and_is_bounded() {
             assert_eq!(checkpoint.nodes[0].extra["quota_redraw_spent"], 2);
             // The bound and the retained alias prove no extra route launch;
             // the denial's wording depends on launch eligibility, not budget.
-            assert!(checkpoint.nodes[0].attempts.iter().all(|attempt| attempt.route == alias));
+            assert!(
+                checkpoint.nodes[0]
+                    .attempts
+                    .iter()
+                    .all(|attempt| attempt.route == alias)
+            );
         }
     }
 }
@@ -377,7 +387,12 @@ fn typed_delta_verifier_can_falsify_a_previously_upheld_finding() {
     let document = graph(vec![node("prior", route("fixture")), verify]);
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     let output = run.checkpoint.nodes[1].outputs.as_ref().unwrap();
-    assert_eq!(run.checkpoint.nodes[1].state, NodeState::Succeeded, "{:?}", run.checkpoint.nodes[1].advance_error);
+    assert_eq!(
+        run.checkpoint.nodes[1].state,
+        NodeState::Succeeded,
+        "{:?}",
+        run.checkpoint.nodes[1].advance_error
+    );
     assert_eq!(output.findings[0].extra["verification"], "falsified");
     assert_eq!(output.findings[0].extra["propagates"], "prior:F1");
     assert_eq!(output.verdict.as_deref(), Some("VERDICT: PASS"));
@@ -426,19 +441,42 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
     }
     impl AttemptOwner for ContendedOwner {
         type Error = FacadeError;
-        fn actor(&self) -> String { "fixture".into() }
-        fn wall_now(&self) -> Option<provenant_core::WallTime> { Some(self.now) }
-        fn launch_retry_policy(&self) -> LaunchRetryPolicy {
-            LaunchRetryPolicy { limit: 0, ..Default::default() }
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
         }
-        fn bind_writer_worktree(&mut self, path: &str) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
+        fn actor(&self) -> String {
+            "fixture".into()
+        }
+        fn wall_now(&self) -> Option<provenant_core::WallTime> {
+            Some(self.now)
+        }
+        fn launch_retry_policy(&self) -> LaunchRetryPolicy {
+            LaunchRetryPolicy {
+                limit: 0,
+                ..Default::default()
+            }
+        }
+        fn bind_writer_worktree(
+            &mut self,
+            path: &str,
+        ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
             self.contend(0)?;
             Ok(self.binding(path))
         }
-        fn resolve_creation_base(&mut self, _: &str, _: &str, _: bool) -> Result<Option<String>, Self::Error> {
+        fn resolve_creation_base(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: bool,
+        ) -> Result<Option<String>, Self::Error> {
             Ok(Some("a".repeat(40)))
         }
-        fn provision_writer_worktree(&mut self, path: &str, _: &str, _: &str) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
+        fn provision_writer_worktree(
+            &mut self,
+            path: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
             self.contend(1)?;
             Ok(self.binding(path))
         }
@@ -446,7 +484,15 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
             self.contend(2)?;
             Ok(true)
         }
-        fn observe_or_start(&mut self, _: &AttemptKey, _: NodeInput<'_>, _: &GraphRoute, _: AccessMode, _: Option<&str>, _: Replay<'_>) -> Result<AttemptObservation, Self::Error> {
+        fn observe_or_start(
+            &mut self,
+            _: &AttemptKey,
+            _: NodeInput<'_>,
+            _: &GraphRoute,
+            _: AccessMode,
+            _: Option<&str>,
+            _: Replay<'_>,
+        ) -> Result<AttemptObservation, Self::Error> {
             Ok(terminal(AttemptOutcome::Succeeded))
         }
     }
@@ -455,16 +501,27 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
         writer.access = AccessMode::WorktreeWrite;
         writer.worktree = Some(".worktrees/topic-fix".into());
         if phase == 1 {
-            writer.attempt = Some(serde_json::from_value(serde_json::json!({
-                "new_worktree":{"branch":"topic/fix","base":"main"}
-            })).unwrap());
+            writer.attempt = Some(
+                serde_json::from_value(serde_json::json!({
+                    "new_worktree":{"branch":"topic/fix","base":"main"}
+                }))
+                .unwrap(),
+            );
         } else if phase == 2 {
-            writer.extra.insert("provision_worktree".into(), true.into());
-            writer.source = Some(SourceBinding::Commit { commit: "a".repeat(40) });
+            writer
+                .extra
+                .insert("provision_worktree".into(), true.into());
+            writer.source = Some(SourceBinding::Commit {
+                commit: "a".repeat(40),
+            });
         }
         let mut document = graph(vec![writer]);
         document.schema_version = 2;
-        let mut owner = ContendedOwner { phase, calls: 0, now: at(0) };
+        let mut owner = ContendedOwner {
+            phase,
+            calls: 0,
+            now: at(0),
+        };
         let mut journal = MemoryJournal::default();
         if phase == 2 {
             // Relay children reach provisioning after their graph checkpoint
@@ -472,17 +529,25 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
             // an existing checkout and bypassing the child-creation path.
             let (plan, _) = validate_plan(&document).unwrap();
             let digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &plan)
-                .unwrap().to_string();
-            let mut checkpoint = transitions::initial_checkpoint(
-                &document, &plan, digest, None, None, None, None,
-            );
+                .unwrap()
+                .to_string();
+            let mut checkpoint =
+                transitions::initial_checkpoint(&document, &plan, digest, None, None, None, None);
             transitions::record_provisioning(
-                &plan.nodes[0], &mut checkpoint, 0, ".worktrees/topic-fix", &"a".repeat(40),
+                &plan.nodes[0],
+                &mut checkpoint,
+                0,
+                ".worktrees/topic-fix",
+                &"a".repeat(40),
             );
             journal.0 = Some(checkpoint);
         }
         let first = advance(&document, &mut owner, &mut journal).unwrap();
-        assert_eq!(first.checkpoint.nodes[0].state, NodeState::Running, "phase {phase}");
+        assert_eq!(
+            first.checkpoint.nodes[0].state,
+            NodeState::Running,
+            "phase {phase}"
+        );
         assert!(first.checkpoint.nodes[0].attempts.is_empty());
         assert_eq!(retry_of(&first.checkpoint).deadline, Some(at(3600)));
         assert_eq!(first.checkpoint.wake_at, Some(at(5)));
@@ -493,7 +558,8 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
         // proof. Missing or inconsistent retry facts must still be refused.
         let (plan, _) = validate_plan(&document).unwrap();
         let digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &plan)
-            .unwrap().to_string();
+            .unwrap()
+            .to_string();
         let corruptions: [fn(&mut NodeProgress); 8] = [
             |progress| progress.launch_retry = None,
             |progress| progress.launch_retry.as_mut().unwrap().failures = 0,
@@ -507,12 +573,15 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
         for (case, corrupt) in corruptions.iter().enumerate() {
             let mut invalid = first.checkpoint.clone();
             corrupt(&mut invalid.nodes[0]);
-            assert!(matches!(
-                validate_checkpoint::<FacadeError, std::convert::Infallible>(
-                    &document, &invalid, &plan, &digest,
+            assert!(
+                matches!(
+                    validate_checkpoint::<FacadeError, std::convert::Infallible>(
+                        &document, &invalid, &plan, &digest,
+                    ),
+                    Err(GraphError::BadCheckpoint { .. })
                 ),
-                Err(GraphError::BadCheckpoint { .. })
-            ), "phase {phase}, malformed wait {case}");
+                "phase {phase}, malformed wait {case}"
+            );
         }
         let calls = owner.calls;
         owner.now = at(1);
@@ -520,7 +589,11 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
         assert_eq!(owner.calls, calls, "binding must honour its persisted wake");
         owner.now = at(5);
         let done = advance(&document, &mut owner, &mut journal).unwrap();
-        assert_eq!(done.checkpoint.nodes[0].state, NodeState::Succeeded, "phase {phase}");
+        assert_eq!(
+            done.checkpoint.nodes[0].state,
+            NodeState::Succeeded,
+            "phase {phase}"
+        );
         assert_eq!(done.checkpoint.nodes[0].attempts.len(), 1);
         assert!(relay::pending_provisioning(&done.checkpoint).is_empty());
     }

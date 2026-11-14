@@ -16,6 +16,9 @@ struct Provider {
 }
 impl AttemptOwner for Provider {
     type Error = std::io::Error;
+    fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+        provenant_config::PortTable::builtin().worktree_layout
+    }
     fn actor(&self) -> String {
         "relay-fixture".into()
     }

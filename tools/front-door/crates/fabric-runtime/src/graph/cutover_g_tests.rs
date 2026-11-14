@@ -68,9 +68,14 @@ fn chair_bound_depletion_reads_facts_once_across_passes() {
         Ok(None)
     };
     for _ in 0..10 {
-        if let Some((_, next)) =
-            next_step::settle_stop(&document, &plan, &checkpoint, &limits, &mut facts)
-        {
+        if let Some((_, next)) = next_step::settle_stop(
+            &document,
+            &plan,
+            &checkpoint,
+            &limits,
+            &provenant_config::PortTable::builtin().worktree_layout,
+            &mut facts,
+        ) {
             checkpoint = next;
         }
     }

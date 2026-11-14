@@ -1198,6 +1198,7 @@ impl Factory {
             scan: &patch::scan_for_secrets,
             journal: None,
             limits: &self.context.config.graph.limits,
+            worktree_layout: self.context.port_table.worktree_layout.clone(),
         };
         let template_name = input["template"]
             .as_str()
@@ -1564,6 +1565,7 @@ impl Factory {
             &mut document,
             &submission_key,
             &self.context.config.graph.limits,
+            self.context.port_table.worktree_layout.clone(),
         )
         .map_err(graph_patch_error)?;
         // Patch admission scans nodes and parameters. Graph-wide metadata is
@@ -1801,6 +1803,7 @@ impl Factory {
                 scan: &patch::scan_for_secrets,
                 journal: None,
                 limits: &self.context.config.graph.limits,
+                worktree_layout: self.context.port_table.worktree_layout.clone(),
             },
         )
         .map_err(graph_input_reason)?;
@@ -1906,6 +1909,7 @@ impl Factory {
                     scan: &patch::scan_for_secrets,
                     journal: None,
                     limits: &self.context.config.graph.limits,
+                    worktree_layout: self.context.port_table.worktree_layout.clone(),
                 },
             )
             .map_err(retry_patch_error)?;
@@ -2919,8 +2923,7 @@ mod tests {
             std::path::PathBuf::from(".claude/worktrees"),
             std::path::PathBuf::from(".worktrees"),
         ];
-        ports.worktree_layout.default =
-            std::path::PathBuf::from(".claude/worktrees/<branch>");
+        ports.worktree_layout.default = std::path::PathBuf::from(".claude/worktrees/<branch>");
         std::fs::write(
             project.path().join(provenant_config::PORTS_CONFIG),
             serde_json::to_vec(&ports)?,
@@ -3144,6 +3147,9 @@ mod tests {
         struct Reviewer(usize);
         impl AttemptOwner for Reviewer {
             type Error = std::convert::Infallible;
+            fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+                provenant_config::PortTable::builtin().worktree_layout
+            }
             fn actor(&self) -> String {
                 "review-fixture".into()
             }
@@ -3768,6 +3774,9 @@ mod tests {
         struct Waiting;
         impl AttemptOwner for Waiting {
             type Error = std::convert::Infallible;
+            fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+                provenant_config::PortTable::builtin().worktree_layout
+            }
             fn actor(&self) -> String {
                 "checkpoint-fixture".into()
             }
@@ -4739,6 +4748,9 @@ mod tests {
         }
         impl AttemptOwner for Owner {
             type Error = std::convert::Infallible;
+            fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+                provenant_config::PortTable::builtin().worktree_layout
+            }
             fn actor(&self) -> String {
                 "template-review-fixture".into()
             }

@@ -63,8 +63,14 @@ fn decide_answer_becomes_the_verdict_and_routes_the_chosen_edge() {
     assert_eq!(ask.kind, AskKind::Decide);
     assert_eq!(ask.session, "chair-session");
     assert_eq!(ask.request, "choose.ask-1");
-    assert_eq!(ask.timeout.unwrap().seconds, crate::config::DEFAULT_DECIDE_TIMEOUT_SECONDS);
-    assert_eq!(ask.timeout.unwrap().source, DecideTimeoutSource::DomainDefault);
+    assert_eq!(
+        ask.timeout.unwrap().seconds,
+        crate::config::DEFAULT_DECIDE_TIMEOUT_SECONDS
+    );
+    assert_eq!(
+        ask.timeout.unwrap().source,
+        DecideTimeoutSource::DomainDefault
+    );
     assert!(owner.filed[0].body.contains("Ship the change?"));
     assert_eq!(ask.wake_at, waiting.checkpoint.wake_at);
     assert!(ask.wake_at.is_some());
@@ -177,7 +183,10 @@ fn decide_reply_text_naming_an_option_is_accepted_and_other_text_asks_again() {
 #[test]
 fn decide_ids_stay_unique_across_repeated_cancel_and_resume() {
     let document = routed(None);
-    let mut owner = FakeOwner { now: Some(at(0)), ..Default::default() };
+    let mut owner = FakeOwner {
+        now: Some(at(0)),
+        ..Default::default()
+    };
     let mut journal = MemoryJournal::default();
     advance(&document, &mut owner, &mut journal).unwrap();
     for _ in 0..2 {
@@ -368,9 +377,7 @@ fn decide_inbox_error_at_deadline_keeps_the_ask_open_for_each_default() {
         assert_ne!(state(&unread, "ship-work"), NodeState::Succeeded);
         assert_ne!(state(&unread, "hold-work"), NodeState::Succeeded);
 
-        owner
-            .answers
-            .insert(ask_id, reply(Some("ship"), None));
+        owner.answers.insert(ask_id, reply(Some("ship"), None));
         let answered = advance(&document, &mut owner, &mut journal).unwrap();
         assert_eq!(answered.status, GraphStatus::Complete);
         assert_eq!(state(&answered, "ship-work"), NodeState::Succeeded);
@@ -471,7 +478,10 @@ fn decide_timeout_persists_wake_at_and_takes_the_default() {
     assert_eq!(waiting.checkpoint.wake_at, Some(at(60)));
     assert_eq!(owner.filed[0].default.as_deref(), Some("hold"));
     assert_eq!(owner.filed[0].wake_at, Some(at(60)));
-    assert_eq!(owner.filed[0].timeout.unwrap().source, DecideTimeoutSource::Graph);
+    assert_eq!(
+        owner.filed[0].timeout.unwrap().source,
+        DecideTimeoutSource::Graph
+    );
     assert!(owner.filed[0].body.contains("from the decide declaration"));
     assert_eq!(journal.0.as_ref().unwrap().wake_at, Some(at(60)));
     owner.now = Some(at(59));
@@ -556,7 +566,10 @@ fn decide_nodes_run_inside_loop_bodies_once_per_round() {
         ]
     }))
     .unwrap();
-    let mut owner = FakeOwner { now: Some(at(0)), ..Default::default() };
+    let mut owner = FakeOwner {
+        now: Some(at(0)),
+        ..Default::default()
+    };
     owner
         .answers
         .insert("revise--r1--choose.ask-1".into(), reply(Some("hold"), None));
@@ -775,7 +788,6 @@ fn a_planner_fragment_can_add_a_decide_node() {
     assert_eq!(owner.calls.len(), 2);
 }
 
-
 #[test]
 fn principal_scope_gate_notifies_once_and_only_waits_outside_approved_scope() {
     for classification in [
@@ -784,7 +796,8 @@ fn principal_scope_gate_notifies_once_and_only_waits_outside_approved_scope() {
         Some(json!({"within_scope":true,"one_way_door":true})),
         None,
     ] {
-        let within_scope = classification == Some(json!({"within_scope":true,"one_way_door":false}));
+        let within_scope =
+            classification == Some(json!({"within_scope":true,"one_way_door":false}));
         let document: GraphDocument = serde_json::from_value(json!({
             "schema_version":1,"graph_id":"principal-scope","nodes":[
                 {"id":"design","access":"read_only","prompt":"design","route":fixture_route()},
@@ -797,13 +810,20 @@ fn principal_scope_gate_notifies_once_and_only_waits_outside_approved_scope() {
                 {"id":"writer","access":"read_only","depends_on":["approved"],"prompt":"continue","route":fixture_route()}
             ]
         })).unwrap();
-        let report = format!("Principal options and smallest slice\n```findings\n{}\n```",
-            json!({"schema_version":1,"findings":[],"repair_design":classification}));
+        let report = format!(
+            "Principal options and smallest slice\n```findings\n{}\n```",
+            json!({"schema_version":1,"findings":[],"repair_design":classification})
+        );
         let mut owner = FakeOwner {
-        now: Some(at(0)), actor:"chair".into(), observations:[
-            terminal_with_result(AttemptOutcome::Succeeded, &report),
-            terminal(AttemptOutcome::Succeeded),
-        ].into(), ..Default::default() };
+            now: Some(at(0)),
+            actor: "chair".into(),
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, &report),
+                terminal(AttemptOutcome::Succeeded),
+            ]
+            .into(),
+            ..Default::default()
+        };
         let mut journal = MemoryJournal::default();
         let run = advance(&document, &mut owner, &mut journal).unwrap();
         assert_eq!(owner.owner_notifications, ["scope.owner-notification"]);
@@ -823,12 +843,32 @@ fn principal_scope_gate_notifies_once_and_only_waits_outside_approved_scope() {
             let library = template::TemplateLibrary::bundled();
             let resolvers = std::collections::BTreeMap::new();
             let limits = crate::config::GraphLimits::default();
-            let context = patch::PatchContext { library:&library, resolvers:&resolvers,
-                scan:&patch::scan_for_secrets, journal:None, limits:&limits };
-            patch::retry_node(&mut patch::LiveGraph { document:&document,
-                checkpoint:journal.0.as_mut().unwrap() }, "scope", None, &context).unwrap();
+            let context = patch::PatchContext {
+                library: &library,
+                resolvers: &resolvers,
+                scan: &patch::scan_for_secrets,
+                journal: None,
+                limits: &limits,
+                worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
+            };
+            patch::retry_node(
+                &mut patch::LiveGraph {
+                    document: &document,
+                    checkpoint: journal.0.as_mut().unwrap(),
+                },
+                "scope",
+                None,
+                &context,
+            )
+            .unwrap();
             advance(&document, &mut owner, &mut journal).unwrap();
-            assert_eq!(owner.owner_notifications, ["scope.owner-notification", "scope.owner-notification.retry-1"]);
+            assert_eq!(
+                owner.owner_notifications,
+                [
+                    "scope.owner-notification",
+                    "scope.owner-notification.retry-1"
+                ]
+            );
         }
         if !within_scope {
             let mut unanswered_journal = MemoryJournal(journal.0.clone());
@@ -836,20 +876,34 @@ fn principal_scope_gate_notifies_once_and_only_waits_outside_approved_scope() {
                 now: run.checkpoint.asks[0].wake_at,
                 ..Default::default()
             };
-            let unanswered = advance(&document, &mut unanswered_owner, &mut unanswered_journal).unwrap();
+            let unanswered =
+                advance(&document, &mut unanswered_owner, &mut unanswered_journal).unwrap();
             assert_eq!(state(&unanswered, "writer"), NodeState::Blocked);
-            let scope = unanswered.checkpoint.nodes.iter().find(|node| node.id == "scope").unwrap();
+            let scope = unanswered
+                .checkpoint
+                .nodes
+                .iter()
+                .find(|node| node.id == "scope")
+                .unwrap();
             assert_eq!(scope.state, NodeState::Failed);
             assert_eq!(scope.outputs.as_ref().unwrap().verdict, None);
-            assert_eq!(scope.outputs.as_ref().unwrap().decide_outcome, Some(DecideOutcome::Unanswered));
+            assert_eq!(
+                scope.outputs.as_ref().unwrap().decide_outcome,
+                Some(DecideOutcome::Unanswered)
+            );
             assert!(unanswered_owner.calls.is_empty());
             advance(&document, &mut unanswered_owner, &mut unanswered_journal).unwrap();
             let mut approved_journal = MemoryJournal(journal.0.clone());
             let mut approved_owner = FakeOwner {
-        now: Some(at(0)), actor:"chair".into(),
-                observations:[terminal(AttemptOutcome::Succeeded)].into(),
-                answers:std::collections::BTreeMap::from([("scope.ask-1".into(), reply(Some("approve"), None))]),
-                ..Default::default() };
+                now: Some(at(0)),
+                actor: "chair".into(),
+                observations: [terminal(AttemptOutcome::Succeeded)].into(),
+                answers: std::collections::BTreeMap::from([(
+                    "scope.ask-1".into(),
+                    reply(Some("approve"), None),
+                )]),
+                ..Default::default()
+            };
             let approved = advance(&document, &mut approved_owner, &mut approved_journal).unwrap();
             assert_eq!(state(&approved, "writer"), NodeState::Succeeded);
             assert_eq!(approved_owner.calls.len(), 1);
@@ -858,22 +912,46 @@ fn principal_scope_gate_notifies_once_and_only_waits_outside_approved_scope() {
             let library = template::TemplateLibrary::bundled();
             let resolvers = std::collections::BTreeMap::new();
             let limits = crate::config::GraphLimits::default();
-            let context = patch::PatchContext { library:&library, resolvers:&resolvers,
-                scan:&patch::scan_for_secrets, journal:None, limits:&limits };
-            patch::retry_node(&mut patch::LiveGraph { document:&document,
-                checkpoint:approved_journal.0.as_mut().unwrap() }, "scope", None, &context).unwrap();
+            let context = patch::PatchContext {
+                library: &library,
+                resolvers: &resolvers,
+                scan: &patch::scan_for_secrets,
+                journal: None,
+                limits: &limits,
+                worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
+            };
+            patch::retry_node(
+                &mut patch::LiveGraph {
+                    document: &document,
+                    checkpoint: approved_journal.0.as_mut().unwrap(),
+                },
+                "scope",
+                None,
+                &context,
+            )
+            .unwrap();
             let retried = advance(&document, &mut approved_owner, &mut approved_journal).unwrap();
             assert_eq!(state(&retried, "scope"), NodeState::Running);
-            assert!(retried.checkpoint.asks.iter().any(|ask| ask.ask_id == "scope.ask-1.retry-1"));
-            assert_eq!(approved_owner.owner_notifications, ["scope.owner-notification.retry-1"]);
-            owner.answers.insert("scope.ask-1".into(), reply(Some("hold"), None));
+            assert!(
+                retried
+                    .checkpoint
+                    .asks
+                    .iter()
+                    .any(|ask| ask.ask_id == "scope.ask-1.retry-1")
+            );
+            assert_eq!(
+                approved_owner.owner_notifications,
+                ["scope.owner-notification.retry-1"]
+            );
+            owner
+                .answers
+                .insert("scope.ask-1".into(), reply(Some("hold"), None));
             let held = advance(&document, &mut owner, &mut journal).unwrap();
             assert_ne!(state(&held, "writer"), NodeState::Succeeded);
             assert_eq!(owner.calls.len(), 1);
         }
     }
 }
-
 
 #[test]
 fn principal_container_retry_does_not_reuse_owner_decision() {
@@ -889,27 +967,67 @@ fn principal_container_retry_does_not_reuse_owner_decision() {
     })).unwrap();
     let report = "First principal slice\n```findings\n{\"schema_version\":1,\"findings\":[],\"repair_design\":{\"within_scope\":false,\"one_way_door\":true}}\n```";
     let mut owner = FakeOwner {
-        now: Some(at(0)), actor:"chair".into(),
-        observations:[terminal_with_result(AttemptOutcome::Succeeded, report)].into(),
-        answers:std::collections::BTreeMap::from([("redesign--scope.ask-1".into(), reply(Some("approve"), None))]),
-        ..Default::default() };
+        now: Some(at(0)),
+        actor: "chair".into(),
+        observations: [terminal_with_result(AttemptOutcome::Succeeded, report)].into(),
+        answers: std::collections::BTreeMap::from([(
+            "redesign--scope.ask-1".into(),
+            reply(Some("approve"), None),
+        )]),
+        ..Default::default()
+    };
     let mut journal = MemoryJournal::default();
-    assert_eq!(advance(&document, &mut owner, &mut journal).unwrap().status, GraphStatus::Complete);
+    assert_eq!(
+        advance(&document, &mut owner, &mut journal).unwrap().status,
+        GraphStatus::Complete
+    );
     let library = template::TemplateLibrary::bundled();
     let resolvers = std::collections::BTreeMap::new();
     let limits = crate::config::GraphLimits::default();
-    let context = patch::PatchContext { library:&library, resolvers:&resolvers,
-        scan:&patch::scan_for_secrets, journal:None, limits:&limits };
-    patch::retry_node(&mut patch::LiveGraph { document:&document,
-        checkpoint:journal.0.as_mut().unwrap() }, "redesign", None, &context).unwrap();
-    owner.observations.push_back(terminal_with_result(AttemptOutcome::Succeeded,
-        &report.replace("First principal slice", "Revised principal slice")));
+    let context = patch::PatchContext {
+        library: &library,
+        resolvers: &resolvers,
+        scan: &patch::scan_for_secrets,
+        journal: None,
+        limits: &limits,
+        worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
+    };
+    patch::retry_node(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: journal.0.as_mut().unwrap(),
+        },
+        "redesign",
+        None,
+        &context,
+    )
+    .unwrap();
+    owner.observations.push_back(terminal_with_result(
+        AttemptOutcome::Succeeded,
+        &report.replace("First principal slice", "Revised principal slice"),
+    ));
     let retried = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(retried.status, GraphStatus::Pending);
     assert_eq!(state(&retried, "redesign--scope"), NodeState::Running);
-    assert_eq!(retried.checkpoint.asks[0].ask_id, "redesign--scope.ask-1.retry-1");
-    assert!(owner.filed.last().unwrap().body.contains("Revised principal slice"));
-    assert_eq!(owner.owner_notifications, ["redesign--scope.owner-notification", "redesign--scope.owner-notification.retry-1"]);
+    assert_eq!(
+        retried.checkpoint.asks[0].ask_id,
+        "redesign--scope.ask-1.retry-1"
+    );
+    assert!(
+        owner
+            .filed
+            .last()
+            .unwrap()
+            .body
+            .contains("Revised principal slice")
+    );
+    assert_eq!(
+        owner.owner_notifications,
+        [
+            "redesign--scope.owner-notification",
+            "redesign--scope.owner-notification.retry-1"
+        ]
+    );
 }
 
 /// Every declared unanswered disposition records no option and prevents dependants running.
@@ -934,7 +1052,12 @@ fn unanswered_decides_follow_their_declared_disposition_without_selecting_an_opt
         assert!(deadline > at(0));
         owner.now = Some(deadline);
         let settled = advance(&document, &mut owner, &mut journal).unwrap();
-        let choose = settled.checkpoint.nodes.iter().find(|node| node.id == "choose").unwrap();
+        let choose = settled
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "choose")
+            .unwrap();
         assert_eq!(choose.state, expected);
         let outputs = choose.outputs.as_ref().unwrap();
         assert_eq!(outputs.decide_outcome, Some(DecideOutcome::Unanswered));
@@ -948,9 +1071,17 @@ fn unanswered_decides_follow_their_declared_disposition_without_selecting_an_opt
 #[test]
 fn every_decide_outcome_round_trips_and_unanswered_has_no_option() {
     let outcomes = [
-        DecideOutcome::Answered { option: "ship".into(), actor: "chair".into() },
-        DecideOutcome::AnsweredByDefault { option: "hold".into() },
-        DecideOutcome::AnsweredByPolicy { option: "approve".into(), rule: "approved_repair_scope".into() },
+        DecideOutcome::Answered {
+            option: "ship".into(),
+            actor: "chair".into(),
+        },
+        DecideOutcome::AnsweredByDefault {
+            option: "hold".into(),
+        },
+        DecideOutcome::AnsweredByPolicy {
+            option: "approve".into(),
+            rule: "approved_repair_scope".into(),
+        },
         DecideOutcome::Unanswered,
     ];
     for outcome in outcomes {

@@ -128,6 +128,9 @@ fn reply(option: Option<&str>, text: Option<&str>) -> AskReply {
 
 impl AttemptOwner for FakeOwner {
     type Error = NoObservation;
+    fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+        provenant_config::PortTable::builtin().worktree_layout
+    }
     fn graph_admission_policy(&self) -> provenant_records::policy::Policy {
         self.admission_policy.clone().unwrap_or_default()
     }
@@ -945,6 +948,9 @@ struct ErrorLauncher {
 
 impl AttemptOwner for ErrorLauncher {
     type Error = crate::coordination::facade::FacadeError;
+    fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+        provenant_config::PortTable::builtin().worktree_layout
+    }
 
     fn actor(&self) -> String {
         "actor".into()

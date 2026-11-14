@@ -530,6 +530,7 @@ impl Factory {
                         &mut document,
                         &submission_key,
                         &self.context.config.graph.limits,
+                        self.context.port_table.worktree_layout.clone(),
                     )
                     .map_err(|_| FacadeError::InvalidInput { detail: None })?;
                 }

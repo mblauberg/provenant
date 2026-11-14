@@ -2257,6 +2257,9 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
     }
     impl provenant_fabric_runtime::graph::AttemptOwner for AcceptedPeer {
         type Error = std::io::Error;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
         fn actor(&self) -> String {
             self.actor.clone()
         }

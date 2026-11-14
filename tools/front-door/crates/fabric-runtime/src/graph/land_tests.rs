@@ -89,6 +89,9 @@ impl CiStatus for Owner {
 }
 impl AttemptOwner for Owner {
     type Error = Infallible;
+    fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+        provenant_config::PortTable::builtin().worktree_layout
+    }
     fn attempt_families(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
         let mut families = Vec::new();
         for family in attempts
@@ -1405,6 +1408,8 @@ fn a_replaced_gate_accepting_rejection_never_lands() {
             scan: &|_| Ok(()),
             journal: None,
             limits: &limits,
+
+            worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
         },
     )
     .unwrap();

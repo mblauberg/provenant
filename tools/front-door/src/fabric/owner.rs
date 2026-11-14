@@ -1494,6 +1494,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         }))
     }
     type Error = FacadeError;
+    fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+        self.factory.context.port_table.worktree_layout.clone()
+    }
     fn resolve_review_base(
         &mut self,
         reference: &str,
@@ -2872,7 +2875,9 @@ impl BoundGraphOwner<'_> {
                     branch: None,
                     commit: None,
                     stop: None,
-                    settlement_reason: Some(provenant_records::run::SettlementReason::PreLaunchRefusal),
+                    settlement_reason: Some(
+                        provenant_records::run::SettlementReason::PreLaunchRefusal,
+                    ),
                 });
             }
             // Preserve the specific detached-writer refusal in node status.

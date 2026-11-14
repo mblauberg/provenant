@@ -1213,6 +1213,7 @@ pub(crate) fn peer_submit_graph(
         &mut document,
         &operation_id.to_string(),
         &factory.context.config.graph.limits,
+        factory.context.port_table.worktree_layout.clone(),
     )
     .map_err(|_| FacadeError::InvalidInput { detail: None })?;
     let mut journal = FileJournal::open(

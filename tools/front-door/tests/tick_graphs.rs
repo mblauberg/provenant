@@ -15,6 +15,9 @@ fn missing_graph_worktree_warns_once_and_scheduled_gc_completes() -> Result {
     }
     impl graph::AttemptOwner for Seed {
         type Error = std::convert::Infallible;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
         fn actor(&self) -> String {
             self.actor.clone()
         }
@@ -188,6 +191,9 @@ fn deadline_free_graph_tick_launches_waiting_fake_provider() -> Result {
     struct Seed(String);
     impl graph::AttemptOwner for Seed {
         type Error = std::convert::Infallible;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
         fn actor(&self) -> String {
             self.0.clone()
         }

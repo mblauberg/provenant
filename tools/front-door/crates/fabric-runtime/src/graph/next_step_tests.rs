@@ -18,6 +18,9 @@ struct Owner {
 
 impl AttemptOwner for Owner {
     type Error = std::convert::Infallible;
+    fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+        provenant_config::PortTable::builtin().worktree_layout
+    }
 
     fn actor(&self) -> String {
         "chair".into()
@@ -92,9 +95,14 @@ impl GraphJournal for Settled {
         let (plan, _) = validate_flat_plan(&expanded, limits).unwrap();
         let facts = self.facts.clone();
         assert!(
-            next_step::settle_stop(&self.document, &plan, checkpoint, limits, &mut |_| Ok(
-                facts.clone()
-            ))
+            next_step::settle_stop(
+                &self.document,
+                &plan,
+                checkpoint,
+                limits,
+                &provenant_config::PortTable::builtin().worktree_layout,
+                &mut |_| Ok(facts.clone()),
+            )
             .is_none(),
             "a saved stop still owes its next step"
         );

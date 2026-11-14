@@ -30,6 +30,54 @@ fn fragments_cannot_inject_persisted_topology_through_extra_fields() {
 }
 
 #[test]
+fn planner_fragment_writers_use_the_declared_worktree_template() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version": 1,
+        "graph_id": "planned",
+        "nodes": []
+    }))
+    .unwrap();
+    let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+        "schema_version": 1,
+        "graph_id": "planned",
+        "plan_digest": "fixture",
+        "nodes": []
+    }))
+    .unwrap();
+    let local_nodes: Vec<GraphNode> = serde_json::from_value(json!([{
+        "id": "writer",
+        "prompt": "Write the checked slice",
+        "write_scope": ["src"],
+        "acceptance_checks": ["Verify the slice"],
+        "access": "worktree_write",
+        "route": {"alias": "senior"}
+    }]))
+    .unwrap();
+    let mut ports = provenant_config::PortTable::builtin();
+    ports.worktree_layout.roots = vec!["trees".into()];
+    ports.worktree_layout.default = "trees/<branch>".into();
+
+    let flattened = plans::flatten_fragment(
+        local_nodes,
+        None,
+        None,
+        &document,
+        &checkpoint,
+        &ports.worktree_layout,
+    )
+    .unwrap();
+
+    assert_eq!(
+        flattened[0].worktree.as_deref(),
+        Some("trees/planned-writer")
+    );
+    assert_eq!(
+        flattened[0].extra.get("provision_worktree"),
+        Some(&serde_json::Value::Bool(true))
+    );
+}
+
+#[test]
 fn admission_planner_fragment_capability() {
     let fragment = json!({
         "schema_version": 1,
@@ -1924,10 +1972,12 @@ fn nested_plan_rewires_all_consumers_and_keeps_original_digest() {
         .iter()
         .find(|expansion| expansion.source == nested.id)
         .unwrap();
-    assert!(inner_expansion
-        .nodes
-        .iter()
-        .any(|node| node.id == "plan--nested--inner"));
+    assert!(
+        inner_expansion
+            .nodes
+            .iter()
+            .any(|node| node.id == "plan--nested--inner")
+    );
 
     // Each fragment is journalled against its planner and identifies that
     // planner as the admitter of its additions.
@@ -1956,11 +2006,12 @@ fn nested_plan_rewires_all_consumers_and_keeps_original_digest() {
     };
     assert!(launch_position("after") > launch_position("plan--nested--inner"));
     for id in ["plan", "plan--nested", "plan--nested--inner", "after"] {
-        assert!(run
-            .checkpoint
-            .nodes
-            .iter()
-            .any(|node| node.id == id && node.state == NodeState::Succeeded));
+        assert!(
+            run.checkpoint
+                .nodes
+                .iter()
+                .any(|node| node.id == id && node.state == NodeState::Succeeded)
+        );
     }
     let (base, _) = validate_plan(&doc).unwrap();
     assert_eq!(
@@ -2846,6 +2897,8 @@ fn admit_with(
         scan,
         journal: None,
         limits: &limits,
+
+        worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
     };
     admit_patch(
         &mut LiveGraph {
@@ -3152,6 +3205,8 @@ fn admit_patch_journals_before_commit_and_tags_its_nodes_with_the_parent() {
         scan: &|_| Ok(()),
         journal: Some(&sink),
         limits: &limits,
+
+        worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
     };
     let patch =
         host_patch(json!({"schema_version":1, "nodes":[{"id":"x", "use":"task", "brief":"Work"}]}));
@@ -3180,6 +3235,8 @@ fn admit_patch_journals_before_commit_and_tags_its_nodes_with_the_parent() {
         scan: &|_| Ok(()),
         journal: Some(&failing),
         limits: &limits,
+
+        worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
     };
     let patch =
         host_patch(json!({"schema_version":1, "nodes":[{"id":"y", "use":"task", "brief":"Work"}]}));
@@ -3212,6 +3269,8 @@ fn submit_compiles_a_patch_into_a_new_graph() {
         scan: &|_| Ok(()),
         journal: None,
         limits: &limits,
+
+        worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
     };
     let patch = host_patch(json!({"schema_version":1, "templates":{"pair":{"nodes":[
             {"id":"one", "use":"task", "brief":"First"}, {"id":"two", "use":"task", "brief":"Second", "after":["one"]}]}},
@@ -3331,7 +3390,13 @@ fn initial_submission_is_a_durable_revision_and_replays_template_evidence() {
     }))
     .unwrap();
     let limits = plans::generous();
-    patch::submission(&mut document, "operation-one", &limits).unwrap();
+    patch::submission(
+        &mut document,
+        "operation-one",
+        &limits,
+        provenant_config::PortTable::builtin().worktree_layout,
+    )
+    .unwrap();
     struct RefuseSave;
     impl GraphJournal for RefuseSave {
         type Error = std::io::Error;
@@ -3385,7 +3450,13 @@ fn initial_submission_is_a_durable_revision_and_replays_template_evidence() {
     let mut changed = document.clone();
     changed.nodes[0].prompt = "Different work under the same operation".into();
     changed.extra.remove("submission_patch");
-    patch::submission(&mut changed, "operation-one", &limits).unwrap();
+    patch::submission(
+        &mut changed,
+        "operation-one",
+        &limits,
+        provenant_config::PortTable::builtin().worktree_layout,
+    )
+    .unwrap();
     assert!(advance(&changed, &mut owner, &mut journal).is_err());
     assert_eq!(journal.0, retained);
 }
@@ -3405,7 +3476,13 @@ fn initial_submission_refuses_changed_snapshot_before_checkpoint_or_launch() {
         "schema_version":1, "graph_id":"secret-submission", "nodes":[node]
     }))
     .unwrap();
-    patch::submission(&mut document, "operation-two", &plans::generous()).unwrap();
+    patch::submission(
+        &mut document,
+        "operation-two",
+        &plans::generous(),
+        provenant_config::PortTable::builtin().worktree_layout,
+    )
+    .unwrap();
     document.extra.get_mut("submission_patch").unwrap()["nodes"][0]["prompt"] =
         json!("changed prompt");
     let mut journal = MemoryJournal::default();
@@ -3440,7 +3517,13 @@ fn initial_submission_envelope_counts_prompt_references_not_brief_copies() {
     }))
     .unwrap();
     let limits = plans::generous();
-    patch::submission(&mut document, "large-operation", &limits).unwrap();
+    patch::submission(
+        &mut document,
+        "large-operation",
+        &limits,
+        provenant_config::PortTable::builtin().worktree_layout,
+    )
+    .unwrap();
     assert!(canonical_len(&document) > MAX_CHECKPOINT_BYTES as usize);
     let (plan, _) = validate_plan_with_limits(&document, &limits).unwrap();
     assert!(graph_envelope_reason(&document, &[], &[], &plan).is_none());
@@ -3715,6 +3798,7 @@ fn ordinary_agent_final_patch_follows_earlier_live_children_once() {
         &mut checkpoint,
         Some(&capture(&output)),
         &plans::generous(),
+        &provenant_config::PortTable::builtin().worktree_layout,
     )
     .expect("final patch must follow the live patch");
     assert_eq!(checkpoint.expansions.len(), 2);
@@ -3728,7 +3812,8 @@ fn ordinary_agent_final_patch_follows_earlier_live_children_once() {
             &next,
             &mut checkpoint,
             Some(&capture(&output)),
-            &plans::generous()
+            &plans::generous(),
+            &provenant_config::PortTable::builtin().worktree_layout,
         )
         .is_none()
     );
@@ -3780,6 +3865,8 @@ fn planner_admits_bundled_batch_and_deliver_through_the_patch_path() {
         scan: &patch::scan_for_secrets,
         journal: None,
         limits: &limits,
+
+        worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
     };
     for name in ["batch", "deliver"] {
         let mut document = planner(128);
@@ -3827,7 +3914,13 @@ fn raw_submission_preserves_raw_reporting_label() {
         }]
     }))
     .unwrap();
-    patch::submission(&mut document, "raw-reporting", &plans::generous()).unwrap();
+    patch::submission(
+        &mut document,
+        "raw-reporting",
+        &plans::generous(),
+        provenant_config::PortTable::builtin().worktree_layout,
+    )
+    .unwrap();
     assert_eq!(document.nodes[0].extra["template"], "raw");
     assert_eq!(document.extra["submission_patch"]["nodes"][0]["use"], "raw");
     assert_eq!(

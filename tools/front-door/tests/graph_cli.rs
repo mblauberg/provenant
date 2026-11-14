@@ -1551,6 +1551,9 @@ fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
     struct RefusingOwner(Option<InvalidInputDetail>);
     impl AttemptOwner for RefusingOwner {
         type Error = FacadeError;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
         fn launch_refused_before_acceptance(
             &mut self,
             _: &graph::GraphAttempt,

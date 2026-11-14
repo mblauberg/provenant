@@ -25,7 +25,8 @@ pub(super) const DETACHED_FROM_GRAPH_CANCEL: &str = "detached_from_graph_cancel"
 pub(super) const SUBTREE_CANCEL: &str = "subtree_cancel";
 const SEPARATOR: &str = "--";
 const ID_BYTES: usize = 64;
-const REQUEST_DIGEST: &str = "relay_request_digest";
+pub(super) const CHILD_RECEIPT_KEY: &str = "relay_child_receipt";
+const CHILD_RECEIPT_SCHEMA_VERSION: u16 = 1;
 
 /// A document launch retains its node overrides and inline template definitions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +122,7 @@ fn task() -> String {
 
 /// What the host returns to the lane for an admitted child.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChildReceipt {
     pub graph_id: String,
     pub parent: String,
@@ -134,6 +136,35 @@ pub struct ChildReceipt {
     pub detached: bool,
     /// Explain whether the child outlives the calling lane.
     pub lifecycle_notice: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredChildReceipt {
+    schema_version: u16,
+    request_digest: String,
+    receipt: ChildReceipt,
+}
+
+fn persist_child_receipt(
+    record: &mut super::patch::PatchRecord,
+    request_digest: &str,
+    receipt: &ChildReceipt,
+) -> Result<(), PatchError> {
+    let stored = StoredChildReceipt {
+        schema_version: CHILD_RECEIPT_SCHEMA_VERSION,
+        request_digest: request_digest.to_owned(),
+        receipt: receipt.clone(),
+    };
+    let value = serde_json::to_value(stored).map_err(|error| PatchError {
+        cause: None,
+        admission: None,
+        parameter: None,
+        code: "invalid",
+        message: format!("child receipt cannot be stored: {error}"),
+    })?;
+    record.extra.insert(CHILD_RECEIPT_KEY.into(), value);
+    Ok(())
 }
 
 fn child_lifecycle_notice(detached: bool) -> &'static str {
@@ -176,8 +207,21 @@ pub fn parent_of_attempt<'a>(checkpoint: &'a GraphCheckpoint, attempt: &str) -> 
 }
 
 /// A writer child's own worktree, beside the graph's other lane worktrees.
-pub fn child_worktree(graph_id: &str, node: &str) -> String {
-    format!(".worktrees/{graph_id}-{node}")
+pub fn child_worktree(
+    layout: &provenant_config::WorktreeLayoutPort,
+    graph_id: &str,
+    node: &str,
+) -> std::io::Result<String> {
+    layout
+        .path_for_branch(&format!("{graph_id}-{node}"))?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "worktree path must be UTF-8",
+            )
+        })
 }
 
 /// The node that owns `attempt` in any state, including a settled parent or a
@@ -196,16 +240,24 @@ pub fn historical_parent_of_attempt<'a>(
         .map(|node| node.id.as_str())
 }
 
-fn writer_worktree(graph: &str, node: &str, request: &ChildRequest) -> Option<String> {
-    request.writer.then(|| {
-        request
-            .launch
-            .as_ref()
-            .and_then(|launch| launch.node.get("worktree"))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .unwrap_or_else(|| child_worktree(graph, node))
-    })
+fn writer_worktree(
+    layout: &provenant_config::WorktreeLayoutPort,
+    graph: &str,
+    node: &str,
+    request: &ChildRequest,
+) -> std::io::Result<Option<String>> {
+    if !request.writer {
+        return Ok(None);
+    }
+    let worktree = request
+        .launch
+        .as_ref()
+        .and_then(|launch| launch.node.get("worktree"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    worktree
+        .map(Some)
+        .map_or_else(|| child_worktree(layout, graph, node).map(Some), Ok)
 }
 
 fn request_key(parent: &str, request: &ChildRequest) -> Result<String, PatchError> {
@@ -237,7 +289,6 @@ pub fn replay_child(
         code: "invalid",
         message,
     };
-    let graph_id = document.graph_id.clone();
     let digest = CanonicalV1::record_digest("fabric-relay-child", 1, request)
         .map_err(|error| invalid(error.to_string()))?
         .to_string();
@@ -250,30 +301,63 @@ pub fn replay_child(
     else {
         return Ok(None);
     };
-    let original_parent = record.parent.as_deref().unwrap_or_default();
-    if original_parent != parent
-        || record.extra.get(REQUEST_DIGEST).and_then(Value::as_str) != Some(digest.as_str())
-    {
+    let value = record
+        .extra
+        .get(CHILD_RECEIPT_KEY)
+        .ok_or_else(|| invalid("stored child receipt is missing".into()))?;
+    let stored: StoredChildReceipt = serde_json::from_value(value.clone())
+        .map_err(|error| invalid(format!("stored child receipt is malformed: {error}")))?;
+    if stored.schema_version != CHILD_RECEIPT_SCHEMA_VERSION {
+        return Err(invalid(format!(
+            "unsupported stored child receipt schema {}",
+            stored.schema_version
+        )));
+    }
+    if stored.request_digest != digest {
         return Err(PatchError {
             cause: None,
             admission: None,
             parameter: None,
             code: "idempotency_conflict",
-            message: "child idempotency key was used for a different request or parent".into(),
+            message: "child idempotency key was used for a different request".into(),
         });
     }
-    let node = format!("{original_parent}{SEPARATOR}{}", request.id);
-    let worktree = writer_worktree(&graph_id, &node, request);
-    Ok(Some(ChildReceipt {
-        graph_id,
-        parent: original_parent.into(),
-        node,
-        revision: record.revision,
-        replayed: true,
-        worktree,
-        detached: request.detached,
-        lifecycle_notice: child_lifecycle_notice(request.detached).into(),
-    }))
+
+    let expected_node = format!("{parent}{SEPARATOR}{}", request.id);
+    let receipt = &stored.receipt;
+    if record.parent.as_deref() != Some(parent)
+        || receipt.graph_id != document.graph_id
+        || receipt.parent != parent
+        || receipt.node != expected_node
+        || receipt.revision != record.revision
+        || receipt.detached != request.detached
+        || receipt.replayed
+        || receipt.lifecycle_notice.is_empty()
+        || !receipt_worktree_matches_request(receipt, request)
+    {
+        return Err(invalid(
+            "stored child receipt does not match its admission".into(),
+        ));
+    }
+    let mut receipt = stored.receipt;
+    receipt.replayed = true;
+    Ok(Some(receipt))
+}
+
+fn receipt_worktree_matches_request(receipt: &ChildReceipt, request: &ChildRequest) -> bool {
+    let explicit = request
+        .launch
+        .as_ref()
+        .and_then(|launch| launch.node.get("worktree"))
+        .and_then(Value::as_str);
+    match (request.writer, explicit, receipt.worktree.as_deref()) {
+        (false, _, None) => true,
+        (false, _, Some(_)) => false,
+        (true, Some(path), Some(stored)) => path == stored,
+        (true, Some(_), None) => false,
+        (true, None, Some(path)) => !path.is_empty(),
+        (true, None, None) => false,
+    }
 }
 
 const PENDING_PROVISIONING: &str = "pending_writer_provisioning";
@@ -407,7 +491,12 @@ pub fn admit_child_bound(
     if let Some(receipt) = replay_child(graph.document, graph.checkpoint, parent, request)? {
         return Ok(receipt);
     }
-    let worktree = writer_worktree(&graph_id, &node, request);
+    let worktree =
+        writer_worktree(&context.worktree_layout, &graph_id, &node, request).map_err(|error| {
+            invalid(format!(
+                "configured worktree layout cannot name child: {error}"
+            ))
+        })?;
     let digest = CanonicalV1::record_digest("fabric-relay-child", 1, request)
         .map_err(|error| invalid(error.to_string()))?
         .to_string();
@@ -476,12 +565,21 @@ pub fn admit_child_bound(
             });
         }
     }
-    // Add replay evidence to the same record before the journal callback runs.
-    let capture = |record: &super::patch::PatchRecord| {
+    let receipt_for = |revision| ChildReceipt {
+        graph_id: graph_id.clone(),
+        parent: parent.to_owned(),
+        node: node.clone(),
+        revision,
+        replayed: false,
+        worktree: worktree.clone(),
+        detached: request.detached,
+        lifecycle_notice: child_lifecycle_notice(request.detached).into(),
+    };
+    // Journal and checkpoint both receive the same typed receipt record.
+    let capture = |record: &super::patch::PatchRecord| -> Result<(), String> {
         let mut record = record.clone();
-        record
-            .extra
-            .insert(REQUEST_DIGEST.into(), digest.clone().into());
+        let receipt = receipt_for(record.revision);
+        persist_child_receipt(&mut record, &digest, &receipt).map_err(|error| error.to_string())?;
         if let Some(journal) = context.journal {
             journal(&record)?;
         }
@@ -489,6 +587,7 @@ pub fn admit_child_bound(
     };
     let admission_context = PatchContext {
         journal: Some(&capture),
+        worktree_layout: context.worktree_layout.clone(),
         ..*context
     };
     let Admitted {
@@ -500,7 +599,8 @@ pub fn admit_child_bound(
         .last_mut()
         .and_then(|expansion| expansion.patch.as_mut())
         .ok_or_else(|| invalid("admitted child patch record missing".into()))?;
-    record.extra.insert(REQUEST_DIGEST.into(), digest.into());
+    let receipt = receipt_for(record.revision);
+    persist_child_receipt(record, &digest, &receipt)?;
     record.journaled = context.journal.is_some();
     // A retried parent can admit fresh live children after an earlier settle.
     // Re-arm closure only when a new admission actually commits.
@@ -843,7 +943,7 @@ pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
                                 .parent
                                 .as_deref()
                                 .is_some_and(|source| source == parent)
-                                && record.extra.contains_key(REQUEST_DIGEST)
+                                && record.extra.contains_key(CHILD_RECEIPT_KEY)
                         })
                     })
                     .flat_map(|expansion| expansion.nodes.iter())

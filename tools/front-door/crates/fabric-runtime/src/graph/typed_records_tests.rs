@@ -6,6 +6,9 @@ use serde_json::{Value, json};
 struct NoCoverage;
 impl AttemptOwner for NoCoverage {
     type Error = std::convert::Infallible;
+    fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+        provenant_config::PortTable::builtin().worktree_layout
+    }
     fn actor(&self) -> String {
         "fixture".into()
     }

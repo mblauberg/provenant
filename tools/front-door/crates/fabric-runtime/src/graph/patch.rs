@@ -251,6 +251,8 @@ pub struct PatchContext<'a> {
     /// before the admission is committed, so a failed write admits nothing.
     pub journal: Option<&'a PatchJournal<'a>>,
     pub limits: &'a crate::config::GraphLimits,
+    /// The project's declared worktree layout used for generated child paths.
+    pub worktree_layout: provenant_config::WorktreeLayoutPort,
 }
 
 /// The confinement secret scan, as submission applies it.
@@ -874,6 +876,7 @@ pub fn submission(
     document: &mut GraphDocument,
     key: &str,
     limits: &crate::config::GraphLimits,
+    worktree_layout: provenant_config::WorktreeLayoutPort,
 ) -> Result<(), PatchError> {
     for node in &mut document.nodes {
         node.extra
@@ -949,6 +952,7 @@ pub fn submission(
         scan: &scan_for_secrets,
         journal: None,
         limits,
+        worktree_layout,
     };
     let compiled = submit(
         &document.graph_id,
@@ -1280,6 +1284,7 @@ pub(super) fn prepare(
             planner.map(|(_, spec)| spec),
             expanded,
             checkpoint,
+            &context.worktree_layout,
         )
         .map_err(classify)?
     };

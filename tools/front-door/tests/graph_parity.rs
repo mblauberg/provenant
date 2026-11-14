@@ -57,6 +57,9 @@ enum Step {
 }
 impl AttemptOwner for Provider {
     type Error = Crash;
+    fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+        provenant_config::PortTable::builtin().worktree_layout
+    }
     fn retry_allowance(
         &self,
         _: &provenant_records::ExtraFields,
@@ -482,6 +485,8 @@ fn quota_stopped_task_and_composite_member_keep_the_same_lineage() -> Result {
                     scan: &patch::scan_for_secrets,
                     journal: None,
                     limits: &Default::default(),
+
+                    worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
                 },
                 None,
             )?;

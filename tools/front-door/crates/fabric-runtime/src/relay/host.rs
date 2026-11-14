@@ -810,6 +810,8 @@ mod tests {
                 limits: &limits,
                 scan: &|_| Ok(()),
                 journal: None,
+
+                worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
             };
             let receipt = relay::admit_child(
                 &mut patch::LiveGraph {

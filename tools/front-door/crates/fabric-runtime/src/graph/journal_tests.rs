@@ -752,6 +752,9 @@ fn pending_markers_follow_saves_and_rebuild_after_loss() {
 }
 impl AttemptOwner for Owner {
     type Error = Infallible;
+    fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+        provenant_config::PortTable::builtin().worktree_layout
+    }
     fn actor(&self) -> String {
         "fixture-actor".into()
     }
@@ -1204,6 +1207,9 @@ fn bound_attempt_manifest_survives_file_journal_reopen_and_reattachment() {
     }
     impl AttemptOwner for RecordingOwner {
         type Error = Infallible;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
         fn actor(&self) -> String {
             "fixture-actor".into()
         }
@@ -1320,6 +1326,9 @@ fn implicit_writer_binding_reattaches_without_resolving_the_moved_head() {
     }
     impl AttemptOwner for BoundOwner {
         type Error = Infallible;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
         fn actor(&self) -> String {
             "fixture".into()
         }
@@ -1656,6 +1665,9 @@ mod launch_recovery {
 
     impl AttemptOwner for ProcessOwner {
         type Error = Infallible;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
 
         fn actor(&self) -> String {
             self.actor.into()

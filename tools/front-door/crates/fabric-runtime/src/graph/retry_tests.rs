@@ -32,6 +32,8 @@ fn retry_id(
             scan,
             journal,
             limits: &plans::generous(),
+
+            worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
         },
     )
 }
@@ -1228,9 +1230,18 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
     .unwrap();
     let mut checkpoint: GraphCheckpoint =
         serde_json::from_value(serde_json::to_value(checkpoint).unwrap()).unwrap();
-    assert_eq!(checkpoint.nodes[0].advance_error_code.as_deref(), Some("launch_refused"));
-    assert_eq!(checkpoint.nodes[0].advance_owner_code.as_deref(), Some("invalid_input"));
-    let wait = graph_waits(&checkpoint).into_iter().find(|wait| wait.node == "work").unwrap();
+    assert_eq!(
+        checkpoint.nodes[0].advance_error_code.as_deref(),
+        Some("launch_refused")
+    );
+    assert_eq!(
+        checkpoint.nodes[0].advance_owner_code.as_deref(),
+        Some("invalid_input")
+    );
+    let wait = graph_waits(&checkpoint)
+        .into_iter()
+        .find(|wait| wait.node == "work")
+        .unwrap();
     assert_eq!(wait.code, "invalid_input");
     assert_eq!(wait.cause.as_deref(), Some("invalid_input"));
     assert_eq!(
@@ -1436,6 +1447,8 @@ fn retry_node_and_dependants_resets_consumers_and_preserves_unrelated_work() {
         scan: &|_| Ok(()),
         journal: None,
         limits: &limits,
+
+        worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
     };
     let mut live = original.clone();
     live.nodes
@@ -1599,7 +1612,10 @@ fn public_agent_retry_replaces_dynamic_children_instead_of_relaunching_stale_wor
         .unwrap();
         let mut owner = FakeOwner {
             observations: [
-                terminal_from(&slice_fragment("slice").replace("```fragment", "```patch"), "old-plan"),
+                terminal_from(
+                    &slice_fragment("slice").replace("```fragment", "```patch"),
+                    "old-plan",
+                ),
                 done_as("old-child"),
             ]
             .into(),
@@ -1609,25 +1625,34 @@ fn public_agent_retry_replaces_dynamic_children_instead_of_relaunching_stale_wor
             .unwrap()
             .checkpoint;
         let mut busy = checkpoint.clone();
-        let child = busy.nodes.iter_mut().find(|node| node.id == "work--slice").unwrap();
+        let child = busy
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "work--slice")
+            .unwrap();
         child.state = NodeState::Running;
         child.attempts[0].state = AttemptState::Running;
         let before = busy.clone();
-        assert!(patch::retry_node_and_dependants(
-            &mut patch::LiveGraph {
-                document: &document,
-                checkpoint: &mut busy,
-            },
-            "work",
-            None,
-            &patch::PatchContext {
-                library: &template::TemplateLibrary::bundled(),
-                resolvers: &Default::default(),
-                scan: &|_| Ok(()),
-                journal: None,
-                limits: &plans::generous(),
-            },
-        ).is_err());
+        assert!(
+            patch::retry_node_and_dependants(
+                &mut patch::LiveGraph {
+                    document: &document,
+                    checkpoint: &mut busy,
+                },
+                "work",
+                None,
+                &patch::PatchContext {
+                    library: &template::TemplateLibrary::bundled(),
+                    resolvers: &Default::default(),
+                    scan: &|_| Ok(()),
+                    journal: None,
+                    limits: &plans::generous(),
+
+                    worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
+                },
+            )
+            .is_err()
+        );
         assert_eq!(busy, before, "a live dynamic child must retain its custody");
         patch::retry_node_and_dependants(
             &mut patch::LiveGraph {
@@ -1642,6 +1667,8 @@ fn public_agent_retry_replaces_dynamic_children_instead_of_relaunching_stale_wor
                 scan: &|_| Ok(()),
                 journal: None,
                 limits: &plans::generous(),
+
+                worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
             },
         )
         .unwrap();
@@ -1653,7 +1680,10 @@ fn public_agent_retry_replaces_dynamic_children_instead_of_relaunching_stale_wor
         );
         let mut owner = FakeOwner {
             observations: [
-                terminal_from(&slice_fragment(replacement).replace("```fragment", "```patch"), "new-plan"),
+                terminal_from(
+                    &slice_fragment(replacement).replace("```fragment", "```patch"),
+                    "new-plan",
+                ),
                 done_as("new-child"),
             ]
             .into(),
@@ -1730,6 +1760,8 @@ fn public_retry_of_dynamic_member_recomputes_enclosing_join_without_retiring_the
             scan: &|_| Ok(()),
             journal: None,
             limits: &plans::generous(),
+
+            worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
         },
     )
     .unwrap();
@@ -1772,6 +1804,8 @@ fn public_retry_preserves_live_spawn_only_children() {
         scan: &|_| Ok(()),
         journal: None,
         limits: &limits,
+
+        worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
     };
     patch::admit_patch(
         &mut patch::LiveGraph {
@@ -1825,7 +1859,6 @@ fn public_retry_preserves_live_spawn_only_children() {
             .all(|expansion| !expansion.retired())
     );
 }
-
 
 #[test]
 fn no_work_writer_continues_in_place_and_records_the_patch() {
@@ -1913,7 +1946,12 @@ fn no_work_stop(head: Option<&str>) -> AttemptObservation {
 fn writer_stop_restarts_only_for_enabled_writers_and_leaves_others_failed() {
     // (access, Some(false) sends a stopped_early stop to the chair, head, restarts)
     for (access, enabled, head, restarts) in [
-        (AccessMode::WorktreeWrite, Some(false), Some("a".repeat(40)), false),
+        (
+            AccessMode::WorktreeWrite,
+            Some(false),
+            Some("a".repeat(40)),
+            false,
+        ),
         (AccessMode::ReadOnly, None, Some("a".repeat(40)), false),
         // A committed stop (moved or missing head) restarts in place too.
         (AccessMode::WorktreeWrite, None, Some("b".repeat(40)), true),
@@ -1924,7 +1962,11 @@ fn writer_stop_restarts_only_for_enabled_writers_and_leaves_others_failed() {
         work.worktree = (access == AccessMode::WorktreeWrite).then(|| ".worktrees/work".into());
         if enabled == Some(false) {
             work.on_stop = provenant_records::OnStop::new(
-                [(provenant_records::StopCause::StoppedEarly, provenant_records::NextStep::Chair)].into(),
+                [(
+                    provenant_records::StopCause::StoppedEarly,
+                    provenant_records::NextStep::Chair,
+                )]
+                .into(),
             );
         }
         let document = graph(vec![work]);
@@ -2122,25 +2164,37 @@ fn stopping_settled_no_work_fences_failed_checkpoint_recovery() {
     plans::clear_expansion_pause(&mut checkpoint, 0, true);
     assert!(checkpoint.pause.is_none());
     let original = checkpoint.nodes[0].clone();
-    assert_eq!(original.advance_error_code.as_deref(), Some("stopped_no_work"));
+    assert_eq!(
+        original.advance_error_code.as_deref(),
+        Some("stopped_no_work")
+    );
     assert!(next_step::pending(&checkpoint));
     cancel_node_subtree(&document, &mut checkpoint, "work", Some("chair stop")).unwrap();
     assert_eq!(checkpoint.nodes[0].attempts, original.attempts);
     assert_eq!(checkpoint.nodes[0].state, original.state);
     assert_eq!(checkpoint.nodes[0].advance_error, original.advance_error);
-    assert_eq!(checkpoint.nodes[0].advance_error_code, original.advance_error_code);
+    assert_eq!(
+        checkpoint.nodes[0].advance_error_code,
+        original.advance_error_code
+    );
     journal.save(&checkpoint).unwrap();
     drop(journal);
 
-    assert!(FileJournal::pending_execution(&root, project, &document.graph_id)
-        .unwrap().is_none());
+    assert!(
+        FileJournal::pending_execution(&root, project, &document.graph_id)
+            .unwrap()
+            .is_none()
+    );
     let mut journal = open();
     let checkpoint = journal.load(&document.graph_id).unwrap().unwrap();
     assert!(next_step::stop_cause(&checkpoint.nodes[0], &checkpoint).is_none());
     assert!(!next_step::pending(&checkpoint));
     assert_eq!(checkpoint.nodes[0].attempts, original.attempts);
     assert_eq!(checkpoint.nodes[0].advance_error, original.advance_error);
-    assert_eq!(checkpoint.nodes[0].advance_error_code, original.advance_error_code);
+    assert_eq!(
+        checkpoint.nodes[0].advance_error_code,
+        original.advance_error_code
+    );
     let mut recovery_owner = FakeOwner::default();
     let run = advance(&document, &mut recovery_owner, &mut journal).unwrap();
     assert!(recovery_owner.calls.is_empty());
@@ -2298,7 +2352,10 @@ fn stopped_writer_restarts_fresh_on_another_route_with_its_handoff() {
     if let AttemptObservation::Terminal { result, .. } = &mut stop {
         *result = Some(Box::new(capture(note)));
     }
-    let mut owner = FakeOwner { observations: [stop, done_as("finished")].into(), ..Default::default() };
+    let mut owner = FakeOwner {
+        observations: [stop, done_as("finished")].into(),
+        ..Default::default()
+    };
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert!(run.checkpoint.successful());
@@ -2358,7 +2415,10 @@ fn no_work_restart_refused_before_planning_saves_a_chair_pause_with_the_stop() {
     if let AttemptObservation::Terminal { result, .. } = &mut stop {
         *result = Some(Box::new(capture(note)));
     }
-    let mut owner = FakeOwner { observations: [stop].into(), ..Default::default() };
+    let mut owner = FakeOwner {
+        observations: [stop].into(),
+        ..Default::default()
+    };
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     // Settled at Paused, not Pending: the stop and its chair pause are one save.
@@ -2374,7 +2434,10 @@ fn no_work_restart_refused_before_planning_saves_a_chair_pause_with_the_stop() {
     assert_eq!(saved.pause_reason(), run.checkpoint.pause_reason());
     assert_eq!(saved.nodes[0].state, NodeState::Failed);
     // Another advance stays paused and launches nothing.
-    assert_eq!(advance(&document, &mut owner, &mut journal).unwrap().status, GraphStatus::Paused);
+    assert_eq!(
+        advance(&document, &mut owner, &mut journal).unwrap().status,
+        GraphStatus::Paused
+    );
     assert_eq!(owner.calls.len(), 1);
 }
 
@@ -2384,41 +2447,79 @@ fn stopped_writer_without_another_route_returns_to_the_chair() {
     work.access = AccessMode::WorktreeWrite;
     work.worktree = Some(".worktrees/work".into());
     let document = graph(vec![work]);
-    let mut owner = FakeOwner { observations: [no_work_stop(Some(&"a".repeat(40)))].into(), ..Default::default() };
+    let mut owner = FakeOwner {
+        observations: [no_work_stop(Some(&"a".repeat(40)))].into(),
+        ..Default::default()
+    };
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(owner.calls.len(), 1);
     assert!(run.checkpoint.expansions.is_empty());
     assert!(!next_step::pending(&run.checkpoint));
-    assert_eq!(advance(&document, &mut owner, &mut journal).unwrap().status, GraphStatus::Paused);
+    assert_eq!(
+        advance(&document, &mut owner, &mut journal).unwrap().status,
+        GraphStatus::Paused
+    );
     assert_eq!(owner.calls.len(), 1);
 }
 
 #[test]
 fn writer_owner_decision_or_missing_capability_returns_to_chair_without_launch() {
-    for note in ["Owner must choose the release target", "Missing capability: network access is required"] {
-        for outcome in [AttemptOutcome::Succeeded, AttemptOutcome::DeclaredStop, AttemptOutcome::StoppedNoWork] {
+    for note in [
+        "Owner must choose the release target",
+        "Missing capability: network access is required",
+    ] {
+        for outcome in [
+            AttemptOutcome::Succeeded,
+            AttemptOutcome::DeclaredStop,
+            AttemptOutcome::StoppedNoWork,
+        ] {
             let no_work = outcome == AttemptOutcome::StoppedNoWork;
             let mut work = node("work", pool_route("senior"));
             work.access = AccessMode::WorktreeWrite;
             work.worktree = Some(".worktrees/work".into());
             let document = graph(vec![work]);
-            let handoff = format!("```handoff\n{}\n```", serde_json::json!({"schema_version":2,"status":"blocked","note":note,"remaining":["Finish accepted brief"],"decisions":[],"verify":[]}));
-            let mut observation = if no_work { no_work_stop(Some(&"a".repeat(40))) } else { done_as("blocked") };
-            if let AttemptObservation::Terminal { result, outcome: observed, .. } = &mut observation {
+            let handoff = format!(
+                "```handoff\n{}\n```",
+                serde_json::json!({"schema_version":2,"status":"blocked","note":note,"remaining":["Finish accepted brief"],"decisions":[],"verify":[]})
+            );
+            let mut observation = if no_work {
+                no_work_stop(Some(&"a".repeat(40)))
+            } else {
+                done_as("blocked")
+            };
+            if let AttemptObservation::Terminal {
+                result,
+                outcome: observed,
+                ..
+            } = &mut observation
+            {
                 *observed = outcome;
                 *result = Some(Box::new(capture(&handoff)));
             }
-            let mut owner = FakeOwner { observations: [observation].into(), ..Default::default() };
+            let mut owner = FakeOwner {
+                observations: [observation].into(),
+                ..Default::default()
+            };
             let mut journal = MemoryJournal::default();
             let run = advance(&document, &mut owner, &mut journal).unwrap();
             assert_eq!(run.status, GraphStatus::Paused, "{note}, no_work={no_work}");
             assert_eq!(owner.calls.len(), 1);
             assert!(run.checkpoint.expansions.is_empty());
-            assert!(run.checkpoint.nodes[0].handoff.as_ref().unwrap().fenced().contains(note));
+            assert!(
+                run.checkpoint.nodes[0]
+                    .handoff
+                    .as_ref()
+                    .unwrap()
+                    .fenced()
+                    .contains(note)
+            );
             assert!(!next_step::pending(&run.checkpoint));
-            assert_eq!(advance(&document, &mut owner, &mut journal).unwrap().status, GraphStatus::Paused);
+            assert_eq!(
+                advance(&document, &mut owner, &mut journal).unwrap().status,
+                GraphStatus::Paused
+            );
             assert_eq!(owner.calls.len(), 1);
         }
     }
@@ -2467,7 +2568,10 @@ fn container_retry_brief_names_the_field_and_template_the_container_came_from() 
         None,
     )
     .unwrap_err();
-    let refusal = error.parameter.clone().unwrap_or_else(|| panic!("{}", error.message));
+    let refusal = error
+        .parameter
+        .clone()
+        .unwrap_or_else(|| panic!("{}", error.message));
     assert_eq!(refusal.template, "review-panel");
     assert_eq!(refusal.node.as_deref(), Some("work"));
     assert!(matches!(

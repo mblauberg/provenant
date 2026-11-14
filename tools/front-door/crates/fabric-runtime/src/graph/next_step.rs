@@ -532,6 +532,7 @@ pub(super) fn settle_stop(
     plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     limits: &crate::config::GraphLimits,
+    worktree_layout: &provenant_config::WorktreeLayoutPort,
     ladder_facts: &mut Ladder<'_>,
 ) -> Option<(usize, GraphCheckpoint)> {
     let (index, node, settle) = select(plan, checkpoint, limits, ladder_facts)?;
@@ -564,6 +565,7 @@ pub(super) fn settle_stop(
             scan: &patch::scan_for_secrets,
             journal: None,
             limits,
+            worktree_layout: worktree_layout.clone(),
         },
     ) {
         Ok(_) => {

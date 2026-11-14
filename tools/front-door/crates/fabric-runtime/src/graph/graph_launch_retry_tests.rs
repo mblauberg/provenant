@@ -11,17 +11,30 @@ fn uncertain_handoff_reobserves_one_guardian_on_the_same_route() {
     }
     impl AttemptOwner for UncertainOwner {
         type Error = FacadeError;
-        fn actor(&self) -> String { "actor".into() }
-        fn wall_now(&self) -> Option<provenant_core::WallTime> { self.now }
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
+        fn actor(&self) -> String {
+            "actor".into()
+        }
+        fn wall_now(&self) -> Option<provenant_core::WallTime> {
+            self.now
+        }
         fn observe_or_start(
-            &mut self, key: &AttemptKey, _: NodeInput<'_>, route: &GraphRoute,
-            _: AccessMode, _: Option<&str>, _: Replay<'_>,
+            &mut self,
+            key: &AttemptKey,
+            _: NodeInput<'_>,
+            route: &GraphRoute,
+            _: AccessMode,
+            _: Option<&str>,
+            _: Replay<'_>,
         ) -> Result<AttemptObservation, Self::Error> {
             self.calls.push((key.clone(), route.clone()));
             if self.calls.len() == 1 {
                 self.guardians += 1;
                 Err(FacadeError::LaunchUnknown {
-                    operation_id: provenant_core::OperationId::parse("uncertain-operation").unwrap(),
+                    operation_id: provenant_core::OperationId::parse("uncertain-operation")
+                        .unwrap(),
                 })
             } else {
                 assert_eq!(self.calls[0], self.calls[self.calls.len() - 1]);
@@ -33,11 +46,17 @@ fn uncertain_handoff_reobserves_one_guardian_on_the_same_route() {
     task.route = None;
     task.routes = Some(vec![route("first"), route("fallback")]);
     let document = graph(vec![task]);
-    let mut owner = UncertainOwner { now: Some(at(0)), ..Default::default() };
+    let mut owner = UncertainOwner {
+        now: Some(at(0)),
+        ..Default::default()
+    };
     let mut journal = MemoryJournal::default();
     let pending = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(pending.checkpoint.nodes[0].state, NodeState::Running);
-    assert_eq!(pending.checkpoint.nodes[0].advance_owner_code.as_deref(), Some("LAUNCH_UNKNOWN"));
+    assert_eq!(
+        pending.checkpoint.nodes[0].advance_owner_code.as_deref(),
+        Some("LAUNCH_UNKNOWN")
+    );
     assert_eq!(pending.checkpoint.nodes[0].attempts.len(), 1);
     owner.now = Some(at(5));
     let done = advance(&document, &mut owner, &mut journal).unwrap();
@@ -100,7 +119,11 @@ fn launch_retry_policy_limits_failures_and_persists_the_source() {
         let document = graph(vec![node("one", route("first"))]);
         let mut owner = ErrorLauncher {
             now: Some(at(0)),
-            errors: [(1, crate::coordination::facade::FacadeError::HomeUnavailable), (2, crate::coordination::facade::FacadeError::HomeUnavailable)].into(),
+            errors: [
+                (1, crate::coordination::facade::FacadeError::HomeUnavailable),
+                (2, crate::coordination::facade::FacadeError::HomeUnavailable),
+            ]
+            .into(),
             launch_policy: Some(LaunchRetryPolicy {
                 limit,
                 limit_source: "override".into(),
@@ -289,9 +312,12 @@ fn review_base_save_failure_prevents_attempt_creation() {
         Err(GraphError::Journal(_))
     ));
     assert!(owner.calls.is_empty());
-    assert!(journal.0.as_ref().is_none_or(|checkpoint| {
-        checkpoint.nodes.iter().all(|node| node.attempts.is_empty())
-    }), "a failed review-base save must not create an attempt");
+    assert!(
+        journal.0.as_ref().is_none_or(|checkpoint| {
+            checkpoint.nodes.iter().all(|node| node.attempts.is_empty())
+        }),
+        "a failed review-base save must not create an attempt"
+    );
 }
 
 #[test]
@@ -307,7 +333,10 @@ fn writer_lock_contention_retries_the_same_attempt_after_release() {
     let pending = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(pending.checkpoint.nodes[0].state, NodeState::Running);
     assert_eq!(retry_of(&pending.checkpoint).wake_at, Some(at(5)));
-    assert_eq!(pending.checkpoint.nodes[0].advance_owner_code.as_deref(), Some("writer_lock_busy"));
+    assert_eq!(
+        pending.checkpoint.nodes[0].advance_owner_code.as_deref(),
+        Some("writer_lock_busy")
+    );
     owner.now = Some(at(5));
     let completed = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(completed.checkpoint.nodes[0].state, NodeState::Succeeded);
@@ -524,34 +553,46 @@ fn expired_launch_replays_an_accepted_operation() {
 #[test]
 fn launch_succeeds_after_more_than_three_transient_failures() {
     for kind in 0..4 {
-    let document = graph(vec![node("one", route("first"))]);
-    let mut owner = ErrorLauncher {
-        launch_policy: Some(LaunchRetryPolicy { limit: 0, ..Default::default() }),
-        now: Some(at(0)),
-        errors: (1..=4).map(|index| (index, match kind {
-            0 => crate::coordination::facade::FacadeError::Busy,
-            1 => crate::coordination::facade::FacadeError::WriterLockBusy,
-            2 => crate::coordination::facade::FacadeError::WriterUnknown,
-            _ => crate::coordination::facade::FacadeError::WriterBusy { holder: None },
-        })).collect(),
-        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
-        ..Default::default()
-    };
-    let mut journal = MemoryJournal::default();
-    for now in [0, 6, 17, 38] {
-        owner.now = Some(at(now));
-        let waiting = advance(&document, &mut owner, &mut journal).unwrap();
-        assert_eq!(waiting.checkpoint.nodes[0].state, NodeState::Running);
-        assert_eq!(waiting.checkpoint.nodes[0].attempts.len(), 1);
-        assert_eq!(retry_of(&waiting.checkpoint).deadline, Some(at(3600)));
+        let document = graph(vec![node("one", route("first"))]);
+        let mut owner = ErrorLauncher {
+            launch_policy: Some(LaunchRetryPolicy {
+                limit: 0,
+                ..Default::default()
+            }),
+            now: Some(at(0)),
+            errors: (1..=4)
+                .map(|index| {
+                    (
+                        index,
+                        match kind {
+                            0 => crate::coordination::facade::FacadeError::Busy,
+                            1 => crate::coordination::facade::FacadeError::WriterLockBusy,
+                            2 => crate::coordination::facade::FacadeError::WriterUnknown,
+                            _ => crate::coordination::facade::FacadeError::WriterBusy {
+                                holder: None,
+                            },
+                        },
+                    )
+                })
+                .collect(),
+            observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        for now in [0, 6, 17, 38] {
+            owner.now = Some(at(now));
+            let waiting = advance(&document, &mut owner, &mut journal).unwrap();
+            assert_eq!(waiting.checkpoint.nodes[0].state, NodeState::Running);
+            assert_eq!(waiting.checkpoint.nodes[0].attempts.len(), 1);
+            assert_eq!(retry_of(&waiting.checkpoint).deadline, Some(at(3600)));
+        }
+        owner.now = Some(at(79));
+        let done = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(done.checkpoint.nodes[0].state, NodeState::Succeeded);
+        assert_eq!(done.checkpoint.nodes[0].attempts.len(), 1);
+        assert!(owner.calls.iter().all(|key| key == &owner.calls[0]));
+        assert_eq!(owner.calls.len(), 5);
     }
-    owner.now = Some(at(79));
-    let done = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(done.checkpoint.nodes[0].state, NodeState::Succeeded);
-    assert_eq!(done.checkpoint.nodes[0].attempts.len(), 1);
-    assert!(owner.calls.iter().all(|key| key == &owner.calls[0]));
-    assert_eq!(owner.calls.len(), 5);
-}
 }
 
 #[test]

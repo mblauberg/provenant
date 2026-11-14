@@ -1108,6 +1108,7 @@ fn fragment(
     checkpoint: &GraphCheckpoint,
     json: &str,
     limits: &crate::config::GraphLimits,
+    worktree_layout: &provenant_config::WorktreeLayoutPort,
     safe_reason: &mut PlanFailureFact,
 ) -> Result<Expansion, String> {
     let default_spec = PlanSpec {
@@ -1188,6 +1189,7 @@ fn fragment(
         scan: &super::patch::scan_for_secrets,
         journal: None,
         limits,
+        worktree_layout: worktree_layout.clone(),
     };
     match super::patch::prepare(
         source,
@@ -1314,6 +1316,7 @@ pub(super) fn flatten_fragment(
     spec: Option<&PlanSpec>,
     document: &GraphDocument,
     checkpoint: &GraphCheckpoint,
+    worktree_layout: &provenant_config::WorktreeLayoutPort,
 ) -> Result<Vec<GraphNode>, String> {
     let units: BTreeMap<String, Vec<String>> = local_nodes
         .iter()
@@ -1340,7 +1343,12 @@ pub(super) fn flatten_fragment(
         BTreeSet::new()
     };
     let mut local_nodes = local_nodes;
-    fn provision_paths(nodes: &mut [GraphNode], graph: &str, prefix: &str) {
+    fn provision_paths(
+        nodes: &mut [GraphNode],
+        graph: &str,
+        prefix: &str,
+        worktree_layout: &provenant_config::WorktreeLayoutPort,
+    ) -> Result<(), String> {
         for child in nodes {
             let id = if prefix.is_empty() {
                 child.id.clone()
@@ -1348,7 +1356,10 @@ pub(super) fn flatten_fragment(
                 format!("{prefix}--{}", child.id)
             };
             if child.access == AccessMode::WorktreeWrite && child.worktree.is_none() {
-                child.worktree = Some(super::relay::child_worktree(graph, &id));
+                child.worktree = Some(
+                    super::relay::child_worktree(worktree_layout, graph, &id)
+                        .map_err(|error| error.to_string())?,
+                );
                 child.extra.insert("provision_worktree".into(), true.into());
             }
             if let Some(composite) = &mut child.composite {
@@ -1368,23 +1379,28 @@ pub(super) fn flatten_fragment(
                             && member.loop_body.is_none()
                     })
                 {
-                    writer.worktree = Some(super::relay::child_worktree(graph, &id));
+                    writer.worktree = Some(
+                        super::relay::child_worktree(worktree_layout, graph, &id)
+                            .map_err(|error| error.to_string())?,
+                    );
                     writer
                         .extra
                         .insert("provision_worktree".into(), true.into());
                 }
-                provision_paths(&mut composite.nodes, graph, &id);
+                provision_paths(&mut composite.nodes, graph, &id, worktree_layout)?;
             }
             if let Some(body) = &mut child.loop_body {
-                provision_paths(&mut body.body, graph, &id);
+                provision_paths(&mut body.body, graph, &id, worktree_layout)?;
             }
         }
+        Ok(())
     }
     provision_paths(
         &mut local_nodes,
         &document.graph_id,
         parent.map_or("", |parent| parent.id.as_str()),
-    );
+        worktree_layout,
+    )?;
     for existing in document
         .nodes
         .iter()
@@ -1740,6 +1756,7 @@ pub(super) fn settle(
     checkpoint: &mut GraphCheckpoint,
     capture: Option<&crate::result_capture::CapturedResult>,
     limits: &crate::config::GraphLimits,
+    worktree_layout: &provenant_config::WorktreeLayoutPort,
 ) -> Option<(
     GraphDocument,
     PlannedGraph,
@@ -1894,6 +1911,7 @@ pub(super) fn settle(
                 checkpoint,
                 &json,
                 limits,
+                worktree_layout,
                 &mut safe_reason,
             )
         })

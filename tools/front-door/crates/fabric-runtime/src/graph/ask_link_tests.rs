@@ -40,6 +40,9 @@ impl InboxOwner {
 
 impl AttemptOwner for InboxOwner {
     type Error = std::convert::Infallible;
+    fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+        provenant_config::PortTable::builtin().worktree_layout
+    }
 
     fn wall_now(&self) -> Option<provenant_core::WallTime> {
         Some(provenant_core::WallTime::from_micros(0).unwrap())
@@ -220,6 +223,8 @@ fn retry_node(document: &GraphDocument, checkpoint: &mut GraphCheckpoint, id: &s
             scan: &|_| Ok(()),
             journal: None,
             limits: &plans::generous(),
+
+            worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
         },
     )
     .unwrap();

@@ -14,6 +14,8 @@ mod relay_provisioning {
             resolvers: &resolvers,
             scan: &|_| Ok(()),
             limits: &limits,
+
+            worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
         };
         let request: relay::ChildRequest = serde_json::from_value(json!({
             "id": "planned",

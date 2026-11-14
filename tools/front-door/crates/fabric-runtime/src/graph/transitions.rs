@@ -585,8 +585,11 @@ pub(super) fn apply_attempt_observation(
                 let node_outcome = settlement_reason
                     .map(|reason| reason.node_outcome(attempt.stop))
                     .unwrap_or(provenant_records::run::SettlementNodeOutcome::Failed);
-                let outcome = if matches!(outcome, AttemptOutcome::Succeeded | AttemptOutcome::ReviewRequired)
-                    && node_outcome == provenant_records::run::SettlementNodeOutcome::Failed
+                let outcome = if matches!(
+                    outcome,
+                    AttemptOutcome::Succeeded | AttemptOutcome::ReviewRequired
+                ) && node_outcome
+                    == provenant_records::run::SettlementNodeOutcome::Failed
                 {
                     AttemptOutcome::OtherFailure
                 } else {
@@ -1255,6 +1258,7 @@ pub(super) fn redraw_quota_alias(
     checkpoint: &mut GraphCheckpoint,
     node_index: usize,
     limits: &crate::config::GraphLimits,
+    worktree_layout: &provenant_config::WorktreeLayoutPort,
 ) -> Result<(), String> {
     // Same-alias redraw takes precedence over a different configured
     // route, and the retry patch requires the old execution settled.
@@ -1275,6 +1279,7 @@ pub(super) fn redraw_quota_alias(
             limits,
             scan: &patch::scan_for_secrets,
             journal: None,
+            worktree_layout: worktree_layout.clone(),
         },
     )
     .map_err(|error| error.to_string())?;
@@ -2027,7 +2032,10 @@ mod tests {
         assert!(!applied.should_continue);
         let progress = &checkpoint.nodes[0];
         assert_eq!(progress.state, NodeState::Failed);
-        assert_eq!(progress.attempts[0].outcome, Some(AttemptOutcome::OtherFailure));
+        assert_eq!(
+            progress.attempts[0].outcome,
+            Some(AttemptOutcome::OtherFailure)
+        );
     }
 
     #[test]
