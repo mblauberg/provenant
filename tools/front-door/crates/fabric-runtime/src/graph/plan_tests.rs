@@ -34,7 +34,7 @@ fn admission_planner_fragment_capability() {
     let fragment = json!({
         "schema_version": 1,
         "nodes": [{
-            "id": "child", "access": "read_only", "goal": "Do a slice",
+            "id": "child", "access": "read_only", "prompt": "Do a slice",
             "acceptance_checks": ["Check it"], "route": {"alias": "senior"},
             "family_group": "group"
         }]
@@ -264,7 +264,7 @@ fn planner(max_nodes: usize) -> GraphDocument {
 }
 
 fn slice(id: &str, scope: &[&str]) -> Value {
-    json!({"id":id, "goal":"Do a slice", "write_scope":scope,
+    json!({"id":id, "prompt":"Do a slice", "write_scope":scope,
            "acceptance_checks":["Verify the slice"], "access":"read_only"})
 }
 
@@ -284,10 +284,10 @@ fn pattern_definition() -> Value {
             "retries": {"type": "integer", "default": 1, "min": 0, "max": 2}
         },
         "nodes": [
-            {"id": "write", "goal": "Do ${label}", "access": "worktree_write",
+            {"id": "write", "prompt": "Do ${label}", "access": "worktree_write",
              "worktree": ".worktrees/impl", "write_scope": "${scope}",
              "acceptance_checks": ["Verify the slice"]},
-            {"id": "review", "goal": "Review the work", "access": "read_only",
+            {"id": "review", "prompt": "Review the work", "access": "read_only",
              "depends_on": ["write"], "write_scope": ["src"],
              "acceptance_checks": ["Verify the review"]}
         ],
@@ -1181,7 +1181,7 @@ fn planner_prompt_names_only_the_nodes_allow_listed_patterns() {
 fn planner_requires_write_scope_only_for_writers() {
     let doc = planner(1);
     let reader =
-        json!({"id":"read","goal":"Read","access":"read_only","acceptance_checks":["check"]});
+        json!({"id":"read","prompt":"Read","access":"read_only","acceptance_checks":["check"]});
     let mut owner = fixture_owner(&[&result(vec![reader]), "read", "checked"]);
     let mut journal = MemoryJournal::default();
     let run = advance(&doc, &mut owner, &mut journal).unwrap();
@@ -1193,7 +1193,7 @@ fn planner_requires_write_scope_only_for_writers() {
     );
     assert_eq!(run.status, GraphStatus::Complete);
 
-    let writer = json!({"id":"write","goal":"Write","access":"worktree_write","worktree":".worktrees/write","acceptance_checks":["check"]});
+    let writer = json!({"id":"write","prompt":"Write","access":"worktree_write","worktree":".worktrees/write","acceptance_checks":["check"]});
     let mut owner = fixture_owner(&[&result(vec![writer])]);
     let mut journal = MemoryJournal::default();
     let run = advance(&doc, &mut owner, &mut journal).unwrap();

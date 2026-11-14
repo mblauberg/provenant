@@ -456,7 +456,7 @@ fn slice_fragment(id: &str) -> String {
     format!(
         "```fragment\n{}\n```",
         json!({
-            "schema_version":1,"nodes":[{"id":id,"goal":"Do work","acceptance_checks":["Verify work"],"access":"read_only"}]
+            "schema_version":1,"nodes":[{"id":id,"prompt":"Do work","acceptance_checks":["Verify work"],"access":"read_only"}]
         })
     )
 }
@@ -945,7 +945,7 @@ fn node_redo_planner_admits_a_new_fragment_without_losing_the_first_expansion() 
         format!(
             "```fragment\n{}\n```",
             json!({"schema_version":1,"nodes":[{
-                "id":id,"goal":"Do a slice","acceptance_checks":["Verify it"],"access":"read_only"
+                "id":id,"prompt":"Do a slice","acceptance_checks":["Verify it"],"access":"read_only"
             }]})
         )
     };

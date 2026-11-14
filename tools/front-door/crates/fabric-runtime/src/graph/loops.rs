@@ -752,14 +752,7 @@ pub(super) fn validate_progress(
         .extensions
         .contains(&format!("loop.{}.decision=stop", node.id));
     let matches_output = |passed| {
-        let mut expected = repair::terminal_outputs(node, checkpoint, positions, passed);
-        if progress
-            .outputs
-            .as_ref()
-            .is_some_and(|outputs| outputs.findings_available.is_none())
-        {
-            expected.findings_available = None;
-        }
+        let expected = repair::terminal_outputs(node, checkpoint, positions, passed);
         progress.outputs == Some(expected)
     };
     let valid = match progress.state {

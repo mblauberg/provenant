@@ -401,7 +401,7 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
         ..RoutingConfig::default()
     };
     config.pacing.accounts.insert(
-        "go".into(),
+        "opencode/go".into(),
         PacingProfile {
             policy: Some(PacingPolicy::Pace),
             windows: Some(vec![PacingWindow::Rolling, PacingWindow::Monthly]),
@@ -700,7 +700,7 @@ fn opencode_zen_pool_does_not_inherit_go_pacing_quota() -> Result<(), Box<dyn st
         .providers
         .insert("opencode".into(), PacingPolicy::Pace);
     config.pacing.accounts.insert(
-        "go".into(),
+        "opencode/go".into(),
         PacingProfile {
             policy: Some(PacingPolicy::Off),
             windows: Some(vec![PacingWindow::Rolling]),

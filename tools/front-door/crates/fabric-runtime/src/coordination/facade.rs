@@ -139,7 +139,6 @@ bounded_input! {
             operation_id: OperationId,
             prompt: String,
             expected_generation: u64,
-            #[serde(default)]
             no_fallback: bool,
         },
     }
@@ -1649,15 +1648,9 @@ mod diagnostic_tests {
             "expected_generation": 0,
             "no_fallback": true
         });
-        let mut legacy = input.clone();
-        legacy.as_object_mut().unwrap().remove("no_fallback");
-        assert!(matches!(
-            serde_json::from_value::<super::RunInput>(legacy)?,
-            super::RunInput::Resume {
-                no_fallback: false,
-                ..
-            }
-        ));
+        let mut missing = input.clone();
+        missing.as_object_mut().unwrap().remove("no_fallback");
+        assert!(serde_json::from_value::<super::RunInput>(missing).is_err());
         let explicit: super::RunInput = serde_json::from_value(input)?;
         assert!(matches!(
             explicit,

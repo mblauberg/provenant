@@ -2,8 +2,7 @@
 //!
 //! A saved checkpoint carries an envelope-owned map of text references. The
 //! bytes live in `graph-<id>.prompt-<hex>` files in the graph directory, so graph
-//! size does not grow with brief size times node count. Inline prompts and
-//! older node-local `prompt_digest` references still decode.
+//! size does not grow with brief size times node count. Inline prompts remain valid.
 use super::*;
 use serde_json::Value;
 use std::borrow::Cow;
@@ -149,11 +148,8 @@ pub(super) fn rehydrate<'a>(
     id: &str,
     bytes: &'a [u8],
 ) -> Result<Cow<'a, [u8]>, JournalError> {
-    const MARKERS: [&[u8]; 2] = [b"\"prompt_digest\"", b"\"stored_text\""];
-    if !MARKERS
-        .iter()
-        .any(|marker| bytes.windows(marker.len()).any(|window| window == *marker))
-    {
+    let marker = b"\"stored_text\"";
+    if !bytes.windows(marker.len()).any(|window| window == marker) {
         return Ok(Cow::Borrowed(bytes));
     }
     let mut value: Value = serde_json::from_slice(bytes)
@@ -173,23 +169,6 @@ pub(super) fn rehydrate<'a>(
                 id,
                 digest.as_str().ok_or(JournalError::BadEnvelope)?,
             )?);
-        }
-    }
-    // Old writers used node-local `prompt_digest`. Restrict legacy decoding
-    // to schema node locations, never arbitrary parameter tables.
-    for path in ["/execution/document/nodes", "/checkpoint/expansions"] {
-        if let Some(Value::Array(nodes)) = value.pointer_mut(path) {
-            for node in nodes {
-                if path.ends_with("expansions") {
-                    if let Some(Value::Array(nodes)) = node.get_mut("nodes") {
-                        for node in nodes {
-                            restore_legacy_node(directory, id, node)?;
-                        }
-                    }
-                } else {
-                    restore_legacy_node(directory, id, node)?;
-                }
-            }
         }
     }
     serde_json::to_vec(&value)
@@ -215,31 +194,6 @@ fn read_text(directory: &Directory, id: &str, digest: &str) -> Result<String, Jo
         return Err(JournalError::BadDigest);
     }
     String::from_utf8(prompt).map_err(|_| JournalError::BadEnvelope)
-}
-
-fn restore_legacy_node(
-    directory: &Directory,
-    id: &str,
-    node: &mut Value,
-) -> Result<(), JournalError> {
-    if let Some(object) = node.as_object_mut() {
-        if let Some(Value::String(digest)) = object.get("prompt_digest") {
-            let prompt = read_text(directory, id, digest)?;
-            object.remove("prompt_digest");
-            object.insert("prompt".into(), Value::String(prompt));
-        }
-        for (container, members) in [("composite", "nodes"), ("loop", "body")] {
-            if let Some(Value::Array(nodes)) = object
-                .get_mut(container)
-                .and_then(|part| part.get_mut(members))
-            {
-                for child in nodes {
-                    restore_legacy_node(directory, id, child)?;
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Remove the graph's prompt blobs. Returns whether any were removed.

@@ -420,15 +420,12 @@ fn effective_profile<'a>(
     &'static str,
     Option<provenant_core::WallTime>,
 ) {
-    // Direct library callers may supply legacy bare keys. These match any
-    // adapter; callers with an account registry should qualify them first.
     let account_profile = account.and_then(|a| {
         context
             .config
             .pacing
             .accounts
             .get(&format!("{}/{a}", model.adapter()))
-            .or_else(|| context.config.pacing.accounts.get(a))
     });
     let free_profile = context
         .catalogue

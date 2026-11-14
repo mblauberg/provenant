@@ -225,7 +225,7 @@ mod tests {
                 {"id":"blocked","state":"blocked","worktree":null,"advance_error_code":"launch_retry_exhausted","last_launch_retry":{"policy":{"limit":1,"limit_source":"project","first_seconds":5,"max_seconds":60},"failures":2},"attempts":[]},
                 {"id":"quota","state":"failed","worktree":null,"attempts":[{"launched":true,"key":{"graph_id":"g","node_id":"quota","route_index":0, "attempt": 1},"route":{"alias":"senior"},"state":"terminal","attempt_ref":"host/quota","outcome":"usage_limited","launch_actor":"actor"}]},
                 {"id":"pending","state":"pending","worktree":null,"attempts":[]},
-                {"id":"done","state":"succeeded","worktree":null,"handoff":{"schema_version":2,"status":"stopped_early","note":"done","remaining":[],"decisions":[],"verify":[]},"outputs":{"schema_version":1,"result":{"digest":"sha256:test","excerpt":"","truncated":false,"path":"result.txt"},"verdict":null,"findings":[],"branch":"lane","commit":"abc","warnings":[]},"attempts":[]}
+                {"id":"done","state":"succeeded","worktree":null,"handoff":{"schema_version":2,"status":"stopped_early","note":"done","remaining":[],"decisions":[],"verify":[]},"outputs":{"schema_version":1,"result":{"digest":"sha256:test","excerpt":"","truncated":false,"path":"result.txt"},"verdict":null,"findings":[],"findings_available":null,"branch":"lane","commit":"abc","warnings":[]},"attempts":[]}
             ]
         })).unwrap();
         let before = serde_json::to_vec(&checkpoint).unwrap();
