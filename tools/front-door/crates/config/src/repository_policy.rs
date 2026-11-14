@@ -120,35 +120,47 @@ impl RepositoryPolicy {
             if token.chars().all(sentence_punctuation) {
                 return false;
             }
-            // Try literal bytes first. Strip punctuation one character at a
-            // time so filename punctuation survives ambiguous prose wrappers.
-            [
-                token,
-                token.trim_start_matches(path_delimiter),
-                token.trim_start_matches(sentence_punctuation),
-            ]
-            .into_iter()
-            .any(|mut path| {
-                while !path.is_empty() {
-                    if self.protects(checkout, cwd, Path::new(path)) {
-                        return true;
-                    }
-                    let Some(last) = path
-                        .chars()
-                        .next_back()
-                        .filter(|c| sentence_punctuation(*c))
-                    else {
-                        break;
-                    };
-                    path = &path[..path.len() - last.len_utf8()];
-                }
-                false
-            })
+            path_candidates(token).any(|path| self.protects(checkout, cwd, Path::new(path)))
         };
         brief.split_whitespace().any(|token| {
             matches_reference(token) || token.split(path_delimiter).any(matches_reference)
         })
     }
+}
+
+/// Yield the literal token first, then candidates with prose wrappers peeled
+/// from its edges. Prefix peeling stops when the remaining bytes begin a path
+/// root or relative marker, so normalization sees `./` and `../` intact.
+fn path_candidates(token: &str) -> impl Iterator<Item = &str> {
+    let preserve_initial_path = begins_path_syntax(token);
+    std::iter::successors(Some(token), move |path| {
+        if preserve_initial_path || begins_path_syntax(path) {
+            return None;
+        }
+        // An ellipsis is a prose wrapper as a unit. It may expose `./`, `../`,
+        // or an absolute path, whose marker must then remain intact.
+        if path.starts_with("...") {
+            return Some(&path[3..]);
+        }
+        let first = path.chars().next()?;
+        (first != '.' && sentence_punctuation(first)).then_some(&path[first.len_utf8()..])
+    })
+    .flat_map(|path| {
+        std::iter::successors(Some(path), |candidate| {
+            let last = candidate.chars().next_back()?;
+            sentence_punctuation(last).then_some(&candidate[..candidate.len() - last.len_utf8()])
+        })
+    })
+    .filter(|candidate| !candidate.is_empty())
+}
+
+fn begins_path_syntax(path: &str) -> bool {
+    path.starts_with('/')
+        || path.starts_with('\\')
+        || path.starts_with("./")
+        || path.starts_with(".\\")
+        || path.starts_with("../")
+        || path.starts_with("..\\")
 }
 
 fn sentence_punctuation(c: char) -> bool {
