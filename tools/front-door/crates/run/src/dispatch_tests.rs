@@ -199,6 +199,7 @@ pub(super) struct Fake {
     pub(super) observed: Option<RouteRecord>,
     pub(super) codex_usage: Option<UsageRecord>,
     pub(super) decoded: Cell<usize>,
+    pub(super) complete: Option<bool>,
     prepared: Cell<usize>,
     resumed: Cell<Option<AttemptId>>,
     prompt: RefCell<String>,
@@ -291,8 +292,10 @@ impl Providers for Fake {
                 .answer
                 .clone()
                 .unwrap_or_else(|| String::from_utf8_lossy(stdout).into_owned()),
-            complete: self.outcome.is_none_or(|outcome| {
-                matches!(outcome, Outcome::Succeeded | Outcome::ReviewRequired)
+            complete: self.complete.unwrap_or_else(|| {
+                self.outcome.is_none_or(|outcome| {
+                    matches!(outcome, Outcome::Succeeded | Outcome::ReviewRequired)
+                })
             }),
             observed_route: self.observed.clone(),
             usage: self.codex_usage.clone().unwrap_or_default(),

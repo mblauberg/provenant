@@ -1297,7 +1297,13 @@ impl SettlementReason {
                     Self::UncommittedWork
                 }
                 Some(TerminalCause::TokenBudget)
-                    if handoff.is_some_and(|handoff| {
+                    if matches!(
+                        outcome,
+                        Outcome::Succeeded
+                            | Outcome::ReviewRequired
+                            | Outcome::Failed
+                            | Outcome::TimedOut
+                    ) && handoff.is_some_and(|handoff| {
                         !handoff.unfinished() && handoff.validate().is_ok()
                     }) =>
                 {
