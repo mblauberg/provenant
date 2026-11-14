@@ -337,9 +337,7 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
         PlanRequest {
             scope: WorkScope::Project(binding.project_id()),
             permissions: PlanPermissions {
-                credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
-                    "/fixture/home",
-                )),
+                credential_roots: provenant_core::CredentialRoots::for_home(&home),
                 policy: Some(lane_policy),
                 read_only: None,
                 mode: AccessMode::ReadOnly,
