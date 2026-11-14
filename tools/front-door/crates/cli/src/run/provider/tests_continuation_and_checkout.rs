@@ -828,8 +828,8 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
                 let data = state.join("candidate-0/data/opencode");
                 std::fs::create_dir_all(&data)?;
                 let db = rusqlite::Connection::open(data.join("opencode.db"))?;
-                db.execute_batch("CREATE TABLE session (id TEXT PRIMARY KEY); CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)")?;
-                db.execute("INSERT INTO session VALUES (?1)", ["fixture-session"])?;
+                db.execute_batch("CREATE TABLE session_v2 (id TEXT PRIMARY KEY); CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)")?;
+                db.execute("INSERT INTO session_v2 VALUES (?1)", ["fixture-session"])?;
                 db.execute(
                     "INSERT INTO session_message VALUES (?1, 'assistant', ?2)",
                     (

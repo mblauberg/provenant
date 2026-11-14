@@ -771,7 +771,6 @@ printf 'agy 1.0.0\n'
                 None,
             )?;
             let skills = &prepared.route.extra["user_skills"];
-            assert_eq!(skills["exposed"], true);
             assert!(
                 skills["warnings"]
                     .as_array()

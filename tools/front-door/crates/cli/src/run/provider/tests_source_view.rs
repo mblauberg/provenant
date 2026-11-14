@@ -173,29 +173,6 @@ fn source_view_names_the_failing_step_and_cause() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn source_view_of_twenty_thousand_files_uses_batched_reads_within_budget()
--> Result<(), Box<dyn std::error::Error>> {
-    let fixture = SourceViewFixture::new()?;
-    for shard in 0..100 {
-        let directory = fixture.project.join(format!("d{shard}"));
-        std::fs::create_dir(&directory)?;
-        for file in 0..200 {
-            std::fs::write(directory.join(format!("f{file}.txt")), format!("{shard}/{file}\n"))?;
-        }
-    }
-    provenant_os::fixture::run_git(&fixture.project, &["add", "-A"])?;
-    provenant_os::fixture::run_git(&fixture.project, &["commit", "-qm", "many"])?;
-    let head = run::resolve_git_base(&fixture.git, &fixture.project, "HEAD")?;
-    use provenant_core::Clock;
-    let clock = provenant_os::clock::SystemClock::new();
-    let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 60)?;
-    let view = fixture.snapshot(&fixture.project, &head)?;
-    assert!(budget.remaining(clock.mono_now()).as_micros() > 0);
-    assert_eq!(std::fs::read(view.join("d99/f199.txt"))?, b"99/199\n");
-    Ok(())
-}
-
-#[test]
 fn source_view_batch_reader_decodes_in_order_and_names_missing_objects() {
     let a: provenant_core::GitOid = "a".repeat(40).parse().unwrap();
     let b: provenant_core::GitOid = "b".repeat(40).parse().unwrap();

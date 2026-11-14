@@ -565,7 +565,23 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
 #[test]
 fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_providers::Adapter;
-    let image = PathBuf::from("/outside/shot.png");
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let home = root.join("home");
+    let cwd = root.join("project");
+    let state = root.join("state");
+    let scratch = root.join("scratch");
+    let private_state = state.join("attempt/provider-state");
+    let assets = root.join("release/active");
+    for path in [&home, &cwd, &scratch, &assets] {
+        std::fs::create_dir_all(path)?;
+    }
+    provenant_os::fixture::private_state_dir(&state)?;
+    std::fs::create_dir_all(&private_state)?;
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), cwd.clone());
+    inputs.state_dir = Some(state.clone());
+    let host_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let image = root.join("outside/shot.png");
     let access = run::LaneAccess {
         attachments: vec![image.clone()],
         ..Default::default()
@@ -573,16 +589,16 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
     let plan = ConfinedPlan::new(confinement_request(
         ProjectId::parse("0123456789abcdef0123456789abcdef")?,
         ConfinementRoots {
-            host_roots: None,
-            cwd: Path::new("/project"),
-            home: Path::new("/home/user"),
-            state: Path::new("/fixture-host-state"),
+            host_roots: Some(&host_roots),
+            cwd: &cwd,
+            home: &home,
+            state: &state,
             credential_roots: &[],
             github_roots: &[],
             protected_worktrees: &[],
-            scratch: Path::new("/tmp/scratch"),
-            private_state: Path::new("/state/private"),
-            assets: Path::new("/release"),
+            scratch: &scratch,
+            private_state: &private_state,
+            assets: &assets,
             prompt_file: None,
         },
         None,
@@ -626,37 +642,54 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
         continuation: None,
         grant_digest: "fixture",
         executable: Path::new("/opt/homebrew/Cellar/codex/fixture/bin/codex"),
-        home: Path::new("/home/user"),
+        home: &home,
         user: "fixture".as_ref(),
         host_var: &|_| None,
         skill_stage_max_bytes: 0,
         account: None,
         token: None,
-        cwd: Path::new("/project"),
+        cwd: &cwd,
         git_context: false,
         nonce: [0; 16],
         provenant: LaneRuntime {
             executable: Path::new("/fixture/provenant/bin/provenant"),
             git: Path::new("/usr/bin/git"),
-            state: Path::new("/state"),
-            home: Path::new("/home/user"),
+            state: &state,
+            home: &home,
             depth: 1,
             attempt: provenant_core::AttemptId::from_bytes([7; 16]),
-            assets: Path::new("/release"),
+            assets: &assets,
         },
     })?;
+    let image_argument = image.to_str().ok_or("image path")?;
     assert!(
         launch
             .argv
             .windows(2)
-            .any(|pair| pair == ["--image", "/outside/shot.png"])
+            .any(|pair| pair == ["--image", image_argument])
     );
     Ok(())
 }
 
 #[test]
 fn attachment_read_grant_is_exact() -> Result<(), Box<dyn std::error::Error>> {
-    let image = PathBuf::from("/outside/image.png");
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let home = root.join("home");
+    let cwd = root.join("project");
+    let state = root.join("state");
+    let scratch = root.join("scratch");
+    let private_state = state.join("attempt/provider-state");
+    let assets = root.join("release/active");
+    for path in [&home, &cwd, &scratch, &assets] {
+        std::fs::create_dir_all(path)?;
+    }
+    provenant_os::fixture::private_state_dir(&state)?;
+    std::fs::create_dir_all(&private_state)?;
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), cwd.clone());
+    inputs.state_dir = Some(state.clone());
+    let host_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let image = root.join("outside/image.png");
     let access = run::LaneAccess {
         attachments: vec![image.clone()],
         ..Default::default()
@@ -664,16 +697,16 @@ fn attachment_read_grant_is_exact() -> Result<(), Box<dyn std::error::Error>> {
     let request = confinement_request(
         ProjectId::parse("0123456789abcdef0123456789abcdef")?,
         ConfinementRoots {
-            host_roots: None,
-            cwd: Path::new("/project"),
-            home: Path::new("/home/user"),
-            state: Path::new("/fixture-host-state"),
+            host_roots: Some(&host_roots),
+            cwd: &cwd,
+            home: &home,
+            state: &state,
             credential_roots: &[],
             github_roots: &[],
             protected_worktrees: &[],
-            scratch: Path::new("/tmp/scratch"),
-            private_state: Path::new("/state/private"),
-            assets: Path::new("/release"),
+            scratch: &scratch,
+            private_state: &private_state,
+            assets: &assets,
             prompt_file: None,
         },
         None,
@@ -684,7 +717,7 @@ fn attachment_read_grant_is_exact() -> Result<(), Box<dyn std::error::Error>> {
         InventoryContext::Sandboxed,
     )?;
     assert!(request.permissions.read_roots.contains(&PathGrant {
-        path: image,
+        path: image.clone(),
         scope: PathScope::Exact
     }));
     assert!(
@@ -692,34 +725,45 @@ fn attachment_read_grant_is_exact() -> Result<(), Box<dyn std::error::Error>> {
             .permissions
             .read_roots
             .iter()
-            .any(|grant| grant.path == Path::new("/outside"))
+            .any(|grant| grant.path == image.parent().expect("image parent"))
     );
     Ok(())
 }
 
 #[test]
 fn lane_plan_reads_the_active_release_root() -> Result<(), Box<dyn std::error::Error>> {
-    let cwd = Path::new("/project");
-    let assets = Path::new("/release/sha256:active");
-    let home = Path::new("/home/user");
-    let scratch = Path::new("/tmp/lane-scratch");
-    let private_state = Path::new("/state/attempt/provider-state");
-    let prompt = Path::new("/state/attempt/prompt.md");
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let home = root.join("home");
+    let cwd = root.join("project");
+    let state = root.join("state");
+    let scratch = root.join("scratch");
+    let private_state = state.join("attempt/provider-state");
+    let assets = root.join("release/active");
+    for path in [&home, &cwd, &scratch, &assets] {
+        std::fs::create_dir_all(path)?;
+    }
+    provenant_os::fixture::private_state_dir(&state)?;
+    std::fs::create_dir_all(&private_state)?;
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), cwd.clone());
+    inputs.state_dir = Some(state.clone());
+    let host_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let prompt = state.join("attempt/prompt.md");
     for entry in REGISTRY {
         let request = confinement_request(
             ProjectId::parse("0123456789abcdef0123456789abcdef")?,
             ConfinementRoots {
-                host_roots: None,
-                cwd,
-                home,
-                state: Path::new("/fixture-host-state"),
+                host_roots: Some(&host_roots),
+                cwd: &cwd,
+                home: &home,
+                state: &state,
                 credential_roots: &[],
                 github_roots: &[],
                 protected_worktrees: &[],
-                scratch,
-                private_state,
-                assets,
-                prompt_file: Some(prompt),
+                scratch: &scratch,
+                private_state: &private_state,
+                assets: &assets,
+                prompt_file: Some(&prompt),
             },
             None,
             &run::LaneAccess::default(),
@@ -729,7 +773,7 @@ fn lane_plan_reads_the_active_release_root() -> Result<(), Box<dyn std::error::E
             InventoryContext::Sandboxed,
         )?;
         assert!(request.permissions.read_roots.contains(&PathGrant {
-            path: assets.to_owned(),
+            path: assets.clone(),
             scope: PathScope::Subtree,
         }));
         let plan = ConfinedPlan::new(request)?;

@@ -1590,7 +1590,9 @@ mod provisioning_tests {
         git(&["commit", "--allow-empty", "-qm", "base"])?;
         let source = git(&["rev-parse", "HEAD"])?;
         let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
-        inputs.state_dir = Some(root.path().join("state"));
+        let state = root.path().join("state");
+        provenant_os::fixture::private_state_dir(&state)?;
+        inputs.state_dir = Some(state);
         let context = Context::open(
             inputs.resolve(&provenant_os::fs::SystemPathResolver)?,
             &home,
