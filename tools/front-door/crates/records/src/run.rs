@@ -1,7 +1,7 @@
 //! Strict run-store records. Facts are constructed only after store validation.
 use crate::{CanonicalError, CanonicalV1, FileDigest, PathWire};
 use provenant_core::{
-    ActorId, AttemptId, DeliveryId, Digest, GitOid, HostId, OperationId, ProjectId, WallTime,
+    ActorId, AttemptId, DeliveryId, Digest, GitOid, OperationId, ProjectId, WallTime,
 };
 use serde::{Deserialize, Serialize};
 
@@ -33,26 +33,13 @@ pub const RESULT_LIMIT: u64 = 4 * 1024 * 1024;
 pub const CAPTURE_LIMIT: u64 = 64 * 1024 * 1024;
 pub const OUTPUT_LIMIT: u64 = 65536;
 
-/// Explicit submitting chair identity, separate from a worker provider session.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChairBinding {
-    #[serde(flatten)]
-    pub extra: crate::ExtraFields,
-    pub host: HostId,
-    pub actor: ActorId,
-    /// The chair's host session, when its harness names one. It addresses the
-    /// chair log that settlement appends to.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<String>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanonicalRequest {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     /// Submission proposal only. Readers trust the host-owned Fabric index.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chair: Option<ChairBinding>,
+    pub chair: Option<crate::custody::Chair>,
     /// A fresh continuation retains the parent for lineage and admission, but
     /// starts the provider without its previous session. The reason is sealed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -657,7 +644,7 @@ pub struct OperationRecord {
     pub refused_at: Option<WallTime>,
     /// Chair bound at submission, retained for refusal notice recovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refusal_chair: Option<ChairBinding>,
+    pub refusal_chair: Option<crate::custody::Chair>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

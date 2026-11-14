@@ -18,18 +18,6 @@ fn call(rig: &TestRig, args: &[&str], expected: i64) -> Result<Value> {
     assert_eq!(value.as_object().ok_or("object")?.len(), 5);
     Ok(value)
 }
-fn token(proof: &Value) -> Result<String> {
-    let token = proof["token"].as_str().ok_or("token string")?;
-    assert_eq!(token.len(), 32, "{token}");
-    assert!(
-        token
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
-        "{token}"
-    );
-    Ok(token.to_owned())
-}
-
 #[test]
 fn identity_mail_tasks_and_events_use_durable_scoped_receipts() -> Result {
     let rig = TestRig::new()?;
@@ -113,7 +101,7 @@ fn identity_mail_tasks_and_events_use_durable_scoped_receipts() -> Result {
     rig.assert_legacy_unchanged()
 }
 #[test]
-fn ownership_and_expired_fences_are_refused() -> Result {
+fn custody_claim_adoption_and_release_share_the_mine_view() -> Result {
     let mut rig = TestRig::new()?;
     let acquired = call(
         &rig,
@@ -121,59 +109,55 @@ fn ownership_and_expired_fences_are_refused() -> Result {
             "fabric",
             "claim",
             "acquire",
-            "--issue",
-            "PR-1",
-            "--lease-seconds",
-            "1",
+            "issue:3078",
             "--operation-id",
             "work-1",
         ],
         0,
     )?;
-    let proof = &acquired["data"]["proof"];
-    let id = proof["id"].as_str().ok_or("claim ID")?;
-    let generation = proof["generation"].to_string();
-    let token = token(proof)?;
+    assert_eq!(
+        acquired["data"]["change"]["record"]["state"]["state"],
+        "active"
+    );
+    let mine = call(&rig, &["status", "--mine"], 0)?;
+    assert!(
+        mine["data"]["items"]
+            .as_array()
+            .ok_or("custody items")?
+            .iter()
+            .any(|item| item["record"]["subject"]["id"] == "3078")
+    );
     for (key, value) in &mut rig.env {
         if key == "PROVENANT_AGENT_LABEL" {
             *value = "other".into();
         }
     }
-    let args = [
-        "fabric",
-        "claim",
-        "verify",
-        id,
-        "--generation",
-        &generation,
-        "--token",
-        &token,
-    ];
-    let refusal = call(&rig, &args, 1)?;
-    assert_eq!(refusal["error"]["code"], "stale_fence");
-    for (key, value) in &mut rig.env {
-        if key == "PROVENANT_AGENT_LABEL" {
-            *value = "fixture".into();
-        }
-    }
-    // A real bounded observation consumes the one-second lease; no test sleeps.
-    let cursor = call(&rig, &["fabric", "events", "read"], 0)?["data"]["cursor"].to_string();
-    let immediate = call(
-        &rig,
-        &[
-            "fabric", "events", "read", "--after", &cursor, "--wait", "0",
-        ],
-        124,
-    )?;
-    assert_eq!(immediate["data"]["timed_out"], true);
-    call(
-        &rig,
-        &[
-            "fabric", "events", "read", "--after", &cursor, "--wait", "1",
-        ],
-        124,
-    )?;
-    assert_eq!(call(&rig, &args, 1)?["error"]["code"], "stale_fence");
+    // Advisory custody remains inspectable and adoptable by another live chair.
+    let inspected = call(&rig, &["fabric", "claim", "verify", "issue:3078"], 0)?;
+    let adopted = call(&rig, &["adopt", "issue:3078"], 0)?;
+    assert_eq!(adopted["data"]["record"]["origin"], "adopted");
+    assert_ne!(
+        inspected["data"]["record"]["holder"],
+        adopted["data"]["record"]["holder"]
+    );
+    let released = call(&rig, &["release", "issue:3078"], 0)?;
+    assert_eq!(released["data"]["record"]["state"]["state"], "released");
+    let mine = call(&rig, &["status", "--mine"], 0)?;
+    assert!(
+        !mine["data"]["items"]
+            .as_array()
+            .ok_or("custody items")?
+            .iter()
+            .any(|item| item["record"]["subject"]["id"] == "3078")
+    );
+    let ledger = call(&rig, &["fabric", "claim", "list"], 0)?;
+    assert!(
+        ledger["data"]["page"]["items"]
+            .as_array()
+            .ok_or("ledger items")?
+            .iter()
+            .any(|item| item["subject"]["id"] == "3078" && item["state"]["state"] == "released")
+    );
     rig.assert_legacy_unchanged()
 }
 #[test]
@@ -304,30 +288,6 @@ fn linked_worktrees_share_projects_and_ignore_git_redirects() -> Result {
 }
 
 #[test]
-fn malformed_fence_tokens_never_reach_either_error_renderer() -> Result {
-    let rig = TestRig::new()?.without_state()?;
-    let secret = "0123456789abcdef0123456789abcdefx";
-    let args = [
-        "fabric",
-        "claim",
-        "verify",
-        "00000000000000000000000000000001",
-        "--generation",
-        "1",
-        "--token",
-        secret,
-    ];
-    let value = call(&rig, &args, 2)?;
-    assert!(!serde_json::to_string(&value)?.contains(secret));
-    let human = rig.command(&args)?;
-    assert_eq!(code(&human), 2);
-    assert!(!String::from_utf8_lossy(&human.stderr.bytes).contains(secret));
-    assert!(!String::from_utf8_lossy(&human.stdout.bytes).contains(secret));
-    assert!(!rig.state.exists());
-    Ok(())
-}
-
-#[test]
 fn non_git_directories_beneath_home_stay_local_and_remote_homes_refuse_local_writes() -> Result {
     let mut rig = TestRig::new()?;
     rig.project = rig.home.join("workspace");
@@ -366,64 +326,6 @@ fn non_git_directories_beneath_home_stay_local_and_remote_homes_refuse_local_wri
     assert_eq!(refused["error"]["code"], "home_unavailable");
     assert!(!rig.state.join("fabric/fabric.sqlite3").exists());
     rig.assert_legacy_unchanged()
-}
-
-#[test]
-fn positional_fence_tokens_never_reach_either_error_renderer() -> Result {
-    let rig = TestRig::new()?.without_state()?;
-    let secret = "0123456789abcdef0123456789abcdef";
-    for option in ["--generation", "--unknown"] {
-        let args = [
-            "fabric",
-            "claim",
-            "verify",
-            "00000000000000000000000000000001",
-            secret,
-            option,
-            "1",
-            "--token",
-            secret,
-        ];
-        let value = call(&rig, &args, 2)?;
-        assert!(!serde_json::to_string(&value)?.contains(secret));
-        let human = rig.command(&args)?;
-        assert_eq!(code(&human), 2);
-        assert!(!String::from_utf8_lossy(&human.stderr.bytes).contains(secret));
-        assert!(!String::from_utf8_lossy(&human.stdout.bytes).contains(secret));
-    }
-    assert!(!rig.state.exists());
-    Ok(())
-}
-
-#[test]
-fn embedded_and_uppercase_fence_tokens_never_reach_either_error_renderer() -> Result {
-    let rig = TestRig::new()?.without_state()?;
-    let lower = "0123456789abcdef0123456789abcdef";
-    let upper = lower.to_ascii_uppercase();
-    for (stray, secret) in [
-        (format!("x{lower}y"), lower),
-        (format!("{lower}0"), lower),
-        (upper.clone(), upper.as_str()),
-        (format!("--tokn={lower}"), lower),
-    ] {
-        let args = [
-            "fabric",
-            "claim",
-            "verify",
-            "00000000000000000000000000000001",
-            stray.as_str(),
-            "--generation",
-            "1",
-        ];
-        let value = call(&rig, &args, 2)?;
-        assert!(!serde_json::to_string(&value)?.contains(secret), "{stray}");
-        let human = rig.command(&args)?;
-        assert_eq!(code(&human), 2);
-        assert!(!String::from_utf8_lossy(&human.stderr.bytes).contains(secret));
-        assert!(!String::from_utf8_lossy(&human.stdout.bytes).contains(secret));
-    }
-    assert!(!rig.state.exists());
-    Ok(())
 }
 
 #[test]

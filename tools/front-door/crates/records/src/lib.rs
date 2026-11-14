@@ -12,6 +12,7 @@ mod attempt_fact;
 mod attempt_file;
 mod canonical;
 pub mod control;
+pub mod custody;
 pub mod diagnostic;
 mod finding;
 pub mod handoff;

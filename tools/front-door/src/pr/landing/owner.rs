@@ -985,6 +985,14 @@ impl LandingOwner for Owner<'_> {
         });
         if !self.shadow {
             write_record(self.state, &record)?;
+            if let Err(error) =
+                crate::custody::settle_landing(self.repo.project_path(), self.state, &record)
+            {
+                record
+                    .warnings
+                    .push(format!("custody settlement pending: {error}"));
+                write_record(self.state, &record)?;
+            }
         }
         if stale {
             self.last = None;

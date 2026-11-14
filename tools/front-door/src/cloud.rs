@@ -23,8 +23,58 @@ pub fn run(command: Cloud, globals: &Globals) -> u8 {
     let result = roots::selected_project(globals.project.as_deref(), true)
         .map_err(Error::from)
         .and_then(|project| match command {
-            Cloud::Launch(launch) => launch_session(&project, &launch),
-            Cloud::Collect(collect) => collect_result(&project, &collect),
+            Cloud::Launch(launch) => {
+                let result = launch_session(&project, &launch)?;
+                let capture = || -> Result<(), Error> {
+                    let resolved = roots::resolve(
+                        globals,
+                        roots::Workspace::Checkout,
+                        roots::Product::Required,
+                    )?;
+                    use provenant_records::custody::{Subject, SubjectKind};
+                    let key = result.0["key"].as_str().ok_or("cloud key missing")?;
+                    let branch = result.0["record"]["branch"]
+                        .as_str()
+                        .ok_or("cloud branch missing")?;
+                    crate::custody::acquire(
+                        &resolved,
+                        &[
+                            Subject::new(SubjectKind::CloudKey, key),
+                            Subject::new(SubjectKind::Branch, branch),
+                        ],
+                    )
+                };
+                if let Err(error) = capture() {
+                    provenant_fabric_runtime::custody::warning(format_args!(
+                        "cloud custody pending: {error}"
+                    ));
+                }
+                Ok(result)
+            }
+            Cloud::Collect(collect) => {
+                let result = collect_result(&project, &collect)?;
+                let capture = || -> Result<(), Error> {
+                    let resolved = roots::resolve(
+                        globals,
+                        roots::Workspace::Checkout,
+                        roots::Product::Required,
+                    )?;
+                    crate::custody::collect_cloud(
+                        &resolved,
+                        result.0["key"].as_str().ok_or("cloud key missing")?,
+                        result.0["branch"].as_str().ok_or("cloud branch missing")?,
+                        result.0["worktree"]
+                            .as_str()
+                            .ok_or("cloud worktree missing")?,
+                    )
+                };
+                if let Err(error) = capture() {
+                    provenant_fabric_runtime::custody::warning(format_args!(
+                        "cloud collection custody pending: {error}"
+                    ));
+                }
+                Ok(result)
+            }
         });
     match result {
         Ok((data, human)) => emit(

@@ -17,7 +17,7 @@ pub(crate) struct BinaryRunOwner<'a> {
     /// Replay submissions under this actor instead of the process's own.
     pub(crate) actor: Option<provenant_core::ActorId>,
     /// Only the direct chair entry point supplies a verified origin.
-    pub(crate) chair: Option<provenant_run::ChairBinding>,
+    pub(crate) chair: Option<provenant_records::custody::Chair>,
 }
 /// Retain admitted preparation records when the CLI projects a launch refusal.
 /// Callers still classify the durable records with `BinaryRunOwner::receipt`.

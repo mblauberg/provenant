@@ -184,6 +184,8 @@ pub struct Unavailable {
 /// `unavailable` rather than shown as empty, so absence never reads as "none".
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionState {
+    pub custody: Vec<String>,
+    pub custody_more: Option<String>,
     pub active: Vec<LaneLine>,
     pub settled: Vec<LaneLine>,
     /// When the listing held lanes beyond the page the collector read, the
@@ -215,6 +217,14 @@ struct Section {
 impl SessionState {
     fn sections(&self, worktrees: bool) -> Vec<Section> {
         let mut sections = Vec::new();
+        if !self.custody.is_empty() || self.custody_more.is_some() {
+            sections.push(Section {
+                title: "Active custody".into(),
+                lines: self.custody.clone(),
+                more: 0,
+                partial: self.custody_more.clone(),
+            });
+        }
         let lanes = |title: &str, lanes: &[LaneLine], next: &Option<String>, skipped: usize| {
             Section {
             title: format!("{title} ({}{})", lanes.len(), plus(next.is_some())),
@@ -342,7 +352,7 @@ impl SessionState {
                 format!("#{} status unavailable; {how}", pr.number)
             }));
             sections.push(Section {
-                title: "Pull requests named in the checkpoint".into(),
+                title: "Pull requests in custody".into(),
                 lines,
                 more: 0,
                 partial: None,
@@ -526,64 +536,13 @@ pub struct Baseline {
     /// Unix seconds of the chair's last save: the checkpoint's own
     /// modification time, which no autosave ever changes.
     pub chair_saved_unix: i64,
-    /// PR numbers the chair named in their text.
-    pub pr_refs: Vec<u64>,
 }
 
 /// Derive the baseline from a checkpoint read.
 pub fn baseline(checkpoint: &super::Checkpoint) -> Baseline {
     Baseline {
         chair_saved_unix: checkpoint.modified_at.as_micros() / 1_000_000,
-        pr_refs: pr_refs(&checkpoint.markdown),
     }
-}
-
-/// Pull request numbers the chair wrote, such as `PR #12`, `pr/12` or
-/// `pull/12`, in first-mention order. The most recent `PR_REF_LIMIT` survive.
-pub fn pr_refs(chair: &str) -> Vec<u64> {
-    let lower = chair.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    let mut found: Vec<u64> = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if !lower.is_char_boundary(i) {
-            i += 1;
-            continue;
-        }
-        let rest = &lower[i..];
-        let skip = ["pull request", "pull/", "pr/", "pr"]
-            .iter()
-            .find(|word| rest.starts_with(**word))
-            .map(|word| word.len());
-        let boundary = lower[..i]
-            .chars()
-            .next_back()
-            .is_none_or(|c| !c.is_alphanumeric());
-        match skip {
-            Some(len) if boundary => {
-                let mut j = i + len;
-                while j < bytes.len() && matches!(bytes[j], b' ' | b'#' | b':') && j < i + len + 3 {
-                    j += 1;
-                }
-                let digits = lower[j..].bytes().take_while(u8::is_ascii_digit).count();
-                if (1..=6).contains(&digits)
-                    && let Ok(number) = lower[j..j + digits].parse::<u64>()
-                    && number > 0
-                {
-                    if !found.contains(&number) {
-                        found.push(number);
-                    }
-                    i = j + digits;
-                    continue;
-                }
-                i += len;
-            }
-            _ => i += 1,
-        }
-    }
-    let excess = found.len().saturating_sub(PR_REF_LIMIT);
-    found.drain(..excess);
-    found
 }
 
 #[cfg(test)]
@@ -853,20 +812,5 @@ mod tests {
         assert!(title.contains("this hook's --state-dir"), "{title}");
         let title = with(None).digest(DIGEST_LIMIT);
         assert!(title.contains("`provenant status` and `provenant pr status`"));
-    }
-
-    #[test]
-    fn pr_numbers_come_from_explicit_references_only() {
-        let text = "Delivered PR #12 and pr/34; see Pull Request 56, pull/78.\n\
-            Issue #99 is separate. Sprint 7 and prune 3 are not PRs. PR #12 again.";
-        assert_eq!(pr_refs(text), vec![12, 34, 56, 78]);
-        let many = (1..=12).map(|n| format!("PR #{n} ")).collect::<String>();
-        assert_eq!(pr_refs(&many), (1..=12).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn pr_references_survive_non_ascii_text() {
-        assert_eq!(pr_refs("é PR #12 — ünïcode pull/34 終"), vec![12, 34]);
-        assert!(pr_refs("cafépr12 überpull/34").is_empty());
     }
 }

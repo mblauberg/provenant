@@ -8,7 +8,7 @@ use std::path::Path;
 /// They never enter the canonical request or an accepted operation's identity.
 #[derive(Clone, Debug, Default)]
 pub struct RefusalContext {
-    pub chair: Option<ChairBinding>,
+    pub chair: Option<Chair>,
     pub intent_digest: Option<provenant_core::Digest>,
 }
 
@@ -946,7 +946,7 @@ pub struct DispatchTask {
     pub access: LaneAccess,
 }
 pub struct DispatchRequest {
-    pub chair: Option<ChairBinding>,
+    pub chair: Option<Chair>,
     pub operation_id: OperationId,
     pub task: DispatchTask,
     pub lane_depth: u64,

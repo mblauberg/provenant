@@ -160,7 +160,8 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let mut run = input();
-    run.request.chair = Some(ChairBinding {
+    run.request.chair = Some(Chair {
+        process: None,
         extra: Default::default(),
         session: None,
         host: provenant_core::HostId::from_bytes([30; 16]),

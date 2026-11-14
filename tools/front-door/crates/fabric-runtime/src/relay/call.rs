@@ -16,7 +16,7 @@ use thiserror::Error;
 /// Wire names of the relayed coordination requests.
 const MAIL: &str = "fabric_mail";
 const EVENTS: &str = "fabric_events";
-const CLAIM: &str = "fabric_lease";
+const CLAIM: &str = "fabric_custody";
 
 /// A parsed relay request. Inputs are the runtime's exact serde contracts.
 pub enum ToolCall {
@@ -59,21 +59,12 @@ impl ToolCall {
                 Ok(())
             }
         };
-        let lease = |value: u64| {
-            if value > limits.lease_seconds {
-                Err(InputError::new("lease_seconds"))
-            } else {
-                Ok(())
-            }
-        };
         match self {
             Self::Mail(MailInput::Send { body: value, .. }, _) => body(value, "body"),
             Self::Mail(MailInput::Read { limit, .. }, _) => page(*limit),
             Self::Events(EventsInput::Read { limit, .. }, _) => page(*limit),
             Self::Events(EventsInput::Note { note, .. }, _) => body(note, "note"),
             Self::Claim(ClaimInput::List { limit, .. }, _) => page(*limit),
-            Self::Claim(ClaimInput::Acquire { lease_seconds, .. }, _)
-            | Self::Claim(ClaimInput::Renew { lease_seconds, .. }, _) => lease(*lease_seconds),
             _ => Ok(()),
         }
     }

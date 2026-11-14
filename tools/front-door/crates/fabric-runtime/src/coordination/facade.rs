@@ -1329,7 +1329,7 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
         match error {
             Error::NotFound => Self::NotFound,
             Error::StaleFence => Self::StaleFence,
-            Error::Conflict | Error::Overlap { .. } => Self::Conflict,
+            Error::Conflict => Self::Conflict,
             Error::Busy => Self::Busy,
             Error::Cancelled => Self::Cancelled,
             Error::Invalid(_) => Self::InvalidInput { detail: None },

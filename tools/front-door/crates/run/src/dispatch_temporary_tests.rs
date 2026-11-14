@@ -7,7 +7,8 @@ fn fresh_resume_preserves_lineage_and_authority_without_provider_state() -> Test
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let mut original = input();
-    original.request.chair = Some(ChairBinding {
+    original.request.chair = Some(Chair {
+        process: None,
         extra: Default::default(),
         session: None,
         host: provenant_core::HostId::from_bytes([32; 16]),

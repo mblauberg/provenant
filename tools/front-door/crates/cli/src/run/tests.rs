@@ -536,7 +536,8 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
         assets: &cwd,
         cwd: &cwd,
     };
-    let chair = Some(run::ChairBinding {
+    let chair = Some(provenant_records::custody::Chair {
+        process: None,
         extra: Default::default(),
         session: None,
         host: provenant_core::HostId::from_bytes([4; 16]),
@@ -604,15 +605,17 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
         let binding = index
             .read(session.context.project_id, &graph, index_call)?
             .unwrap();
-        assert_eq!(binding.chair, chair);
+        assert_eq!(binding.holder.chair().cloned(), chair);
         assert_eq!(
-            binding.request_digest,
-            session
-                .store
-                .request(first, &call)
-                .unwrap()
-                .digest()
-                .unwrap()
+            binding.provenance,
+            Some(
+                session
+                    .store
+                    .request(first, &call)
+                    .unwrap()
+                    .digest()
+                    .unwrap()
+            )
         );
         Ok(())
     })
@@ -624,7 +627,8 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
     // Reusing an operation from another chair cannot rebind even a missing
     // host index row. Repair must use the immutable original request.
     let mut replay = submission("context-base");
-    replay.chair = Some(run::ChairBinding {
+    replay.chair = Some(provenant_records::custody::Chair {
+        process: None,
         extra: Default::default(),
         session: None,
         host: provenant_core::HostId::from_bytes([6; 16]),

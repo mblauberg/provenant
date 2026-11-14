@@ -262,7 +262,7 @@ pub struct Submitted {
 }
 
 pub struct Submission {
-    pub chair: Option<run::ChairBinding>,
+    pub chair: Option<provenant_records::custody::Chair>,
     pub operation_id: OperationId,
     pub task: Submitted,
     pub knobs: Vec<String>,

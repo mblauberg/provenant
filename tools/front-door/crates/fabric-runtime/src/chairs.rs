@@ -1,38 +1,29 @@
-//! Host-only dispatch associations. Never open this index in a lane's child root.
+//! Graph ownership is a view of the host custody ledger.
 use provenant_core::{ProjectId, StateRoot};
 use provenant_fabric_store::HostStore;
-pub use provenant_fabric_store::{Error, GraphChair, Request};
-use provenant_records::run::CanonicalRequest;
+pub use provenant_fabric_store::{Error, Request};
+use provenant_records::{custody::*, run::CanonicalRequest};
 
 pub struct ChairIndex(HostStore);
-
 impl ChairIndex {
-    /// Read existing host associations without creating or migrating state.
     pub fn open_read_only(
         root: &StateRoot,
         deadline: std::time::Instant,
     ) -> Result<Option<Self>, Error> {
         HostStore::open_read_only(root, deadline).map(|store| store.map(Self))
     }
-
     pub fn open(root: &StateRoot, call: &Request<'_>) -> Result<Self, Error> {
         HostStore::open(root, call).map(Self)
     }
-
-    /// Missing records mean unbound. No provider/session or run-store fallback.
     pub fn read(
         &self,
         project: ProjectId,
         graph: &str,
         call: &Request<'_>,
-    ) -> Result<Option<GraphChair>, Error> {
-        self.0.graph_chair(project, graph, call)
+    ) -> Result<Option<CustodyRecord>, Error> {
+        self.0
+            .custody_item(project, &Subject::new(SubjectKind::Graph, graph), call)
     }
-
-    /// Bind a graph's chair at its first launch, before any provider starts.
-    /// Every later attempt in the graph resolves the same binding: one that
-    /// names no chair inherits it, and one that names a different chair
-    /// conflicts. The seal keeps the first request's digest.
     pub fn submit(
         &self,
         project: ProjectId,
@@ -40,11 +31,17 @@ impl ChairIndex {
         proposal: &CanonicalRequest,
         call: &Request<'_>,
     ) -> Result<(), Error> {
-        self.seal(project, graph, proposal, proposal.chair.clone(), call)
+        self.seal(project, graph, proposal.chair.clone(), call)?;
+        if self.read(project, graph, call)?.is_some() {
+            self.0.seal_custody_provenance(
+                project,
+                &Subject::new(SubjectKind::Graph, graph),
+                proposal.digest()?,
+                call,
+            )?;
+        }
+        Ok(())
     }
-    /// Carry a parent graph's binding to a graph launched from it. A missing
-    /// parent seal yields an unbound association; a proposal naming a
-    /// different chair conflicts.
     pub fn inherit(
         &self,
         project: ProjectId,
@@ -55,44 +52,57 @@ impl ChairIndex {
     ) -> Result<(), Error> {
         let chair = self
             .read(project, parent, call)?
-            .and_then(|value| value.chair);
+            .and_then(|record| record.holder.chair().cloned());
         if proposal.chair.is_some() && proposal.chair != chair {
             return Err(Error::Conflict);
         }
-        self.seal(project, graph, proposal, chair, call)
+        self.seal(project, graph, chair, call)?;
+        if self.read(project, graph, call)?.is_some() {
+            self.0.seal_custody_provenance(
+                project,
+                &Subject::new(SubjectKind::Graph, graph),
+                proposal.digest()?,
+                call,
+            )?;
+        }
+        Ok(())
     }
     fn seal(
         &self,
         project: ProjectId,
         graph: &str,
-        proposal: &CanonicalRequest,
-        chair: Option<provenant_records::run::ChairBinding>,
+        chair: Option<Chair>,
         call: &Request<'_>,
     ) -> Result<(), Error> {
-        if let Some(sealed) = self.read(project, graph, call)? {
-            return if chair.is_none() || sealed.chair == chair {
-                Ok(())
-            } else {
-                Err(Error::Conflict)
-            };
+        if graph.is_empty()
+            || graph.len() > 48
+            || !graph.bytes().all(|b| {
+                b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.')
+            })
+        {
+            return Err(Error::Invalid("graph name"));
         }
-        self.0.seal_graph_chair(
-            project,
-            graph,
-            &GraphChair {
-                extra: Default::default(),
-                request_digest: proposal.digest()?,
-                chair,
-            },
-            call,
-        )
+        // An implicit child inherits; explicit advisory custody may change
+        // holders without becoming a second launch lock.
+        if let Some(chair) = chair {
+            let change = self.0.acquire_custody(
+                project,
+                &Subject::new(SubjectKind::Graph, graph),
+                &Holder::Chair { chair },
+                Origin::Provenant,
+                call,
+            )?;
+            crate::custody::warn(std::slice::from_ref(&change));
+        }
+        Ok(())
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use provenant_core::{ActorId, CancelToken, HostId, MonoTime, RootInputs, TestClock, WallTime};
-    use provenant_records::run::ChairBinding;
+    use provenant_records::custody::Chair;
 
     fn proposal() -> CanonicalRequest {
         CanonicalRequest {
@@ -114,8 +124,9 @@ mod tests {
         }
     }
 
-    fn binding() -> ChairBinding {
-        ChairBinding {
+    fn binding() -> Chair {
+        Chair {
+            process: None,
             extra: Default::default(),
             session: None,
             host: HostId::from_bytes([2; 16]),
@@ -153,39 +164,51 @@ mod tests {
         index.submit(project, "graph", &sibling, &call)?;
         index.inherit(project, "graph", "graph-child", &child, &call)?;
         assert_eq!(
-            index.read(project, "graph", &call)?.unwrap().chair,
+            index
+                .read(project, "graph", &call)?
+                .unwrap()
+                .holder
+                .chair()
+                .cloned(),
             Some(chair.clone())
         );
         assert_eq!(
-            index.read(project, "graph-child", &call)?.unwrap().chair,
+            index
+                .read(project, "graph-child", &call)?
+                .unwrap()
+                .holder
+                .chair()
+                .cloned(),
             Some(chair)
         );
         assert!(index.read(project, "missing", &call)?.is_none());
         assert!(index.read(other_project, "graph", &call)?.is_none());
 
         let mut conflicting_child = child.clone();
-        conflicting_child.chair = Some(ChairBinding {
+        conflicting_child.chair = Some(Chair {
+            process: None,
             extra: Default::default(),
             session: None,
             host: HostId::from_bytes([9; 16]),
             actor: ActorId::from_bytes([8; 16]),
         });
+        index.submit(project, "graph", &conflicting_child, &call)?;
+        assert_eq!(
+            index.read(project, "graph", &call)?.unwrap().holder.chair(),
+            conflicting_child.chair.as_ref()
+        );
         assert!(matches!(
-            index.submit(project, "graph", &conflicting_child, &call),
-            Err(Error::Conflict)
-        ));
-        assert!(matches!(
-            index.inherit(project, "graph", "other-child", &conflicting_child, &call),
+            index.inherit(
+                project,
+                "graph-child",
+                "other-child",
+                &conflicting_child,
+                &call
+            ),
             Err(Error::Conflict)
         ));
         index.inherit(project, "unknown-parent", "unbound-child", &child, &call)?;
-        assert!(
-            index
-                .read(project, "unbound-child", &call)?
-                .unwrap()
-                .chair
-                .is_none()
-        );
+        assert!(index.read(project, "unbound-child", &call)?.is_none());
         assert!(matches!(
             index.submit(project, "Not a graph", &child, &call),
             Err(Error::Invalid("graph name"))

@@ -16,7 +16,7 @@ use std::{
 /// The only schema this release opens, for `fabric.sqlite3` and `host.sqlite3`.
 pub(crate) const SCHEMA: provenant_sqlite::Schema = provenant_sqlite::Schema {
     sql: include_str!("schema.sql"),
-    version: 16,
+    version: 17,
 };
 
 /// The database schema version this release opens.
@@ -59,7 +59,7 @@ impl Request<'_> {
 
 pub struct Store {
     pub(crate) db: Connection,
-    pub(crate) state_root: std::path::PathBuf,
+    pub(crate) state_root: StateRoot,
     // SQLite supports movable connections, but Fabric requires worker ownership.
     _owner: PhantomData<Rc<()>>,
 }
@@ -159,7 +159,7 @@ impl Store {
         }
         let store = Self {
             db,
-            state_root: root.as_path().to_owned(),
+            state_root: root.clone(),
             _owner: PhantomData,
         };
         if provenant_sqlite::stored_version(&store.db)? != SCHEMA.version {
@@ -208,7 +208,7 @@ impl Store {
         check_version(&db)?;
         Ok(Self {
             db,
-            state_root: root.as_path().to_owned(),
+            state_root: root.clone(),
             _owner: PhantomData,
         })
     }
@@ -333,14 +333,14 @@ impl Store {
         })?;
         Ok(Self {
             db,
-            state_root: root.as_path().to_owned(),
+            state_root: root.clone(),
             _owner: PhantomData,
         })
     }
     /// Called after commit. The signal is a hint, so a failure never fails the write.
     pub(crate) fn signal_changes(&self) {
         use provenant_os::changes::{Scope, hint};
-        hint(&self.state_root, &[Scope::Inbox, Scope::Board]);
+        hint(self.state_root.as_path(), &[Scope::Inbox, Scope::Board]);
     }
     pub(crate) fn write<T>(
         &self,

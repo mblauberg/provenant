@@ -26,27 +26,16 @@ CREATE TABLE event_cursors (
  project TEXT NOT NULL, consumer TEXT NOT NULL, seq INTEGER NOT NULL CHECK(seq >= 0),
  PRIMARY KEY(project, consumer)
 ) STRICT;
-CREATE TABLE claims (
- project TEXT NOT NULL, id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind='work'),
- scope_key TEXT NOT NULL, generation INTEGER NOT NULL CHECK(generation >= 1),
- holder TEXT, token BLOB, expires INTEGER, record BLOB NOT NULL,
- PRIMARY KEY(project,id), UNIQUE(project,kind,scope_key),
- CHECK((holder IS NULL AND token IS NULL AND expires IS NULL)
-    OR (holder IS NOT NULL AND length(token)=16 AND expires IS NOT NULL))
+CREATE TABLE custody (
+ seq INTEGER PRIMARY KEY AUTOINCREMENT,
+ project TEXT NOT NULL, kind TEXT NOT NULL, subject TEXT NOT NULL,
+ state TEXT NOT NULL, holder TEXT NOT NULL, chair TEXT, record BLOB NOT NULL,
+ UNIQUE(project,kind,subject)
 ) STRICT;
-CREATE TABLE claim_paths (
- project TEXT NOT NULL, claim TEXT NOT NULL, path TEXT NOT NULL,
- PRIMARY KEY(project,claim,path),
- FOREIGN KEY(project,claim) REFERENCES claims(project,id)
-) STRICT;
-CREATE TABLE claim_counters (
- project TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind='work'),
- scope_key TEXT NOT NULL, id TEXT NOT NULL,
- generation INTEGER NOT NULL CHECK(generation >= 1),
- PRIMARY KEY(project,kind,scope_key), UNIQUE(project,id)
-) STRICT;
-CREATE INDEX claim_path_lookup ON claim_paths(project,path,claim);
-CREATE INDEX released_claims ON claims(project,id) WHERE holder IS NULL;
+CREATE INDEX custody_state ON custody(state,seq);
+CREATE INDEX custody_holder ON custody(holder,state,seq);
+CREATE INDEX custody_chair ON custody(chair,state,seq);
+CREATE INDEX custody_project ON custody(project,state,seq);
 CREATE TABLE coordination_operations (
  project TEXT NOT NULL, id TEXT NOT NULL, actor TEXT NOT NULL,
  request BLOB NOT NULL, result BLOB NOT NULL,
@@ -88,12 +77,7 @@ CREATE TABLE human_answer_outbox (
  PRIMARY KEY(project,answer),
  FOREIGN KEY(project,answer) REFERENCES human_answers(project,id)
 ) STRICT;
-CREATE TABLE graph_chairs (
-    project TEXT NOT NULL,
-    graph TEXT NOT NULL,
-    record BLOB NOT NULL,
-    PRIMARY KEY(project, graph)
-) STRICT;
+
 CREATE INDEX human_local_delivery ON human_answer_outbox(project,
  json_extract(CAST(record AS TEXT),'$.target_host'),
  json_extract(CAST(record AS TEXT),'$.target_session'),
@@ -116,4 +100,4 @@ CREATE INDEX human_hook_pending ON human_answer_outbox(project,
  json_extract(CAST(record AS TEXT),'$.target_actor'), answer
 ) WHERE json_extract(CAST(record AS TEXT),'$.state') IN ('queued','offered')
  AND coalesce(json_extract(CAST(record AS TEXT),'$.error'),'') != 'hook_envelope_too_large';
-PRAGMA user_version=16;
+PRAGMA user_version=17;

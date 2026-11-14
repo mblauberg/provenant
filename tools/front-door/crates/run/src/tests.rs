@@ -533,7 +533,8 @@ fn refusal_notice_obligation_survives_restart_and_completes_only_for_same_facts(
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let mut input = input();
-    input.request.chair = Some(ChairBinding {
+    input.request.chair = Some(Chair {
+        process: None,
         extra: Default::default(),
         host: provenant_core::HostId::from_bytes([1; 16]),
         actor: ActorId::from_bytes([2; 16]),
@@ -618,7 +619,8 @@ fn corrupt_refusal_notices_do_not_hide_valid_notices_after_a_full_page() -> Test
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let mut input = input();
-    input.request.chair = Some(ChairBinding {
+    input.request.chair = Some(Chair {
+        process: None,
         extra: Default::default(),
         host: provenant_core::HostId::from_bytes([1; 16]),
         actor: ActorId::from_bytes([2; 16]),

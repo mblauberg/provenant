@@ -60,8 +60,6 @@ pub enum Error {
     NotFound,
     #[error("record conflicts with existing state")]
     Conflict,
-    #[error("claim overlaps active ownership {claim}")]
-    Overlap { claim: provenant_core::ClaimId },
     #[error("path cannot be represented as UTF-8")]
     PathEncoding,
     #[error("ownership fence is stale")]

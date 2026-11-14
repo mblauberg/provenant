@@ -6,8 +6,10 @@
 use provenant_cli::Globals;
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use provenant_workflow::session::{
-    CommandPrefix, LaneLine, PrLine, PrUnread, SessionState, Unavailable, WorktreeLine,
+    CommandPrefix, LaneLine, SessionState, Unavailable, WorktreeLine,
 };
+#[cfg(test)]
+use provenant_workflow::session::{PrLine, PrUnread};
 use serde_json::Value;
 use std::{
     ffi::OsString,
@@ -18,7 +20,7 @@ use std::{
 const OUTPUT_CAP: usize = 512 * 1024;
 const LANE_PAGE: &str = "100";
 const LISTING_TIME: Duration = Duration::from_secs(3);
-const PR_TIME: Duration = Duration::from_secs(3);
+
 /// Outcomes after which a lane no longer runs. `input_required` is included:
 /// the lane stopped and waits for the chair.
 const TERMINAL: [&str; 15] = [
@@ -43,7 +45,7 @@ pub struct Want {
     pub worktrees: bool,
     /// Unix seconds; lanes settled after this count as new.
     pub settled_after_unix: i64,
-    pub pr_refs: Vec<u64>,
+    pub session: Option<String>,
 }
 
 /// This binary's own read commands, run in `cwd` with the hook's state root.
@@ -191,7 +193,7 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
         commands: CommandPrefix::new(globals.state_dir.as_deref(), cwd),
         ..Default::default()
     };
-    let executor = match SystemExecutor::new(4 + want.pr_refs.len()) {
+    let executor = match SystemExecutor::new(5) {
         Ok(executor) => executor,
         Err(error) => {
             unavailable_sources(
@@ -229,20 +231,13 @@ fn collect_with_cli(
         let worktrees = want
             .worktrees
             .then(|| scope.spawn(move || cli.worktree_listing(deadline)));
-        let prs: Vec<_> = want
-            .pr_refs
-            .iter()
-            .map(|number| {
-                let number = *number;
-                scope.spawn(move || {
-                    let argument = number.to_string();
-                    (
-                        number,
-                        cli.data(&["pr", "status", &argument], PR_TIME, deadline),
-                    )
-                })
-            })
-            .collect();
+        let custody = scope.spawn(move || {
+            let mut args = vec!["status", "--mine", "--limit", LANE_PAGE];
+            if let Some(session) = want.session.as_deref() {
+                args.extend(["--session", session]);
+            }
+            cli.data(&args, LISTING_TIME, deadline)
+        });
         match active.join() {
             Ok(Ok((lanes, next, skipped))) => {
                 state.active = lanes;
@@ -289,19 +284,35 @@ fn collect_with_cli(
                 }),
             }
         }
-        for handle in prs {
-            match handle.join() {
-                Ok((number, Ok(data))) => state.prs.push(PrLine {
-                    number,
-                    state: pr_status(&data).0,
-                    summary: pr_status(&data).1,
-                }),
-                Ok((number, Err(_))) => state.prs_unread.push(PrUnread {
-                    number,
-                    command: state.commands.command(&format!("pr status {number}")),
-                }),
-                Err(_) => {}
+        match custody.join() {
+            Ok(Ok(data)) => {
+                match serde_json::from_value::<provenant_records::custody::CustodyStatus>(data) {
+                    Ok(view) => {
+                        for item in view.items {
+                            state
+                                .custody
+                                .push(format!("{} ({:?})", item.record.subject, item.presence));
+                        }
+                        state.custody_more = view.next.map(|cursor| {
+                            state
+                                .commands
+                                .command(&format!("status --mine --cursor {cursor}"))
+                        });
+                    }
+                    Err(error) => state.unavailable.push(Unavailable {
+                        source: "custody".into(),
+                        reason: format!("invalid custody response: {error}"),
+                    }),
+                }
             }
+            Ok(Err(reason)) => state.unavailable.push(Unavailable {
+                source: "custody".into(),
+                reason,
+            }),
+            Err(_) => state.unavailable.push(Unavailable {
+                source: "custody".into(),
+                reason: "listing worker panicked".into(),
+            }),
         }
     });
     state
@@ -496,6 +507,7 @@ fn parse_worktree_stream(bytes: &[u8]) -> Option<(Vec<WorktreeLine>, usize)> {
     Some((parse_worktrees(&Value::Array(entries)), skipped))
 }
 /// Read the first line of the CLI's status array; unknown fields stay unknown.
+#[cfg(test)]
 fn pr_status(data: &Value) -> (String, String) {
     let data = data
         .as_array()
@@ -559,7 +571,7 @@ esac
             &Want {
                 worktrees: true,
                 settled_after_unix: 0,
-                pr_refs: vec![],
+                session: None,
             },
             crate::hooks::session_collection_deadline(host_deadline),
         );
@@ -745,7 +757,7 @@ esac
         let want = Want {
             worktrees: true,
             settled_after_unix: 0,
-            pr_refs: vec![],
+            session: None,
         };
         let mut state = SessionState::default();
         unavailable_sources(&mut state, &want, "executable unavailable".into());

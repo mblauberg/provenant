@@ -101,6 +101,16 @@ impl Tracker {
             }
         }
         db.bind(project, branch, &pr, head, &call)?;
+        use provenant_records::custody::{Subject, SubjectKind};
+        if let Err(error) = crate::custody::acquire(
+            &self.resolved,
+            &[
+                Subject::new(SubjectKind::Pr, number.to_string()),
+                Subject::new(SubjectKind::Branch, branch),
+            ],
+        ) {
+            warn(Some(number), &format!("custody pending: {error}"));
+        }
         Ok(())
     }
 

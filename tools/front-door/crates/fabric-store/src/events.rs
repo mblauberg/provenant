@@ -8,11 +8,9 @@ pub enum EventKind {
     MailSent,
     MailRead,
     RunChanged,
+    CustodyChanged,
     /// Detail is a records::landing::LandingChanged payload; envelope unchanged.
     LandingChanged,
-    ClaimAcquired,
-    ClaimRenewed,
-    ClaimReleased,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventRecord {

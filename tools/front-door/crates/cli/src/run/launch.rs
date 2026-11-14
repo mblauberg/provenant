@@ -509,6 +509,52 @@ pub(super) fn launch_on_host_with_wait(
     let request = &read;
     let request_digest = request.digest().map_err(run::RunError::from)?;
 
+    // Direct host submissions need an observed chair even when their request
+    // names none. The canonical request stays unchanged; custody owns identity.
+    if request.chair.is_none() && request.parent.is_none() && !crate::fabric::in_lane() {
+        let bind = || -> Result<(), Box<dyn std::error::Error>> {
+            let context = crate::fabric::Context::open(edge.roots.clone(), edge.home, edge.cwd)?;
+            if context.identity.project != session.context.project_id
+                || crate::workflow::session_actor(&context, None).map_err(std::io::Error::other)?
+                    != session.context.actor_id
+            {
+                return Err("direct run custody identity could not be verified".into());
+            }
+            let graph = graph_for_attempt(session, attempt, call)
+                .map_err(|fail| std::io::Error::other(fail.message))?;
+            let index_call = provenant_fabric_store::Request {
+                clock: call.clock,
+                cancel: call.cancel,
+            };
+            let ledger = provenant_fabric_store::HostStore::open(&edge.roots.state, &index_call)?;
+            let subject = provenant_records::custody::Subject::new(
+                provenant_records::custody::SubjectKind::Graph,
+                graph,
+            );
+            let change = ledger.acquire_custody(
+                session.context.project_id,
+                &subject,
+                &provenant_records::custody::Holder::Chair {
+                    chair: crate::fabric::current_chair(&context),
+                },
+                provenant_records::custody::Origin::Provenant,
+                &index_call,
+            )?;
+            provenant_fabric_runtime::custody::warn(std::slice::from_ref(&change));
+            ledger.seal_custody_provenance(
+                session.context.project_id,
+                &subject,
+                request_digest,
+                &index_call,
+            )?;
+            Ok(())
+        };
+        if let Err(error) = bind() {
+            provenant_fabric_runtime::custody::warning(format_args!(
+                "direct run custody pending: {error}"
+            ));
+        }
+    }
     {
         let graph = graph_for_attempt(session, attempt, call)?;
         with_chair_index(edge.roots, call, |index, index_call| {
@@ -530,6 +576,68 @@ pub(super) fn launch_on_host_with_wait(
                 index.submit(session.context.project_id, &graph, request, index_call)
             }
         })?;
+    }
+    {
+        use provenant_records::custody::{Holder, Subject, SubjectKind};
+        let graph = graph_for_attempt(session, attempt, call)?;
+        let index_call = provenant_fabric_store::Request {
+            clock: call.clock,
+            cancel: call.cancel,
+        };
+        let chair =
+            provenant_fabric_runtime::chairs::ChairIndex::open(&edge.roots.state, &index_call)
+                .and_then(|index| index.read(session.context.project_id, &graph, &index_call))
+                .map_err(|error| Fail::new(Status::Error, ErrorKind::Fabric, error.to_string()))?
+                .and_then(|record| record.holder.chair().cloned());
+        let holder = Holder::Attempt {
+            attempt,
+            chair: chair.clone(),
+        };
+        let mut subjects = vec![Subject::new(SubjectKind::Attempt, attempt.to_string())];
+        if chair.is_none() {
+            subjects.push(Subject::new(SubjectKind::Graph, graph));
+        }
+        if let Some(writer) = &request.task.writer {
+            subjects.push(Subject::new(
+                SubjectKind::Worktree,
+                writer.worktree.to_string_lossy(),
+            ));
+            match crate::fabric::checkout_branch(&writer.worktree) {
+                Ok(Some(branch)) => subjects.push(Subject::new(SubjectKind::Branch, branch)),
+                Ok(None) => {}
+                Err(error) => provenant_fabric_runtime::custody::warning(format_args!(
+                    "branch custody observation unavailable: {error}"
+                )),
+            }
+        }
+        match provenant_fabric_runtime::custody::acquire(
+            &edge.roots.state,
+            session.context.project_id,
+            &holder,
+            &subjects,
+            provenant_records::custody::Origin::Provenant,
+            &index_call,
+        ) {
+            Ok(changes) => provenant_fabric_runtime::custody::warn(&changes),
+            Err(error) => provenant_fabric_runtime::custody::warning(format_args!(
+                "run custody acquisition pending: {error}"
+            )),
+        }
+        if let Ok(ledger) = provenant_fabric_store::HostStore::open(&edge.roots.state, &index_call)
+            && let Err(error) = ledger.seal_custody_provenance(
+                session.context.project_id,
+                &Subject::new(
+                    SubjectKind::Graph,
+                    graph_for_attempt(session, attempt, call)?,
+                ),
+                request_digest,
+                &index_call,
+            )
+        {
+            provenant_fabric_runtime::custody::warning(format_args!(
+                "graph custody provenance pending: {error}"
+            ));
+        }
     }
     let seed = run::RootSeed {
         home: edge.home.into(),

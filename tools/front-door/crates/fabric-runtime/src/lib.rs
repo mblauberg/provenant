@@ -3,6 +3,7 @@
 pub mod chairs;
 pub mod config;
 pub mod coordination;
+pub mod custody;
 pub mod fetch;
 pub mod git_transport;
 pub mod graph;

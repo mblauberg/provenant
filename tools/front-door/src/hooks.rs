@@ -615,7 +615,7 @@ fn checkpoint(
                 settled_after_unix: baseline
                     .as_ref()
                     .map_or(wall - NO_CHECKPOINT_WINDOW, |b| b.chair_saved_unix),
-                pr_refs: baseline.map(|b| b.pr_refs).unwrap_or_default(),
+                session: Some(host.session_id.clone()),
             };
             let state = crate::hook_state::collect(globals, cwd, &want, deadline);
             digest = state.digest(session::DIGEST_LIMIT);
@@ -643,6 +643,7 @@ fn checkpoint(
                     globals,
                     cwd,
                     current.as_ref(),
+                    &host.session_id,
                     wall,
                     &clock,
                     deadline,
@@ -743,6 +744,7 @@ fn autosave(
     globals: &Globals,
     cwd: &Path,
     current: Option<&provenant_workflow::session::Checkpoint>,
+    session_id: &str,
     wall: i64,
     clock: &SystemClock,
     deadline: Instant,
@@ -752,7 +754,7 @@ fn autosave(
     let want = crate::hook_state::Want {
         worktrees: true,
         settled_after_unix: baseline.as_ref().map_or(wall, |b| b.chair_saved_unix),
-        pr_refs: baseline.map(|b| b.pr_refs).unwrap_or_default(),
+        session: Some(session_id.to_owned()),
     };
     let state = crate::hook_state::collect(globals, cwd, &want, deadline);
     let stamp = String::from(clock.wall_now()?);

@@ -9,8 +9,8 @@ use input::bounded_input;
 pub use input::{InputError, ValidateInput};
 
 use provenant_core::{
-    ActorId, CancelToken, ClaimId, Clock, DurationMicros, MessageId, ProjectId, StateRoot,
-    WaitBudget, WaitTransport,
+    ActorId, CancelToken, Clock, DurationMicros, MessageId, ProjectId, StateRoot, WaitBudget,
+    WaitTransport,
 };
 use provenant_os::fs::FsError;
 use provenant_records::{ArtifactRef, RecordHeader};
@@ -18,10 +18,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use provenant_core::{Pause, ThreadPause};
-use provenant_fabric_store::{ClaimFence, ClaimRequest, Request, Store};
 pub use provenant_fabric_store::{
-    Delivery, Event, EventKind, EventRecord, Message, MessageKind, MessageRef, Page, WorkClaim,
-    WorkScope,
+    Delivery, Event, EventKind, EventRecord, Message, MessageKind, MessageRef, Page,
+};
+use provenant_fabric_store::{HostStore, Request, Store};
+pub use provenant_records::custody::{
+    CustodyChange, CustodyPage, CustodyQuery, CustodyRecord, CustodyState, Holder, Origin, Subject,
+    SubjectKind,
 };
 
 #[derive(Debug, Error)]
@@ -78,24 +81,6 @@ impl From<provenant_fabric_store::Error> for CoordinationError {
             provenant_fabric_store::Error::Cancelled => Self::Cancelled,
             other => Self::Store(other),
         }
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClaimProof {
-    #[serde(flatten)]
-    pub extra: provenant_records::ExtraFields,
-    pub id: ClaimId,
-    pub generation: u64,
-    #[serde(with = "input::hex_token")]
-    pub token: [u8; 16],
-}
-impl std::fmt::Debug for ClaimProof {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClaimProof")
-            .field("id", &self.id)
-            .field("generation", &self.generation)
-            .finish_non_exhaustive()
     }
 }
 
@@ -221,46 +206,44 @@ fn bounded_page<T: Serialize>(
 bounded_input! {
     pub enum ClaimInput as WireClaimInput {
         #[serde(rename = "claim_acquire")]
-        Acquire { scope: WorkScope, lease_seconds: u64 },
+        Acquire { subject: Subject, holder: Holder },
         #[serde(rename = "claim_renew")]
-        Renew { proof: ClaimProof, lease_seconds: u64 },
+        Renew { subject: Subject },
         #[serde(rename = "claim_verify")]
-        Verify { proof: ClaimProof },
+        Verify { subject: Subject },
         #[serde(rename = "claim_release")]
-        Release { proof: ClaimProof },
+        Release { subject: Subject },
         #[serde(rename = "claim_list")]
-        List { after: Option<ClaimId>, limit: u64 },
+        List { after: Option<u64>, limit: u64 },
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum ClaimResult {
     Acquired {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
-        proof: ClaimProof,
-        claim: WorkClaim,
+        change: CustodyChange,
     },
     Renewed {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
-        claim: WorkClaim,
+        record: CustodyRecord,
     },
     Verified {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
-        claim: WorkClaim,
+        record: CustodyRecord,
     },
     Released {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
-        id: ClaimId,
+        record: CustodyRecord,
     },
     Listed {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
-        page: Page<WorkClaim>,
+        page: CustodyPage,
     },
 }
 
@@ -362,10 +345,6 @@ impl<'a> LocalCoordination<'a> {
         Ok(())
     }
 
-    fn lease_duration(seconds: u64) -> DurationMicros {
-        DurationMicros::from_micros(seconds * 1_000_000)
-    }
-
     fn observation_budget(
         &self,
         budget: WaitBudget,
@@ -401,25 +380,6 @@ impl<'a> LocalCoordination<'a> {
 
     fn new_id_bytes() -> Result<[u8; 16], CoordinationError> {
         provenant_os::fs::entropy_128().map_err(CoordinationError::Entropy)
-    }
-
-    fn claim_fence(&self, proof: &ClaimProof) -> ClaimFence {
-        ClaimFence {
-            extra: Default::default(),
-            id: proof.id,
-            actor: self.actor,
-            generation: proof.generation,
-            token: proof.token,
-        }
-    }
-
-    fn claim_proof(&self, fence: ClaimFence) -> ClaimProof {
-        ClaimProof {
-            extra: Default::default(),
-            id: fence.id,
-            generation: fence.generation,
-            token: fence.token,
-        }
     }
 }
 
@@ -632,79 +592,83 @@ impl CoordinationApi for LocalCoordination<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<ClaimResult, CoordinationError> {
+        let request = self.request(cancel);
+        let ledger = self.store.host_custody(&request)?;
+        self.claim_at(&ledger, input, budget, cancel)
+    }
+}
+
+impl LocalCoordination<'_> {
+    fn claim_at(
+        &self,
+        ledger: &HostStore,
+        input: ClaimInput,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<ClaimResult, CoordinationError> {
         input.validate_input(WaitTransport::Cli)?;
         self.ensure_active(budget, cancel)?;
-        let request = self.request(cancel);
-        match input {
-            ClaimInput::Acquire {
-                scope,
-                lease_seconds,
-                ..
-            } => {
-                let fence = self.store.acquire_claim(
-                    &ClaimRequest {
-                        extra: Default::default(),
-                        id: ClaimId::from_bytes(Self::new_id_bytes()?),
-                        project: self.project,
-                        actor: self.actor,
-                        token: Self::new_id_bytes()?,
-                        lease: Self::lease_duration(lease_seconds),
-                        scope,
-                    },
-                    &request,
-                )?;
-                let claim = self.store.verify_claim(self.project, &fence, &request)?;
-                Ok(ClaimResult::Acquired {
-                    extra: Default::default(),
-                    proof: self.claim_proof(fence),
-                    claim,
-                })
-            }
-            ClaimInput::Renew {
-                proof,
-                lease_seconds,
-                ..
-            } => {
-                let fence = self.claim_fence(&proof);
-                self.store.renew_claim(
-                    self.project,
-                    &fence,
-                    Self::lease_duration(lease_seconds),
-                    &request,
-                )?;
-                let claim = self.store.verify_claim(self.project, &fence, &request)?;
-                Ok(ClaimResult::Renewed {
-                    extra: Default::default(),
-                    claim,
-                })
-            }
-            ClaimInput::Verify { proof, .. } => {
-                let claim =
-                    self.store
-                        .verify_claim(self.project, &self.claim_fence(&proof), &request)?;
-                Ok(ClaimResult::Verified {
-                    extra: Default::default(),
-                    claim,
-                })
-            }
-            ClaimInput::Release { proof, .. } => {
-                let id = proof.id;
-                self.store
-                    .release_claim(self.project, &self.claim_fence(&proof), &request)?;
-                Ok(ClaimResult::Released {
-                    extra: Default::default(),
-                    id,
-                })
-            }
-            ClaimInput::List { after, limit, .. } => {
-                let page = self.store.claims(self.project, after, limit, &request)?;
-                let page = bounded_page(page.items, page.truncated)?;
-                Ok(ClaimResult::Listed {
-                    extra: Default::default(),
-                    page,
-                })
-            }
+        let call = self.request(cancel);
+        if let ClaimInput::Renew { subject, .. } | ClaimInput::Release { subject, .. } = &input
+            && let Some(record) = ledger.custody_item(self.project, subject, &call)?
+            && record.state.kind() == provenant_records::custody::StateKind::Active
+        {
+            crate::custody::warning(format_args!(
+                "{subject} is held by {:?}; advisory action by {}",
+                record.holder, self.actor
+            ));
         }
+        Ok(match input {
+            ClaimInput::Acquire {
+                subject, holder, ..
+            } => {
+                if holder.actor() != Some(self.actor) {
+                    return Err(CoordinationError::InvalidInput("custody holder actor"));
+                }
+                ClaimResult::Acquired {
+                    extra: Default::default(),
+                    change: ledger.acquire_custody(
+                        self.project,
+                        &subject,
+                        &holder,
+                        Origin::Provenant,
+                        &call,
+                    )?,
+                }
+            }
+            ClaimInput::Renew { subject, .. } => ClaimResult::Renewed {
+                extra: Default::default(),
+                record: ledger.touch_custody(self.project, &subject, self.actor, &call)?,
+            },
+            ClaimInput::Verify { subject, .. } => ClaimResult::Verified {
+                extra: Default::default(),
+                record: ledger
+                    .custody_item(self.project, &subject, &call)?
+                    .ok_or(provenant_fabric_store::Error::NotFound)?,
+            },
+            ClaimInput::Release { subject, .. } => ClaimResult::Released {
+                extra: Default::default(),
+                record: ledger.change_custody_state(
+                    self.project,
+                    &subject,
+                    CustodyState::Released,
+                    Some(self.actor),
+                    &call,
+                )?,
+            },
+            ClaimInput::List { after, limit, .. } => ClaimResult::Listed {
+                extra: Default::default(),
+                page: ledger.custody(
+                    &CustodyQuery {
+                        project: Some(self.project),
+                        after: after.unwrap_or(0),
+                        limit,
+                        ..Default::default()
+                    },
+                    &call,
+                )?,
+            },
+        })
     }
 }
 
@@ -739,7 +703,14 @@ impl LocalCoordination<'_> {
             }
             Mutation::Mail(value) => record!(Mail, self.mail(value, budget, cancel)),
             Mutation::Events(value) => record!(Events, self.events(value, budget, cancel)),
-            Mutation::Claim(value) => record!(Claim, self.claim(value, budget, cancel)),
+            Mutation::Claim(value) => {
+                let ledger = self.store.host_custody(&request)?;
+                ledger
+                    .coordination_operation(self.project, self.actor, id, &frozen, &request, || {
+                        self.claim_at(&ledger, value, budget, cancel)
+                    })
+                    .map(MutationResult::Claim)
+            }
         }
     }
 }
@@ -919,75 +890,51 @@ mod tests {
     }
 
     #[test]
-    fn claim_replay_keeps_its_domain_and_result_extensions() {
+    fn custody_mutations_replay_from_the_host_ledger() {
         let fixture = Fixture::new();
         let service = fixture.service();
         let cancel = CancelToken::new();
-        let acquire_id = provenant_core::OperationId::parse("acquire").unwrap();
-        let MutationResult::Claim(ClaimResult::Acquired { proof, .. }) = service
-            .mutate(
-                Mutation::Claim(ClaimInput::Acquire {
-                    extra: Default::default(),
-                    scope: WorkScope::Issue {
-                        extra: Default::default(),
-                        key: "PR-42".into(),
-                    },
-                    lease_seconds: 60,
-                }),
-                &acquire_id,
-                fixture.budget(),
-                &cancel,
-            )
-            .unwrap()
-        else {
-            panic!("claim acquisition");
+        let subject = Subject::new(SubjectKind::Issue, "3078");
+        let holder = Holder::Chair {
+            chair: provenant_records::custody::Chair {
+                extra: Default::default(),
+                host: provenant_core::HostId::from_bytes([1; 16]),
+                actor: fixture.actor,
+                session: None,
+                process: None,
+            },
         };
-        let claim_id = proof.id;
+        let acquire = Mutation::Claim(ClaimInput::Acquire {
+            extra: Default::default(),
+            subject: subject.clone(),
+            holder,
+        });
+        let id = provenant_core::OperationId::parse("acquire").unwrap();
+        let first = service
+            .mutate(acquire.clone(), &id, fixture.budget(), &cancel)
+            .unwrap();
+        let replay = service
+            .mutate(acquire, &id, fixture.budget(), &cancel)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(first).unwrap(),
+            serde_json::to_value(replay).unwrap()
+        );
         let release = Mutation::Claim(ClaimInput::Release {
             extra: Default::default(),
-            proof,
+            subject,
         });
-        let release_id = provenant_core::OperationId::parse("release").unwrap();
+        let id = provenant_core::OperationId::parse("release").unwrap();
         let first = service
-            .mutate(release.clone(), &release_id, fixture.budget(), &cancel)
+            .mutate(release.clone(), &id, fixture.budget(), &cancel)
             .unwrap();
-        assert!(matches!(
-            first,
-            MutationResult::Claim(ClaimResult::Released { .. })
-        ));
-        let database =
-            rusqlite::Connection::open(fixture.root.as_path().join("fabric/fabric.sqlite3"))
-                .unwrap();
-        database.execute(
-            "UPDATE coordination_operations SET result=CAST(json_set(CAST(result AS TEXT),'$.future',json_object('revision',2)) AS BLOB) WHERE id=?1",
-            [release_id.to_string()],
-        ).unwrap();
-        let MutationResult::Claim(ClaimResult::Released { id, extra }) = service
-            .mutate(release, &release_id, fixture.budget(), &cancel)
-            .unwrap()
-        else {
-            panic!("replay must retain the claim domain");
-        };
-        assert_eq!(id, claim_id);
-        assert_eq!(extra["future"], serde_json::json!({"revision":2}));
-        let (input, result) = service
-            .store
-            .coordination_receipt_with_input::<Mutation, serde_json::Value>(
-                fixture.project,
-                fixture.actor,
-                &release_id,
-                &service.request(&cancel),
-            )
-            .unwrap()
+        let replay = service
+            .mutate(release, &id, fixture.budget(), &cancel)
             .unwrap();
-        let crate::hosts::CoordinationResult::Claim {
-            result: ClaimResult::Released { extra, .. },
-            ..
-        } = crate::hosts::CoordinationResult::from_stored(&input, result).unwrap()
-        else {
-            panic!("recovered receipt must retain the claim domain");
-        };
-        assert_eq!(extra["future"], serde_json::json!({"revision": 2}));
+        assert_eq!(
+            serde_json::to_value(first).unwrap(),
+            serde_json::to_value(replay).unwrap()
+        );
     }
 
     #[test]
@@ -1110,49 +1057,26 @@ mod tests {
     }
 
     #[test]
-    fn work_claim_fences_are_service_scoped() {
+    fn custody_holders_use_the_authenticated_actor() {
         let fixture = Fixture::new();
         let service = fixture.service();
         let cancel = CancelToken::new();
-        let ClaimResult::Acquired { proof, claim, .. } = service
-            .claim(
-                ClaimInput::Acquire {
+        let input = ClaimInput::Acquire {
+            extra: Default::default(),
+            subject: Subject::new(SubjectKind::Issue, "3078"),
+            holder: Holder::Chair {
+                chair: provenant_records::custody::Chair {
                     extra: Default::default(),
-                    scope: WorkScope::Issue {
-                        extra: Default::default(),
-                        key: "PR-42".into(),
-                    },
-                    lease_seconds: 5,
+                    host: provenant_core::HostId::from_bytes([1; 16]),
+                    actor: ActorId::from_bytes([99; 16]),
+                    session: None,
+                    process: None,
                 },
-                fixture.budget(),
-                &cancel,
-            )
-            .expect("acquire work claim")
-        else {
-            panic!("claim result")
+            },
         };
-        assert_eq!(claim.holder, Some(fixture.actor));
         assert!(matches!(
-            service.claim(
-                ClaimInput::Verify {
-                    extra: Default::default(),
-                    proof: proof.clone()
-                },
-                fixture.budget(),
-                &cancel
-            ),
-            Ok(ClaimResult::Verified { .. })
-        ));
-        assert!(matches!(
-            service.claim(
-                ClaimInput::Release {
-                    extra: Default::default(),
-                    proof
-                },
-                fixture.budget(),
-                &cancel
-            ),
-            Ok(ClaimResult::Released { .. })
+            service.claim(input, fixture.budget(), &cancel),
+            Err(CoordinationError::InvalidInput(_))
         ));
     }
 
