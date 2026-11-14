@@ -1155,8 +1155,11 @@ pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
         assert_eq!(status(&value, step)?, "done", "{step}: {value}");
     }
     // The forge request remains bound to the approved head.
-    let merge = fs::read_to_string(rig.project.join("merge-args"))
-        .map_err(|error| format!("read fake forge merge arguments: {error}"))?;
+    let merge = fs::read_to_string(rig.project.join("merge-args")).map_err(|error| {
+        let calls = fs::read_to_string(rig.project.join("gh-calls"))
+            .unwrap_or_else(|calls_error| format!("<unavailable: {calls_error}>"));
+        format!("read fake forge merge arguments: {error}; fake forge calls: {calls}")
+    })?;
     let merge_args: Vec<_> = merge.lines().collect();
     assert!(
         merge_args
