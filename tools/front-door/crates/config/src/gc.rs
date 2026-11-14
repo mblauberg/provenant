@@ -210,11 +210,6 @@ pub struct LaneBuildSettings {
     /// grace without writing is unprotected unless a Cargo lock is held. 15
     /// minutes unless set.
     pub build_dir_grace_seconds: Option<u64>,
-    /// Seconds between walks of the lane caches by admission-triggered
-    /// collection. Within it, an admission skips the walk unless free space is
-    /// below the floor or the last walk found the total near the cap. 5
-    /// minutes unless set.
-    pub build_dir_survey_interval_seconds: Option<u64>,
 }
 /// Longest configurable gap between lane starts: ten minutes.
 pub const MAX_START_SPACING_MS: u64 = 600_000;
@@ -243,9 +238,6 @@ const CARGO_DEBUG_LEVELS: [&str; 10] = [
 pub const DEFAULT_BUILD_DIR_MAX_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 /// Recency grace for lane build output when `build_dir_grace_seconds` is unset.
 pub const DEFAULT_BUILD_DIR_GRACE_SECONDS: u64 = 15 * 60;
-/// Interval between admission-triggered walks when
-/// `build_dir_survey_interval_seconds` is unset.
-pub const DEFAULT_BUILD_DIR_SURVEY_INTERVAL_SECONDS: u64 = 5 * 60;
 /// The asset's -1 sentinel selects the host-dependent default.
 pub fn deserialize_auto<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -370,10 +362,6 @@ impl LaneBuildSettings {
     pub fn build_dir_grace_seconds(&self) -> u64 {
         self.build_dir_grace_seconds
             .unwrap_or(DEFAULT_BUILD_DIR_GRACE_SECONDS)
-    }
-    pub fn build_dir_survey_interval_seconds(&self) -> u64 {
-        self.build_dir_survey_interval_seconds
-            .unwrap_or(DEFAULT_BUILD_DIR_SURVEY_INTERVAL_SECONDS)
     }
     /// Concurrent cargo builds the host allows: the setting (clamped to 1..=64)
     /// or max(1, min(cores / cargo_build_jobs, total GiB / 6)), so a 10-core

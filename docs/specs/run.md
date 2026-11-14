@@ -106,13 +106,12 @@ and run binaries execute after Cargo drops its locks, so a directory written
 within `build_dir_grace_seconds` (15 minutes by default), or since the sweep
 measured it, is kept. The grace covers only recent writes: a binary that runs longer than the grace without writing under `target/` is unprotected unless a Cargo lock is still held. The walk takes no lock and a sweep with nothing to remove
 stops there; removal holds the host admission lock, so no lane is admitted
-mid-removal, and probes each candidate again. Collection runs when a lane
-settles, when admission finds the disk below the floor, and in `provenant gc`.
+mid-removal, and probes each candidate again. Collection belongs to `provenant gc`; admission observes pressure and follows
+its configured policy without reclaiming build output.
 - Why (default): disposable build output must stay bounded without deleting active builds.
 - Test: `crates/run/src/build_dir_gc.rs::a_held_lock_prevents_deletion_whichever_of_the_three_is_held`;
   `crates/run/src/build_dir_gc.rs::least_recently_used_goes_first_and_the_cap_stops_collection`;
   `crates/run/src/build_dir_gc.rs::the_free_space_floor_is_honoured_and_no_more_is_removed`;
-  `crates/run/src/dispatch_writer_tests.rs::admission_below_the_floor_reclaims_build_output_and_then_admits`;
   `crates/cli/src/run/provider/mod.rs::cargo_profile_tests`
 - Owner: `crates/run/src/build_dir_gc.rs`, `crates/cli/src/run/provider/mod.rs`
 

@@ -147,16 +147,6 @@ pub trait Resources {
     fn lane_disk(&self, attempt: &Directory, _: &HolderContext) -> std::io::Result<u64> {
         self.disk(attempt)
     }
-    /// Free lane build output when admission finds the disk below its floor.
-    /// Best effort; true means space may have been freed, so the caller
-    /// samples the disk again.
-    fn reclaim_disk(&self, _: &Directory) -> bool {
-        false
-    }
-    /// Reclaim from the output roots the running guardian was sealed with.
-    fn reclaim_lane_disk(&self, attempt: &Directory, _: &HolderContext) -> bool {
-        self.reclaim_disk(attempt)
-    }
 }
 
 pub struct SystemResources;
@@ -179,11 +169,6 @@ impl Resources for SystemResources {
     fn lane_disk(&self, _: &Directory, context: &HolderContext) -> std::io::Result<u64> {
         let (state, cwd) = context.disk_roots();
         provenant_confinement::disk::lane_available_bytes(state, &context.roots.home, cwd)
-    }
-    fn reclaim_lane_disk(&self, _: &Directory, context: &HolderContext) -> bool {
-        let (state, _) = context.disk_roots();
-        crate::build_dir_gc::reclaim(state, &context.roots.home)
-            .is_some_and(|report| !report.removed.is_empty())
     }
 }
 
@@ -772,6 +757,17 @@ impl RunStore {
         use provenant_records::policy::{Effect, Facts, Strength};
         let configured = self.lane_caps();
         let ticket = self.ticket(&self.db, id)?;
+        // Prune dead leases before a hard cap can refuse this admission.
+        // `prepare_lease` samples the owner and consults the injected process observer.
+        let caps = configured.under_policy(&policy);
+        let owner = crate::ledger::prepare_lease(
+            &ledger,
+            self.context.state_root.as_path(),
+            &ticket,
+            caps,
+            clock,
+            resources,
+        )?;
         for strength in [Strength::Refuse, Strength::Warn] {
             let caps = configured.under_strength(&policy, strength);
             let Some(hit) =
@@ -804,15 +800,6 @@ impl RunStore {
                 }
             }
         }
-        let caps = configured.under_policy(&policy);
-        let owner = crate::ledger::prepare_lease(
-            &ledger,
-            self.context.state_root.as_path(),
-            &self.ticket(&self.db, id)?,
-            caps,
-            clock,
-            resources,
-        )?;
         self.write(call, |tx| {
             let old = self.record(id, call)?;
             if !matches!(old.state, AttemptState::Starting { .. }) {
