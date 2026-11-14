@@ -272,7 +272,7 @@ pub(super) fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> R
                 gate.clone().into_os_string(),
             ));
         }
-        let first = spawn_graph_command(
+        let mut first = spawn_graph_command(
             &rig,
             "preparation-first",
             &worktree,
@@ -314,7 +314,7 @@ pub(super) fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> R
             "PROVENANT_FIXTURE_HOLD_SEED".into(),
             next_gate.clone().into_os_string(),
         ));
-        let next = spawn_graph_command(&rig, "preparation-next", &worktree, "none")?;
+        let mut next = spawn_graph_command(&rig, "preparation-next", &worktree, "none")?;
         wait_graph_gate(
             &mut next,
             &next_gate.join("entered"),
