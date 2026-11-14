@@ -97,6 +97,7 @@ mod graph_writer_admission_tests {
                 Ok(
                     provenant_fabric_runtime::graph::AttemptObservation::Terminal {
                         attempt_ref: None,
+                        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                         outcome: provenant_fabric_runtime::graph::AttemptOutcome::Succeeded,
                         launched: true,
                         result: None,
@@ -104,7 +105,7 @@ mod graph_writer_admission_tests {
                         result_path: None,
                         branch: None,
                         commit: None,
-                        stop: None,
+                        handoff: None,
                     },
                 )
             }
@@ -851,6 +852,7 @@ mod graph_ask_inbox_tests {
             rounds: ask.rounds,
             session: ask.session.clone(),
             wake_at: ask.wake_at,
+            timeout: ask.timeout,
             request,
         };
         for (index, (option, text, expected)) in [
@@ -1155,7 +1157,7 @@ mod graph_ask_inbox_tests {
         };
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version": 1, "graph_id": "chat-answer", "decision_session": "chair-session",
-            "nodes": [{"id": "choose", "kind": "decide", "access": "read_only", "decide": {
+            "nodes": [{"id": "choose", "kind": "decide", "access": "read_only", "decide": {"on_unanswered":"block_dependants",
                 "question": "Ship the change?",
                 "options": [{"id": "ship", "label": "Ship"}, {"id": "hold", "label": "Hold"}]}}]
         }))?;
@@ -1248,7 +1250,7 @@ mod graph_ask_inbox_tests {
         };
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version": 1, "graph_id": "decide-cancel", "decision_session": "chair-session",
-            "nodes": [{"id": "choose", "kind": "decide", "access": "read_only", "decide": {
+            "nodes": [{"id": "choose", "kind": "decide", "access": "read_only", "decide": {"on_unanswered":"block_dependants",
                 "question": "Ship the change?",
                 "options": [{"id": "ship", "label": "Ship"}, {"id": "hold", "label": "Hold"}]}}]
         }))?;
@@ -2243,6 +2245,7 @@ mod result_tests {
                 capture.push(b"bounded producer excerpt");
                 Ok(graph::AttemptObservation::Terminal {
                     attempt_ref: producer.then(|| self.reference.clone()),
+                    settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                     outcome: graph::AttemptOutcome::Succeeded,
                     launched: true,
                     result: Some(Box::new(capture.finish())),
@@ -2250,7 +2253,7 @@ mod result_tests {
                     result_path: None,
                     branch: None,
                     commit: None,
-                    stop: None,
+                    handoff: None,
                 })
             }
         }
@@ -2840,6 +2843,7 @@ mod retry_allowance_tests {
         ) -> Result<graph::AttemptObservation, Self::Error> {
             Ok(graph::AttemptObservation::Terminal {
                 attempt_ref: None,
+                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                 outcome: graph::AttemptOutcome::Succeeded,
                 launched: false,
                 result: None,
@@ -2847,7 +2851,7 @@ mod retry_allowance_tests {
                 result_path: None,
                 branch: None,
                 commit: None,
-                stop: None,
+                handoff: None,
             })
         }
     }
@@ -3252,7 +3256,7 @@ mod provisioned_writer_submission_tests {
             provider: Some("fixture".into()), model: Some("fixture/model".into()), ..Default::default()
         };
         store.publish_terminal(record.attempt_id, record.revision, &provenant_run::TerminalPublication {
- stop: None,
+ handoff: None,
             terminal_cause: None, terminal_note: None,
             outcome: if quota { provenant_records::run::Outcome::QuotaLimited } else { provenant_records::run::Outcome::Succeeded },
             started_at: Some(started), finished_at: finished, provider_ms: Some(1000),

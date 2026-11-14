@@ -167,6 +167,7 @@ mod tests {
             attempt_number: 1,
             project_id: ProjectId::from_bytes([4; 16]),
             terminal_state: AttemptOutcome::Succeeded,
+            cause_source: provenant_records::run::CauseSource::Unavailable,
             exit_code: Some(0),
             queued_at: UtcMicros::from_micros(1).unwrap(),
             started_at: None,

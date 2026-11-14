@@ -200,6 +200,7 @@ fn on_stop_steps<'de, D: serde::Deserializer<'de>>(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StopRule {
     pub cause: StopCause,
+    pub source: crate::run::CauseSource,
     pub default: NextStep,
     /// A pinned cause always takes its default; `on_stop` cannot move it.
     pub pinned: bool,
@@ -211,9 +212,14 @@ pub struct StopRule {
 const NEW: NextStep = NextStep::NewRoute;
 const CHAIR: NextStep = NextStep::Chair;
 
-const fn rule(cause: StopCause, default: NextStep) -> StopRule {
+const fn rule(
+    cause: StopCause,
+    default: NextStep,
+    source: crate::run::CauseSource,
+) -> StopRule {
     StopRule {
         cause,
+        source,
         default,
         pinned: false,
         retries: 0,
@@ -221,18 +227,24 @@ const fn rule(cause: StopCause, default: NextStep) -> StopRule {
 }
 
 /// A transient cause: one fresh attempt on the same route, then `default`.
-const fn once(cause: StopCause, default: NextStep) -> StopRule {
+const fn once(
+    cause: StopCause,
+    default: NextStep,
+    source: crate::run::CauseSource,
+) -> StopRule {
     StopRule {
         cause,
+        source,
         default,
         pinned: false,
         retries: 1,
     }
 }
 
-const fn pinned(cause: StopCause) -> StopRule {
+const fn pinned(cause: StopCause, source: crate::run::CauseSource) -> StopRule {
     StopRule {
         cause,
+        source,
         default: CHAIR,
         pinned: true,
         retries: 0,
@@ -243,47 +255,47 @@ const fn pinned(cause: StopCause) -> StopRule {
 pub const STOP_TABLE: &[StopRule] = {
     use StopCause::*;
     &[
-        rule(StoppedEarly, NEW),
-        pinned(Blocked),
-        rule(HandoffMissing, CHAIR),
-        once(EmptyResult, NEW),
-        rule(Uncommitted, CHAIR),
-        pinned(InputRequired),
-        rule(ContextHandoff, NEW),
-        rule(TokenBudget, CHAIR),
-        rule(Deadline, CHAIR),
-        pinned(Cancelled),
-        once(ProviderStop, NEW),
-        once(ProcessCrash, NEW),
-        rule(AuthRequired, NEW),
-        rule(UsageLimited, NEW),
-        rule(ModelUnavailable, NEW),
-        rule(AdapterUnavailable, NEW),
-        rule(PermissionDenied, CHAIR),
-        pinned(IdentityMismatch),
-        rule(LaneTokenLost, NEW),
-        rule(SourceViewRefused, CHAIR),
-        rule(RouteRefused, CHAIR),
-        rule(AccessPolicyRefused, CHAIR),
-        rule(DiskFloor, CHAIR),
-        once(DiskUnobserved, NEW),
-        rule(PromptUnreadable, CHAIR),
-        rule(CloudPlacementRemoved, CHAIR),
-        rule(WriteGrantsRefused, CHAIR),
-        rule(WorktreeBusy, CHAIR),
-        rule(LaunchHandoffRefused, CHAIR),
-        rule(RetainedWriterImport, CHAIR),
-        rule(UnsupportedPlatform, CHAIR),
-        rule(UnknownPacingAccount, CHAIR),
-        rule(UnregisteredAccount, CHAIR),
-        rule(CredentialHelperFailed, CHAIR),
-        rule(CommandUnavailable, CHAIR),
-        rule(HostNativeUnconfigured, CHAIR),
-        once(SpawnFailure, NEW),
-        rule(SettlementFailed, CHAIR),
-        rule(Lost, CHAIR),
-        rule(Unsettled, CHAIR),
-        rule(Quarantined, CHAIR),
+        rule(StoppedEarly, NEW, crate::run::CauseSource::Provider),
+        pinned(Blocked, crate::run::CauseSource::Owner),
+        rule(HandoffMissing, CHAIR, crate::run::CauseSource::Provider),
+        once(EmptyResult, NEW, crate::run::CauseSource::Provider),
+        rule(Uncommitted, CHAIR, crate::run::CauseSource::Provider),
+        pinned(InputRequired, crate::run::CauseSource::Owner),
+        rule(ContextHandoff, NEW, crate::run::CauseSource::Host),
+        rule(TokenBudget, CHAIR, crate::run::CauseSource::Host),
+        rule(Deadline, CHAIR, crate::run::CauseSource::Host),
+        pinned(Cancelled, crate::run::CauseSource::Owner),
+        once(ProviderStop, NEW, crate::run::CauseSource::Provider),
+        once(ProcessCrash, NEW, crate::run::CauseSource::Host),
+        rule(AuthRequired, NEW, crate::run::CauseSource::Provider),
+        rule(UsageLimited, NEW, crate::run::CauseSource::Provider),
+        rule(ModelUnavailable, NEW, crate::run::CauseSource::Provider),
+        rule(AdapterUnavailable, NEW, crate::run::CauseSource::Host),
+        rule(PermissionDenied, CHAIR, crate::run::CauseSource::Host),
+        pinned(IdentityMismatch, crate::run::CauseSource::Host),
+        rule(LaneTokenLost, NEW, crate::run::CauseSource::Host),
+        rule(SourceViewRefused, CHAIR, crate::run::CauseSource::Host),
+        rule(RouteRefused, CHAIR, crate::run::CauseSource::Host),
+        rule(AccessPolicyRefused, CHAIR, crate::run::CauseSource::Owner),
+        rule(DiskFloor, CHAIR, crate::run::CauseSource::Host),
+        once(DiskUnobserved, NEW, crate::run::CauseSource::Host),
+        rule(PromptUnreadable, CHAIR, crate::run::CauseSource::Host),
+        rule(CloudPlacementRemoved, CHAIR, crate::run::CauseSource::Owner),
+        rule(WriteGrantsRefused, CHAIR, crate::run::CauseSource::Owner),
+        rule(WorktreeBusy, CHAIR, crate::run::CauseSource::Host),
+        rule(LaunchHandoffRefused, CHAIR, crate::run::CauseSource::Host),
+        rule(RetainedWriterImport, CHAIR, crate::run::CauseSource::Host),
+        rule(UnsupportedPlatform, CHAIR, crate::run::CauseSource::Host),
+        rule(UnknownPacingAccount, CHAIR, crate::run::CauseSource::Host),
+        rule(UnregisteredAccount, CHAIR, crate::run::CauseSource::Host),
+        rule(CredentialHelperFailed, CHAIR, crate::run::CauseSource::Host),
+        rule(CommandUnavailable, CHAIR, crate::run::CauseSource::Host),
+        rule(HostNativeUnconfigured, CHAIR, crate::run::CauseSource::Host),
+        once(SpawnFailure, NEW, crate::run::CauseSource::Host),
+        rule(SettlementFailed, CHAIR, crate::run::CauseSource::Host),
+        rule(Lost, CHAIR, crate::run::CauseSource::Host),
+        rule(Unsettled, CHAIR, crate::run::CauseSource::Host),
+        rule(Quarantined, CHAIR, crate::run::CauseSource::Host),
     ]
 };
 
@@ -384,19 +396,17 @@ impl StopCause {
         }
     }
 
-    /// This cause's row. A cause without a row goes to the chair; the table
-    /// test makes that unreachable.
+    /// The declaration is complete; the invariant test covers every cause.
     pub fn rule(self) -> StopRule {
         STOP_TABLE
             .iter()
             .copied()
             .find(|rule| rule.cause == self)
-            .unwrap_or(StopRule {
-                cause: self,
-                default: CHAIR,
-                pinned: true,
-                retries: 0,
-            })
+            .expect("every stop cause has one declared rule")
+    }
+
+    pub fn source(self) -> crate::run::CauseSource {
+        self.rule().source
     }
 
     pub fn default_next(self) -> NextStep {
@@ -644,13 +654,17 @@ impl Stop {
     pub fn sealed(
         cause: Option<crate::run::TerminalCause>,
         outcome: crate::run::Outcome,
+        reason: crate::run::SettlementReason,
         handoff: Option<Handoff>,
     ) -> Result<Option<Self>, StopError> {
         let declared = handoff.as_ref().is_some_and(Handoff::unfinished);
-        let host = cause.map(Into::into).or_else(|| {
-            StopCause::of_outcome(outcome)
-                .filter(|cause| !(declared && *cause == StopCause::Uncommitted))
-        });
+        let host = cause
+            .map(Into::into)
+            .or(reason.rule().stop_cause)
+            .or_else(|| {
+                StopCause::of_outcome(outcome)
+                    .filter(|cause| !(declared && *cause == StopCause::Uncommitted))
+            });
         match (host, handoff) {
             (Some(cause), handoff) => Self::new(cause, handoff).map(Some),
             (None, Some(handoff)) => Self::declared(handoff),

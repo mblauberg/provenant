@@ -202,10 +202,9 @@ delivery, and an extension never adds rounds twice.
 ### Node asks and decide nodes
 
 The inbox owns the question and answer; graph checkpoints link to it. Replay
-must not create another request. A decision records the chosen option or the
-declared default at its deadline. Answers require held authority and the exact
-target; cancellation closes owned requests. A timed-out authority gate never
-grants authority through silence.
+must not create another request. A stored decide request carries its optional default and effective configurable timeout with source.
+Decision outcomes distinguish owner answers, answers by declared default or policy, and unanswered deadlines; an unanswered outcome carries no option and follows its declared disposition without releasing dependants as if an option were chosen.
+Answers require held authority and the exact target; cancellation closes owned requests. A timed-out authority gate never grants authority through silence.
 
 - Why: the owner and chair need one authoritative answer.
 - Test: `crates/fabric-runtime/src/graph/ask_tests.rs::decide_answer_becomes_the_verdict_and_routes_the_chosen_edge`

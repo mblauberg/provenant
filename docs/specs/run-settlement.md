@@ -33,8 +33,8 @@ remains visible for delivery or review.
 - Why: unfinished work must not appear complete or lose its handoff.
 - Test: `crates/run/src/dispatch_settlement_tests.rs::a_declared_stop_settles_review_required`
 
-A stop is sealed once from the recorded terminal cause, host outcome and
-handoff in that precedence. The graph acts on that sealed fact.
+One settlement classification derives the terminal outcome, sealed stop and graph outcome from terminal evidence, reason and handoff.
+A missing required writer handoff seals `handoff_missing` and goes to the chair; graph dependants cannot treat it as success.
 - Why: all readers need the same cause for the next decision.
 - Test: `crates/records/src/format2_tests.rs::each_record_round_trips_and_keeps_an_unknown_field`
 

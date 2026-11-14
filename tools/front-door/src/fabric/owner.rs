@@ -1462,6 +1462,15 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         ))
     }
 
+    fn decide_timeout(
+        &self,
+    ) -> Result<provenant_fabric_runtime::graph::DecideTimeout, Self::Error> {
+        Ok(provenant_fabric_runtime::graph::DecideTimeout {
+            seconds: self.factory.context.config.graph.decide_timeout_seconds,
+            source: self.factory.context.graph_decide_timeout_source,
+        })
+    }
+
     fn admission_timeout_seconds(&self) -> Option<u64> {
         if let Some(budget) = self.writer_launch_budget {
             return Some(
@@ -2863,6 +2872,7 @@ impl BoundGraphOwner<'_> {
                     branch: None,
                     commit: None,
                     stop: None,
+                    settlement_reason: Some(provenant_records::run::SettlementReason::PreLaunchRefusal),
                 });
             }
             // Preserve the specific detached-writer refusal in node status.
@@ -3824,6 +3834,7 @@ impl BoundGraphOwner<'_> {
                         node.source_commit.map(str::to_owned)
                     },
                     stop,
+                    settlement_reason: attempt.settlement_reason,
                 })
             }
             _ => Ok(AttemptObservation::Pending {

@@ -24,6 +24,7 @@ mod path_wire;
 pub mod policy;
 mod source;
 pub mod telemetry_context;
+pub mod usage_identity;
 mod trace;
 
 pub use artifact_ref::ArtifactRef;
@@ -42,6 +43,7 @@ pub use jsonc::{JsoncDocument, JsoncToken, JsoncTokenKind, decode_jsonc};
 pub use path_wire::{PathWire, PathWireError, StructuredPathWire};
 pub use source::{SourceDigest, SourceDigestError, SourceInput, source_digest};
 pub use trace::Trace;
+pub use usage_identity::{AccountIdentity, Identity, IdentityEpoch, IdentityEvidenceSource, UnknownIdentityReason};
 
 pub mod inbox;
 pub mod landing;

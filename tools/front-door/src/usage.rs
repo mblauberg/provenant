@@ -86,8 +86,8 @@ pub fn run(stats: &Stats, globals: &Globals) -> u8 {
 }
 
 /// Ingest native Claude sessions into the state root's token store. Registered
-/// accounts attribute their directories; every other `~/.claude*` directory is
-/// `unattributed`, never dropped.
+/// and other `~/.claude*` directories locate transcripts; identity comes only
+/// from a chair session record and otherwise stays typed unknown.
 pub fn ingest_native(
     roots: &Roots,
     home: &std::path::Path,
@@ -98,25 +98,25 @@ pub fn ingest_native(
     use provenant_telemetry::ingest;
     let config = provenant_cli::config_reads::read_for(roots, "telemetry")
         .map_err(|error| error.to_string())?;
-    let accounts: Vec<(String, Vec<std::path::PathBuf>)> = config
+    let directories: Vec<std::path::PathBuf> = config
         .domains
         .accounts
         .entries
         .values()
         .filter(|entry| entry.adapter == ingest::PROVIDER)
-        .map(|entry| {
-            let mut directories = vec![entry.directory.clone()];
-            directories.extend(entry.directories.iter().cloned());
-            (entry.label.clone(), directories)
+        .flat_map(|entry| {
+            std::iter::once(entry.directory.clone()).chain(entry.directories.iter().cloned())
         })
         .collect();
-    let dirs = ingest::config_dirs(&accounts, home);
-    let chairs: std::collections::BTreeSet<String> =
-        usage::chair_sessions(roots, jiff::Timestamp::MIN, jiff::Timestamp::MAX)
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .map(|chair| chair.session)
-            .collect();
+    let dirs = ingest::config_dirs(&directories, home);
+    let mut chairs = std::collections::BTreeMap::new();
+    for chair in usage::chair_sessions(roots, jiff::Timestamp::MIN, jiff::Timestamp::MAX)
+        .map_err(|error| error.to_string())?
+    {
+        chairs
+            .entry(chair.session)
+            .or_insert(chair.account_identity);
+    }
     {
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new()

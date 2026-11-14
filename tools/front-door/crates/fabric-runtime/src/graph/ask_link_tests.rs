@@ -116,7 +116,7 @@ impl GraphJournal for FlakyJournal {
 fn question() -> GraphDocument {
     serde_json::from_value(serde_json::json!({
         "schema_version":1, "graph_id":"asking", "decision_session":"chair-session", "nodes":[
-            {"id":"choose", "kind":"decide", "access":"read_only", "decide":{
+            {"id":"choose", "kind":"decide", "access":"read_only", "decide":{"on_unanswered":"block_dependants",
                 "question":"Ship the change?", "default":"hold",
                 "options":[{"id":"ship", "label":"Ship"}, {"id":"hold", "label":"Hold"}]}}
         ]

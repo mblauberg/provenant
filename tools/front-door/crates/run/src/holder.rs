@@ -2384,6 +2384,9 @@ impl RunStore {
         let succeeded_before_stop = decoded.outcome == Outcome::Succeeded;
         // A declared stop requires review even when the provider succeeded.
         let mut partial = std::mem::take(&mut decoded.partial_signals);
+        if decoded.terminal_cause == Some(TerminalCause::EmptyWriterResult) {
+            partial.push(PartialSignal::HandoffMissing);
+        }
         // A read-only lane has no changes to prove, so its complete answer is
         // the proof. Only a writer must also report its work in a handoff.
         if matches!(
@@ -2558,14 +2561,8 @@ impl RunStore {
             decoded.terminal_cause = None;
         }
         let decoded_reason = decoded.reason.take().map(bounded_reason);
-        let stop = provenant_records::Stop::sealed(
-            decoded.terminal_cause,
-            decoded.outcome,
-            handoff.clone(),
-        )
-        .map_err(|_| RunError::Validation("stop could not be sealed"))?;
         let publication = TerminalPublication {
-            stop,
+            handoff: handoff.clone(),
             terminal_cause: decoded.terminal_cause,
             terminal_note,
             outcome: decoded.outcome,

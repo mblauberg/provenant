@@ -141,6 +141,7 @@ fn terminal(
 ) -> AttemptObservation {
     AttemptObservation::Terminal {
         attempt_ref: Some(reference.into()),
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         outcome,
         launched: true,
         result: result.map(|text| {

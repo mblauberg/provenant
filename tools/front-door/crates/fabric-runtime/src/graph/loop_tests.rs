@@ -102,6 +102,7 @@ fn loop_composite_review_pins_each_repaired_commit() {
         attempt_ref: None, outcome: AttemptOutcome::Succeeded, launched: true,
         result: None, result_warning: None, result_path: None, branch: None,
         commit: Some(commit.to_owned()),
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
     };
     let mut owner = FakeOwner {
@@ -912,6 +913,7 @@ fn link_of(ask: AskRequest) -> AskLink {
         rounds: ask.rounds,
         session: ask.session,
         wake_at: ask.wake_at,
+        timeout: ask.timeout,
     }
 }
 
@@ -1305,6 +1307,7 @@ fn commit_terminal(commit: &str) -> AttemptObservation {
         result_path: None,
         branch: None,
         commit: Some(commit.to_owned()),
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
     }
 }
@@ -2410,6 +2413,7 @@ fn compiled_repair_design_continuation_keeps_the_original_writer() {
         result_path: None,
         branch: Some("work/item".into()),
         commit: Some("1".repeat(40)),
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
     };
     let mut owner = repair_reviews(&[

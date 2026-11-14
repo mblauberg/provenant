@@ -176,6 +176,7 @@ fn distinct_from_writer_passes_the_writer_attempts_to_the_owner() {
         result_path: None,
         branch: Some("writer".into()),
         commit: Some("3".repeat(40)),
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
     };
     let mut owner = FakeOwner {
@@ -760,6 +761,7 @@ fn a_required_separation_is_passed_to_the_router_and_recorded_when_refused() {
                 result_path: None,
                 branch: None,
                 commit: None,
+                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                 stop: None,
             },
         ]

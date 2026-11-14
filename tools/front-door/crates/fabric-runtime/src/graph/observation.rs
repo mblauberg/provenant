@@ -60,6 +60,8 @@ pub enum AttemptObservation {
         commit: Option<String>,
         /// The stop cause the run sealed, if the attempt stopped.
         stop: Option<provenant_records::StopCause>,
+        /// Exact settlement classification persisted by the run store.
+        settlement_reason: Option<provenant_records::run::SettlementReason>,
     },
 }
 

@@ -144,6 +144,7 @@ fn slot_wait_ms(queued_at: WallTime, started_at: Option<WallTime>) -> Option<u64
 pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
     let usage = r.effective_usage().into();
     let AttemptState::Terminal {
+        extra: terminal_extra,
         outcome,
         exit_code,
         finished_at,
@@ -171,6 +172,16 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         .map(|(adapter, session)| provenant_records::TranscriptRef { adapter, session });
     let (tier, template, parent_node) = graph_labels(r.context.as_ref());
     let slot_wait_ms = slot_wait_ms(r.queued_at, r.started_at);
+    let cause_source = match terminal_extra.get("stop") {
+        Some(value) => serde_json::from_value::<provenant_records::Stop>(value.clone())
+            .ok()
+            .map(|stop| stop.cause().source())
+            .unwrap_or(provenant_records::run::CauseSource::Unavailable),
+        None => r
+            .settlement_reason
+            .map(|reason| reason.rule().source)
+            .unwrap_or(provenant_records::run::CauseSource::Unavailable),
+    };
     Ok(AttemptFact {
         context: r.context,
         attempt_id: r.attempt_id,
@@ -178,6 +189,7 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         attempt_number: r.attempt_number,
         project_id: r.project_id,
         terminal_state: outcome.into(),
+        cause_source,
         exit_code,
         queued_at: r.queued_at,
         started_at: r.started_at,

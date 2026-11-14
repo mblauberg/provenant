@@ -681,7 +681,7 @@ pub(crate) mod peer_tests {
             record.attempt_id,
             record.revision,
             &provenant_run::TerminalPublication {
- stop: None,
+ handoff: None,
                 terminal_cause: None,
                 terminal_note: None,
                 outcome,

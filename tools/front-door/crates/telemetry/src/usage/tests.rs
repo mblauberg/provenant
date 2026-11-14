@@ -46,6 +46,28 @@ impl Clock for Fixed {
 }
 
 #[test]
+fn every_account_identity_case_round_trips() -> Result {
+    let cases = [
+        AccountIdentity {
+            identity: Identity::Known {
+                provider: "claude".into(),
+                account_key: "account-key".into(),
+            },
+            epoch: IdentityEpoch::Known { id: "epoch".into() },
+            evidence_source: IdentityEvidenceSource::Provider,
+        },
+        AccountIdentity::unknown(),
+        AccountIdentity::no_provider_account(),
+    ];
+    for identity in cases {
+        let bytes = serde_json::to_vec(&identity)?;
+        let decoded: AccountIdentity = serde_json::from_slice(&bytes)?;
+        assert_eq!(decoded, identity);
+    }
+    Ok(())
+}
+
+#[test]
 fn recording_on_a_missing_root_creates_nothing() -> Result {
     let (_temp, base) = tempdir()?;
     let roots = roots(&base)?;
@@ -63,7 +85,14 @@ fn chair_observations_survive_rotation_and_respect_window_bounds() -> Result {
     record_chair(
         &roots,
         CLOCK,
-        "work",
+        AccountIdentity {
+            identity: Identity::Known {
+                provider: "claude".into(),
+                account_key: "account-work".into(),
+            },
+            epoch: IdentityEpoch::Known { id: "epoch-1".into() },
+            evidence_source: IdentityEvidenceSource::Provider,
+        },
         "session",
         Some(project),
         Some(".claude-work"),
@@ -75,7 +104,7 @@ fn chair_observations_survive_rotation_and_respect_window_bounds() -> Result {
     record_chair(
         &roots,
         CLOCK,
-        "spare",
+        AccountIdentity::unknown(),
         "another-session",
         Some(project),
         None,
@@ -84,9 +113,9 @@ fn chair_observations_survive_rotation_and_respect_window_bounds() -> Result {
     let until = "2026-10-27T00:00:00Z".parse()?;
     let chairs = chair_sessions(&roots, since, until)?;
     assert_eq!(chairs.len(), 2);
-    assert_eq!(chairs[0].account, "work");
+    assert_eq!(chairs[0].account_identity.account_key(), "claude/account-work");
     assert_eq!(chairs[0].config.as_deref(), Some(".claude-work"));
-    assert_eq!(chairs[1].account, "spare");
+    assert_eq!(chairs[1].account_identity, AccountIdentity::unknown());
     assert_eq!(chairs[1].config, None);
     assert!(
         chairs

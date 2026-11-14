@@ -499,6 +499,7 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
                     result_path: None,
                     branch: None,
                     commit: None,
+                    settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                     stop: None,
                 }]
                 .into(),

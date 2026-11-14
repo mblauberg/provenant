@@ -65,6 +65,10 @@ fn ask_bound(ask: &AskRequest) -> usize {
         rounds: ask.rounds,
         session: ask.session.clone(),
         wake_at: Some(latest()),
+        timeout: Some(asks::DecideTimeout {
+            seconds: u64::MAX,
+            source: asks::DecideTimeoutSource::Configured,
+        }),
         request: "f".repeat(asks::REQUEST_ID_BYTES),
     };
     canonical_len(&link) + 1
@@ -317,6 +321,7 @@ fn node_bound(
                 extra: Default::default(),
                 verdict_error: Some(String::new()),
                 schema_version: 2,
+        decide_outcome: None,
                 result: Some(ResultOutput {
                     extra: Default::default(),
                     digest: String::new(),

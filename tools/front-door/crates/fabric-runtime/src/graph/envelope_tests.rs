@@ -61,7 +61,7 @@ fn mixed() -> GraphDocument {
              "route":{"alias":"senior"}, "plan":{"kinds":["task"], "max_nodes":4}},
             {"id":"review", "access":"read_only", "prompt":"Review", "routes":routes(3)},
             {"id":"choose", "kind":"decide", "access":"read_only", "depends_on":["review"],
-             "decide":{"question":"Ship the reviewed change?", "default":"hold", "timeout_seconds":60,
+             "decide":{"on_unanswered":"block_dependants", "question":"Ship the reviewed change?", "default":"hold", "timeout_seconds":60,
                 "options":[{"id":"ship", "label":"Ship"}, {"id":"hold", "label":"Hold", "description":"Wait for more review"}]}},
             {"id":"ci", "kind":"gate", "access":"read_only", "depends_on":["review"],
              "condition":{"type":"ci", "target":"feature/example"}},
@@ -154,6 +154,7 @@ fn filled_ask(ask: AskRequest) -> AskLink {
         rounds: ask.rounds,
         session: ask.session,
         wake_at: Some(envelope::latest()),
+        timeout: ask.timeout,
         request: "f".repeat(asks::REQUEST_ID_BYTES),
     }
 }
@@ -1134,7 +1135,7 @@ fn principal_scope_report_notification_and_assessment_fit_checkpoint_bound() {
         "schema_version":1,"graph_id":"principal-envelope","nodes":[
             {"id":"design","access":"read_only","prompt":"design","route":{"alias":"principal"}},
             {"id":"scope","kind":"decide","access":"read_only","depends_on":["design"],
-             "repair_scope_gate":true,"decide":{"question":"Approve changed scope?",
+             "repair_scope_gate":true,"decide":{"on_unanswered":"block_dependants", "question":"Approve changed scope?",
              "options":[{"id":"approve","label":"Approve"},{"id":"hold","label":"Hold"}]}}
         ]
     })).unwrap();

@@ -61,15 +61,15 @@ proposes a diff and never applies it.
 
 ## Attribution is detected, never guessed
 
-Chair and native usage is attributed only by a registered config directory;
-anything else is `unattributed`, never dropped. Ingest stores token counts
+Usage rows retain per-session account identity, epoch and evidence source from the provider identity port; unavailable identity is typed unknown, never inferred from a config-directory path.
+Ingest preserves that attribution; unknown usage remains `unattributed`, never dropped. Ingest stores token counts
 without prompt, reply, tool or path text, and rerunning it adds nothing. The
 store is one segment per UTC day; a day that reaches its cap stops additions to
 that day visibly, and no reader loads the whole store.
 Historical context is never filled from the current release or instructions.
 - Why: chair sessions are most of the spend, and a guessed row hides who spent it.
 - Test: `tests/chair.rs::chair_on_an_unregistered_config_directory_is_recorded_as_unattributed`;
-  `crates/telemetry/src/ingest/tests.rs::rerun_adds_nothing_and_accounts_stay_distinct`;
+  `crates/telemetry/src/ingest/tests.rs::session_identities_split_usage_when_a_config_directory_rotates`;
   `::enrichment_preserves_existing_token_buckets_and_excludes_text`;
   `crates/telemetry/src/tests.rs::lane_context_fixture_joins_existing_chair_and_graph`
 

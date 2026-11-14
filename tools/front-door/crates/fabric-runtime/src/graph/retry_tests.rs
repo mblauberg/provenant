@@ -1904,6 +1904,7 @@ fn no_work_stop(head: Option<&str>) -> AttemptObservation {
         result_path: None,
         branch: None,
         commit: head.map(str::to_owned),
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
     }
 }

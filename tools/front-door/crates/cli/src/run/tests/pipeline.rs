@@ -66,6 +66,7 @@ fn mixed_model_node_stays_unknown_instead_of_charging_the_final_model()
         attempt_number: 1,
         project_id: ProjectId::from_bytes([3; 16]),
         terminal_state: AttemptOutcome::Succeeded,
+        cause_source: provenant_records::run::CauseSource::Unavailable,
         exit_code: Some(0),
         queued_at: WallTime::from_micros(0)?,
         started_at: None,

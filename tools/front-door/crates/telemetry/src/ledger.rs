@@ -12,7 +12,7 @@
 use crate::{CostTotal, PriceTable, TelemetryError, reducer::Money, segments};
 use provenant_core::{CancelToken, Clock, ProjectId, WallTime};
 use provenant_os::fs::{Directory, FsError, ledger::Ledger as JsonLedger};
-use provenant_records::{AttemptFact, WorkKey};
+use provenant_records::{AccountIdentity, AttemptFact, WorkKey};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -24,7 +24,7 @@ use thiserror::Error;
 /// Directory in the state root holding the segments.
 pub const DIRECTORY: &str = "usage-ledger";
 /// The one row format this build reads and writes.
-pub const FORMAT: &str = "provenant.usage-ledger.v2";
+pub const FORMAT: &str = "provenant.usage-ledger.v3";
 /// Largest segment read. A segment holds one day of attempts.
 const SEGMENT_CAP: u64 = 64 << 20;
 
@@ -92,7 +92,7 @@ pub struct Row {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
-    pub account: Option<String>,
+    pub identity: AccountIdentity,
     pub outcome: String,
     pub started: Option<WallTime>,
     pub finished: WallTime,
@@ -174,7 +174,7 @@ pub fn row(
         provider,
         model,
         effort: field(|r| &r.effort),
-        account: field(|r| &r.account_label),
+        identity: AccountIdentity::unknown(),
         outcome,
         started: fact.started_at,
         finished: fact.finished_at,

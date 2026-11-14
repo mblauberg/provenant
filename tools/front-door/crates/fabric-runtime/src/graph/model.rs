@@ -985,6 +985,8 @@ pub struct NodeOutputs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict_error: Option<String>,
     pub schema_version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decide_outcome: Option<DecideOutcome>,
     pub result: Option<ResultOutput>,
     pub verdict: Option<String>,
     pub findings: Vec<Finding>,
@@ -1003,6 +1005,26 @@ pub struct NodeOutputs {
     /// when no handoff was declared or it lists no items.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remaining: Option<Vec<String>>,
+}
+
+/// Durable result of a decide request. `Unanswered` structurally carries no option.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DecideOutcome {
+    Answered { option: String, actor: String },
+    AnsweredByDefault { option: String },
+    AnsweredByPolicy { option: String, rule: String },
+    Unanswered,
+}
+
+impl DecideOutcome {
+    pub fn option(&self) -> Option<&str> {
+        match self {
+            Self::Answered { option, .. } | Self::AnsweredByDefault { option }
+            | Self::AnsweredByPolicy { option, .. } => Some(option),
+            Self::Unanswered => None,
+        }
+    }
 }
 
 /// Typed review evidence retained when a read-only review lane settles.

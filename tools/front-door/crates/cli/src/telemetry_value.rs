@@ -226,8 +226,10 @@ fn value_inner(command: &TelemetryValue, edge: &Edge<'_>) -> Output {
         }) else {
             continue;
         };
+        let identity_key = format!("{provider}/{}", reading.account_key);
         let used = report::totals(in_window.iter().copied().filter(|row| {
-            row.provider.as_deref() == Some(provider) && row.account.as_deref() == Some(label)
+            row.provider.as_deref() == Some(provider)
+                && row.identity.account_key() == identity_key
         }))
         .map_err(io)?;
         let price = provenant_quota::price_in_force(&entry.plans, reading.observed_unix_seconds);
@@ -275,7 +277,7 @@ fn value_inner(command: &TelemetryValue, edge: &Edge<'_>) -> Output {
         in_window
             .iter()
             .copied()
-            .filter(|row| row.account.is_none()),
+            .filter(|row| row.identity.is_unknown()),
     )
     .map_err(io)?;
     if unattributed.attempts > 0 {

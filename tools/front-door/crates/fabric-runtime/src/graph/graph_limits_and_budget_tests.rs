@@ -15,6 +15,7 @@ fn usage_fetch_failure_is_unknown_and_does_not_wedge_graph() {
         result_path: None,
         branch: None,
         commit: None,
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
     };
     for policy in [
@@ -75,6 +76,7 @@ fn cost_unknown_reason_is_recorded() {
             result_path: None,
             branch: None,
             commit: None,
+            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
             stop: None,
         }]),
         usage: AttemptUsage {
@@ -300,6 +302,7 @@ fn final_budget_exhaustion_still_delivers() {
             result_path: None,
             branch: None,
             commit: None,
+            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
             stop: None,
         }]),
         usage: AttemptUsage {
@@ -350,6 +353,7 @@ fn budget_pause_stops_admission_and_extension_resumes() {
         result_path: None,
         branch: None,
         commit: None,
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
     };
     let mut owner = FakeOwner {
@@ -399,6 +403,7 @@ fn unknown_usage_warns_or_pauses_and_events_are_idempotent() {
         result_path: None,
         branch: None,
         commit: None,
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
     };
     for policy in [
@@ -476,6 +481,7 @@ fn graph_wall_budget_sums_provider_time_and_preserves_partial_lower_bound() {
             result_path: None,
             branch: None,
             commit: None,
+            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
             stop: None,
         }]),
         usage: AttemptUsage {

@@ -2,6 +2,7 @@
 #![allow(clippy::disallowed_methods)]
 mod support;
 use provenant_core::{ProjectId, WallTime};
+use provenant_records::AccountIdentity;
 use provenant_telemetry::ledger::{self, Cost, Row, Source, Tokens};
 use serde_json::{Value, json};
 use std::fs;
@@ -35,7 +36,7 @@ fn reading(provider: &str, label: &str, at: i64, used: u64) -> Value {
 fn row(
     attempt: &str,
     provider: &str,
-    account: Option<&str>,
+    account_key: Option<&str>,
     cost: Option<(u64, bool)>,
     finished: i64,
 ) -> Result<Row> {
@@ -52,7 +53,10 @@ fn row(
         provider: Some(provider.into()),
         model: Some("m".into()),
         effort: None,
-        account: account.map(str::to_owned),
+        identity: account_key.map_or_else(
+            AccountIdentity::no_provider_account,
+            |key| AccountIdentity::known(provider, key, "fixture-epoch"),
+        ),
         outcome: "succeeded".into(),
         started: None,
         finished: WallTime::from_micros(finished * 1_000_000)?,
@@ -180,9 +184,11 @@ fn cost_reports_unpriced_and_unattributed_attempts_without_zero_filling() -> Res
             .as_array()
             .and_then(|groups| groups.iter().find(|g| g["key"] == key))
     };
-    let work = group("work").ok_or("work group")?;
+    let work = group("claude/work").ok_or("claude/work group")?;
     assert_eq!(work["usd"], "2.000000");
     assert_eq!(work["unpriced_attempts"], 1);
+    let play = group("codex/play").ok_or("codex/play group")?;
+    assert_eq!(play["usd"], "3.000000");
     let gap = group("unattributed").ok_or("gap group")?;
     assert_eq!(gap["unattributed_attempts"], 1);
     // An unpriced attempt on its own has no cost, not a zero one.

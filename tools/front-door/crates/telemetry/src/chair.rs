@@ -2,7 +2,7 @@
 //! transcript. The SessionStart hook only learns which account a session runs
 //! under; tokens exist once the session has run, so the report reads them.
 //! Only assistant message IDs, models and usage counts are kept.
-use crate::{claude::Raw, usage::ChairSession};
+use crate::{claude::Raw, usage::{AccountIdentity, ChairSession}};
 use provenant_records::Usage;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -276,10 +276,10 @@ pub fn attach_usage(
 ) {
     let mut budget = MAX_TOTAL_BYTES;
     let mut done =
-        BTreeMap::<(String, String, Option<PathBuf>), Result<Vec<ChairModelUsage>, Unread>>::new();
+        BTreeMap::<(AccountIdentity, String, Option<PathBuf>), Result<Vec<ChairModelUsage>, Unread>>::new();
     for chair in sessions.iter_mut() {
         let config = config_dir(chair);
-        let key = (chair.account.clone(), chair.session.clone(), config.clone());
+        let key = (chair.account_identity.clone(), chair.session.clone(), config.clone());
         let result = done.entry(key).or_insert_with(|| match &config {
             Some(config) => session_usage(config, &chair.session, &mut budget),
             None => Err(Unread::NoConfigDir),

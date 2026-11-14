@@ -60,6 +60,9 @@ pub fn priors(
         if index as u64 >= crate::MAX_ATTEMPTS {
             return Err(crate::TelemetryError::TooLarge("100,000 selected attempts"));
         }
+        if item.fact.cause_source != provenant_records::run::CauseSource::Provider {
+            continue;
+        }
         let Some(pool) = item.pool else {
             continue;
         };
@@ -152,6 +155,9 @@ pub fn report(
     for (index, item) in evidence.into_iter().enumerate() {
         if index as u64 >= crate::MAX_ATTEMPTS {
             return Err(crate::TelemetryError::TooLarge("100,000 selected attempts"));
+        }
+        if item.fact.cause_source != provenant_records::run::CauseSource::Provider {
+            continue;
         }
         let route = item.fact.resolved_route.as_ref();
         let provider = route

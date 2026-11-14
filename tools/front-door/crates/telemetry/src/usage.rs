@@ -35,6 +35,8 @@ impl UsageError {
     }
 }
 
+pub use provenant_records::{AccountIdentity, Identity, IdentityEpoch, IdentityEvidenceSource, UnknownIdentityReason};
+
 #[derive(Serialize, Deserialize)]
 struct Event {
     kind: String,
@@ -48,8 +50,7 @@ struct Event {
     /// Only the project, and only when attribution is on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     trace: Option<Trace>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    account: Option<String>,
+    account_identity: AccountIdentity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     session: Option<String>,
     /// A chair session's Claude config directory, relative to the home
@@ -140,7 +141,7 @@ pub fn record_cli_context(
                 ..Trace::default()
             })
             .filter(|trace| trace.project.is_some() || trace.attempt.is_some()),
-            account: None,
+            account_identity: AccountIdentity::no_provider_account(),
             session: session.map(str::to_owned),
             config: None,
             wait,
@@ -149,17 +150,15 @@ pub fn record_cli_context(
     );
 }
 
-/// The account recorded for a chair session whose config directory is not a
-/// registered account, so such sessions stay visible instead of being dropped.
+/// The reserved display key for an account identity that was not resolved.
 pub const UNATTRIBUTED: &str = "unattributed";
 
-/// Record the serving account resolved by the chair's SessionStart hook, or
-/// [`UNATTRIBUTED`] when none resolved. `config` is the session's Claude config
-/// directory relative to the home directory, when it lies under it.
+/// Record the provider evidence resolved at SessionStart. Transcript location
+/// remains separately recorded for discovery and never supplies identity.
 pub fn record_chair(
     roots: &Roots,
     clock: &dyn Clock,
-    account: &str,
+    account_identity: AccountIdentity,
     session: &str,
     project: Option<ProjectId>,
     config: Option<&str>,
@@ -175,7 +174,7 @@ pub fn record_chair(
             duration_ms: 0,
             timestamp: now.to_string(),
             trace: project_trace(project),
-            account: Some(account.into()),
+            account_identity,
             session: Some(session.into()),
             config: config.map(str::to_owned),
             wait: None,
@@ -187,7 +186,7 @@ pub fn record_chair(
 #[derive(Debug)]
 pub struct ChairSession {
     pub adapter: String,
-    pub account: String,
+    pub account_identity: AccountIdentity,
     pub session: String,
     pub project: Option<ProjectId>,
     /// Claude config directory relative to home, as recorded by the hook.
@@ -200,7 +199,7 @@ pub struct ChairSession {
 }
 
 /// Recent chair observations. The caller deduplicates repeated SessionStart
-/// events by project, account and session within the selected window.
+/// events by project, identity and session within the selected window.
 pub fn chair_sessions(
     roots: &Roots,
     since: jiff::Timestamp,
@@ -222,7 +221,7 @@ pub fn chair_sessions(
             }
             Some(ChairSession {
                 adapter: event.unit,
-                account: event.account?,
+                account_identity: event.account_identity,
                 session: event.session?,
                 project: event.trace.and_then(|trace| trace.project),
                 config: event.config,

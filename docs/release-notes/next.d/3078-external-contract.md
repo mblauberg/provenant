@@ -81,3 +81,7 @@ The command and option spellings below appeared in the v1.11.2 command surface o
 
 - `domains.fabric.pipelines`: no direct equivalent; delete this stale pipeline table. (#3078)
 - `domains.fabric.graph.writer_launch_seconds`: use `domains.fabric.graph.launch_wait_seconds` for launch and wait, and `domains.fabric.graph.writer_provision_seconds` for writer provisioning. (#3078)
+
+### Telemetry and providers
+
+- Usage attribution now carries verified identity, epoch and evidence source; unresolved identities report `unattributed`. Account groups use `provider/account_key` rather than directory-derived labels. (#3078)

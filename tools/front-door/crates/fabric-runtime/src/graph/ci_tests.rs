@@ -93,6 +93,7 @@ impl AttemptOwner for Owner {
             result_path: None,
             branch: self.branch.clone(),
             commit: self.commit.clone(),
+            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
             stop: None,
         })
     }
@@ -306,7 +307,7 @@ fn ci_and_ask_deadlines_share_the_earliest_wake() {
     doc.nodes.push(
         serde_json::from_value(serde_json::json!({
             "id": "choose", "kind": "decide", "access": "read_only",
-            "decide": {
+            "decide": {"on_unanswered":"block_dependants",
                 "question": "Continue?", "default": "yes", "timeout_seconds": 30,
                 "options": [{"id": "yes", "label": "Continue"}, {"id": "no", "label": "Stop"}]
             }

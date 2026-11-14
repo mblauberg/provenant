@@ -158,7 +158,7 @@ mod file_tests;
 mod tests;
 pub use asks::{
     AskFiled, AskFiling, AskKind, AskLink, AskOption, AskReply, AskRequest, AskScope, DecideSpec,
-    close_resolved_asks, loop_ask,
+    DecideTimeout, DecideTimeoutSource, UnansweredDisposition, close_resolved_asks, loop_ask,
 };
 pub use composites::CompositeSpec;
 pub use land::{LandAuthority, LandObservation, LandRecord, LandRequest, LandSpec};
@@ -368,6 +368,14 @@ pub trait AttemptOwner {
     /// Maximum time to admit a launch, measured from its first submission.
     fn admission_timeout_seconds(&self) -> Option<u64> {
         None
+    }
+
+    /// Effective configurable decide timeout, including where its value came from.
+    fn decide_timeout(&self) -> Result<DecideTimeout, Self::Error> {
+        Ok(DecideTimeout {
+            seconds: crate::config::DEFAULT_DECIDE_TIMEOUT_SECONDS,
+            source: DecideTimeoutSource::DomainDefault,
+        })
     }
 
     /// Re-read host-owned proof of a pre-custody preparation refusal and
@@ -3467,6 +3475,7 @@ fn gate_outputs(passed: bool) -> NodeOutputs {
         extra: Default::default(),
         verdict_error: None,
         schema_version: 2,
+        decide_outcome: None,
         result: None,
         verdict: Some(if passed { "PASS" } else { "FAIL" }.to_owned()),
         findings: Vec::new(),

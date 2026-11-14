@@ -522,7 +522,7 @@ fn settlement_and_tick_read_no_terminal_graphs_at_scale() -> Result<(), Box<dyn 
         let id = if number == 0 { "owner".to_owned() } else { format!("pending-{number:02}") };
         let nodes = if number == 0 { serde_json::json!([{"id":"one","prompt":"reply OK","access":"worktree_write",
             "worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]) }
-        else { serde_json::json!([{"id":"choose","kind":"decide","access":"read_only","decide":{
+        else { serde_json::json!([{"id":"choose","kind":"decide","access":"read_only","decide":{"on_unanswered":"block_dependants",
             "question":"Ship?","options":[{"id":"ship","label":"Ship"},{"id":"hold","label":"Hold"}],
             "default":"hold","timeout_seconds":3600}}]) };
         let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({

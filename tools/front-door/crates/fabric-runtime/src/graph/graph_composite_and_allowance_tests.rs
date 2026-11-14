@@ -140,6 +140,7 @@ fn writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source() {
         result_path: None,
         branch: Some("writer".into()),
         commit: Some(head_2.clone()),
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
     };
     let lens_done = terminal(AttemptOutcome::Succeeded);

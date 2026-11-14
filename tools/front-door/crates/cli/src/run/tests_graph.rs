@@ -21,6 +21,7 @@ fn graph_quality_reports_missing_checkpoint_without_failing()
         attempt_number: 1,
         project_id: project,
         terminal_state: AttemptOutcome::Succeeded,
+        cause_source: provenant_records::run::CauseSource::Unavailable,
         exit_code: Some(0),
         queued_at: WallTime::from_micros(0)?,
         started_at: None,
@@ -233,7 +234,7 @@ fn stats_text_lists_cache_share_only_where_a_provider_reported_it() {
     .unwrap();
     let chair = |usage| ChairSession {
         adapter: "claude".into(),
-        account: "work".into(),
+        account_identity: provenant_telemetry::usage::AccountIdentity::known("claude", "work", "fixture-epoch"),
         session: "s".into(),
         project: None,
         config: None,

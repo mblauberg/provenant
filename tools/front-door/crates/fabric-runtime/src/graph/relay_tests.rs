@@ -296,7 +296,7 @@ fn child_decision_inherits_the_graph_chair_session() {
         templates: Default::default(),
         node: json!({
             "id":"choose", "kind":"decide", "access":"read_only",
-            "decide":{"question":"Continue the child?", "options":[
+            "decide":{"on_unanswered":"block_dependants", "question":"Continue the child?", "options":[
                 {"id":"continue", "label":"Continue"},
                 {"id":"hold", "label":"Hold"}
             ]}
@@ -560,6 +560,7 @@ fn settled_parent_stops_running_children(outcome: AttemptOutcome) {
                 launched: true,
                 result: None,
                 attempt_ref: Some("attempt-a".into()),
+                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                 stop: None,
             },
             AttemptObservation::Pending {
@@ -1236,6 +1237,7 @@ fn honest_stop_continuation_replays_its_logical_parents_writer_child() {
             attempt_ref:Some("first-attempt".into()), outcome:AttemptOutcome::Succeeded, launched:true,
             result:Some(Box::new(capture("```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"Continue checking\"}\n```"))),
             result_warning:None, result_path:None, branch:Some("parent".into()), commit:Some("a".repeat(40)),
+            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
             stop: None,
         },
         // The parent restarts in place, ahead of its child in plan order.
@@ -1244,6 +1246,7 @@ fn honest_stop_continuation_replays_its_logical_parents_writer_child() {
             attempt_ref:Some("child-attempt".into()), outcome:AttemptOutcome::Succeeded, launched:true,
             result:Some(Box::new(capture("Child completed"))), result_warning:None, result_path:None,
             branch:Some("child".into()), commit:Some("a".repeat(40)),
+            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
             stop: None,
         },
     ]);

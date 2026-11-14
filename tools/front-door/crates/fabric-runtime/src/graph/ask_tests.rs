@@ -6,7 +6,7 @@ fn fixture_route() -> Value {
 }
 
 fn decide(id: &str, timeout: Option<u64>) -> Value {
-    let mut spec = json!({"question":"Ship the change?", "default":"hold",
+    let mut spec = json!({"question":"Ship the change?", "on_unanswered":"block_dependants", "default":"hold",
         "options":[{"id":"ship", "label":"Ship"}, {"id":"hold", "label":"Hold"}]});
     if let Some(seconds) = timeout {
         spec["timeout_seconds"] = json!(seconds);
@@ -63,6 +63,9 @@ fn decide_answer_becomes_the_verdict_and_routes_the_chosen_edge() {
     assert_eq!(ask.kind, AskKind::Decide);
     assert_eq!(ask.session, "chair-session");
     assert_eq!(ask.request, "choose.ask-1");
+    assert_eq!(ask.timeout.unwrap().seconds, crate::config::DEFAULT_DECIDE_TIMEOUT_SECONDS);
+    assert_eq!(ask.timeout.unwrap().source, DecideTimeoutSource::DomainDefault);
+    assert!(owner.filed[0].body.contains("from the Fabric graph domain default"));
     assert!(owner.filed[0].body.contains("Ship the change?"));
     assert_eq!(ask.wake_at, waiting.checkpoint.wake_at);
     assert!(ask.wake_at.is_some());
@@ -90,6 +93,13 @@ fn decide_answer_becomes_the_verdict_and_routes_the_chosen_edge() {
     assert_eq!(
         choose.outputs.as_ref().unwrap().verdict.as_deref(),
         Some("ship")
+    );
+    assert_eq!(
+        choose.outputs.as_ref().unwrap().decide_outcome,
+        Some(DecideOutcome::Answered {
+            option: "ship".into(),
+            actor: "chair".into(),
+        })
     );
     assert!(
         choose
@@ -340,6 +350,8 @@ fn decide_timeout_persists_wake_at_and_takes_the_default() {
     assert_eq!(waiting.checkpoint.wake_at, Some(at(60)));
     assert_eq!(owner.filed[0].default.as_deref(), Some("hold"));
     assert_eq!(owner.filed[0].wake_at, Some(at(60)));
+    assert_eq!(owner.filed[0].timeout.unwrap().source, DecideTimeoutSource::Graph);
+    assert!(owner.filed[0].body.contains("from the decide declaration"));
     assert_eq!(journal.0.as_ref().unwrap().wake_at, Some(at(60)));
     owner.now = Some(at(59));
     assert_eq!(
@@ -362,11 +374,11 @@ fn decide_timeout_persists_wake_at_and_takes_the_default() {
         .iter()
         .find(|n| n.id == "choose")
         .unwrap();
-    assert!(
-        choose
-            .deterministic_summary()
-            .unwrap()
-            .contains("the default at the deadline")
+    assert_eq!(
+        choose.outputs.as_ref().unwrap().decide_outcome,
+        Some(DecideOutcome::AnsweredByDefault {
+            option: "hold".into(),
+        })
     );
 }
 
@@ -509,6 +521,7 @@ fn budget_pause() -> (GraphDocument, FakeOwner, crate::config::GraphBudget) {
         result_path: None,
         branch: None,
         commit: None,
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
     };
     let owner = FakeOwner {
@@ -655,7 +668,7 @@ fn principal_scope_gate_notifies_once_and_only_waits_outside_approved_scope() {
             "schema_version":1,"graph_id":"principal-scope","nodes":[
                 {"id":"design","access":"read_only","prompt":"design","route":fixture_route()},
                 {"id":"scope","kind":"decide","access":"read_only","depends_on":["design"],
-                 "repair_scope_gate":true,"decide":{"question":"Approve the changed slice?",
+                 "repair_scope_gate":true,"decide":{"on_unanswered":"block_dependants", "question":"Approve the changed slice?",
                     "options":[{"id":"approve","label":"Approve"},{"id":"hold","label":"Hold"}]}},
                 {"id":"approved","kind":"gate","access":"read_only","depends_on":["scope"],
                  "inputs":[{"node":"scope","outputs":["verdict"]}],
@@ -697,17 +710,19 @@ fn principal_scope_gate_notifies_once_and_only_waits_outside_approved_scope() {
             assert_eq!(owner.owner_notifications, ["scope.owner-notification", "scope.owner-notification.retry-1"]);
         }
         if !within_scope {
-            let mut timed_out_journal = MemoryJournal(journal.0.clone());
-            let mut timed_out_owner = FakeOwner {
+            let mut unanswered_journal = MemoryJournal(journal.0.clone());
+            let mut unanswered_owner = FakeOwner {
                 now: run.checkpoint.asks[0].wake_at,
                 ..Default::default()
             };
-            let timed_out = advance(&document, &mut timed_out_owner, &mut timed_out_journal).unwrap();
-            assert_ne!(state(&timed_out, "writer"), NodeState::Succeeded);
-            assert_eq!(timed_out.checkpoint.nodes.iter().find(|node| node.id == "scope")
-                .unwrap().outputs.as_ref().unwrap().verdict.as_deref(), Some("timed_out"));
-            assert!(timed_out_owner.calls.is_empty());
-            advance(&document, &mut timed_out_owner, &mut timed_out_journal).unwrap();
+            let unanswered = advance(&document, &mut unanswered_owner, &mut unanswered_journal).unwrap();
+            assert_eq!(state(&unanswered, "writer"), NodeState::Blocked);
+            let scope = unanswered.checkpoint.nodes.iter().find(|node| node.id == "scope").unwrap();
+            assert_eq!(scope.state, NodeState::Failed);
+            assert_eq!(scope.outputs.as_ref().unwrap().verdict, None);
+            assert_eq!(scope.outputs.as_ref().unwrap().decide_outcome, Some(DecideOutcome::Unanswered));
+            assert!(unanswered_owner.calls.is_empty());
+            advance(&document, &mut unanswered_owner, &mut unanswered_journal).unwrap();
             let mut approved_journal = MemoryJournal(journal.0.clone());
             let mut approved_owner = FakeOwner {
         now: Some(at(0)), actor:"chair".into(),
@@ -746,7 +761,7 @@ fn principal_container_retry_does_not_reuse_owner_decision() {
             {"id":"redesign","kind":"composite","access":"read_only","composite":{"exports":[],"nodes":[
                 {"id":"design","access":"read_only","prompt":"design","route":fixture_route()},
                 {"id":"scope","kind":"decide","access":"read_only","depends_on":["design"],
-                 "repair_scope_gate":true,"decide":{"question":"Approve the changed slice?",
+                 "repair_scope_gate":true,"decide":{"on_unanswered":"block_dependants", "question":"Approve the changed slice?",
                     "options":[{"id":"approve","label":"Approve"},{"id":"hold","label":"Hold"}]}}
             ]}}
         ]
@@ -776,15 +791,17 @@ fn principal_container_retry_does_not_reuse_owner_decision() {
     assert_eq!(owner.owner_notifications, ["redesign--scope.owner-notification", "redesign--scope.owner-notification.retry-1"]);
 }
 
-/// Small: every ordinary decide has a durable bounded deadline, including
-/// graphs that supply neither a timeout nor a default option.
+/// Every declared unanswered disposition records no option and prevents dependants running.
 #[test]
-fn decide_defaults_expire_and_warn_without_an_owner_turn() {
-    for explicit_default in [false, true] {
+fn unanswered_decides_follow_their_declared_disposition_without_selecting_an_option() {
+    for (disposition, expected) in [
+        (UnansweredDisposition::BlockDependants, NodeState::Failed),
+        (UnansweredDisposition::SkipDependants, NodeState::Skipped),
+    ] {
         let mut document = routed(None);
-        if !explicit_default {
-            document.nodes[0].decide.as_mut().unwrap().default = None;
-        }
+        let decide = document.nodes[0].decide.as_mut().unwrap();
+        decide.default = None;
+        decide.on_unanswered = disposition;
         let mut owner = FakeOwner {
             now: Some(at(0)),
             observations: [terminal(AttemptOutcome::Succeeded)].into(),
@@ -792,30 +809,50 @@ fn decide_defaults_expire_and_warn_without_an_owner_turn() {
         };
         let mut journal = MemoryJournal::default();
         let waiting = advance(&document, &mut owner, &mut journal).unwrap();
-        let deadline = waiting.checkpoint.asks[0]
-            .wake_at
-            .expect("default deadline");
+        let deadline = waiting.checkpoint.asks[0].wake_at.expect("decide deadline");
         assert!(deadline > at(0));
         owner.now = Some(deadline);
         let settled = advance(&document, &mut owner, &mut journal).unwrap();
-        let choose = settled
-            .checkpoint
-            .nodes
-            .iter()
-            .find(|node| node.id == "choose")
-            .unwrap();
-        assert_eq!(choose.state, NodeState::Succeeded);
+        let choose = settled.checkpoint.nodes.iter().find(|node| node.id == "choose").unwrap();
+        assert_eq!(choose.state, expected);
         let outputs = choose.outputs.as_ref().unwrap();
-        assert_eq!(
-            outputs.verdict.as_deref(),
-            Some(if explicit_default { "hold" } else { "ship" })
-        );
-        assert!(
-            outputs
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("timeout"))
-        );
+        assert_eq!(outputs.decide_outcome, Some(DecideOutcome::Unanswered));
+        assert_eq!(outputs.verdict, None);
         assert!(settled.checkpoint.asks.is_empty());
+        assert_ne!(state(&settled, "ship-work"), NodeState::Succeeded);
+        assert_ne!(state(&settled, "hold-work"), NodeState::Succeeded);
+    }
+}
+
+#[test]
+fn every_decide_outcome_round_trips_and_unanswered_has_no_option() {
+    let outcomes = [
+        DecideOutcome::Answered { option: "ship".into(), actor: "chair".into() },
+        DecideOutcome::AnsweredByDefault { option: "hold".into() },
+        DecideOutcome::AnsweredByPolicy { option: "approve".into(), rule: "approved_repair_scope".into() },
+        DecideOutcome::Unanswered,
+    ];
+    for outcome in outcomes {
+        let encoded = serde_json::to_value(&outcome).unwrap();
+        let decoded: DecideOutcome = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded, outcome);
+        if outcome == DecideOutcome::Unanswered {
+            assert!(encoded.get("option").is_none());
+            assert_eq!(outcome.option(), None);
+        } else {
+            assert!(outcome.option().is_some());
+        }
+    }
+}
+
+#[test]
+fn every_unanswered_disposition_is_encodable() {
+    for disposition in [
+        UnansweredDisposition::BlockDependants,
+        UnansweredDisposition::SkipDependants,
+    ] {
+        let encoded = serde_json::to_value(disposition).unwrap();
+        let decoded: UnansweredDisposition = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, disposition);
     }
 }

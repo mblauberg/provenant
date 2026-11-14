@@ -132,6 +132,8 @@ pub enum HostNativeConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GraphConfig {
+    /// Deadline for decide requests that omit a node-specific timeout.
+    pub decide_timeout_seconds: u64,
     /// General command launch and read/wait allowance.
     pub launch_wait_seconds: u64,
     /// Allowance for one writer provisioning, independent of a reader wait.
@@ -148,9 +150,12 @@ pub struct GraphConfig {
     pub land: GraphLand,
 }
 
+pub const DEFAULT_DECIDE_TIMEOUT_SECONDS: u64 = 300;
+
 impl Default for GraphConfig {
     fn default() -> Self {
         Self {
+            decide_timeout_seconds: DEFAULT_DECIDE_TIMEOUT_SECONDS,
             launch_wait_seconds: 55,
             writer_provision_seconds: 55,
             limits: Default::default(),
@@ -804,14 +809,20 @@ impl DomainConfig for FabricConfig {
                 reject(format!("plan.auto.{name}"));
             }
         }
-        for (key, seconds) in [
-            ("launch_wait_seconds", self.graph.launch_wait_seconds),
+        for (key, seconds, maximum) in [
+            (
+                "decide_timeout_seconds",
+                self.graph.decide_timeout_seconds,
+                604_800,
+            ),
+            ("launch_wait_seconds", self.graph.launch_wait_seconds, 14_400),
             (
                 "writer_provision_seconds",
                 self.graph.writer_provision_seconds,
+                14_400,
             ),
         ] {
-            if !(1..=14_400).contains(&seconds) {
+            if !(1..=maximum).contains(&seconds) {
                 reject(format!("graph.{key}"));
             }
         }
@@ -877,6 +888,7 @@ fn defaults(_profile: Profile) -> &'static str {
 /// boundary: recovery could raise a cap, lift a budget or swap a binary. Labels,
 /// peers' addresses and lane tuning recover to defaults.
 pub const FIELD_METADATA: &[FieldMetadata] = &[
+    FieldMetadata::int("graph.decide_timeout_seconds", 1, 604_800),
     FieldMetadata::int("graph.launch_wait_seconds", 1, 14_400),
     FieldMetadata::int("graph.writer_provision_seconds", 1, 14_400),
     FieldMetadata::enumeration(
@@ -924,6 +936,7 @@ fn boundary_existing(error: &SectionError) -> bool {
     };
     [
         "limits",
+        "graph.decide_timeout_seconds",
         "graph.launch_wait_seconds",
         "graph.writer_provision_seconds",
         "graph.limits",
@@ -945,6 +958,19 @@ fn boundary_existing(error: &SectionError) -> bool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn decide_timeout_setting_is_configurable_and_bounded() {
+        let mut config = config();
+        for seconds in [0, 604_801] {
+            config.graph.decide_timeout_seconds = seconds;
+            assert!(config.validate().iter().any(|error| {
+                error.field == "graph.decide_timeout_seconds"
+            }));
+        }
+        config.graph.decide_timeout_seconds = DEFAULT_DECIDE_TIMEOUT_SECONDS;
+        assert!(config.validate().is_empty());
+    }
 
     #[test]
     fn launch_allowances_validate_independently() {

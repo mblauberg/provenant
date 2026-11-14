@@ -24,6 +24,114 @@ fn every_stop_cause_has_exactly_one_default() {
     assert_eq!(STOP_TABLE.len(), causes.len());
 }
 
+
+#[test]
+fn every_settlement_reason_has_one_source_and_node_outcome() {
+    use crate::run::{SETTLEMENT_TABLE, SettlementReason};
+    for reason in SettlementReason::ALL {
+        let encoded = serde_json::to_value(reason).unwrap();
+        assert_eq!(serde_json::from_value::<SettlementReason>(encoded).unwrap(), *reason);
+        assert_eq!(
+            SETTLEMENT_TABLE.iter().filter(|rule| rule.reason == *reason).count(),
+            1,
+        );
+        let rule = reason.rule();
+        assert_eq!(rule.reason, *reason);
+        let stop = Stop::sealed(None, crate::run::Outcome::ReviewRequired, *reason, None).unwrap();
+        let stop_cause = stop.as_ref().map(Stop::cause);
+        let expected = if stop_cause.is_some() {
+            crate::run::SettlementNodeOutcome::Failed
+        } else {
+            rule.node_outcome
+        };
+        assert_eq!(reason.node_outcome(stop_cause), expected);
+        let encoded = serde_json::to_vec(&stop).unwrap();
+        assert_eq!(serde_json::from_slice::<Option<Stop>>(&encoded).unwrap(), stop);
+    }
+    assert_eq!(SETTLEMENT_TABLE.len(), SettlementReason::ALL.len());
+}
+
+#[test]
+fn every_stop_cause_declares_its_source_in_its_rule() {
+    let unavailable = crate::run::CauseSource::Unavailable;
+    let encoded = serde_json::to_vec(&unavailable).unwrap();
+    assert_eq!(serde_json::from_slice::<crate::run::CauseSource>(&encoded).unwrap(), unavailable);
+    for cause in StopCause::ALL {
+        assert_eq!(STOP_TABLE.iter().filter(|rule| rule.cause == cause).count(), 1);
+        let source = cause.source();
+        assert_ne!(source, crate::run::CauseSource::Unavailable);
+        let encoded = serde_json::to_vec(&source).unwrap();
+        assert_eq!(serde_json::from_slice::<crate::run::CauseSource>(&encoded).unwrap(), source);
+    }
+}
+
+#[test]
+fn one_terminal_classification_binds_reason_stop_source_and_graph_result() {
+    use crate::run::{
+        CauseSource, SETTLEMENT_TABLE, SettlementNodeOutcome, SettlementReason, TerminalEvidence,
+        Outcome, PartialSignal, TerminalCause,
+    };
+    for reason in SettlementReason::ALL {
+        let encoded = serde_json::to_value(reason).unwrap();
+        assert_eq!(serde_json::from_value::<SettlementReason>(encoded).unwrap(), *reason);
+        assert_eq!(SETTLEMENT_TABLE.iter().filter(|rule| rule.reason == *reason).count(), 1);
+        assert!(matches!(reason.rule().source, CauseSource::Provider | CauseSource::Host | CauseSource::Owner));
+    }
+
+    let evidence = TerminalEvidence::ProcessExit;
+    let completed = SettlementReason::classify(
+        Outcome::ReviewRequired, Some(&evidence), &[], None, None,
+    ).unwrap();
+    assert_eq!(completed.reason, SettlementReason::Completed);
+    assert_eq!(completed.source, CauseSource::Provider);
+    assert_eq!(completed.node_outcome, SettlementNodeOutcome::Succeeded);
+    assert!(completed.stop.is_none());
+
+    let handoff_missing = SettlementReason::classify(
+        Outcome::Succeeded,
+        Some(&evidence),
+        &[PartialSignal::HandoffMissing],
+        None,
+        None,
+    ).unwrap();
+    assert_eq!(handoff_missing.reason, SettlementReason::HandoffMissing);
+    assert_eq!(handoff_missing.outcome, Outcome::ReviewRequired);
+    assert_eq!(handoff_missing.stop.as_ref().map(Stop::cause), Some(StopCause::HandoffMissing));
+    assert_eq!(handoff_missing.node_outcome, SettlementNodeOutcome::Failed);
+
+    let empty = SettlementReason::classify(
+        Outcome::ReviewRequired,
+        Some(&evidence),
+        &[PartialSignal::HandoffMissing],
+        Some(TerminalCause::EmptyWriterResult),
+        None,
+    ).unwrap();
+    assert_eq!(empty.reason, SettlementReason::EmptyResult);
+    let stop = empty.stop.as_ref().unwrap();
+    assert_eq!(stop.cause(), StopCause::EmptyResult);
+    assert_eq!(stop.cause().default_next(), NextStep::NewRoute);
+    assert_eq!(empty.node_outcome, SettlementNodeOutcome::Failed);
+
+    let blocked = SettlementReason::classify(
+        Outcome::Succeeded,
+        Some(&evidence),
+        &[],
+        Some(TerminalCause::Blocked),
+        None,
+    ).unwrap();
+    assert_eq!(blocked.reason, SettlementReason::DeclaredStop);
+    assert_eq!(blocked.outcome, Outcome::ReviewRequired);
+    assert_eq!(blocked.source, CauseSource::Owner);
+    assert_eq!(blocked.stop.as_ref().map(Stop::cause), Some(StopCause::Blocked));
+    assert_eq!(blocked.node_outcome, SettlementNodeOutcome::Failed);
+
+    for cause in StopCause::ALL {
+        if cause.default_next() == NextStep::Chair {
+            assert_eq!(SettlementReason::Completed.node_outcome(Some(cause)), SettlementNodeOutcome::Failed);
+        }
+    }
+}
+
 #[test]
 fn the_spec_table_matches_the_stop_table() {
     let spec = std::fs::read_to_string(
@@ -345,7 +453,12 @@ fn a_declared_stop_survives_uncommitted_edits_but_not_uncertain_custody() {
     )
     .unwrap();
     let cause = |outcome, handoff: Option<&Handoff>| {
-        Stop::sealed(None, outcome, handoff.cloned())
+        let reason = if handoff.is_some_and(Handoff::unfinished) {
+            crate::run::SettlementReason::DeclaredStop
+        } else {
+            crate::run::SettlementReason::UncommittedWork
+        };
+        Stop::sealed(None, outcome, reason, handoff.cloned())
             .unwrap()
             .map(|stop| stop.cause())
     };

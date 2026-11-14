@@ -84,9 +84,8 @@ pub(crate) fn work_key(
 #[derive(Clone)]
 pub struct TerminalPublication<'a> {
     pub terminal_cause: Option<TerminalCause>,
-    /// The typed stop sealed with this attempt: its cause and the handoff,
-    /// decoded once at settlement.
-    pub stop: Option<provenant_records::Stop>,
+    /// Provider handoff evidence decoded by the common terminal classifier.
+    pub handoff: Option<provenant_records::handoff::Handoff>,
     /// A bounded sentence Provenant composed from fixed text and typed values,
     /// such as a retry decision. It is never provider output.
     pub terminal_note: Option<String>,
@@ -1137,8 +1136,7 @@ impl RunStore {
             };
         old.preparation_failure = preparation_failure;
         let publication = TerminalPublication {
-            stop: terminal_cause
-                .and_then(|cause| provenant_records::Stop::new(cause.into(), None).ok()),
+            handoff: None,
             terminal_cause,
             terminal_note,
             outcome,
@@ -1306,42 +1304,13 @@ impl RunStore {
             complete: publication.complete,
             redacted: publication.redacted,
         });
-        let mut terminal_extra = provenant_records::ExtraFields::default();
-        if let Some(cause) = publication.terminal_cause {
-            terminal_extra.insert(
-                "terminal_cause".into(),
-                serde_json::to_value(cause)
-                    .map_err(|_| RunError::Validation("terminal cause could not be encoded"))?,
-            );
-        }
-        if let Some(stop) = &publication.stop {
-            terminal_extra.insert(
-                "stop".into(),
-                serde_json::to_value(stop)
-                    .map_err(|_| RunError::Validation("stop could not be encoded"))?,
-            );
-        }
-        if let Some(note) = publication.terminal_note.as_deref() {
-            terminal_extra.insert(
-                "terminal_note".into(),
-                serde_json::Value::String(provenant_records::diagnostic::safe_text(note)),
-            );
-        }
-        next.state = AttemptState::Terminal {
-            extra: terminal_extra,
-            outcome: publication.outcome,
-            exit_code: outcome_exit,
-            finished_at: publication.finished_at,
-            reason: publication.reason.clone(),
-        };
-        next.schema_version = 2;
         let import_cancellation = publication.outcome == Outcome::Cancelled
             && import_cancelled(
                 &self.attempt_dir(id, false)?,
                 Self::scope(&old),
                 old.verified_owner.unwrap_or(self.context.actor_id),
             )?;
-        next.terminal_evidence = Some(if import_cancellation {
+        let terminal_evidence = if import_cancellation {
             TerminalEvidence::ImportCancellation
         } else if publication.outcome == Outcome::Unsettled {
             TerminalEvidence::Unsettled {
@@ -1357,12 +1326,46 @@ impl RunStore {
             TerminalEvidence::ProcessExit
         } else {
             TerminalEvidence::PreLaunchRefusal
-        });
-        next.settlement_reason = Some(SettlementReason::derive(
+        };
+        let classification = SettlementReason::classify(
             publication.outcome,
-            next.terminal_evidence.as_ref(),
+            Some(&terminal_evidence),
             &next.partial_signals,
-        ));
+            publication.terminal_cause,
+            publication.handoff.as_ref(),
+        )
+        .map_err(|_| RunError::Validation("terminal classification could not be sealed"))?;
+        let mut terminal_extra = provenant_records::ExtraFields::default();
+        if let Some(cause) = publication.terminal_cause {
+            terminal_extra.insert(
+                "terminal_cause".into(),
+                serde_json::to_value(cause)
+                    .map_err(|_| RunError::Validation("terminal cause could not be encoded"))?,
+            );
+        }
+        if let Some(stop) = &classification.stop {
+            terminal_extra.insert(
+                "stop".into(),
+                serde_json::to_value(stop)
+                    .map_err(|_| RunError::Validation("stop could not be encoded"))?,
+            );
+        }
+        if let Some(note) = publication.terminal_note.as_deref() {
+            terminal_extra.insert(
+                "terminal_note".into(),
+                serde_json::Value::String(provenant_records::diagnostic::safe_text(note)),
+            );
+        }
+        next.state = AttemptState::Terminal {
+            extra: terminal_extra,
+            outcome: classification.outcome,
+            exit_code: outcome_exit,
+            finished_at: publication.finished_at,
+            reason: publication.reason.clone(),
+        };
+        next.schema_version = 2;
+        next.terminal_evidence = Some(terminal_evidence);
+        next.settlement_reason = Some(classification.reason);
         next.publication_error = None;
         next.exit_evidence = durable_exit;
         let attempt = self.attempt_dir(id, false)?;
@@ -1392,7 +1395,7 @@ impl RunStore {
             let writer: crate::writer::WriterTerminal = decode(&raw)?;
             next.head = Some(writer.head);
         }
-        if publication.outcome == Outcome::Succeeded {
+        if classification.outcome == Outcome::Succeeded {
             // Recovery reports uncertainty from the sealed start marker without
             // repeating an external effect or inferring success from prose.
             let raw = match read_sealed(&attempt, "delivery.json", RECORD_LIMIT)? {

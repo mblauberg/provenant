@@ -113,7 +113,14 @@ fn chair_session_start_ingests_the_session_as_chair() -> Result {
     let row = rows
         .first()
         .ok_or("the chair SessionStart did not ingest its session")?;
-    assert_eq!(row["account"], "current");
+    assert_eq!(row["identity"]["identity"]["state"], "unknown");
+    assert_eq!(row["identity"]["epoch"]["state"], "unknown");
+    assert_eq!(row["identity"]["evidence_source"], "unknown");
+    assert_eq!(
+        row["identity"]["identity"]["reason"],
+        "provider_identity_port_unavailable",
+    );
+    assert!(row.get("account").is_none());
     assert_eq!(row["source"], "chair");
     assert_eq!(row["session"], "chair-session");
     assert_eq!(row["output"], 45);

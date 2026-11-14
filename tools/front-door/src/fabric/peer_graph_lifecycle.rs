@@ -73,7 +73,7 @@ fn tick_reports_unreadable_once_and_advances_another_graph()
     let budget = WaitBudget::cli(clock.mono_now(), 10)?;
     let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version":1, "graph_id":"b-good", "decision_session":"chair-session",
-        "nodes":[{"id":"choose", "kind":"decide", "access":"read_only", "decide":{
+        "nodes":[{"id":"choose", "kind":"decide", "access":"read_only", "decide":{"on_unanswered":"block_dependants",
             "question":"Ship?", "options":[{"id":"ship","label":"Ship"},{"id":"hold","label":"Hold"}],
             "default":"hold", "timeout_seconds":60
         }}]
@@ -194,7 +194,7 @@ fn tick_dispatches_capacity_waiter_with_future_decision() -> Result<(), Box<dyn 
     let budget = WaitBudget::cli(clock.mono_now(), 30)?;
     let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version":1,"graph_id":"waiter", "template_library":{},"decision_session":"chair-session","nodes":[
-        {"id":"choose","kind":"decide","access":"read_only","decide":{"question":"Ship?",
+        {"id":"choose","kind":"decide","access":"read_only","decide":{"on_unanswered":"block_dependants", "question":"Ship?",
         "options":[{"id":"ship","label":"Ship"},{"id":"hold","label":"Hold"}],"default":"hold","timeout_seconds":3600}},
         {"id":"one","prompt":"reply OK","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
     }))?;
@@ -270,7 +270,7 @@ fn tick_warns_once_for_missing_worktree_and_advances_another_graph()
         seed.at = if seed.inbox { now } else { provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)? };
         let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version":1, "graph_id":id, "decision_session":"chair-session",
-            "nodes":[{"id":"choose", "kind":"decide", "access":"read_only", "decide":{
+            "nodes":[{"id":"choose", "kind":"decide", "access":"read_only", "decide":{"on_unanswered":"block_dependants",
                 "question":"Ship?", "options":[{"id":"ship","label":"Ship"},{"id":"hold","label":"Hold"}],
                 "default":"hold", "timeout_seconds":60
             }}]

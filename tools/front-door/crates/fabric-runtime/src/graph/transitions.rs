@@ -304,6 +304,7 @@ pub(super) fn apply_attempt_observation(
                 branch,
                 commit,
                 stop,
+                settlement_reason,
             } => {
                 progress.review_settlement = None;
                 settled_result = result.clone();
@@ -553,7 +554,6 @@ pub(super) fn apply_attempt_observation(
                 } else {
                     outcome
                 };
-                attempt.outcome = Some(outcome);
                 // An integrity or disposition failure is not the stop the
                 // owner sealed, so no restart answers it.
                 if warned || disposition_error.is_some() {
@@ -582,6 +582,17 @@ pub(super) fn apply_attempt_observation(
                 }
                 compact_findings(&mut outputs, result.as_deref(), &upstream_findings);
                 progress.outputs = Some(outputs);
+                let node_outcome = settlement_reason
+                    .map(|reason| reason.node_outcome(attempt.stop))
+                    .unwrap_or(provenant_records::run::SettlementNodeOutcome::Failed);
+                let outcome = if matches!(outcome, AttemptOutcome::Succeeded | AttemptOutcome::ReviewRequired)
+                    && node_outcome == provenant_records::run::SettlementNodeOutcome::Failed
+                {
+                    AttemptOutcome::OtherFailure
+                } else {
+                    outcome
+                };
+                attempt.outcome = Some(outcome);
                 match outcome {
                     AttemptOutcome::Succeeded | AttemptOutcome::ReviewRequired => {
                         progress.state = NodeState::Succeeded;
@@ -1948,6 +1959,7 @@ mod tests {
                     branch: None,
                     commit: None,
                     stop: None,
+                    settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                 },
                 ObservationFacts {
                     route_index: 0,
@@ -1977,6 +1989,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn handoff_missing_classification_keeps_dependants_closed() {
+        let (plan, positions, mut checkpoint, limits) = fixture();
+        start(&plan, &positions, &mut checkpoint, &limits);
+        let applied = apply_attempt_observation(
+            &plan,
+            &mut checkpoint,
+            &positions,
+            0,
+            &limits,
+            AttemptObservation::Terminal {
+                attempt_ref: Some("host/handoff-missing".into()),
+                outcome: AttemptOutcome::ReviewRequired,
+                launched: true,
+                result: None,
+                result_warning: None,
+                result_path: None,
+                branch: None,
+                commit: None,
+                stop: Some(provenant_records::StopCause::HandoffMissing),
+                settlement_reason: Some(provenant_records::run::SettlementReason::HandoffMissing),
+            },
+            ObservationFacts {
+                route_index: 0,
+                usage: None,
+                fallback_evidence: None,
+                evidence_unreadable: false,
+                fallback_cause: None,
+                skipped_accounts: Vec::new(),
+                review_range: ReviewRange::Unknown,
+            },
+        )
+        .unwrap();
+        assert!(!applied.should_continue);
+        let progress = &checkpoint.nodes[0];
+        assert_eq!(progress.state, NodeState::Failed);
+        assert_eq!(progress.attempts[0].outcome, Some(AttemptOutcome::OtherFailure));
     }
 
     #[test]

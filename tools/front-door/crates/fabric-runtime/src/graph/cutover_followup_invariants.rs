@@ -31,6 +31,7 @@ fn terminal(
 ) -> AttemptObservation {
     AttemptObservation::Terminal {
         attempt_ref: Some("fixture/attempt".into()),
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         outcome,
         launched: true,
         result: text.map(|text| {
@@ -411,7 +412,7 @@ fn review_minimum_is_an_input_with_the_existing_default() {
 fn decide_node(id: &str) -> Value {
     json!({
         "id":id, "kind":"decide", "access":"read_only",
-        "decide":{"question":format!("Choose for {id}"),
+        "decide":{"on_unanswered":"block_dependants", "question":format!("Choose for {id}"),
             "options":[{"id":"yes","label":"Yes"},{"id":"no","label":"No"}]}
     })
 }

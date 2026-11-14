@@ -36,7 +36,7 @@ fn tick_advances_expired_asks_and_cancelled_graphs_and_skips_future_and_busy_gra
     for id in ["a-busy", "b-due", "c-future", "d-cancelled"] {
         let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version":1, "graph_id":id, "decision_session":"chair-session",
-            "nodes":[{"id":"choose", "kind":"decide", "access":"read_only", "decide":{
+            "nodes":[{"id":"choose", "kind":"decide", "access":"read_only", "decide":{"on_unanswered":"block_dependants",
                 "question":"Ship?", "options":[{"id":"ship","label":"Ship"},{"id":"hold","label":"Hold"}],
                 "default":"hold", "timeout_seconds":60
             }}]

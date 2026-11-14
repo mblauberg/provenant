@@ -96,6 +96,8 @@ pub struct AttemptFact {
     pub attempt_number: u64,
     pub project_id: ProjectId,
     pub terminal_state: AttemptOutcome,
+    /// Source of the settlement cause, or an explicit unavailable state.
+    pub cause_source: crate::run::CauseSource,
     pub exit_code: Option<i64>,
     pub queued_at: WallTime,
     pub started_at: Option<WallTime>,

@@ -1,4 +1,5 @@
 use super::*;
+use crate::usage::AccountIdentity;
 use crate::{BillingKind, ConfiguredModel, ConfiguredPrices, Hosts, Rates, validate_prices};
 use provenant_core::HostId;
 use provenant_records::RouteFact;
@@ -49,6 +50,7 @@ fn fact(number: u64, input: Option<u64>) -> AttemptFact {
         attempt_number: number,
         project_id: ProjectId::from_bytes([2; 16]),
         terminal_state: AttemptOutcome::Succeeded,
+        cause_source: provenant_records::run::CauseSource::Provider,
         exit_code: Some(0),
         queued_at: WallTime::from_micros(0).unwrap(),
         started_at: Some(WallTime::from_micros(0).unwrap()),
@@ -99,7 +101,7 @@ fn detail() -> Window {
 
 #[test]
 fn quota_usage_separates_accounts_projects_and_chairs_from_lane_tokens() {
-    use crate::usage::ChairSession;
+    use crate::usage::{AccountIdentity, ChairSession};
     let mut first = fact(1, Some(100));
     first.usage.cache_read = Some(900);
     first.usage.cache_write = None;
@@ -112,7 +114,7 @@ fn quota_usage_separates_accounts_projects_and_chairs_from_lane_tokens() {
     unknown.resolved_route = None;
     let chair = || ChairSession {
         adapter: "p".into(),
-        account: "account".into(),
+        account_identity: AccountIdentity::known("p", "account", "fixture-epoch"),
         session: "session".into(),
         project: Some(project),
         config: None,
@@ -774,7 +776,7 @@ fn cache_read_share_is_reported_per_model_account_provider_and_source() {
     other_account.resolved_route.as_mut().unwrap().account_label = Some("other".into());
     let chair = ChairSession {
         adapter: "p".into(),
-        account: "account".into(),
+        account_identity: AccountIdentity::known("p", "account", "fixture-epoch"),
         session: "s".into(),
         project: None,
         config: None,
@@ -843,7 +845,7 @@ fn chair_usage_is_priced_by_the_adapter_qualified_model() {
     let table = validate_prices(&config).unwrap();
     let chair = ChairSession {
         adapter: "claude".into(),
-        account: "work".into(),
+        account_identity: AccountIdentity::known("claude", "work", "fixture-epoch"),
         session: "s".into(),
         project: None,
         config: None,
@@ -896,7 +898,7 @@ fn unread_chair_sessions_are_counted_not_dropped() {
     use crate::usage::ChairSession;
     let chair = |session: &str, unread| ChairSession {
         adapter: "claude".into(),
-        account: crate::usage::UNATTRIBUTED.into(),
+        account_identity: AccountIdentity::unknown(),
         session: session.into(),
         project: None,
         config: None,
@@ -926,7 +928,7 @@ fn chair_cost_is_complete_only_when_every_session_is_read() {
     use crate::usage::ChairSession;
     let chair = |session: &str, unread| ChairSession {
         adapter: "claude".into(),
-        account: crate::usage::UNATTRIBUTED.into(),
+        account_identity: AccountIdentity::unknown(),
         session: session.into(),
         project: None,
         config: None,
@@ -1363,7 +1365,17 @@ fn route_outcomes_report_success_time_access_effort_and_assignment() {
     let mut failed = fact(4, Some(1_000_000));
     failed.terminal_state = AttemptOutcome::Failed;
     failed.provider_ms = Some(100);
+    let mut host_failure = fact(5, Some(1_000_000));
+    host_failure.terminal_state = AttemptOutcome::Failed;
+    host_failure.cause_source = provenant_records::run::CauseSource::Host;
+    host_failure.provider_ms = Some(900);
     let rows = report(vec![
+        Evidence {
+            fact: host_failure,
+            access: Some("worktree-write".into()),
+            pool: Some("senior".into()),
+            partial: false,
+        },
         Evidence {
             fact: failed,
             access: Some("worktree-write".into()),
@@ -1537,8 +1549,8 @@ fn context_bands_price_each_reply_by_the_context_it_sent() {
     config.models[0].model = "p/m".into();
     let prices = validate_prices(&config).unwrap();
     let row = |source, cache_read, uncached_input| crate::ingest::Row {
-        schema_version: 1,
-        account: "a".into(),
+        schema_version: crate::ingest::ROW_SCHEMA_VERSION,
+        identity: AccountIdentity::unknown(),
         provider: "p".into(),
         model: "m".into(),
         effort: None,
@@ -1607,7 +1619,17 @@ fn route_priors_count_only_attributed_comparable_quality_outcomes() {
                 access: known.then(|| "stored_launch".into()),
             }
         };
+    let mut host_failure = evidence(
+        9,
+        AttemptOutcome::Failed,
+        Some("senior"),
+        Some("review"),
+        false,
+        true,
+    );
+    host_failure.fact.cause_source = provenant_records::run::CauseSource::Host;
     let rows = priors([
+        host_failure,
         evidence(
             1,
             AttemptOutcome::Succeeded,

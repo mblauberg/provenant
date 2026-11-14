@@ -69,7 +69,7 @@ fn missing_graph_worktree_warns_once_and_scheduled_gc_completes() -> Result {
     for id in ["missing", "present"] {
         let document: graph::GraphDocument = serde_json::from_value(
             json!({"schema_version":1,"graph_id":id,"decision_session":"chair-session",
-            "nodes":[{"id":"choose","kind":"decide","access":"read_only","decide":{"question":"Ship?",
+            "nodes":[{"id":"choose","kind":"decide","access":"read_only","decide":{"on_unanswered":"block_dependants", "question":"Ship?",
             "options":[{"id":"ship","label":"Ship"},{"id":"hold","label":"Hold"}],"default":"hold","timeout_seconds":60}}]}),
         )?;
         let mut journal = FileJournal::open(&state, project, id, budget, &cancel, &clock)?;

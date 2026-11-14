@@ -127,7 +127,7 @@ pub fn quota_usage(
         if window.project.is_some_and(|p| Some(p) != chair.project) {
             continue;
         }
-        let key = (Some(chair.adapter), Some(chair.account), chair.project);
+        let key = (Some(chair.adapter), Some(chair.account_identity.account_key()), chair.project);
         if sessions.insert((key.clone(), chair.session)) {
             let row = rows.entry(key).or_default();
             add(&mut row.sessions, 1)?;
@@ -1056,7 +1056,7 @@ fn chair_stats(
         seen = true;
         if !sessions.insert((
             chair.adapter.clone(),
-            chair.account.clone(),
+            chair.account_identity.account_key(),
             chair.session.clone(),
         )) {
             continue;
@@ -1071,7 +1071,7 @@ fn chair_stats(
                 format!("{}/{}", chair.adapter, model.model)
             };
             let cost = priced(&model.usage, Some(&chair.adapter), Some(&name), prices)?;
-            let key = (chair.adapter.clone(), chair.account.clone(), name);
+            let key = (chair.adapter.clone(), chair.account_identity.account_key(), name);
             if !groups.contains_key(&key) && groups.len() as u64 >= MAX_GROUPS {
                 return Err(TelemetryError::TooLarge("10,000 groups"));
             }

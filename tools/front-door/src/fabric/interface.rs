@@ -3140,6 +3140,7 @@ mod tests {
                     result_path: None,
                     branch: None,
                     commit: None,
+                    settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                     stop: None,
                 })
             }
@@ -4755,6 +4756,7 @@ mod tests {
                     result_path: None,
                     branch: writer.then(|| "slice".into()),
                     commit: writer.then(|| self.commit.clone()),
+                    settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                     stop: None,
                 })
             }

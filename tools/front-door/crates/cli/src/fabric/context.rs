@@ -31,6 +31,7 @@ pub struct Context {
     pub config: FabricConfig,
     /// Origin captured with the effective graph configuration.
     pub graph_prompt_limit_source: provenant_fabric_runtime::graph::InputCapSource,
+    pub graph_decide_timeout_source: provenant_fabric_runtime::graph::DecideTimeoutSource,
     /// Captured once from the host-set lane environment, never from arguments.
     pub in_lane: bool,
     pub(super) executor: SystemExecutor,
@@ -218,6 +219,18 @@ pub fn checkout_branch(path: &Path) -> Result<Option<String>, EdgeError> {
         .map(str::to_owned))
 }
 
+fn decide_timeout_source(
+    origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
+) -> provenant_fabric_runtime::graph::DecideTimeoutSource {
+    use provenant_fabric_runtime::graph::DecideTimeoutSource;
+    match origins.get("domains.fabric.graph.decide_timeout_seconds") {
+        Some(provenant_config::Origin::User { .. }) => DecideTimeoutSource::Configured,
+        Some(provenant_config::Origin::Compiled { .. }) | None => {
+            DecideTimeoutSource::DomainDefault
+        }
+    }
+}
+
 fn prompt_limit_source(
     origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
 ) -> provenant_fabric_runtime::graph::InputCapSource {
@@ -234,6 +247,7 @@ impl Context {
         // Validate configuration before allocating identities or opening SQLite.
         let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
+        let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
         let config = resolved.domains.fabric;
         private_dir(roots.state.as_path(), roots.state.as_path())?;
         let utility_root = if in_lane() {
@@ -289,6 +303,7 @@ impl Context {
             identity,
             config,
             graph_prompt_limit_source,
+            graph_decide_timeout_source,
             in_lane: lane,
             executor,
             home: home.to_path_buf(),
@@ -299,6 +314,7 @@ impl Context {
     pub fn open_read_only(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
         let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
+        let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
         let config = resolved.domains.fabric;
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
         let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
@@ -332,6 +348,7 @@ impl Context {
             identity,
             config,
             graph_prompt_limit_source,
+            graph_decide_timeout_source,
             in_lane: in_lane(),
             executor,
             home: home.to_path_buf(),
@@ -343,6 +360,7 @@ impl Context {
     pub fn open_inspection(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
         let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
+        let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
         let config = resolved.domains.fabric;
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
         let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
@@ -390,6 +408,7 @@ impl Context {
             identity,
             config,
             graph_prompt_limit_source,
+            graph_decide_timeout_source,
             in_lane: in_lane(),
             executor,
             home: home.to_path_buf(),
@@ -407,6 +426,7 @@ impl Context {
         let cwd = binding.common_dir().parent().ok_or(EdgeError::Invalid)?;
         let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
+        let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
         let config = resolved.domains.fabric;
         let host = provenant_config::lookup_host(&roots)?.ok_or(EdgeError::Invalid)?;
         let key = match CrossHostProjectKey::from_home(home, binding.common_dir()) {
@@ -429,6 +449,7 @@ impl Context {
             identity,
             config,
             graph_prompt_limit_source,
+            graph_decide_timeout_source,
             in_lane: in_lane(),
             executor: SystemExecutor::new(1)?,
             home: home.to_path_buf(),
@@ -977,9 +998,9 @@ mod tests {
     }
 
     #[test]
-    fn prompt_limit_origin_distinguishes_default_from_explicit_same_value()
+    fn graph_setting_origins_distinguish_domain_default_from_explicit_same_value()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::InputCapSource;
+        use provenant_fabric_runtime::graph::{DecideTimeoutSource, InputCapSource};
         let temp = tempfile::tempdir()?;
         let mut inputs =
             provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("repo"));
@@ -994,7 +1015,13 @@ mod tests {
             super::prompt_limit_source(&default.origins),
             InputCapSource::Default
         );
+        assert_eq!(
+            super::decide_timeout_source(&default.origins),
+            DecideTimeoutSource::DomainDefault
+        );
         let configured = b"schema_version = 1
+[domains.fabric.graph]
+decide_timeout_seconds = 300
 [domains.fabric.graph.limits]
 node_prompt_bytes = 262144
 ";
@@ -1010,6 +1037,10 @@ node_prompt_bytes = 262144
         assert_eq!(
             super::prompt_limit_source(&resolved.origins),
             InputCapSource::Configured
+        );
+        assert_eq!(
+            super::decide_timeout_source(&resolved.origins),
+            DecideTimeoutSource::Configured
         );
         Ok(())
     }

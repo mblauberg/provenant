@@ -920,15 +920,10 @@ fn config_hint(context: &Context) -> Option<String> {
             .all(|part| matches!(part, std::path::Component::Normal(_))))
     .then(|| text.to_owned())
 }
-// Attribution is best effort and must not prevent consuming a handoff. A
-// session whose config directory is not a registered account (the default
-// `~/.claude` included) is still recorded, as `unattributed`: launching the
-// chair with `CLAUDE_CONFIG_DIR` set to a registered account's directory is
-// what attributes it.
+// Attribution is best effort and must not prevent consuming a handoff. The
+// provider has no identity port here, so the session keeps typed unknown
+// identity while its config hint is retained only to locate the transcript.
 fn record_start(context: &Context, input: &Input) {
-    let account = crate::registered_claude(&context.roots)
-        .ok()
-        .and_then(|accounts| current(&accounts, context).ok().map(|a| a.key().to_owned()));
     let project = if crate::usage::attribution_enabled(&context.roots) {
         crate::hooks::with_git(|runtime, executor, budget, cancel| {
             let location = runtime
@@ -945,9 +940,7 @@ fn record_start(context: &Context, input: &Input) {
     provenant_telemetry::usage::record_chair(
         &context.roots,
         &provenant_os::clock::SystemClock::new(),
-        account
-            .as_deref()
-            .unwrap_or(provenant_telemetry::usage::UNATTRIBUTED),
+        provenant_telemetry::usage::AccountIdentity::unknown(),
         input.session_id.as_str(),
         project,
         config_hint(context).as_deref(),

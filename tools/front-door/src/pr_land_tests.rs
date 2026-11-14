@@ -743,7 +743,7 @@ fn contribution_terminal(
         id,
         record.revision,
         &provenant_run::TerminalPublication {
-            stop: None,
+            handoff: None,
             terminal_cause: None,
             terminal_note: None,
             outcome,
@@ -1767,7 +1767,7 @@ pub(crate) fn pr_land_preserves_terminal_writer_evidence_in_host_store() -> Resu
             id,
             running.revision,
             &TerminalPublication {
-                stop: None,
+                handoff: None,
                 terminal_cause: None,
                 terminal_note: None,
                 outcome: provenant_run::Outcome::Succeeded,

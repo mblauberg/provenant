@@ -230,15 +230,8 @@ impl LaneRow {
         {
             use crate::run::SettlementReason;
             let detail = match reason {
-                SettlementReason::HandoffMissing => match &lane.state {
-                    AttemptState::Terminal { extra, .. }
-                        if extra.get("terminal_cause")
-                            == Some(&json!(crate::run::TerminalCause::EmptyWriterResult)) =>
-                    {
-                        Some(crate::run::TerminalCause::EmptyWriterResult.detail())
-                    }
-                    _ => Some("the lane finished without a handoff; inspect its result"),
-                },
+                SettlementReason::HandoffMissing => Some("the lane finished without a handoff; inspect its result"),
+                SettlementReason::EmptyResult => Some(crate::run::TerminalCause::EmptyWriterResult.detail()),
                 SettlementReason::DeclaredStop => match &lane.state {
                     AttemptState::Terminal { extra, .. }
                         if extra.get("terminal_cause")

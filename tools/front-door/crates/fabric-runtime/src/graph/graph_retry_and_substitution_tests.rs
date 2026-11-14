@@ -393,6 +393,7 @@ fn review_substitute_keeps_writer_chain_exclusion() {
         result_path: None,
         branch: Some("writer".into()),
         commit: Some("3".repeat(40)),
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
     };
     let mut owner = FakeOwner {

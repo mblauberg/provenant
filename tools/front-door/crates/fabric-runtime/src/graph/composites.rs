@@ -502,6 +502,7 @@ fn outputs(
     let mut selected = NodeOutputs {
         extra: Default::default(),
         schema_version: 2,
+        decide_outcome: None,
         result: None,
         verdict: None,
         verdict_error: None,

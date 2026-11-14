@@ -215,7 +215,7 @@ fn hook(rig: &TestRig, start: bool, session: &str) -> Result<provenant_os::exec:
     }))?))
 }
 #[test]
-fn chair_start_records_serving_account_without_a_pending_handoff() -> Result {
+fn chair_start_records_unknown_identity_without_a_pending_handoff() -> Result {
     let rig = configured()?;
     assert_eq!(code(&rig.command(&["fabric", "identity", "--json"])?), 0);
     let config = rig.state.join("config.toml");
@@ -241,7 +241,14 @@ fn chair_start_records_serving_account_without_a_pending_handoff() -> Result {
         .find(|e| e["kind"] == "chair.session")
         .ok_or("SessionStart did not record the serving account without a handoff")?;
     assert_eq!(event["unit"], "claude");
-    assert_eq!(event["account"], "current");
+    assert_eq!(event["account_identity"]["identity"]["state"], "unknown");
+    assert_eq!(event["account_identity"]["epoch"]["state"], "unknown");
+    assert_eq!(event["account_identity"]["evidence_source"], "unknown");
+    assert_eq!(
+        event["account_identity"]["identity"]["reason"],
+        "provider_identity_port_unavailable",
+    );
+    assert!(event.get("account").is_none());
     assert_eq!(event["session"], "ordinary-session");
     assert!(event["trace"]["project"].is_string());
     assert!(!log.contains("PRIVATE PROMPT"));
@@ -262,7 +269,7 @@ fn chair_start_records_serving_account_without_a_pending_handoff() -> Result {
     let stats: serde_json::Value = serde_json::from_slice(&stats.stdout.bytes)?;
     let chair = &stats["data"]["chair"];
     assert_eq!(chair["sessions"], 1);
-    assert_eq!(chair["groups"][0]["account"], "primary");
+    assert_eq!(chair["groups"][0]["account"], "unattributed");
     assert_eq!(chair["groups"][0]["model"], "claude/claude-opus-5-5");
     assert_eq!(chair["groups"][0]["usage"]["cache_read"]["known"], 400);
     Ok(())
@@ -302,7 +309,14 @@ fn chair_on_an_unregistered_config_directory_is_recorded_as_unattributed() -> Re
         .into_iter()
         .find(|e| e["kind"] == "chair.session")
         .ok_or("the default config directory must still be recorded")?;
-    assert_eq!(event["account"], "unattributed");
+    assert_eq!(event["account_identity"]["identity"]["state"], "unknown");
+    assert_eq!(event["account_identity"]["epoch"]["state"], "unknown");
+    assert_eq!(event["account_identity"]["evidence_source"], "unknown");
+    assert_eq!(
+        event["account_identity"]["identity"]["reason"],
+        "provider_identity_port_unavailable",
+    );
+    assert!(event.get("account").is_none());
     assert_eq!(event["config"], ".claude");
     Ok(())
 }
@@ -320,7 +334,14 @@ fn chair_start_obeys_project_attribution_opt_in() -> Result {
         .into_iter()
         .find(|e| e["kind"] == "chair.session")
         .ok_or("chair event")?;
-    assert_eq!(event["account"], "current");
+    assert_eq!(event["account_identity"]["identity"]["state"], "unknown");
+    assert_eq!(event["account_identity"]["epoch"]["state"], "unknown");
+    assert_eq!(event["account_identity"]["evidence_source"], "unknown");
+    assert_eq!(
+        event["account_identity"]["identity"]["reason"],
+        "provider_identity_port_unavailable",
+    );
+    assert!(event.get("account").is_none());
     assert!(
         event.get("trace").is_none(),
         "project attribution is off: {event}"

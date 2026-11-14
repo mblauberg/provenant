@@ -62,6 +62,7 @@ fn fact(number: u64, day: i64, model: &str, input: Option<u64>) -> Result<Attemp
         attempt_number: number,
         project_id: ProjectId::from_bytes([2; 16]),
         terminal_state: AttemptOutcome::Succeeded,
+        cause_source: provenant_records::run::CauseSource::Unavailable,
         exit_code: Some(0),
         queued_at: finished,
         started_at: Some(finished),
@@ -241,7 +242,7 @@ fn an_unrecognised_line_is_reported_by_segment_and_line() -> Result {
     let mut text = std::fs::read_to_string(&path)?;
     text.push_str("not json\n");
     text.push_str("{\"format\":\"provenant.usage-ledger.v3\"}\n");
-    text.push_str("{\"format\":\"provenant.usage-ledger.v2\",\"attempt\":\"x\"}\n");
+    text.push_str("{\"format\":\"provenant.usage-ledger.v3\",\"attempt\":\"x\"}\n");
     text.push_str("{\"torn");
     std::fs::write(&path, text)?;
     std::fs::write(state.join(DIRECTORY).join("notes.txt"), "stray")?;

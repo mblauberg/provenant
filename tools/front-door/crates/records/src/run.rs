@@ -1147,58 +1147,195 @@ pub enum TerminalEvidence {
     },
 }
 
-/// The closed reason an attempt reached its terminal state. The free-text
-/// reason on the state explains; this enum is what callers match on.
+/// Who owns a settlement cause. Route quality uses provider causes only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SettlementReason {
-    /// The provider finished and reported its results.
-    Completed,
-    /// The provider finished without a final handoff, so nothing was reported.
-    HandoffMissing,
-    /// The lane declared that work remains.
-    DeclaredStop,
-    /// The provider stopped for a reason other than a finished turn.
-    ProviderStop,
-    /// A writer left edits it did not commit.
-    UncommittedWork,
-    /// Refused before any process started.
-    PreLaunchRefusal,
-    Cancelled,
-    Lost,
-    Unsettled,
-    /// The provider ran and ended in a non-success outcome.
+pub enum CauseSource {
+    Provider,
+    Host,
+    Owner,
+    /// Retained terminal data did not carry a valid typed stop or reason.
+    Unavailable,
+}
+
+/// Whether a settled attempt may release its graph dependants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettlementNodeOutcome {
+    Succeeded,
     Failed,
 }
+
+/// The source and graph result for one settlement reason.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SettlementRule {
+    pub reason: SettlementReason,
+    pub source: CauseSource,
+    pub node_outcome: SettlementNodeOutcome,
+    pub terminal_outcome: SettlementTerminalOutcome,
+    pub stop_cause: Option<crate::stop::StopCause>,
+}
+
+/// How a settlement reason normalises a successful-looking provisional outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettlementTerminalOutcome {
+    Preserve,
+    ReviewRequired,
+    Uncommitted,
+}
+
+impl SettlementTerminalOutcome {
+    fn apply(self, observed: Outcome) -> Outcome {
+        match self {
+            Self::Preserve => observed,
+            Self::ReviewRequired if observed == Outcome::Succeeded => Outcome::ReviewRequired,
+            Self::ReviewRequired => observed,
+            Self::Uncommitted if matches!(observed, Outcome::Succeeded | Outcome::ReviewRequired) => {
+                Outcome::Uncommitted
+            }
+            Self::Uncommitted => observed,
+        }
+    }
+}
+
+/// One declaration owns the durable reasons and their cross-cutting policy.
+/// Generated enum, ALL and table cannot drift apart.
+macro_rules! settlement_reasons {
+    ($($(#[$meta:meta])* $reason:ident { source: $source:ident, node: $node:ident, outcome: $outcome:ident, stop: $stop:expr }),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum SettlementReason {
+            $($(#[$meta])* $reason),+
+        }
+
+        impl SettlementReason {
+            pub const ALL: &'static [Self] = &[$(Self::$reason),+];
+
+            pub const fn rule(self) -> SettlementRule {
+                match self {
+                    $(Self::$reason => SettlementRule {
+                        reason: Self::$reason,
+                        source: CauseSource::$source,
+                        node_outcome: SettlementNodeOutcome::$node,
+                        terminal_outcome: SettlementTerminalOutcome::$outcome,
+                        stop_cause: $stop,
+                    }),+
+                }
+            }
+        }
+
+        pub const SETTLEMENT_TABLE: &[SettlementRule] = &[
+            $(SettlementRule {
+                reason: SettlementReason::$reason,
+                source: CauseSource::$source,
+                node_outcome: SettlementNodeOutcome::$node,
+                terminal_outcome: SettlementTerminalOutcome::$outcome,
+                stop_cause: $stop,
+            }),+
+        ];
+    };
+}
+
+settlement_reasons! {
+    /// The provider finished and reported its results.
+    Completed { source: Provider, node: Succeeded, outcome: Preserve, stop: None },
+    /// The provider finished without a final handoff, so nothing was reported.
+    HandoffMissing { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMissing) },
+    /// The writer exited without a final message.
+    EmptyResult { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::EmptyResult) },
+    /// The lane declared that work remains.
+    DeclaredStop { source: Provider, node: Failed, outcome: ReviewRequired, stop: None },
+    /// The provider stopped for a reason other than a finished turn.
+    ProviderStop { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::ProviderStop) },
+    /// A writer left edits it did not commit.
+    UncommittedWork { source: Provider, node: Failed, outcome: Uncommitted, stop: None },
+    /// Refused before any process started.
+    PreLaunchRefusal { source: Host, node: Failed, outcome: Preserve, stop: None },
+    Cancelled { source: Owner, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Cancelled) },
+    Lost { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Lost) },
+    Unsettled { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unsettled) },
+    /// The provider ran and ended in a non-success outcome.
+    Failed { source: Provider, node: Failed, outcome: Preserve, stop: None },
+}
 impl SettlementReason {
-    /// Derive the reason from facts the terminal decision already holds.
+    /// Derive the reason from the complete terminal facts before any reader
+    /// interprets the outcome, stop or next step independently.
     pub fn derive(
         outcome: Outcome,
         evidence: Option<&TerminalEvidence>,
         partial: &[PartialSignal],
+        terminal_cause: Option<TerminalCause>,
+        handoff: Option<&crate::handoff::Handoff>,
     ) -> Self {
         match (evidence, outcome) {
-            // A lost or unsettled outcome may still carry a process exit: the
-            // process ran, but custody or reporting was not proven. The
-            // outcome names the reason, whatever evidence accompanied it.
             (_, Outcome::Lost) => Self::Lost,
             (_, Outcome::Unsettled) => Self::Unsettled,
             (Some(TerminalEvidence::Lost { .. }), _) => Self::Lost,
             (Some(TerminalEvidence::Unsettled { .. }), _) => Self::Unsettled,
             (_, Outcome::Cancelled) => Self::Cancelled,
             (Some(TerminalEvidence::PreLaunchRefusal), _) => Self::PreLaunchRefusal,
-            (_, Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted) => [
-                (PartialSignal::DeclaredStop, Self::DeclaredStop),
-                (PartialSignal::HandoffMissing, Self::HandoffMissing),
-                (PartialSignal::ProviderStop, Self::ProviderStop),
-                (PartialSignal::UncommittedWork, Self::UncommittedWork),
-            ]
-            .into_iter()
-            .find(|(signal, _)| partial.contains(signal))
-            .map_or(Self::Completed, |(_, reason)| reason),
-            _ => Self::Failed,
+            _ => match terminal_cause {
+                Some(TerminalCause::EmptyWriterResult) => Self::EmptyResult,
+                Some(TerminalCause::Blocked | TerminalCause::StoppedNoWork) => Self::DeclaredStop,
+                Some(TerminalCause::ProviderEarlyStop) => Self::ProviderStop,
+                _ if handoff.is_some_and(|handoff| handoff.unfinished()) => Self::DeclaredStop,
+                _ if partial.contains(&PartialSignal::DeclaredStop) => Self::DeclaredStop,
+                _ if partial.contains(&PartialSignal::HandoffMissing) => Self::HandoffMissing,
+                _ if partial.contains(&PartialSignal::ProviderStop) => Self::ProviderStop,
+                _ if partial.contains(&PartialSignal::UncommittedWork)
+                    || outcome == Outcome::Uncommitted => Self::UncommittedWork,
+                _ if matches!(outcome, Outcome::Succeeded | Outcome::ReviewRequired) => Self::Completed,
+                _ => Self::Failed,
+            },
         }
     }
+
+    /// A typed stop keeps dependants closed even when the terminal provider
+    /// outcome looked successful. With no stop, only Completed releases them.
+    pub const fn node_outcome(
+        self,
+        stop: Option<crate::stop::StopCause>,
+    ) -> SettlementNodeOutcome {
+        if stop.is_some() {
+            SettlementNodeOutcome::Failed
+        } else {
+            self.rule().node_outcome
+        }
+    }
+
+    /// Derive the persisted reason, sealed stop, source and graph result from
+    /// the same complete terminal facts.
+    pub fn classify(
+        outcome: Outcome,
+        evidence: Option<&TerminalEvidence>,
+        partial: &[PartialSignal],
+        terminal_cause: Option<TerminalCause>,
+        handoff: Option<&crate::handoff::Handoff>,
+    ) -> Result<SettlementClassification, crate::stop::StopError> {
+        let reason = Self::derive(outcome, evidence, partial, terminal_cause, handoff);
+        let outcome = reason.rule().terminal_outcome.apply(outcome);
+        let stop = crate::stop::Stop::sealed(terminal_cause, outcome, reason, handoff.cloned())?;
+        let stop_cause = stop.as_ref().map(crate::stop::Stop::cause);
+        let source = stop_cause.map_or(reason.rule().source, crate::stop::StopCause::source);
+        let node_outcome = reason.node_outcome(stop_cause);
+        Ok(SettlementClassification {
+            outcome,
+            reason,
+            stop,
+            source,
+            node_outcome,
+        })
+    }
+}
+
+/// Complete terminal classification shared by persistence, graph transitions
+/// and route quality.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettlementClassification {
+    pub outcome: Outcome,
+    pub reason: SettlementReason,
+    pub stop: Option<crate::stop::Stop>,
+    pub source: CauseSource,
+    pub node_outcome: SettlementNodeOutcome,
 }
 
 /// Independently retried work after a terminal decision.
@@ -1732,11 +1869,11 @@ mod tests {
             },
         ] {
             assert_eq!(
-                SettlementReason::derive(Outcome::Lost, Some(&evidence), &[]),
+                SettlementReason::derive(Outcome::Lost, Some(&evidence), &[], None, None),
                 SettlementReason::Lost
             );
             assert_eq!(
-                SettlementReason::derive(Outcome::Unsettled, Some(&evidence), &[]),
+                SettlementReason::derive(Outcome::Unsettled, Some(&evidence), &[], None, None),
                 SettlementReason::Unsettled
             );
         }

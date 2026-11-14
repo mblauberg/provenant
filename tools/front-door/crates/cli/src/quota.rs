@@ -1848,10 +1848,8 @@ pub(crate) fn execute(
     Ok(shown)
 }
 /// Chair sessions the SessionStart hook recorded in `[since, until)`, with the
-/// tokens read from their transcripts. The hook stores the resolved account
-/// key; lane facts carry labels, so a registered account's key becomes its
-/// label here. A session on an unregistered config directory keeps the
-/// reserved `unattributed` account.
+/// tokens read from their transcripts. Provider identity remains the identity
+/// evidence stored with the session; config paths are used only to locate transcripts.
 pub(crate) fn chair_sessions_with_usage(
     roots: &Roots,
     home: Option<&Path>,
@@ -1867,7 +1865,7 @@ pub(crate) fn chair_sessions_with_usage(
         accounts
             .entries
             .values()
-            .find(|entry| entry.adapter == chair.adapter && entry.key == chair.account)
+            .find(|entry| entry.adapter == chair.adapter && entry.key == chair.account_identity.account_key())
             .map(|entry| entry.directory.clone())
             .or_else(|| {
                 // The hook records only a plain relative path under home.
@@ -1879,15 +1877,6 @@ pub(crate) fn chair_sessions_with_usage(
                     .flatten()
             })
     });
-    for chair in &mut chairs {
-        if let Some(entry) = accounts
-            .entries
-            .values()
-            .find(|entry| entry.adapter == chair.adapter && entry.key == chair.account)
-        {
-            chair.account = entry.label.clone();
-        }
-    }
     Ok(chairs)
 }
 

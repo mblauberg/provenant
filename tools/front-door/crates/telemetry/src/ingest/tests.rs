@@ -46,12 +46,14 @@ impl Fixture {
     fn run(&self, dirs: &[(&str, &str)], chairs: &[&str], since: Option<&str>) -> Result<Report> {
         let dirs: Vec<_> = dirs
             .iter()
-            .map(|(account, dir)| ConfigDir {
-                account: (*account).into(),
+            .map(|(_, dir)| ConfigDir {
                 path: self.dir(dir),
             })
             .collect();
-        let chairs = chairs.iter().map(|s| (*s).to_owned()).collect();
+        let chairs = chairs
+            .iter()
+            .map(|s| ((*s).to_owned(), AccountIdentity::unknown()))
+            .collect();
         Ok(ingest(
             &self.roots,
             &Request {
@@ -188,7 +190,7 @@ fn effort_is_kept_only_when_it_is_a_short_identifier() -> Result {
 }
 
 #[test]
-fn rerun_adds_nothing_and_accounts_stay_distinct() -> Result {
+fn rerun_adds_nothing_and_unknown_identity_never_uses_directory_labels() -> Result {
     let f = Fixture::new()?;
     populate(&f)?;
     let first = f.run(&DIRS, &["s1"], None)?;
@@ -196,11 +198,7 @@ fn rerun_adds_nothing_and_accounts_stay_distinct() -> Result {
     let again = f.run(&DIRS, &["s1"], None)?;
     assert_eq!((again.added, again.already_present), (0, 5));
     let rows = read_rows(&f.roots, &RowFilter::default())?;
-    let account = |label: &str| rows.iter().filter(|r| r.account == label).count();
-    assert_eq!(
-        (account("anese"), account("pro"), account("unattributed")),
-        (3, 1, 1)
-    );
+    assert!(rows.iter().all(|row| row.identity == AccountIdentity::unknown()));
     // Rows add up to the message usage, each message once at its largest counts.
     let m1 = rows.iter().find(|r| r.message == "m1").unwrap();
     assert_eq!(m1.buckets(), [10, 7, 60, 40, 5]);
@@ -210,6 +208,10 @@ fn rerun_adds_nothing_and_accounts_stay_distinct() -> Result {
     );
     let source = |id: &str| rows.iter().find(|r| r.message == id).unwrap().source;
     assert_eq!(source("m1"), Source::Chair);
+    assert_eq!(
+        rows.iter().find(|row| row.message == "m1").unwrap().identity,
+        AccountIdentity::unknown()
+    );
     assert_eq!(source("m3"), Source::Subagent);
     assert_eq!(source("m4"), Source::Lane);
     assert!(!stored(&f)?.contains("private"));
@@ -234,6 +236,50 @@ fn one_account_on_two_directories_counts_once() -> Result {
     let report = f.run(&dirs, &[], None)?;
     assert_eq!(report.directories, 2);
     assert_eq!(report.added, 3);
+    Ok(())
+}
+
+#[test]
+fn session_identities_split_usage_when_a_config_directory_rotates() -> Result {
+    let f = Fixture::new()?;
+    f.write(
+        "rotating",
+        "projects/p/session-a.jsonl",
+        &message("message-a", "2026-10-01T00:00:00Z", 1, 0, 0, 3),
+    )?;
+    f.write(
+        "rotating",
+        "projects/p/session-b.jsonl",
+        &message("message-b", "2026-10-01T00:00:01Z", 1, 0, 0, 9),
+    )?;
+    let first = AccountIdentity::known("claude", "account-a", "epoch-a");
+    let second = AccountIdentity::known("claude", "account-b", "epoch-b");
+    let chairs = BTreeMap::from([
+        ("session-a".to_owned(), first.clone()),
+        ("session-b".to_owned(), second.clone()),
+    ]);
+    let dirs = [ConfigDir {
+        path: f.dir("rotating"),
+    }];
+    let report = ingest(
+        &f.roots,
+        &Request {
+            dirs: &dirs,
+            chair_sessions: &chairs,
+            provider: None,
+            since: None,
+            deadline: None,
+            incremental: false,
+        },
+    )?;
+    assert_eq!(report.added, 2);
+    let rows = read_rows(&f.roots, &RowFilter::default())?;
+    assert_eq!(rows.len(), 2);
+    let row_for = |session: &str| rows.iter().find(|row| row.session == session).unwrap();
+    assert_eq!(row_for("session-a").identity, first);
+    assert_eq!(row_for("session-a").output, 3);
+    assert_eq!(row_for("session-b").identity, second);
+    assert_eq!(row_for("session-b").output, 9);
     Ok(())
 }
 
@@ -270,7 +316,7 @@ fn since_and_provider_narrow_the_import() -> Result {
         &f.roots,
         &Request {
             dirs: &[],
-            chair_sessions: &BTreeSet::new(),
+            chair_sessions: &BTreeMap::new(),
             provider: Some("codex"),
             since: None,
             deadline: None,
@@ -326,7 +372,7 @@ fn linked_projects_and_session_directories_are_not_followed() -> Result {
 }
 
 #[test]
-fn registered_directories_get_their_label_and_the_rest_are_unattributed() -> Result {
+fn transcript_directories_do_not_supply_account_identity() -> Result {
     let f = Fixture::new()?;
     populate(&f)?;
     let home = f.base.clone();
@@ -335,25 +381,13 @@ fn registered_directories_get_their_label_and_the_rest_are_unattributed() -> Res
     std::fs::create_dir_all(home.join(".claude-extra/projects"))?;
     std::fs::create_dir_all(home.join(".claude-empty"))?;
     std::fs::write(home.join(".claude.json"), "{}")?;
-    let accounts = vec![("pro".to_owned(), vec![home.join(".claude-pro")])];
-    let dirs = config_dirs(&accounts, &home);
-    let labels: Vec<_> = dirs
+    let registered = vec![home.join(".claude-pro")];
+    let dirs = config_dirs(&registered, &home);
+    let names: Vec<_> = dirs
         .iter()
-        .map(|d| {
-            (
-                d.account.as_str(),
-                d.path.file_name().unwrap().to_str().unwrap(),
-            )
-        })
+        .map(|dir| dir.path.file_name().unwrap().to_str().unwrap())
         .collect();
-    assert_eq!(
-        labels,
-        [
-            ("pro", ".claude-pro"),
-            ("unattributed", ".claude"),
-            ("unattributed", ".claude-extra")
-        ]
-    );
+    assert_eq!(names, [".claude-pro", ".claude", ".claude-extra"]);
     Ok(())
 }
 
@@ -462,16 +496,13 @@ fn an_expired_deadline_reads_nothing_and_keeps_the_store() -> Result {
     )?;
     let dirs: Vec<ConfigDir> = DIRS
         .iter()
-        .map(|(account, dir)| ConfigDir {
-            account: (*account).into(),
-            path: f.dir(dir),
-        })
+        .map(|(_, dir)| ConfigDir { path: f.dir(dir) })
         .collect();
     let report = ingest(
         &f.roots,
         &Request {
             dirs: &dirs,
-            chair_sessions: &BTreeSet::new(),
+            chair_sessions: &BTreeMap::new(),
             provider: None,
             since: None,
             deadline: Some(Instant::now()),
@@ -493,10 +524,9 @@ fn incremental_ingest_resumes_complete_lines_and_recovers_replacements() -> Resu
     let first = message("m1", at, 10, 0, 0, 1);
     f.write("claude", path, &first)?;
     let dirs = [ConfigDir {
-        account: "unattributed".into(),
         path: f.dir("claude"),
     }];
-    let chairs = BTreeSet::new();
+    let chairs = BTreeMap::new();
     // A recently modified long session may contain messages older than the
     // hook's file cutoff; its cursor must not discard them.
     let since = "2026-10-02T00:00:00Z".parse()?;
@@ -558,11 +588,13 @@ fn incremental_ingest_upgrades_existing_chair_without_rereading() -> Result {
         &message("m1", "2026-10-01T00:00:00Z", 1, 0, 0, 1),
     )?;
     let dirs = [ConfigDir {
-        account: "a".into(),
         path: f.dir("claude"),
     }];
-    let chairs = BTreeSet::new();
-    let recorded_chairs = BTreeSet::from(["s1".to_owned()]);
+    let chairs = BTreeMap::new();
+    let recorded_chairs = BTreeMap::from([(
+        "s1".to_owned(),
+        AccountIdentity::known("claude", "account-key", "epoch"),
+    )]);
     let request = |chairs| Request {
         dirs: &dirs,
         chair_sessions: chairs,
@@ -581,6 +613,7 @@ fn incremental_ingest_upgrades_existing_chair_without_rereading() -> Result {
         "idempotent attribution without duplicate rows"
     );
     assert_eq!(rows[0].source, Source::Chair);
+    assert_eq!(rows[0].identity, recorded_chairs["s1"]);
     Ok(())
 }
 
@@ -622,15 +655,13 @@ fn native_attempt_links_only_its_matching_subagent_and_updates_after_settlement(
     )?;
     let dirs = [
         ConfigDir {
-            account: "a".into(),
             path: f.dir("claude"),
         },
         ConfigDir {
-            account: "b".into(),
             path: f.dir("other"),
         },
     ];
-    let chairs = BTreeSet::new();
+    let chairs = BTreeMap::new();
     let request = Request {
         dirs: &dirs,
         chair_sessions: &chairs,
@@ -674,7 +705,7 @@ fn native_attempt_links_only_its_matching_subagent_and_updates_after_settlement(
         .iter()
         .find(|r| r.message == "m3")
         .ok_or("other account")?;
-    assert_eq!(other.account, "b");
+    assert_eq!(other.identity, AccountIdentity::unknown());
     assert_eq!(other.native_attempt, None);
     let native = native_attempts::report(native_attempts::read(&f.roots)?, &rows);
     assert_eq!(native.attempts[0].attempt.alias, "reviewer");

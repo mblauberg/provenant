@@ -279,6 +279,7 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
         rounds: ask.rounds,
         session: ask.session.clone(),
         wake_at: ask.wake_at,
+        timeout: ask.timeout,
         request: filed.request,
     };
     let scope = AskScope { actor: &actor, ask: &link };

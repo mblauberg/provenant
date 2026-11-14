@@ -1,5 +1,5 @@
-//! Native session ingest: per-message token rows from Claude Code transcripts,
-//! attributed to an account by the config directory they were found under.
+//! Native session ingest: per-message token rows from Claude Code transcripts.
+//! Transcript paths locate sessions; chair records carry per-session identity evidence.
 //!
 //! The store is the `ingest` directory in the state root: one dated segment per
 //! UTC day of message time (`2026-10-01.jsonl`), one row per assistant message,
@@ -8,6 +8,7 @@
 //! only the segments it touches and readers stream the days they ask for, so
 //! no operation meets a whole-store size.
 use crate::{claude::Raw, segments};
+use provenant_records::AccountIdentity;
 use provenant_core::Roots;
 use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
 use serde::{Deserialize, Serialize};
@@ -21,7 +22,7 @@ use std::{
 };
 use thiserror::Error;
 
-pub const ROW_SCHEMA_VERSION: u64 = 2;
+pub const ROW_SCHEMA_VERSION: u64 = 3;
 /// The only provider whose sessions leave a native transcript.
 pub const PROVIDER: &str = "claude";
 const DIRECTORY: &str = "ingest";
@@ -77,12 +78,12 @@ pub enum Source {
     Lane,
 }
 
-/// One assistant message's usage. The five buckets are disjoint: `cache_write`
-/// is the short-TTL part of cache creation and `cache_write_1h` the rest.
+/// One assistant message's usage and per-session identity evidence. The five
+/// buckets are disjoint: `cache_write` is the short-TTL part and `cache_write_1h` the rest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Row {
     pub schema_version: u64,
-    pub account: String,
+    pub identity: AccountIdentity,
     pub provider: String,
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -139,29 +140,19 @@ pub const BUCKETS: [&str; 5] = [
     "output",
 ];
 
-/// A Claude config directory and the account label it is attributed to.
+/// A transcript root. Its path locates sessions and never supplies identity.
 #[derive(Clone, Debug)]
 pub struct ConfigDir {
-    pub account: String,
     pub path: PathBuf,
 }
 
-/// Reserved account for config directories no registered account claims.
-pub const UNATTRIBUTED: &str = crate::usage::UNATTRIBUTED;
-
-/// The directories to ingest: each registered account's directories under its
-/// label, then every other `~/.claude*` directory with transcripts, including
-/// `~/.claude` itself, as `unattributed`. Nothing is dropped and nothing is
-/// guessed. `accounts` is `(label, directories)` in registration order.
-pub fn config_dirs(accounts: &[(String, Vec<PathBuf>)], home: &Path) -> Vec<ConfigDir> {
-    let mut dirs: Vec<ConfigDir> = accounts
+/// The directories to ingest: registered transcript roots plus other
+/// `~/.claude*` roots, including `~/.claude`. Paths locate transcripts only;
+/// account identity is carried from the chair session record when present.
+pub fn config_dirs(registered: &[PathBuf], home: &Path) -> Vec<ConfigDir> {
+    let mut dirs: Vec<ConfigDir> = registered
         .iter()
-        .flat_map(|(label, paths)| {
-            paths.iter().map(|path| ConfigDir {
-                account: label.clone(),
-                path: path.clone(),
-            })
-        })
+        .map(|path| ConfigDir { path: path.clone() })
         .collect();
     let claimed: BTreeSet<PathBuf> = dirs
         .iter()
@@ -183,18 +174,15 @@ pub fn config_dirs(accounts: &[(String, Vec<PathBuf>)], home: &Path) -> Vec<Conf
         }
     }
     found.sort();
-    dirs.extend(found.into_iter().map(|path| ConfigDir {
-        account: UNATTRIBUTED.into(),
-        path,
-    }));
+    dirs.extend(found.into_iter().map(|path| ConfigDir { path }));
     dirs
 }
 
 #[derive(Clone, Debug)]
 pub struct Request<'a> {
     pub dirs: &'a [ConfigDir],
-    /// Session IDs the chair hook recorded; other top-level sessions are lanes.
-    pub chair_sessions: &'a BTreeSet<String>,
+    /// Per-session identities recorded by the chair hook; other sessions stay unknown.
+    pub chair_sessions: &'a BTreeMap<String, AccountIdentity>,
     /// Only `claude` has native transcripts; any other value ingests nothing.
     pub provider: Option<&'a str>,
     /// Skip files not written since and messages stamped before.
@@ -248,7 +236,7 @@ struct Message {
     usage: Option<Raw>,
 }
 struct Pending {
-    account: String,
+    identity: AccountIdentity,
     model: String,
     effort: Option<String>,
     raw: Raw,
@@ -291,7 +279,6 @@ fn plain(path: &Path, directory: bool) -> Option<std::fs::Metadata> {
 
 struct Transcript {
     path: PathBuf,
-    account: String,
     session: String,
     source: Source,
     agent_id: Option<String>,
@@ -338,14 +325,13 @@ fn locate(
                 if !valid_session(session) || !fresh(&meta) {
                     continue;
                 }
-                let source = if request.chair_sessions.contains(session) {
+                let source = if request.chair_sessions.contains_key(session) {
                     Source::Chair
                 } else {
                     Source::Lane
                 };
                 out.push(Transcript {
                     path,
-                    account: dir.account.clone(),
                     session: session.into(),
                     source,
                     agent_id: None,
@@ -378,8 +364,7 @@ fn locate(
                     if fresh(&meta) {
                         out.push(Transcript {
                             path: file.path(),
-                            account: dir.account.clone(),
-                            session: name.into(),
+                                    session: name.into(),
                             source: Source::Subagent,
                             agent_id,
                             native_config: Some(config_key.clone()),
@@ -617,7 +602,11 @@ fn read_transcript(
         messages.insert(
             key,
             Pending {
-                account: transcript.account.clone(),
+                identity: request
+                    .chair_sessions
+                    .get(&transcript.session)
+                    .cloned()
+                    .unwrap_or_else(AccountIdentity::unknown),
                 model,
                 effort,
                 raw: usage,
@@ -655,7 +644,7 @@ fn row(session: String, message: String, pending: Pending) -> Row {
     let one_hour = one_hour_named.min(creation);
     Row {
         schema_version: ROW_SCHEMA_VERSION,
-        account: pending.account,
+        identity: pending.identity,
         provider: PROVIDER.into(),
         model: pending.model,
         effort: pending.effort,
@@ -790,15 +779,27 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
     }
     for segment in days.values_mut() {
         for row in segment.rows.values_mut() {
-            if row.source == Source::Lane && request.chair_sessions.contains(&row.session) {
+            if row.source == Source::Lane
+                && request.chair_sessions.contains_key(&row.session)
+            {
                 row.source = Source::Chair;
+                segment.changed = true;
+            }
+            if matches!(&row.identity.identity, crate::usage::Identity::Unknown { .. })
+                && let Some(identity) = request.chair_sessions.get(&row.session)
+                && matches!(&identity.identity, crate::usage::Identity::Known { .. })
+            {
+                row.identity = identity.clone();
                 segment.changed = true;
             }
         }
     }
     let mut fresh: BTreeMap<String, Vec<Row>> = BTreeMap::new();
     for ((session, message), pending) in messages {
-        let account = report.accounts.entry(pending.account.clone()).or_default();
+        let account = report
+            .accounts
+            .entry(pending.identity.account_key())
+            .or_default();
         let day = segments::name(pending.timestamp);
         let key = (session.clone(), message.clone());
         let holder = days
@@ -898,7 +899,7 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
             size += line.len() as u64;
             report
                 .accounts
-                .entry(row.account.clone())
+                .entry(row.identity.account_key())
                 .or_default()
                 .added += 1;
             report.added += 1;
@@ -1121,7 +1122,7 @@ pub fn read_rows(roots: &Roots, filter: &RowFilter) -> Result<Vec<Row>, IngestEr
                 return;
             };
             if row.schema_version != ROW_SCHEMA_VERSION
-                || filter.account.as_ref().is_some_and(|a| *a != row.account)
+                || filter.account.as_ref().is_some_and(|a| a != &row.identity.account_key())
                 || filter.model.as_ref().is_some_and(|m| *m != row.model)
             {
                 return;

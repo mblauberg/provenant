@@ -281,6 +281,7 @@ pub(super) fn make_outputs_with_upstream(
             .collect(),
         verdict_error,
         schema_version: 2,
+        decide_outcome: None,
         result,
         verdict: verdict.map(|value| bounded(&value, OUTPUT_FIELD_BYTES)),
         findings,

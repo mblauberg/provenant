@@ -654,6 +654,7 @@ fn outputs(record: &LandRecord) -> NodeOutputs {
         extra: Default::default(),
         verdict_error: None,
         schema_version: 2,
+        decide_outcome: None,
         result: Some(ResultOutput {
             extra: Default::default(),
             digest: CanonicalV1::file_digest(excerpt.as_bytes()).to_string(),

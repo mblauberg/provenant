@@ -752,6 +752,7 @@ fn launched_reader_reports_pinned_route() {
             result_path: None,
             branch: None,
             commit: None,
+            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
             stop: None,
         }]),
         ..FakeOwner::default()
@@ -788,6 +789,7 @@ fn reader_auth_restart_uses_the_declared_successor_account() {
             result_path: None,
             branch: None,
             commit: None,
+            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
             stop: None,
         }, terminal(AttemptOutcome::Succeeded)]),
         ..FakeOwner::default()
@@ -822,6 +824,7 @@ fn fallback_reports_unreadable_evidence() {
             result_path: None,
             branch: None,
             commit: None,
+            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
             stop: None,
         }]),
         ..FakeOwner::default()
@@ -883,6 +886,7 @@ fn resumed_fallback_requires_current_local_custody_evidence() {
         result_path: None,
         branch: None,
         commit: None,
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
         stop: None,
     };
     let mut owner = FakeOwner {

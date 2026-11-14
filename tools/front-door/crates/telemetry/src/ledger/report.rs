@@ -7,6 +7,8 @@
 //! `unattributed`, not folded into another account.
 use super::Row;
 use crate::{TelemetryError, reducer::Money};
+use provenant_records::AccountIdentity;
+use provenant_records::AccountIdentity;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -72,7 +74,7 @@ pub fn totals<'a>(rows: impl IntoIterator<Item = &'a Row>) -> Result<Totals, Tel
     let (mut numerator, mut any) = (0u128, false);
     for row in rows {
         totals.attempts += 1;
-        totals.unattributed_attempts += u64::from(row.account.is_none());
+        totals.unattributed_attempts += u64::from(row.identity.is_unknown());
         totals.unreported_token_attempts += u64::from(unreported(row));
         match &row.cost {
             Some(cost) => {
@@ -102,9 +104,8 @@ pub fn totals<'a>(rows: impl IntoIterator<Item = &'a Row>) -> Result<Totals, Tel
 }
 
 fn key(row: &Row, by: By) -> String {
-    let some = |value: &Option<String>| value.clone().unwrap_or_else(|| GAP.to_owned());
     match by {
-        By::Account => some(&row.account),
+        By::Account => row.identity.account_key(),
         By::Model => some(&row.model),
         By::Graph => row.graph.clone(),
         By::Node => format!("{}/{}", row.graph, row.node),
@@ -156,7 +157,9 @@ mod tests {
             provider: Some("claude".into()),
             model: Some("m".into()),
             effort: None,
-            account: account.map(str::to_owned),
+            identity: account.map_or_else(AccountIdentity::unknown, |key| {
+                AccountIdentity::known("claude", key, "fixture-epoch")
+            }),
             outcome: "succeeded".into(),
             started: None,
             finished: WallTime::from_micros(0).expect("epoch"),
@@ -202,9 +205,9 @@ mod tests {
         ];
         let groups = group(&rows, By::Account).expect("groups");
         let keys: Vec<_> = groups.iter().map(|g| g.key.as_str()).collect();
-        assert_eq!(keys, [GAP, "work"]);
-        assert_eq!(groups[0].totals.unattributed_attempts, 1);
-        assert_eq!(groups[1].totals.unattributed_attempts, 0);
+        assert_eq!(keys, ["claude/work", GAP]);
+        assert_eq!(groups[0].totals.unattributed_attempts, 0);
+        assert_eq!(groups[1].totals.unattributed_attempts, 1);
         assert_eq!(groups[0].totals.unreported_token_attempts, 0);
     }
 }
