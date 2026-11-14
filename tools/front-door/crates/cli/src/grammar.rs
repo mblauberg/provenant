@@ -130,7 +130,7 @@ pub enum Command {
         /// Wait for this head's CI (default 1 hour; maximum 4 hours)
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "1h", catalog_duration())]
         wait: Option<u64>,
-        /// Initial CI poll interval in seconds (overrides domains.pr.land.poll_seconds, default 30)
+        /// Set a fixed interval in seconds for CI, gate, and post-merge waits; bundled defaults use adapter cadence
         #[arg(long, catalog_u64_range = 1..)]
         poll: Option<u64>,
         /// Show the resolved landing policy without landing
@@ -151,7 +151,7 @@ pub enum Command {
     /// Retry a graph, node or attempt
     #[command(name = "retry", add = crate::metadata::CoreCommand(5, "provenant retry fix-login"))]
     Retry(Resume),
-    /// Queue a steering message for a lane when its provider supports control
+    /// Live steering is unavailable on every provider (control_unsupported); delivery transports come later
     #[command(add = crate::metadata::CoreCommand(3, "provenant steer fix-login/implement --brief-file - < message.md"))]
     Steer(crate::inbox::Steer),
     /// Apply a patch to unstarted graph nodes
@@ -205,6 +205,11 @@ pub enum Command {
     /// Inspect issue specifications for stale or misleading references
     #[command(subcommand)]
     Tracker(Tracker),
+    /// Run a declared repository verification tier
+    Verify {
+        /// Free-form tier name from the effective verify port
+        tier: Option<String>,
+    },
     /// Run fast repository checks
     #[command(subcommand)]
     Check(Check),
@@ -479,6 +484,8 @@ fn host_alias(value: &str) -> Result<String, &'static str> {
 }
 #[derive(Debug, Subcommand)]
 pub enum Config {
+    /// Show the effective repository integration ports and their sources.
+    Ports,
     /// List configuration warnings with their source file and key.
     Check(Page),
     /// Print effective configuration and knobs, plus the resolved launch

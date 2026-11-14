@@ -7,7 +7,7 @@
 //! checkpoint before the receipt is returned, so a lost reply is answered by
 //! replaying the same idempotency key.
 use super::Context;
-use provenant_core::{CancelToken, Clock, WaitBudget};
+use provenant_core::{CancelToken, Clock, Pause, WaitBudget};
 use provenant_fabric_runtime::graph::{
     FileJournal, GraphJournal,
     patch::{LiveGraph, PatchContext, scan_for_secrets},
@@ -685,11 +685,10 @@ fn recover_provisioning(
             });
             journal.save(checkpoint).map_err(journal_error)?;
         }
-        let branch = provenant_confinement::worktrees::managed_writer_branch(
-            &context.cwd,
-            std::path::Path::new(&path),
-        )
-        .map_err(provisioning_refusal)?;
+        let branch = context
+            .port_table
+            .managed_writer_branch(std::path::Path::new(&path))
+            .map(str::to_owned);
         let result = match branch.as_deref() {
             Some(branch) => {
                 provision_writer_checked(context, &path, branch, &source, launch, cancel)
@@ -1028,12 +1027,11 @@ pub fn provision_child_with_budget(
     budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<(), ServiceError> {
-    let branch = provenant_confinement::worktrees::managed_writer_branch(
-        &context.cwd,
-        std::path::Path::new(path),
-    )
-    .map_err(provisioning_refusal)?
-    .ok_or_else(|| refused("writer_worktree", "invalid managed worktree path"))?;
+    let branch = context
+        .port_table
+        .managed_writer_branch(std::path::Path::new(path))
+        .map(str::to_owned)
+        .ok_or_else(|| refused("writer_worktree", "invalid managed worktree path"))?;
     provision_writer(context, path, &branch, source, budget, cancel)
 }
 
@@ -1101,6 +1099,7 @@ pub fn writer_launch_budget(
 
 /// Resolve a validated checkpoint path against the project root that owns it.
 fn resolve_managed_writer_path(
+    host_state: &std::path::Path,
     project_root: &std::path::Path,
     path: &str,
     branch: &str,
@@ -1109,7 +1108,11 @@ fn resolve_managed_writer_path(
     if !project_root.is_absolute() {
         return Err(WorktreeError::InvalidRequest);
     }
-    let expected = worktrees::managed_writer_relative_path(project_root, branch)?;
+    let ports = provenant_config::PortTable::read_for(Some(project_root), host_state)
+        .map_err(WorktreeError::PortConfiguration)?;
+    let expected = ports
+        .managed_writer_path(branch)
+        .map_err(WorktreeError::PortConfiguration)?;
     if std::path::Path::new(path) == expected.as_path() {
         Ok(project_root.join(expected))
     } else {
@@ -1145,8 +1148,12 @@ pub fn provision_writer_checked(
                 lock_budget: budget,
                 ..*worktree_context
             };
-            let expected =
-                resolve_managed_writer_path(worktree_context.repo.root_path(), path, branch)?;
+            let expected = resolve_managed_writer_path(
+                context.roots.state.as_path(),
+                worktree_context.repo.root_path(),
+                path,
+                branch,
+            )?;
             provision_in_context(&worktree_context, path, branch, source, cancel)?;
             Ok(expected)
         },
@@ -1161,7 +1168,12 @@ fn provision_in_context(
     cancel: &CancelToken,
 ) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
     use provenant_confinement::worktrees::{self, WorktreeCreate, WorktreeError};
-    let expected = resolve_managed_writer_path(context.repo.root_path(), path, branch)?;
+    let expected = resolve_managed_writer_path(
+        context.host_state()?,
+        context.repo.root_path(),
+        path,
+        branch,
+    )?;
     // Inspect registration and custody without holding sibling worktrees open
     // for unrelated Git probes. The selected target's cleanliness is checked
     // below, under its writer lease.
@@ -1268,14 +1280,37 @@ pub fn from_lane(
 pub fn wait_for_children(
     cancel: &CancelToken,
     within: std::time::Duration,
+    interval: std::time::Duration,
 ) -> Result<Value, ServiceError> {
     let clock = provenant_os::clock::SystemClock::new();
     let started = clock.mono_now();
     while_waiting(cancel, within, || {
-        poll_children(cancel, within, &clock, started, |remaining| {
+        poll_children(cancel, within, &clock, started, interval, |remaining| {
             from_lane(&RelayOp::Children, cancel, remaining)
         })
     })
+}
+
+pub fn child_wait_observation(interval: std::time::Duration) -> String {
+    format!(
+        "paced reread every {} ms (domains.wait.local_interval_ms); relay socket has no remote event subscription",
+        interval.as_millis()
+    )
+}
+
+fn pause_child_poll(cancel: &CancelToken, delay: std::time::Duration) {
+    let deadline = std::time::Instant::now() + delay;
+    while !cancel.is_cancelled() {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        Pause::wait(
+            &provenant_core::ThreadPause,
+            provenant_core::DurationMicros::from_micros(remaining.as_micros()),
+            cancel,
+        );
+    }
 }
 
 fn poll_children(
@@ -1283,6 +1318,7 @@ fn poll_children(
     within: std::time::Duration,
     clock: &dyn Clock,
     started: provenant_core::MonoTime,
+    interval: std::time::Duration,
     mut poll: impl FnMut(std::time::Duration) -> Result<Value, ServiceError>,
 ) -> Result<Value, ServiceError> {
     loop {
@@ -1305,7 +1341,14 @@ fn poll_children(
         if children.iter().all(|child| child["settled"] == true) {
             return Ok(value);
         }
-        provenant_os::sys::wait_pause(remaining.min(std::time::Duration::from_millis(100)));
+        let elapsed = std::time::Duration::from_micros(
+            clock
+                .mono_now()
+                .as_micros()
+                .saturating_sub(started.as_micros()),
+        );
+        let remaining = within.saturating_sub(elapsed);
+        pause_child_poll(cancel, remaining.min(interval));
     }
 }
 
@@ -1531,6 +1574,7 @@ mod child_wait_tests {
                         std::time::Duration::from_secs(2),
                         &provenant_os::clock::SystemClock::new(),
                         provenant_os::clock::SystemClock.mono_now(),
+                        std::time::Duration::from_millis(1),
                         |_| {
                             polls += 1;
                             if cancelled {
@@ -1586,6 +1630,7 @@ mod child_wait_tests {
                     std::time::Duration::from_secs(1),
                     &clock,
                     started,
+                    std::time::Duration::from_millis(1),
                     |_| panic!("must not poll after yield consumed the deadline"),
                 )
             },

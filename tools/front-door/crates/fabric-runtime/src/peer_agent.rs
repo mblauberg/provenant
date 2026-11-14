@@ -674,7 +674,10 @@ impl Projects {
                     if common.file_name() == Some(OsStr::new(".git"))
                         && let Some(project) = common.parent()
                     {
-                        let ports = provenant_config::PortTable::read_project(project)?;
+                        let ports = provenant_config::PortTable::read_for(
+                            Some(project),
+                            roots.state.as_path(),
+                        )?;
                         worktree_roots.extend(ports.worktree_roots_under(project));
                     }
                 }

@@ -76,6 +76,7 @@ pub fn with_context_using_workers_and_facts<T>(
     let runtime = UtilityRuntime::new(
         canonicalize(&git)?,
         roots.state.as_path().join("utility-home"),
+        roots.state.as_path(),
     )?;
     let executor = SystemExecutor::new(1).map_err(|_| WorktreeError::InvalidRequest)?;
     let budget = UtilityBudget::bounded(Duration::from_secs(5))?;

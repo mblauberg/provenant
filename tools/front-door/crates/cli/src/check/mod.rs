@@ -266,6 +266,7 @@ fn next_cursor<T>(page: &CheckPage<T>) -> Result<Option<String>, CheckError> {
 }
 
 pub struct GitContext<'a> {
+    pub host_state: &'a Path,
     pub repo: &'a ReadOnlyRepo,
     pub runtime: &'a UtilityRuntime,
     pub executor: &'a dyn Executor,

@@ -48,6 +48,7 @@ pub(super) fn deliver(
     if candidates.is_empty() {
         return Ok(());
     }
+    let observation = crate::wait::non_wait_observation_settings();
     let Some(host) =
         provenant_config::lookup_host(roots).map_err(|_| "host identity unavailable".to_owned())?
     else {
@@ -85,6 +86,7 @@ pub(super) fn deliver(
                     session,
                     &row.account,
                     *expiry,
+                    &observation,
                     clock,
                     budget,
                 )
@@ -110,6 +112,7 @@ fn send(
     session: &str,
     account: &AccountScope,
     expiry: i64,
+    observation: &provenant_fabric_runtime::coordination::ObservationSettings,
     clock: &dyn Clock,
     budget: WaitBudget,
 ) -> Result<(), String> {
@@ -140,8 +143,16 @@ fn send(
         account.label, account.adapter
     );
     let cancel = CancelToken::new();
-    let service = LocalCoordination::open(state, project, sender, clock, &ThreadPause, &cancel)
-        .map_err(|e| e.to_string())?;
+    let service = LocalCoordination::open(
+        state,
+        project,
+        sender,
+        observation.clone(),
+        clock,
+        &ThreadPause,
+        &cancel,
+    )
+    .map_err(|e| e.to_string())?;
     service
         .mutate(
             Mutation::Mail(MailInput::Send {
@@ -285,10 +296,12 @@ mod tests {
         deliver(&roots, &report, 50, &clock).unwrap();
         report.accounts[0].login_expiry.as_mut().unwrap().state = LoginExpiryState::Unknown;
         deliver(&roots, &report, 50, &clock).unwrap();
+        let observation = crate::wait::non_wait_observation_settings();
         let service = LocalCoordination::open(
             &roots.state,
             project,
             ActorId::from_bytes([9; 16]),
+            observation,
             &clock,
             &ThreadPause,
             &cancel,
@@ -376,6 +389,7 @@ mod tests {
             "session",
             &account,
             500,
+            &crate::wait::non_wait_observation_settings(),
             &clock,
             WaitBudget::cli(clock.mono_now(), 2).unwrap(),
         )
@@ -383,10 +397,12 @@ mod tests {
         evidence.expires_unix_seconds = None;
         assert_eq!(evidence.state(460, 50), LoginExpiryState::Unknown);
         let cancel = CancelToken::new();
+        let observation = crate::wait::non_wait_observation_settings();
         let service = LocalCoordination::open(
             &roots.state,
             project,
             ActorId::from_bytes([3; 16]),
+            observation,
             &clock,
             &ThreadPause,
             &cancel,

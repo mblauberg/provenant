@@ -1,5 +1,7 @@
 //! Settings for the `wait` verb. Source cadence remains overridable.
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
+use provenant_core::DurationMicros;
+use provenant_fabric_runtime::coordination::{LOCAL_OBSERVATION_INTERVAL_KEY, ObservationSettings};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -9,6 +11,9 @@ pub struct Settings {
     pub max_timeout_seconds: Option<u64>,
     pub local_interval_ms: u64,
     pub pr_interval_ms: u64,
+    pub pr_slow_interval_ms: u64,
+    pub pr_near_end_window_ms: u64,
+    pub pr_conditional_requests: bool,
     pub max_targets: u64,
     pub pr_read_timeout_seconds: u64,
 }
@@ -19,11 +24,42 @@ impl Default for Settings {
             max_timeout_seconds: None,
             local_interval_ms: 500,
             pr_interval_ms: 5000,
+            pr_slow_interval_ms: 15000,
+            pr_near_end_window_ms: 30000,
+            pr_conditional_requests: true,
             max_targets: 64,
             pr_read_timeout_seconds: 60,
         }
     }
 }
+pub(crate) fn non_wait_observation_settings() -> ObservationSettings {
+    let settings = Settings::default();
+    ObservationSettings {
+        local_interval: DurationMicros::from_micros(settings.local_interval_ms * 1_000),
+        source: provenant_config::Origin::Compiled {
+            profile: provenant_config::Profile::default(),
+        },
+    }
+}
+
+pub(crate) fn observation_settings(
+    resolved: &provenant_config::ResolvedConfig<crate::domains::Domains>,
+) -> ObservationSettings {
+    let source = resolved
+        .origins
+        .get(LOCAL_OBSERVATION_INTERVAL_KEY)
+        .cloned()
+        .unwrap_or(provenant_config::Origin::Compiled {
+            profile: resolved.profile,
+        });
+    ObservationSettings {
+        local_interval: DurationMicros::from_micros(
+            resolved.domains.wait.local_interval_ms * 1_000,
+        ),
+        source,
+    }
+}
+
 impl Settings {
     pub fn timeout(
         &self,
@@ -66,6 +102,13 @@ impl DomainConfig for Settings {
             ),
             ("local_interval_ms", self.local_interval_ms, 10, 60000),
             ("pr_interval_ms", self.pr_interval_ms, 10, 60000),
+            ("pr_slow_interval_ms", self.pr_slow_interval_ms, 10, 60000),
+            (
+                "pr_near_end_window_ms",
+                self.pr_near_end_window_ms,
+                0,
+                60000,
+            ),
             ("max_targets", self.max_targets, 1, 1024),
             (
                 "pr_read_timeout_seconds",
@@ -87,15 +130,17 @@ impl DomainConfig for Settings {
 pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     "wait",
     |_| {
-        "timeout_seconds = 300\nlocal_interval_ms = 500\npr_interval_ms = 5000\nmax_targets = 64\npr_read_timeout_seconds = 60\n"
+        "timeout_seconds = 300\nmax_timeout_seconds = 14400\nlocal_interval_ms = 500\npr_interval_ms = 5000\npr_slow_interval_ms = 15000\npr_near_end_window_ms = 30000\npr_conditional_requests = true\nmax_targets = 64\npr_read_timeout_seconds = 60\n"
     },
 )
-.with_boundary_checks()
 .with_fields(&[
     FieldMetadata::int("timeout_seconds", 1, u32::MAX as i64),
     FieldMetadata::int("max_timeout_seconds", 1, u32::MAX as i64),
     FieldMetadata::int("local_interval_ms", 10, 60000),
     FieldMetadata::int("pr_interval_ms", 10, 60000),
+    FieldMetadata::int("pr_slow_interval_ms", 10, 60000),
+    FieldMetadata::int("pr_near_end_window_ms", 0, 60000),
+    FieldMetadata::new("pr_conditional_requests", "bool"),
     FieldMetadata::int("max_targets", 1, 1024),
     FieldMetadata::int("pr_read_timeout_seconds", 1, 600),
 ]);

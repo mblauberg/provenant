@@ -886,8 +886,11 @@ fn terminal_verifies_private_objects_before_publication()
             std::fs::create_dir_all(objects.join("info"))?;
             let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
             let executor = SystemExecutor::new(1)?;
-            let runtime =
-                provenant_confinement::UtilityRuntime::new(&executable, fixture.root.join("home"))?;
+            let runtime = provenant_confinement::UtilityRuntime::new(
+                &executable,
+                fixture.root.join("home"),
+                fixture.root.join("state"),
+            )?;
             let repo = runtime.open_repo(
                 &executor,
                 &fixture.writer.project,

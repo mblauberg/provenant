@@ -193,7 +193,7 @@ mod tests {
         let mut options = ExecOptions::new(&argv, &base, Duration::from_secs(10));
         options.env = Some(&env);
         assert_eq!(executor.execute(options)?.termination, Termination::Exit(0));
-        let runtime = UtilityRuntime::new(git, &home)?;
+        let runtime = UtilityRuntime::new(git, &home, context.state_root.as_path())?;
         let repo = runtime.open_read_repo(
             &executor,
             &repo_path,

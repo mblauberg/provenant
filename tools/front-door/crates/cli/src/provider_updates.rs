@@ -170,6 +170,7 @@ fn note_update(
         &ctx.roots.state,
         ctx.identity.project,
         ctx.identity.inbox.actor,
+        ctx.local_observation.clone(),
         clock,
         &ThreadPause,
         &cancel,

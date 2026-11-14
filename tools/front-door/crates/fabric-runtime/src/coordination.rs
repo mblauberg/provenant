@@ -84,6 +84,15 @@ impl From<provenant_fabric_store::Error> for CoordinationError {
     }
 }
 
+pub const LOCAL_OBSERVATION_INTERVAL_KEY: &str = "domains.wait.local_interval_ms";
+
+/// Source cadence for local event observation when no native event source is available.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservationSettings {
+    pub local_interval: DurationMicros,
+    pub source: provenant_config::Origin,
+}
+
 bounded_input! {
     pub enum MailInput as WireMailInput {
         Send {
@@ -281,6 +290,7 @@ pub struct LocalCoordination<'a> {
     store: Store,
     project: ProjectId,
     actor: ActorId,
+    observation: ObservationSettings,
     clock: &'a dyn Clock,
     backoff: &'a dyn Pause,
 }
@@ -290,19 +300,28 @@ impl<'a> LocalCoordination<'a> {
         root: &StateRoot,
         project: ProjectId,
         actor: ActorId,
+        observation: ObservationSettings,
         clock: &'a dyn Clock,
         backoff: &'a dyn Pause,
         cancel: &CancelToken,
     ) -> Result<Self, CoordinationError> {
         let request = Request { clock, cancel };
         let store = Store::open(root, &request)?;
-        Ok(Self::new(store, project, actor, clock, backoff))
+        Ok(Self::new(
+            store,
+            project,
+            actor,
+            observation,
+            clock,
+            backoff,
+        ))
     }
 
     pub fn new(
         store: Store,
         project: ProjectId,
         actor: ActorId,
+        observation: ObservationSettings,
         clock: &'a dyn Clock,
         backoff: &'a dyn Pause,
     ) -> Self {
@@ -310,6 +329,7 @@ impl<'a> LocalCoordination<'a> {
             store,
             project,
             actor,
+            observation,
             clock,
             backoff,
         }
@@ -364,18 +384,58 @@ impl<'a> LocalCoordination<'a> {
         )
     }
 
-    pub(crate) fn pause_observation(&self, budget: WaitBudget, cancel: &CancelToken) {
-        self.backoff.wait(
-            DurationMicros::from_micros(
-                500_000.min(budget.remaining(self.clock.mono_now()).as_micros()),
-            ),
-            cancel,
-        );
+    fn wait_fallback_interval(
+        &self,
+        duration: DurationMicros,
+        cancel: &CancelToken,
+    ) -> Result<(), CoordinationError> {
+        let mut remaining = duration.as_micros();
+        while remaining > 0 && !cancel.is_cancelled() {
+            let slice = remaining.min(250_000);
+            let before = self.clock.mono_now();
+            self.backoff
+                .wait(DurationMicros::from_micros(slice), cancel);
+            if cancel.is_cancelled() {
+                break;
+            }
+            let after = self.clock.mono_now();
+            if after > before {
+                remaining = remaining.saturating_sub(after.as_micros() - before.as_micros());
+            } else {
+                let deadline = before.checked_add(DurationMicros::from_micros(slice))?;
+                self.clock.wait_until(deadline)?;
+                remaining = remaining.saturating_sub(slice);
+            }
+        }
+        Ok(())
     }
-    pub(crate) fn pause(&self, budget: WaitBudget, cancel: &CancelToken) {
-        let left = budget.remaining(self.clock.mono_now()).as_micros();
-        self.backoff
-            .wait(DurationMicros::from_micros(left.min(50_000)), cancel);
+
+    fn observation_extra(
+        &self,
+        backend: Option<provenant_os::changes::watch::Backend>,
+        fallback_reason: Option<&str>,
+    ) -> provenant_records::ExtraFields {
+        let mut extra = provenant_records::ExtraFields::new();
+        let value = match (backend, fallback_reason) {
+            (Some(backend), _) => serde_json::json!({
+                "mode": "event_source",
+                "backend": match backend {
+                    provenant_os::changes::watch::Backend::Inotify => "inotify",
+                    provenant_os::changes::watch::Backend::Kqueue => "kqueue",
+                    provenant_os::changes::watch::Backend::Unsupported => "unsupported",
+                },
+            }),
+            (None, Some(reason)) => serde_json::json!({
+                "mode": "paced_reread",
+                "source_key": LOCAL_OBSERVATION_INTERVAL_KEY,
+                "source_origin": &self.observation.source,
+                "interval_ms": self.observation.local_interval.as_micros() / 1000,
+                "reason": reason,
+            }),
+            (None, None) => return extra,
+        };
+        extra.insert("observation".into(), value);
+        extra
     }
 
     fn new_id_bytes() -> Result<[u8; 16], CoordinationError> {
@@ -534,6 +594,22 @@ impl CoordinationApi for LocalCoordination<'_> {
                     None => budget,
                 };
                 let read_request = self.request(cancel);
+                // Register before the first read so a commit during the query stays queued.
+                let waiting = wait_seconds.is_some_and(|seconds| seconds > 0);
+                let mut fallback_reason = None;
+                let mut watcher = if waiting {
+                    let paths = self.store.event_observation_paths();
+                    match provenant_os::changes::watch::Watcher::subscribe(&paths) {
+                        Ok(watcher) => Some(watcher),
+                        Err(error) => {
+                            fallback_reason = Some(error.to_string());
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                let mut backend = watcher.as_ref().map(|watcher| watcher.backend());
                 // fabric.md CLI surface: events use caller-held cursors.
                 let start = after.unwrap_or(0);
                 let mut page = self
@@ -544,19 +620,89 @@ impl CoordinationApi for LocalCoordination<'_> {
                     if cancel.is_cancelled() {
                         return Err(CoordinationError::Cancelled);
                     }
-                    self.pause(read_budget, cancel);
-                    if read_budget.remaining(self.clock.mono_now()).as_micros() == 0 {
-                        timed_out = true;
+                    let remaining = read_budget.remaining(self.clock.mono_now()).as_micros();
+                    if remaining == 0 {
+                        if waiting {
+                            // The change signal is a hint. Re-read once at the deadline
+                            // so a skipped/coalesced file event cannot hide a commit.
+                            page = self
+                                .store
+                                .events(self.project, start, limit, &read_request)?;
+                        }
+                        timed_out = page.items.is_empty();
                         break;
                     }
-                    page = self
-                        .store
-                        .events(self.project, start, limit, &read_request)?;
+                    if watcher.is_some() {
+                        let slice = remaining.min(250_000);
+                        let deadline = self
+                            .clock
+                            .mono_now()
+                            .checked_add(DurationMicros::from_micros(slice))?;
+                        let outcome = match watcher.as_mut() {
+                            Some(active) => active.wait(std::time::Duration::from_micros(slice)),
+                            None => continue,
+                        };
+                        match outcome {
+                            Ok(provenant_os::changes::watch::WaitOutcome::Changed) => {
+                                if cancel.is_cancelled() {
+                                    return Err(CoordinationError::Cancelled);
+                                }
+                                if read_budget.remaining(self.clock.mono_now()).as_micros() == 0 {
+                                    page = self.store.events(
+                                        self.project,
+                                        start,
+                                        limit,
+                                        &read_request,
+                                    )?;
+                                    timed_out = page.items.is_empty();
+                                    break;
+                                }
+                                page =
+                                    self.store
+                                        .events(self.project, start, limit, &read_request)?;
+                            }
+                            Ok(provenant_os::changes::watch::WaitOutcome::TimedOut) => {
+                                // Native timeout checks cancellation/deadline only; it
+                                // never triggers a periodic database reread.
+                                self.clock.wait_until(deadline)?;
+                                if cancel.is_cancelled() {
+                                    return Err(CoordinationError::Cancelled);
+                                }
+                            }
+                            Ok(provenant_os::changes::watch::WaitOutcome::Woken) => {
+                                if cancel.is_cancelled() {
+                                    return Err(CoordinationError::Cancelled);
+                                }
+                            }
+                            Err(error) => {
+                                fallback_reason = Some(error.to_string());
+                                watcher = None;
+                                backend = None;
+                            }
+                        }
+                    } else {
+                        let interval = self.observation.local_interval.as_micros().min(remaining);
+                        self.wait_fallback_interval(DurationMicros::from_micros(interval), cancel)?;
+                        if cancel.is_cancelled() {
+                            return Err(CoordinationError::Cancelled);
+                        }
+                        if read_budget.remaining(self.clock.mono_now()).as_micros() == 0 {
+                            continue;
+                        }
+                        page = self
+                            .store
+                            .events(self.project, start, limit, &read_request)?;
+                    }
                 }
+                let extra = if waiting {
+                    self.observation_extra(backend, fallback_reason.as_deref())
+                } else {
+                    Default::default()
+                };
                 let page = bounded_page(page.items, page.truncated)?;
                 let cursor = page.items.last().map(|event| event.seq).unwrap_or(start);
                 Ok(EventsResult::Read {
-                    extra: Default::default(),
+                    extra,
                     page,
                     cursor,
                     timed_out,
@@ -796,6 +942,9 @@ mod tests {
                 actor: ActorId::from_bytes([2; 16]),
             }
         }
+        fn observation_settings(&self) -> ObservationSettings {
+            crate::test_support::observation_settings()
+        }
         fn service(&self) -> LocalCoordination<'_> {
             let cancel = CancelToken::new();
             let request = Request {
@@ -803,7 +952,14 @@ mod tests {
                 cancel: &cancel,
             };
             let store = Store::open(&self.root, &request).expect("isolated store");
-            LocalCoordination::new(store, self.project, self.actor, &self.clock, &self.backoff)
+            LocalCoordination::new(
+                store,
+                self.project,
+                self.actor,
+                self.observation_settings(),
+                &self.clock,
+                &self.backoff,
+            )
         }
         fn budget(&self) -> WaitBudget {
             WaitBudget::relay(self.clock.mono_now(), 5).expect("test relay budget")
@@ -826,6 +982,37 @@ mod tests {
         assert_eq!(writer_release, "unknown");
         assert_eq!(record, expected_record);
         assert_eq!(version, expected_version);
+    }
+
+    #[test]
+    fn fallback_observation_preserves_the_declared_cadence_origin_and_reason() {
+        let fixture = Fixture::new();
+        let mut service = fixture.service();
+        let interval_ms = 73;
+        let user_path = provenant_records::PathWire::from_relative(
+            &provenant_core::RelativePath::parse("config.toml").expect("fixture path"),
+        )
+        .expect("fixture wire path");
+        for source in [
+            fixture.observation_settings().source,
+            provenant_config::Origin::User { path: user_path },
+        ] {
+            service.observation = ObservationSettings {
+                local_interval: DurationMicros::from_micros(interval_ms * 1000),
+                source: source.clone(),
+            };
+            let reason = "fixture event source unavailable";
+            let extra = service.observation_extra(None, Some(reason));
+            let observation = &extra["observation"];
+            assert_eq!(observation["mode"], "paced_reread");
+            assert_eq!(observation["source_key"], LOCAL_OBSERVATION_INTERVAL_KEY);
+            assert_eq!(
+                observation["source_origin"],
+                serde_json::to_value(source).expect("origin")
+            );
+            assert_eq!(observation["interval_ms"], interval_ms);
+            assert_eq!(observation["reason"], reason);
+        }
     }
 
     #[test]
@@ -879,6 +1066,7 @@ mod tests {
             &f.root,
             f.project,
             f.actor,
+            f.observation_settings(),
             &f.clock,
             &f.backoff,
             &CancelToken::new(),
@@ -1116,6 +1304,7 @@ mod tests {
             &fixture.root,
             fixture.project,
             fixture.actor,
+            fixture.observation_settings(),
             &clock,
             &clock,
             &cancel,

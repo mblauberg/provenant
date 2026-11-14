@@ -9,37 +9,62 @@ from pathlib import Path
 import subprocess
 import sys
 
-ROOT = Path(__file__).resolve().parent.parent
-PORTS_ASSET = ROOT / "tools/front-door/crates/config/assets/ports.json"
-with PORTS_ASSET.open() as stream:
-    BUILTIN_PORTS = json.load(stream)
-DEFAULTS = BUILTIN_PORTS["verify"]
+SCRIPT_ROOT = Path(__file__).resolve().parent.parent
+ROOT = SCRIPT_ROOT  # Direct repository CI keeps using the script's own checkout.
+PORTS_ASSET = SCRIPT_ROOT / "tools/front-door/crates/config/assets/ports.json"
+try:
+    with PORTS_ASSET.open() as stream:
+        BUILTIN_PORTS = json.load(stream)
+    DEFAULTS = BUILTIN_PORTS["verify"]
+except FileNotFoundError:
+    # Installed product invocations receive the effective verify owner from
+    # Provenant; this source-tree-only default serves direct repository CI.
+    BUILTIN_PORTS = None
+    DEFAULTS = None
 
 
-def config(root):
-    path = root / ".provenant" / "ports.json"
-    if not path.exists():
-        return copy.deepcopy(DEFAULTS)
-    with path.open() as stream:
-        ports = json.load(stream)
-    names = set(BUILTIN_PORTS) - {"schema_version"}
-    if (not isinstance(ports, dict)
-            or type(ports.get("schema_version")) is not int
-            or ports["schema_version"] != BUILTIN_PORTS["schema_version"]
-            or {name for name in ports if name != "schema_version"} != names):
-        raise ValueError("invalid port table shape")
-    verify = ports["verify"]
+def config(root, effective_config_json=None):
+    # Repository CI owns config/ports.json; the optional .provenant entry is a
+    # link for the agent integration, never a build dependency. Provenant passes
+    # only the resolved verify owner so other repository and host ports stay private.
+    if effective_config_json is not None:
+        verify = json.loads(effective_config_json)
+    else:
+        path = root / "config" / "ports.json"
+        if not path.exists():
+            if DEFAULTS is None:
+                raise ValueError("no verify port is available for this project")
+            return copy.deepcopy(DEFAULTS)
+        with path.open() as stream:
+            ports = json.load(stream)
+        names = set(BUILTIN_PORTS) - {"schema_version"}
+        if (not isinstance(ports, dict)
+                or type(ports.get("schema_version")) is not int
+                or ports["schema_version"] != BUILTIN_PORTS["schema_version"]
+                or {name for name in ports if name != "schema_version"} != names):
+            raise ValueError("invalid port table shape")
+        verify = ports.get("verify")
     if not isinstance(verify, dict):
         raise ValueError("invalid verify port")
     if verify.get("default_tier") not in verify.get("tiers", {}):
         raise ValueError("verify default tier must name a declared tier")
-    verify["source"] = "project"
     return verify
+
+
+BRIDGE_ENV = (
+    "PROVENANT_VERIFY_EFFECTIVE_CONFIG_JSON",
+    "PROVENANT_VERIFY_PROJECT_ROOT",
+    "PROVENANT_VERIFY_TIER",
+)
+
+
+def child_environment():
+    return {name: value for name, value in os.environ.items() if name not in BRIDGE_ENV}
 
 
 def changed_paths(root, base):
     def git(*args):
-        return subprocess.check_output(["git", *args], cwd=root, text=True).splitlines()
+        return subprocess.check_output(["git", *args], cwd=root, env=child_environment(), text=True).splitlines()
     paths = set(git("diff", "--name-only", f"{base}...HEAD"))
     paths.update(git("diff", "--name-only", "HEAD"))
     paths.update(git("ls-files", "--others", "--exclude-standard"))
@@ -68,27 +93,34 @@ def select(paths, packages, mappings, package_mappings=()):
 def main():
     import shlex
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tier")
+    parser.add_argument("--tier", default=os.environ.get("PROVENANT_VERIFY_TIER"))
     parser.add_argument("--host", default="local")
+    parser.add_argument("--project", default=os.environ.get("PROVENANT_VERIFY_PROJECT_ROOT", str(ROOT)))
+    parser.add_argument(
+        "--effective-config-json",
+        default=os.environ.get("PROVENANT_VERIFY_EFFECTIVE_CONFIG_JSON"),
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
-    cfg = config(ROOT)
+    root = Path(args.project).resolve()
+    cfg = config(root, args.effective_config_json)
     if not cfg["tiers"]:
         parser.error("no verification tiers are configured")
     args.tier = args.tier or cfg["default_tier"]
     if args.tier not in cfg["tiers"]:
         parser.error(f"no verification tier named {args.tier}")
-    workspace = ROOT / cfg["workspace"]
-    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    workspace = root / cfg["workspace"]
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, env=child_environment(), text=True).strip()
     if args.host != "local":
         runner = cfg["runners"].get(args.host)
         if not runner:
             parser.error(f"no runner configured for {args.host}")
-        refs = subprocess.check_output(["git", "ls-remote", "--heads", cfg["remote"]], cwd=ROOT, text=True)
+        refs = subprocess.check_output(["git", "ls-remote", "--heads", cfg["remote"]], cwd=root, env=child_environment(), text=True)
         if not any(line.split()[0] == commit for line in refs.splitlines() if line.split()):
             parser.error("commit is not the tip of a pushed branch")
         command = [part.replace("{commit}", commit).replace("{tier}", args.tier).replace("{remote}", cfg["remote"]) for part in runner]
         print(f"tier {args.tier} on {args.host}, commit {commit}: {shlex.join(command)}", flush=True)
-        result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+        result = subprocess.run(command, cwd=root, env=child_environment(), capture_output=True, text=True)
         if result.stderr:
             print(result.stderr, file=sys.stderr, end="")
         lines = result.stdout.splitlines()
@@ -115,9 +147,9 @@ def main():
     selection = tier["selection"]
     touched, integrations = [], []
     if selection in ("packages", "integrations"):
-        metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=workspace, text=True))
-        packages = [{"name": p["name"], "manifest_path": str(Path(p["manifest_path"]).relative_to(ROOT))} for p in metadata["packages"] if p["id"] in metadata["workspace_members"]]
-        paths = changed_paths(ROOT, cfg["base"])
+        metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=workspace, env=child_environment(), text=True))
+        packages = [{"name": p["name"], "manifest_path": str(Path(p["manifest_path"]).relative_to(root))} for p in metadata["packages"] if p["id"] in metadata["workspace_members"]]
+        paths = changed_paths(root, cfg["base"])
         touched, integrations = select(
             paths, packages, cfg["integrations"], cfg["package_paths"]
         )
@@ -131,7 +163,7 @@ def main():
     if not templates:
         print(f"{args.tier} has no configured commands", file=sys.stderr)
         return 2
-    env = os.environ.copy()
+    env = child_environment()
     threads = cfg.get("test_threads")
     if threads is not None:
         if type(threads) is not int or threads < 1:
@@ -143,7 +175,7 @@ def main():
     if any("{quarantine_args}" in template for template in templates):
         command = cfg.get("quarantine_command") or ["true"]
         try:
-            quarantine = subprocess.check_output(command, cwd=ROOT, text=True).strip()
+            quarantine = subprocess.check_output(command, cwd=root, env=child_environment(), text=True).strip()
         except (OSError, subprocess.CalledProcessError) as error:
             print(f"quarantine command failed: {error}", file=sys.stderr)
             return 2

@@ -26,7 +26,8 @@ fn repository(project: &Path) -> Result<String> {
 
 fn project_id(resolved: &roots::Resolved) -> Result<Option<ProjectId>> {
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+    let runtime =
+        provenant_confinement::UtilityRuntime::read_only(git, resolved.roots.state.as_path())?;
     let location = runtime
         .project_location(
             &provenant_os::exec::SystemExecutor::new(1)?,

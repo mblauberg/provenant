@@ -402,6 +402,8 @@ pub struct UtilityRuntime {
     /// Lane-writable locations beyond those derived from the repository, such
     /// as the run state directory that holds lane scratch.
     lane_roots: LaneRoots,
+    /// Explicit host config root for effective project and host port declarations.
+    host_state: PathBuf,
 }
 
 /// Where a run's lane scratch and provider state live below the state
@@ -419,7 +421,11 @@ pub struct DiscoveredProject {
 impl UtilityRuntime {
     /// Closed Git reads with HOME/TMPDIR pointing at a non-directory. This
     /// requires no state or temporary-directory creation and grants no mutation.
-    pub fn read_only(git: impl AsRef<Path>) -> Result<Self, UtilityError> {
+    /// The explicit host state is read only when repository lane roots are derived.
+    pub fn read_only(
+        git: impl AsRef<Path>,
+        host_state: impl AsRef<Path>,
+    ) -> Result<Self, UtilityError> {
         Ok(Self {
             git: ExecutablePin::new(git.as_ref(), "git")?,
             home: PrivateHome {
@@ -427,13 +433,20 @@ impl UtilityRuntime {
                 identity: None,
             },
             lane_roots: LaneRoots::default(),
+            host_state: host_state.as_ref().to_owned(),
         })
     }
-    pub fn new(git: impl AsRef<Path>, home: impl AsRef<Path>) -> Result<Self, UtilityError> {
+    /// Open a Git utility using the supplied host state for port declarations.
+    pub fn new(
+        git: impl AsRef<Path>,
+        home: impl AsRef<Path>,
+        host_state: impl AsRef<Path>,
+    ) -> Result<Self, UtilityError> {
         Ok(Self {
             git: ExecutablePin::new(git.as_ref(), "git")?,
             home: PrivateHome::new(home.as_ref())?,
             lane_roots: LaneRoots::default(),
+            host_state: host_state.as_ref().to_owned(),
         })
     }
 
@@ -458,6 +471,7 @@ impl UtilityRuntime {
             repo.private_git_dir(),
             repo.common_git_dir(),
             &self.lane_roots,
+            &self.host_state,
         )?)
     }
 

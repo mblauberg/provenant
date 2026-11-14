@@ -118,10 +118,11 @@ const WRITER_LOCK: &str = "writer.lock";
 /// The configured path for a writer created from a validated branch name.
 pub fn managed_writer_relative_path(
     project: &Path,
+    host_state: &Path,
     branch: &str,
 ) -> Result<PathBuf, WorktreeError> {
     GitRefName::branch(branch).map_err(|_| WorktreeError::InvalidRequest)?;
-    let ports = provenant_config::PortTable::read_project(project)
+    let ports = provenant_config::PortTable::read_for(Some(project), host_state)
         .map_err(WorktreeError::PortConfiguration)?;
     ports
         .managed_writer_path(branch)
@@ -131,17 +132,21 @@ pub fn managed_writer_relative_path(
 /// Resolve a relative path against the configured layout roots.
 pub fn managed_writer_branch(
     project: &Path,
+    host_state: &Path,
     relative: &Path,
 ) -> Result<Option<String>, WorktreeError> {
-    let ports = provenant_config::PortTable::read_project(project)
+    let ports = provenant_config::PortTable::read_for(Some(project), host_state)
         .map_err(WorktreeError::PortConfiguration)?;
     Ok(ports.managed_writer_branch(relative).map(str::to_owned))
 }
 
 /// Configured allocation roots for a host-registered Git common directory.
-/// Project roots use their sourced layout; bare/common-only repositories use
-/// the compiled declaration while retaining the same common-dir anchoring.
-pub(crate) fn allocation_directories(common: &Path) -> Result<Vec<PathBuf>, WorktreeError> {
+/// Project roots use their sourced layout; bare/common-only repositories still
+/// receive host overrides while retaining the same common-dir anchoring.
+pub(crate) fn allocation_directories(
+    common: &Path,
+    host_state: &Path,
+) -> Result<Vec<PathBuf>, WorktreeError> {
     let parent = common.parent().ok_or(WorktreeError::InvalidRequest)?;
     let (base, project) = if common.file_name() == Some(OsStr::new(".git")) {
         (parent, Some(parent))
@@ -169,11 +174,8 @@ pub(crate) fn allocation_directories(common: &Path) -> Result<Vec<PathBuf>, Work
             Err(error) => return Err(error.into()),
         }
     };
-    let ports = match project {
-        Some(project) => provenant_config::PortTable::read_project(project)
-            .map_err(WorktreeError::PortConfiguration)?,
-        None => provenant_config::PortTable::builtin(),
-    };
+    let ports = provenant_config::PortTable::read_for(project, host_state)
+        .map_err(WorktreeError::PortConfiguration)?;
     Ok(ports.worktree_roots_under(base))
 }
 
@@ -587,6 +589,19 @@ pub trait RetirementPort {
         step: provenant_records::custody::RetirementStep,
         state: provenant_records::custody::RetirementStepState,
     ) -> Result<provenant_records::custody::RetirementRecord, WorktreeError>;
+}
+
+impl WorktreeContext<'_> {
+    /// Host config root shared by project and host port declarations.
+    pub fn host_state(&self) -> Result<PathBuf, WorktreeError> {
+        self.project_state
+            .current_path()
+            .map_err(|_| WorktreeError::InvalidRequest)?
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .ok_or(WorktreeError::InvalidRequest)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1006,16 +1021,25 @@ mod worktree_layout_tests {
         .unwrap();
 
         assert_eq!(
-            managed_writer_relative_path(project.path(), "feature/topic").unwrap(),
+            managed_writer_relative_path(project.path(), project.path(), "feature/topic").unwrap(),
             PathBuf::from(".claude/worktrees/feature-topic"),
         );
         assert_eq!(
-            managed_writer_branch(project.path(), Path::new(".worktrees/other")).unwrap(),
+            managed_writer_branch(
+                project.path(),
+                project.path(),
+                Path::new(".worktrees/other")
+            )
+            .unwrap(),
             Some("other".to_owned()),
         );
         assert_eq!(
-            managed_writer_branch(project.path(), Path::new(".claude/worktrees/feature-topic"),)
-                .unwrap(),
+            managed_writer_branch(
+                project.path(),
+                project.path(),
+                Path::new(".claude/worktrees/feature-topic"),
+            )
+            .unwrap(),
             Some("feature-topic".to_owned()),
         );
     }
@@ -1036,7 +1060,7 @@ mod worktree_layout_tests {
         .unwrap();
 
         assert_eq!(
-            allocation_directories(&project.path().join(".git")).unwrap(),
+            allocation_directories(&project.path().join(".git"), project.path()).unwrap(),
             vec![
                 project.path().join("trees"),
                 project.path().join(".claude/worktrees"),

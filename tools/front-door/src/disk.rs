@@ -185,7 +185,7 @@ fn collect_resolved(
     };
     let inventory = (|| -> Result<_, Box<dyn std::error::Error>> {
         let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
-        let utility = UtilityRuntime::read_only(git)?;
+        let utility = UtilityRuntime::read_only(git, state)?;
         let executor = SystemExecutor::new(1)?;
         let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
         let repo = utility.open_repo(&executor, project, budget, &cancel)?;

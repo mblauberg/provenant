@@ -29,7 +29,7 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
         let selected = if globals.project.is_some() {
             use provenant_confinement::{UtilityBudget, UtilityRuntime};
             let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-            let runtime = UtilityRuntime::read_only(git)?;
+            let runtime = UtilityRuntime::read_only(git, resolved.roots.state.as_path())?;
             let executor = provenant_os::exec::SystemExecutor::new(1)?;
             let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5))?;
             let location = runtime

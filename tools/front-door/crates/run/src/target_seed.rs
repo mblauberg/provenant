@@ -21,8 +21,8 @@ pub struct Manifest {
 /// Select the project's Cargo build directory using the same workspace selector
 /// as the verification tiers. Read only data here: lane preparation must never
 /// invoke Cargo (or a writer-controlled compiler) outside confinement.
-pub fn cargo_build_directory(project: &Path) -> io::Result<Option<PathBuf>> {
-    let workspace = provenant_config::PortTable::read_project(project)?
+pub fn cargo_build_directory(project: &Path, host_state: &Path) -> io::Result<Option<PathBuf>> {
+    let workspace = provenant_config::PortTable::read_for(Some(project), host_state)?
         .verify
         .workspace;
     if workspace.is_absolute()
@@ -260,7 +260,7 @@ fn lane_release_pin(worktree: &Path, home: &Path) -> Result<String, &'static str
     {
         return Err(codes::RUSTUP_OVERRIDES_PRESENT);
     }
-    let build = cargo_build_directory(worktree)
+    let build = cargo_build_directory(worktree, host_state)
         .map_err(|_| codes::CARGO_WORKSPACE_UNREADABLE)?
         .ok_or(codes::CARGO_WORKSPACE_MISSING)?;
     // Rustup chooses the nearest pin, including pins above the build directory.
@@ -321,10 +321,14 @@ mod lane_probe_tests {
     #[test]
     fn cargo_selection_uses_project_configuration_and_skips_non_cargo() {
         let root = tempfile::tempdir().unwrap();
-        assert!(cargo_build_directory(root.path()).unwrap().is_none());
+        assert!(
+            cargo_build_directory(root.path(), root.path())
+                .unwrap()
+                .is_none()
+        );
         std::fs::write(root.path().join("Cargo.toml"), "[workspace]\n").unwrap();
         assert_eq!(
-            cargo_build_directory(root.path()).unwrap(),
+            cargo_build_directory(root.path(), root.path()).unwrap(),
             Some(root.path().canonicalize().unwrap())
         );
         let nested = root.path().join("any/depth/workspace");
@@ -339,11 +343,15 @@ mod lane_probe_tests {
         )
         .unwrap();
         assert_eq!(
-            cargo_build_directory(root.path()).unwrap(),
+            cargo_build_directory(root.path(), root.path()).unwrap(),
             Some(nested.canonicalize().unwrap())
         );
         std::fs::remove_file(nested.join("Cargo.toml")).unwrap();
-        assert!(cargo_build_directory(root.path()).unwrap().is_none());
+        assert!(
+            cargo_build_directory(root.path(), root.path())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

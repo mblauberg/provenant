@@ -251,6 +251,7 @@ impl Factory {
                 store,
                 ctx.identity.project,
                 ctx.identity.inbox.actor,
+                ctx.local_observation.clone(),
                 &self.clock,
                 &self.backoff,
             ));
@@ -259,6 +260,7 @@ impl Factory {
             &ctx.roots.state,
             &ctx.identity,
             &ctx.config,
+            ctx.local_observation.clone(),
             &self.home,
             &self.cwd,
             &self.executor,

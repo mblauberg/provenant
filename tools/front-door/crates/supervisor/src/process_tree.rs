@@ -17,8 +17,10 @@ pub const SAMPLE_SCHEMA_VERSION: u32 = 2;
 pub const FILE: &str = "process-tree.json";
 pub const MAX_PROCESSES: usize = 4096;
 const MAX_BYTES: u64 = 1024 * 1024;
-const MAX_AGE_MICROS: u64 = 5_000_000;
 const MAX_SAMPLE_MICROS: u64 = 250_000;
+pub const DEFAULT_SAMPLE_INTERVAL_MS: u64 = 5_000;
+pub const DEFAULT_SAMPLE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(DEFAULT_SAMPLE_INTERVAL_MS);
 
 #[derive(Debug, thiserror::Error)]
 #[error("lane process-tree sample unavailable; retry while the supervisor is running")]
@@ -130,6 +132,7 @@ pub struct Snapshot {
     starts: BTreeMap<u32, u64>,
     boot: String,
     monotonic_micros: u64,
+    freshness_micros: u64,
 }
 
 #[derive(Clone)]
@@ -149,6 +152,7 @@ impl Sampler {
         root: &ProcessIdentity,
         attempt: AttemptId,
         sandboxed: bool,
+        interval: std::time::Duration,
     ) -> Option<Self> {
         let directory = directory.try_clone().ok()?;
         let root = root.clone();
@@ -159,14 +163,14 @@ impl Sampler {
                 loop {
                     // Reconcile transient fork/exit churn without overlapping
                     // walks. Retain the last good observation until it expires.
-                    let snapshot = observe_refresh(|| observe(&root, attempt, sandboxed));
+                    let snapshot = observe_refresh(|| observe(&root, attempt, sandboxed, interval));
                     if receiver.try_recv() != Err(std::sync::mpsc::TryRecvError::Empty) {
                         break;
                     }
                     if let Some(snapshot) = &snapshot {
                         let _ = publish(&directory, Some(snapshot));
                     }
-                    if receiver.recv_timeout(std::time::Duration::from_secs(1))
+                    if receiver.recv_timeout(interval)
                         != Err(std::sync::mpsc::RecvTimeoutError::Timeout)
                     {
                         break;
@@ -187,13 +191,14 @@ impl Drop for Sampler {
 /// Sample only descendants of the supervisor-held provider identity. A child
 /// listing, identity or RSS failure invalidates the whole observation.
 pub fn sample(root: &ProcessIdentity, attempt: AttemptId) -> Result<Snapshot> {
-    observe(root, attempt, true).map_err(|_| Unavailable)
+    observe(root, attempt, true, DEFAULT_SAMPLE_INTERVAL).map_err(|_| Unavailable)
 }
 
 fn observe(
     root: &ProcessIdentity,
     attempt: AttemptId,
     sandboxed: bool,
+    interval: std::time::Duration,
 ) -> ObservationResult<Snapshot> {
     let clock = SystemClock::new();
     let monotonic_micros = clock
@@ -226,6 +231,7 @@ fn observe(
         starts: BTreeMap::new(),
         boot,
         monotonic_micros,
+        freshness_micros: freshness_micros(interval),
     };
     let now = || {
         clock
@@ -370,6 +376,15 @@ pub fn read(path: &Path, root_pid: u32) -> Result<Sample> {
     })
 }
 
+fn freshness_micros(interval: std::time::Duration) -> u64 {
+    u64::try_from(
+        interval
+            .as_micros()
+            .saturating_add(u128::from(MAX_SAMPLE_MICROS)),
+    )
+    .unwrap_or(u64::MAX)
+}
+
 fn select(
     snapshot: Snapshot,
     root_pid: u32,
@@ -382,7 +397,7 @@ fn select(
     let age = now
         .checked_sub(snapshot.monotonic_micros)
         .ok_or(Unavailable)?;
-    if age > MAX_AGE_MICROS
+    if age > snapshot.freshness_micros
         || sample.sampled_at > wall
         || snapshot.boot != boot
         || sample.schema_version != SAMPLE_SCHEMA_VERSION
@@ -620,6 +635,7 @@ mod tests {
                 .collect(),
             boot: "boot".into(),
             monotonic_micros: 1_000_000,
+            freshness_micros: freshness_micros(DEFAULT_SAMPLE_INTERVAL),
         }
     }
 
@@ -694,9 +710,30 @@ mod tests {
     }
 
     #[test]
+    fn process_tree_freshness_follows_the_declared_sampling_interval() {
+        let mut sampled = snapshot();
+        sampled.freshness_micros = freshness_micros(std::time::Duration::from_secs(20));
+        let selected = select(
+            sampled,
+            10,
+            21_000_000,
+            "boot",
+            WallTime::from_micros(21_000_000).unwrap(),
+            |_| Ok(100),
+        )
+        .unwrap();
+        assert_eq!(selected.root_pid, 10);
+    }
+
+    #[test]
     fn process_tree_refuses_stale_reused_foreign_and_incomplete_samples() {
         let wall = WallTime::from_micros(2_000_000).unwrap();
-        assert!(select(snapshot(), 10, 6_000_001, "boot", wall, |_| Ok(100)).is_err());
+        let stale = snapshot();
+        let stale_after = stale
+            .monotonic_micros
+            .saturating_add(stale.freshness_micros)
+            .saturating_add(1);
+        assert!(select(stale, 10, stale_after, "boot", wall, |_| Ok(100)).is_err());
         assert!(select(snapshot(), 10, 999_999, "boot", wall, |_| Ok(100)).is_err());
         assert!(select(snapshot(), 10, 2_000_000, "other-boot", wall, |_| Ok(100)).is_err());
         assert!(select(snapshot(), 10, 2_000_000, "boot", wall, |_| Ok(101)).is_err());

@@ -987,7 +987,7 @@ fn main() -> Result<()> {
     })?;
     let selected_ref = GitRefName::branch(BRANCH)?;
     let git = std::fs::canonicalize(which("git").ok_or("git")?)?;
-    let runtime = UtilityRuntime::new(git.clone(), &layout.home_git)?;
+    let runtime = UtilityRuntime::new(git.clone(), &layout.home_git, &layout.state)?;
     let worktree = if args.writer {
         let repo = runtime.open_repo(
             &executor,

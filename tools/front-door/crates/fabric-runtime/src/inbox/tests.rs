@@ -1544,6 +1544,7 @@ fn chair_mail_is_isolated_to_its_exact_session() {
         &f.root,
         f.identity.project,
         f.identity.inbox.actor,
+        crate::test_support::observation_settings(),
         &f.clock,
         &ThreadPause,
         &f.cancel,

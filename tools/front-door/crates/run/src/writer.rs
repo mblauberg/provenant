@@ -100,7 +100,7 @@ fn runtime(state: &Path) -> Result<UtilityRuntime> {
         Err(e) => return Err(anchored_error(e, state)),
     }
     let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
-    UtilityRuntime::new(&git, home.clone())
+    UtilityRuntime::new(&git, home.clone(), state)
         .map(|runtime| {
             runtime.with_lane_roots(provenant_confinement::utility::lane_state_roots(state))
         })
@@ -1164,7 +1164,8 @@ impl LaunchConfinement {
         if !self.cargo_registry_seed {
             return Outcome::skipped("disabled");
         }
-        let build = match crate::target_seed::cargo_build_directory(worktree) {
+        let build = match crate::target_seed::cargo_build_directory(worktree, &self.writer_registry)
+        {
             Ok(Some(build)) => build,
             Ok(None) => return Outcome::skipped("non_cargo_project"),
             Err(_) => {
@@ -1179,6 +1180,7 @@ impl LaunchConfinement {
                 trusted_lane_toolchain(
                     &self.home,
                     worktree,
+                    &self.writer_registry,
                     environment,
                     &provenant_confinement::write_grants(self.plan.permissions(), &self.profile),
                 )
@@ -1647,6 +1649,7 @@ fn cargo_config_cannot_select_compiler(path: &Path) -> std::result::Result<(), &
 fn trusted_lane_toolchain(
     home: &Path,
     worktree: &Path,
+    host_state: &Path,
     environment: &[(OsString, OsString)],
     grants: &[provenant_confinement::permissions::WriteGrant],
 ) -> std::result::Result<(), &'static str> {
@@ -2197,25 +2200,25 @@ mod cargo_setup_tests {
         std::fs::write(bin.join("rustup"), b"fixture").unwrap();
         std::os::unix::fs::symlink("rustup", bin.join("rustc")).unwrap();
         let env = vec![(OsString::from("PATH"), bin.as_os_str().to_owned())];
-        assert!(trusted_lane_toolchain(&home, &worktree, &env, &[]).is_ok());
+        assert!(trusted_lane_toolchain(&home, &worktree, &home, &env, &[]).is_ok());
         let grant = WriteGrant {
             source: WriteSource::WriteRoot,
             path: home.join(".rustup"),
             scope: PathScope::Subtree,
         };
         assert_eq!(
-            trusted_lane_toolchain(&home, &worktree, &env, &[grant]),
+            trusted_lane_toolchain(&home, &worktree, &home, &env, &[grant]),
             Err(codes::RUSTUP_HOME_WRITABLE)
         );
         let path = std::env::join_paths([&worktree, &bin]).unwrap();
         let unsafe_env = vec![(OsString::from("PATH"), path)];
         assert_eq!(
-            trusted_lane_toolchain(&home, &worktree, &unsafe_env, &[]),
+            trusted_lane_toolchain(&home, &worktree, &home, &unsafe_env, &[]),
             Err(codes::PATH_ENTRY_WRITABLE)
         );
         std::fs::write(worktree.join("rustc"), b"untrusted").unwrap();
         assert_eq!(
-            trusted_lane_toolchain(&home, &worktree, &unsafe_env, &[]),
+            trusted_lane_toolchain(&home, &worktree, &home, &unsafe_env, &[]),
             Err(codes::PATH_ENTRY_WRITABLE)
         );
     }
@@ -2244,7 +2247,7 @@ mod cargo_setup_tests {
         let path = std::env::join_paths([scratch.join("bin").as_path(), bin.as_path()]).unwrap();
         let env = vec![(OsString::from("PATH"), path)];
         assert_eq!(
-            trusted_lane_toolchain(&home, &worktree, &env, &grants),
+            trusted_lane_toolchain(&home, &worktree, &home, &env, &grants),
             Ok(())
         );
         // The scratch directory itself, or a sibling inside it, is not the shim directory.
@@ -2254,6 +2257,7 @@ mod cargo_setup_tests {
             trusted_lane_toolchain(
                 &home,
                 &worktree,
+                &home,
                 &[(OsString::from("PATH"), other)],
                 &grants
             ),
@@ -2262,7 +2266,7 @@ mod cargo_setup_tests {
         // A compiler already present in the shim directory must be the rustup shim.
         std::fs::write(scratch.join("bin/rustc"), b"untrusted").unwrap();
         assert_eq!(
-            trusted_lane_toolchain(&home, &worktree, &env, &grants),
+            trusted_lane_toolchain(&home, &worktree, &home, &env, &grants),
             Err(codes::RUSTC_NOT_RUSTUP_SHIM)
         );
     }
@@ -2385,7 +2389,7 @@ mod cargo_setup_tests {
         )
         .unwrap();
         std::fs::write(nested.join("Cargo.toml"), "[workspace]\n").unwrap();
-        let build = crate::target_seed::cargo_build_directory(&worktree)
+        let build = crate::target_seed::cargo_build_directory(&worktree, tmp.path())
             .unwrap()
             .unwrap();
         std::fs::create_dir_all(cache.join("cargo-home")).unwrap();

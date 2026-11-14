@@ -103,7 +103,8 @@ impl LandTracker {
             roots::Product::Optional,
         )?;
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-        let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+        let runtime =
+            provenant_confinement::UtilityRuntime::read_only(git, resolved.roots.state.as_path())?;
         let location = runtime
             .project_location(
                 &provenant_os::exec::SystemExecutor::new(1)?,
@@ -1372,10 +1373,11 @@ mod land_log_tests {
 #[cfg(test)]
 pub(crate) fn delete_after_check(
     project: &Path,
+    host_state: &Path,
     merged: GitOid,
     between: &[&str],
 ) -> Result<(String, String)> {
-    let git = Git::new()?;
+    let git = Git::new(host_state)?;
     let pull: Pull = serde_json::from_value(serde_json::json!({
         "state": "MERGED",
         "baseRefName": "main",

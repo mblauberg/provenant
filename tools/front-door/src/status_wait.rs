@@ -1,7 +1,6 @@
 //! `provenant wait`: block until graph targets or pull requests settle. A wait
-//! is a reader: neither expiry nor cancellation stops the work. Every target
-//! resolves before the wait starts, and each source polls on its own thread so
-//! a slow read never delays another target.
+//! is a reader: neither expiry nor cancellation stops the work. Local graphs
+//! share one event source; pull requests remain on forge observation.
 // This edge owns the real deadline for channel receives and source I/O.
 #![allow(clippy::disallowed_methods)]
 use provenant_cli::Globals;
@@ -10,9 +9,8 @@ use provenant_records::Outcome;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
-    os::unix::fs::MetadataExt,
-    path::Path,
-    sync::{Condvar, Mutex, mpsc},
+    path::PathBuf,
+    sync::{Arc, Condvar, Mutex, mpsc},
     time::{Duration, Instant},
 };
 
@@ -20,13 +18,16 @@ use std::{
 enum Source {
     Graph(provenant_cli::Target),
     UnreadableGraph(provenant_cli::Target, String),
-    Pr(u64),
+    Pr {
+        number: u64,
+        repository: Result<String, String>,
+    },
 }
 impl Source {
     fn label(&self) -> String {
         match self {
             Self::Graph(target) | Self::UnreadableGraph(target, _) => target.to_string(),
-            Self::Pr(number) => format!("#{number}"),
+            Self::Pr { number, .. } => format!("#{number}"),
         }
     }
 }
@@ -113,9 +114,7 @@ fn classify_rows(label: &str, rows: &[Value]) -> Reading {
     }
 }
 
-/// Read one source. The flag is true when this host's stamped files fully
-/// represent the reading, so later ticks may skip reads while they are
-/// unchanged; see [`Reads`].
+/// Read one source after a native event or a configured fallback tick.
 fn read(
     source: &Source,
     edge: &provenant_cli::run::Edge<'_>,
@@ -123,14 +122,11 @@ fn read(
     deadline: Instant,
     pr_read_timeout: Duration,
     cancel: &CancelToken,
-) -> (Reading, bool) {
+) -> Reading {
     let label = source.label();
     let left = deadline.saturating_duration_since(Instant::now());
     if cancel.is_cancelled() || left.is_zero() {
-        return (
-            Reading::unavailable(&label, "wait deadline or cancellation reached"),
-            false,
-        );
+        return Reading::unavailable(&label, "wait deadline or cancellation reached");
     }
     let reading = match source {
         Source::UnreadableGraph(_, error) => classify_rows(
@@ -144,124 +140,35 @@ fn read(
                 crate::fabric::read_status_rows(target, edge, session, deadline, cancel)
             }) {
                 Ok(rows) => {
-                    let host = session.as_ref().map(|context| &context.identity.host);
-                    return (classify_rows(&label, &rows), rows_local(&rows, host));
+                    return classify_rows(&label, &rows);
                 }
                 Err(error) => Reading::unavailable(&label, &error.to_string()),
             }
         }
-        Source::Pr(number) => match crate::pr::status::wait_line(
-            edge.cwd,
-            edge.roots.state.as_path(),
-            *number,
-            left.min(pr_read_timeout),
-            crate::pr::observer::POLL,
-            Some(cancel),
-        ) {
-            Ok(line) => Reading {
-                settle: match line.verdict() {
-                    Some(true) => Settle::Succeeded,
-                    Some(false) => Settle::Unsuccessful,
-                    None => Settle::Pending,
+        Source::Pr { number, repository } => match repository {
+            Ok(repository) => match crate::pr::status::wait_line_observed(
+                edge.cwd,
+                edge.roots.state.as_path(),
+                repository,
+                *number,
+                left.min(pr_read_timeout),
+                crate::pr::observer::POLL,
+            ) {
+                Ok(line) => Reading {
+                    settle: match line.verdict() {
+                        Some(true) => Settle::Succeeded,
+                        Some(false) => Settle::Unsuccessful,
+                        None => Settle::Pending,
+                    },
+                    line: format!("{label} {}", line.class()),
+                    data: json!(line),
                 },
-                line: format!("{label} {}", line.class()),
-                data: json!(line),
+                Err(error) => Reading::unavailable(&label, &error.to_string()),
             },
-            Err(error) => Reading::unavailable(&label, &error.to_string()),
+            Err(error) => Reading::unavailable(&label, error),
         },
     };
-    (reading, false)
-}
-
-/// Whether every attempt row belongs to `host`. Without a host (a relay from
-/// inside a lane) nothing local backs the rows. Rows of another host were
-/// enriched from that peer's own store, which no file here stamps.
-fn rows_local<H: std::str::FromStr + PartialEq>(rows: &[Value], host: Option<&H>) -> bool {
-    host.is_some_and(|host| {
-        rows.iter().all(|row| {
-            row["kind"] != "attempt"
-                || row["attempt_id"]
-                    .as_str()
-                    .and_then(|id| id.split_once('/'))
-                    .is_none_or(|(owner, _)| owner.parse::<H>().is_ok_and(|owner| &owner == host))
-        })
-    })
-}
-
-/// Longest a local target goes without a full read while its files look
-/// untouched. The read samples sources a file stamp cannot see, such as
-/// process liveness.
-const IDLE_REFRESH: Duration = Duration::from_secs(10);
-
-/// Inode, size and modification time of one file a read depends on.
-type FileStamp = Option<(u64, u64, i64, i64)>;
-
-/// Cheap change hint for a graph source: the metadata of the Run store, its
-/// WAL and the graph checkpoint directory (checkpoints publish by atomic
-/// rename, so the directory changes with every write). Interval ticks compare
-/// stamps and skip the full read, which opens the Run store and the checkpoint,
-/// while nothing has been written. Once a read has opened the project, only
-/// that project's directory is stamped. `None` means the source has no file
-/// hint (a pull request).
-fn stamp(
-    source: &Source,
-    state: &Path,
-    project: Option<provenant_core::ProjectId>,
-) -> Option<Vec<FileStamp>> {
-    if !matches!(source, Source::Graph(_)) {
-        return None;
-    }
-    let mut files = vec![state.join("run.sqlite3"), state.join("run.sqlite3-wal")];
-    let graphs = state.join("fabric").join("graphs");
-    match project {
-        Some(project) => files.push(graphs.join(project.to_string())),
-        None => files.extend(
-            std::fs::read_dir(&graphs)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .map(|entry| entry.path()),
-        ),
-    }
-    Some(
-        files
-            .iter()
-            .map(|path| {
-                let meta = std::fs::metadata(path).ok()?;
-                Some((meta.ino(), meta.size(), meta.mtime(), meta.mtime_nsec()))
-            })
-            .collect(),
-    )
-}
-
-/// Decides when a waiter pays for a full read. The stamp is taken before the
-/// read, so a write that lands during it is seen on the next tick. Only a read
-/// whose reading is fully represented by the stamped files arms the gate, and
-/// the last tick before the deadline always reads, so a wait never times out on
-/// a hint alone.
-#[derive(Default)]
-struct Reads {
-    seen: Option<(Vec<FileStamp>, Instant)>,
-}
-impl Reads {
-    fn due(
-        &self,
-        now: Instant,
-        stamp: Option<&Vec<FileStamp>>,
-        left: Duration,
-        interval: Duration,
-    ) -> bool {
-        match (&self.seen, stamp) {
-            (Some((seen, at)), Some(stamp)) => {
-                left <= interval || seen != stamp || now.duration_since(*at) >= IDLE_REFRESH
-            }
-            _ => true,
-        }
-    }
-    /// `gated` is true for a successful read of a locally represented source.
-    fn record(&mut self, now: Instant, stamp: Option<Vec<FileStamp>>, gated: bool) {
-        self.seen = stamp.filter(|_| gated).map(|stamp| (stamp, now));
-    }
+    reading
 }
 
 /// Cancellation wakes source pauses and interrupts in-flight GitHub reads.
@@ -270,10 +177,24 @@ struct Stop {
     stopped: Mutex<bool>,
     wake: Condvar,
     cancel: CancelToken,
+    event_wake: Mutex<Option<provenant_os::changes::watch::WakeHandle>>,
 }
 impl Stop {
+    fn install_event_wake(&self, wake: provenant_os::changes::watch::WakeHandle) {
+        if let Ok(mut slot) = self.event_wake.lock() {
+            *slot = Some(wake.clone());
+        }
+        if self.cancel.is_cancelled() {
+            let _ = wake.wake();
+        }
+    }
     fn stop(&self) {
         self.cancel.cancel();
+        if let Ok(slot) = self.event_wake.lock() {
+            if let Some(wake) = slot.as_ref() {
+                let _ = wake.wake();
+            }
+        }
         if let Ok(mut stopped) = self.stopped.lock() {
             *stopped = true;
         }
@@ -292,6 +213,323 @@ impl Stop {
 struct Update {
     target: usize,
     reading: Reading,
+}
+
+fn graph_observation_paths(
+    state: &provenant_core::StateRoot,
+    project: provenant_core::ProjectId,
+    graph: &str,
+) -> Result<Vec<PathBuf>, String> {
+    provenant_fabric_runtime::graph::FileJournal::observation_paths(state, project, graph)
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) fn observation_text(
+    watcher: Option<&provenant_os::changes::watch::Watcher>,
+    interval: Duration,
+    fallback: Option<&str>,
+) -> String {
+    match watcher {
+        Some(watcher) => format!(
+            "filesystem events via {}",
+            match watcher.backend() {
+                provenant_os::changes::watch::Backend::Inotify => "inotify",
+                provenant_os::changes::watch::Backend::Kqueue => "kqueue",
+                provenant_os::changes::watch::Backend::Unsupported => "unsupported",
+            }
+        ),
+        None => format!(
+            "paced reread every {} ms (domains.wait.local_interval_ms); event source unavailable: {}",
+            interval.as_millis(),
+            fallback.unwrap_or("no event source")
+        ),
+    }
+}
+
+fn rows_local<H: std::str::FromStr + PartialEq>(rows: &[Value], host: Option<&H>) -> bool {
+    host.is_some_and(|host| {
+        rows.iter().all(|row| {
+            row["kind"] != "attempt"
+                || row["attempt_id"]
+                    .as_str()
+                    .and_then(|id| id.split_once('/'))
+                    .is_none_or(|(owner, _)| owner.parse::<H>().is_ok_and(|owner| &owner == host))
+        })
+    })
+}
+
+fn reading_locally_represented(reading: &Reading, host: Option<&provenant_core::HostId>) -> bool {
+    reading.data["rows"]
+        .as_array()
+        .is_some_and(|rows| rows_local(rows, host))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GraphWake {
+    Event,
+    NativeTimeout,
+    PacedFallback,
+}
+
+/// Distinguishes native notifications from cancellation checkpoints and paced
+/// fallback ticks. Only `PacedFallback` authorizes a state reread without an
+/// event; native timeouts merely let callers check cancellation and deadlines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ObservationWake {
+    Changed,
+    NativeTimeout,
+    Woken,
+    PacedFallback,
+    Cancelled,
+}
+
+/// One host event source for all local observation paths, with an explicit
+/// configured-interval fallback when native registration is unavailable.
+pub(crate) struct LocalObservation {
+    watcher: Option<provenant_os::changes::watch::Watcher>,
+    interval: Duration,
+    fallback: Option<String>,
+    has_local_paths: bool,
+    next_paced: Option<provenant_core::MonoTime>,
+}
+impl LocalObservation {
+    pub(crate) fn subscribe(paths: &[PathBuf], interval: Duration) -> Self {
+        if paths.is_empty() {
+            return Self {
+                watcher: None,
+                interval,
+                fallback: Some("no local event targets".into()),
+                has_local_paths: false,
+                next_paced: None,
+            };
+        }
+        match provenant_os::changes::watch::Watcher::subscribe(paths) {
+            Ok(watcher) => Self {
+                watcher: Some(watcher),
+                interval,
+                fallback: None,
+                has_local_paths: true,
+                next_paced: None,
+            },
+            Err(error) => Self {
+                watcher: None,
+                interval,
+                fallback: Some(error.to_string()),
+                has_local_paths: true,
+                next_paced: None,
+            },
+        }
+    }
+
+    pub(crate) fn paced(interval: Duration, reason: impl Into<String>) -> Self {
+        Self {
+            watcher: None,
+            interval,
+            fallback: Some(reason.into()),
+            has_local_paths: true,
+            next_paced: None,
+        }
+    }
+
+    pub(crate) fn interval(&self) -> Duration {
+        self.interval
+    }
+
+    pub(crate) fn report(&self, remote_pending: bool) -> String {
+        if !self.has_local_paths {
+            return if remote_pending {
+                format!(
+                    "peer statuses reread every {} ms (domains.wait.local_interval_ms); no local event targets",
+                    self.interval.as_millis()
+                )
+            } else {
+                "no local event targets".into()
+            };
+        }
+        observation_text_with_remote(
+            self.watcher.as_ref(),
+            self.interval,
+            self.fallback.as_deref(),
+            remote_pending,
+        )
+    }
+
+    pub(crate) fn wait(
+        &mut self,
+        maximum: Duration,
+        cancel: &CancelToken,
+        clock: &(impl provenant_core::Clock + ?Sized),
+    ) -> Result<ObservationWake, provenant_core::TimeError> {
+        if cancel.is_cancelled() {
+            return Ok(ObservationWake::Cancelled);
+        }
+        let slice = maximum.min(Duration::from_millis(250));
+        let native_deadline = if self.watcher.is_some() {
+            Some(
+                clock
+                    .mono_now()
+                    .checked_add(provenant_core::DurationMicros::from_micros(
+                        slice.as_micros() as u64,
+                    ))?,
+            )
+        } else {
+            None
+        };
+        if let Some(deadline) = native_deadline {
+            let result = match self.watcher.as_mut() {
+                Some(watcher) => watcher.wait(slice),
+                None => return self.wait_paced(maximum, cancel, clock),
+            };
+            if cancel.is_cancelled() {
+                return Ok(ObservationWake::Cancelled);
+            }
+            match result {
+                Ok(provenant_os::changes::watch::WaitOutcome::Changed) => {
+                    return Ok(ObservationWake::Changed);
+                }
+                Ok(provenant_os::changes::watch::WaitOutcome::TimedOut) => {
+                    // Native waits use real kernel time. Advance injected clocks
+                    // to the same pre-wait checkpoint without rereading state.
+                    if !slice.is_zero() {
+                        clock.wait_until(deadline)?;
+                    }
+                    return Ok(ObservationWake::NativeTimeout);
+                }
+                Ok(provenant_os::changes::watch::WaitOutcome::Woken) => {
+                    return Ok(ObservationWake::Woken);
+                }
+                Err(error) => {
+                    // A failed native source becomes an explicit, reported
+                    // paced fallback. Do not reread until its configured tick.
+                    self.watcher = None;
+                    self.fallback = Some(error.to_string());
+                }
+            }
+        }
+        self.wait_paced(maximum, cancel, clock)
+    }
+
+    fn wait_paced(
+        &mut self,
+        maximum: Duration,
+        cancel: &CancelToken,
+        clock: &(impl provenant_core::Clock + ?Sized),
+    ) -> Result<ObservationWake, provenant_core::TimeError> {
+        let interval =
+            provenant_core::DurationMicros::from_micros(self.interval.as_micros() as u64);
+        let due = match self.next_paced {
+            Some(due) => due,
+            None => {
+                let due = clock.mono_now().checked_add(interval)?;
+                self.next_paced = Some(due);
+                due
+            }
+        };
+        let now = clock.mono_now();
+        if now >= due {
+            self.next_paced = Some(now.checked_add(interval)?);
+            return Ok(ObservationWake::PacedFallback);
+        }
+
+        let requested =
+            clock
+                .mono_now()
+                .checked_add(provenant_core::DurationMicros::from_micros(
+                    maximum.as_micros().min(u64::MAX as u128) as u64,
+                ))?;
+        let wake_at = requested.min(due);
+        while !cancel.is_cancelled() {
+            let now = clock.mono_now();
+            if now >= wake_at {
+                break;
+            }
+            let remaining = wake_at.as_micros().saturating_sub(now.as_micros());
+            let slice = Duration::from_micros(remaining).min(Duration::from_millis(250));
+            let slice_deadline = now.checked_add(provenant_core::DurationMicros::from_micros(
+                slice.as_micros() as u64,
+            ))?;
+            clock.wait_until(slice_deadline)?;
+        }
+        if cancel.is_cancelled() {
+            return Ok(ObservationWake::Cancelled);
+        }
+        let now = clock.mono_now();
+        if now >= due {
+            // Start the next period at this observed tick, preserving a single
+            // reread even if a remote wait shortened each preceding call.
+            self.next_paced = Some(now.checked_add(interval)?);
+            Ok(ObservationWake::PacedFallback)
+        } else {
+            Ok(ObservationWake::NativeTimeout)
+        }
+    }
+}
+
+fn graph_reads_for_wake(
+    pending: &[usize],
+    remote: &std::collections::BTreeSet<usize>,
+    wake: GraphWake,
+) -> Vec<usize> {
+    match wake {
+        GraphWake::Event => pending
+            .iter()
+            .copied()
+            .filter(|index| !remote.contains(index))
+            .collect(),
+        GraphWake::NativeTimeout => Vec::new(),
+        GraphWake::PacedFallback => pending.to_vec(),
+    }
+}
+
+fn include_due_remote_reads(
+    reads: &mut Vec<usize>,
+    pending: &[usize],
+    remote: &std::collections::BTreeSet<usize>,
+    remote_poll_due: bool,
+) {
+    if remote_poll_due {
+        let due = pending
+            .iter()
+            .copied()
+            .filter(|index| remote.contains(index) && !reads.contains(index))
+            .collect::<Vec<_>>();
+        reads.extend(due);
+    }
+}
+
+fn observation_text_with_remote(
+    watcher: Option<&provenant_os::changes::watch::Watcher>,
+    interval: Duration,
+    fallback: Option<&str>,
+    remote_pending: bool,
+) -> String {
+    let mut text = observation_text(watcher, interval, fallback);
+    if remote_pending {
+        text.push_str(&format!(
+            "; peer/relay or unrepresented rows reread every {} ms (domains.wait.local_interval_ms) because the relay has no remote event subscription",
+            interval.as_millis()
+        ));
+    }
+    text
+}
+
+#[derive(Default)]
+struct ObservationHistory {
+    remote_source_seen: bool,
+}
+impl ObservationHistory {
+    fn record(&mut self, reading: &Reading, host: Option<&provenant_core::HostId>) {
+        self.remote_source_seen |= !reading_locally_represented(reading, host);
+    }
+
+    fn render(
+        &self,
+        watcher: Option<&provenant_os::changes::watch::Watcher>,
+        interval: Duration,
+        fallback: Option<&str>,
+    ) -> String {
+        observation_text_with_remote(watcher, interval, fallback, self.remote_source_seen)
+    }
 }
 
 /// Only terminal node/attempt states produce settlement events. In particular
@@ -494,7 +732,102 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     let deadline = Instant::now()
         + Duration::from_secs(settings.timeout(command.timeout, max_origin.as_ref()));
     let stop = Stop::default();
+    let interval = Duration::from_millis(settings.local_interval_ms);
     let mut sources: Vec<Source> = command.targets.iter().cloned().map(Source::Graph).collect();
+
+    // Subscribe before the first status read so settlement during preflight
+    // remains queued for the single local graph worker.
+    let project = if provenant_cli::fabric::in_lane() {
+        Err(
+            "lane targets are read through their owner; local event files are unavailable"
+                .to_owned(),
+        )
+    } else {
+        provenant_cli::fabric::Context::open_read_only(
+            resolved.roots.clone(),
+            &resolved.home,
+            &resolved.project,
+        )
+        .map(|context| (context.identity.project, context.identity.host))
+        .map_err(|error| format!("cannot resolve project event logs: {error}"))
+    };
+    let local_host = project.as_ref().ok().map(|(_, host)| host.clone());
+    let project_error = project.as_ref().err().cloned();
+    let mut pending_index_error = None;
+    let mut observation_path_error = None;
+    let event_paths = match project {
+        Ok((project, _)) if !command.targets.is_empty() => {
+            let paths = command
+                .targets
+                .iter()
+                .map(|target| graph_observation_paths(&resolved.roots.state, project, &target.name))
+                .collect::<Result<Vec<_>, _>>();
+            match paths {
+                Ok(paths) => paths.into_iter().flatten().collect(),
+                Err(error) => {
+                    observation_path_error =
+                        Some(format!("cannot resolve graph observation paths: {error}"));
+                    Vec::new()
+                }
+            }
+        }
+        Ok((project, _)) if command.prs.is_empty() => {
+            let names = provenant_fabric_runtime::graph::FileJournal::pending_graph_ids(
+                &resolved.roots.state,
+                project,
+            )
+            .map_err(|error| format!("cannot resolve pending graph events: {error}"));
+            match names {
+                Ok(names) => {
+                    let names = names
+                        .into_iter()
+                        .take(settings.max_targets as usize)
+                        .collect::<Vec<_>>();
+                    match names
+                        .iter()
+                        .map(|name| graph_observation_paths(&resolved.roots.state, project, name))
+                        .collect::<Result<Vec<_>, _>>()
+                    {
+                        Ok(paths) => paths.into_iter().flatten().collect(),
+                        Err(error) => {
+                            observation_path_error =
+                                Some(format!("cannot resolve graph observation paths: {error}"));
+                            Vec::new()
+                        }
+                    }
+                }
+                Err(error) => {
+                    pending_index_error = Some(error);
+                    Vec::new()
+                }
+            }
+        }
+        _ => Vec::new(),
+    };
+    let setup_fallback = project_error
+        .or(pending_index_error)
+        .or(observation_path_error);
+    let (mut event_watcher, initial_fallback) = if event_paths.is_empty() {
+        (
+            None,
+            setup_fallback.unwrap_or_else(|| "no local graph targets".to_owned()),
+        )
+    } else {
+        match provenant_os::changes::watch::Watcher::subscribe(&event_paths) {
+            Ok(watcher) => (Some(watcher), String::new()),
+            Err(error) => (None, setup_fallback.unwrap_or_else(|| error.to_string())),
+        }
+    };
+    let fallback_reason = event_watcher.is_none().then(|| initial_fallback.clone());
+    if let Some(watcher) = &event_watcher {
+        stop.install_event_wake(watcher.wake_handle());
+    }
+    let observation = Arc::new(Mutex::new(observation_text_with_remote(
+        event_watcher.as_ref(),
+        interval,
+        fallback_reason.as_deref(),
+        false,
+    )));
     let mut validation = std::collections::BTreeMap::new();
     if let Err(error) = provenant_sqlite::with_busy_timeout(Duration::ZERO, || {
         crate::fabric::check_targets(
@@ -545,8 +878,8 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     let mut prs = command.prs.clone();
     prs.sort_unstable();
     prs.dedup();
-    sources.extend(prs.into_iter().map(Source::Pr));
-    if sources.len() > settings.max_targets as usize {
+    let pr_read_timeout = Duration::from_secs(settings.pr_read_timeout_seconds);
+    if sources.len() + prs.len() > settings.max_targets as usize {
         return crate::fail(
             "wait",
             Outcome::Invalid,
@@ -555,7 +888,18 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             globals,
         );
     }
-    let pr_read_timeout = Duration::from_secs(settings.pr_read_timeout_seconds);
+    if !prs.is_empty() {
+        let repository = crate::pr::status::wait_repository(
+            edge.roots.state.as_path(),
+            &edge.cwd,
+            pr_read_timeout,
+        )
+        .map_err(|error| error.to_string());
+        sources.extend(prs.into_iter().map(|number| Source::Pr {
+            number,
+            repository: repository.clone(),
+        }));
+    }
     let mut latest: Vec<Option<Reading>> = sources
         .iter()
         .map(|source| validation.get(&source.label()).cloned())
@@ -610,45 +954,77 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         }
     }
     let (sender, receiver) = mpsc::sync_channel(128);
+    let graph_indices = sources
+        .iter()
+        .enumerate()
+        .filter_map(|(index, source)| match source {
+            Source::Graph(_) | Source::UnreadableGraph(..) => Some(index),
+            Source::Pr { .. } => None,
+        })
+        .collect::<Vec<_>>();
     let done = std::thread::scope(|scope| {
-        for (index, source) in sources.iter().enumerate() {
-            if latest[index].as_ref().is_some_and(Reading::done) {
-                continue;
-            }
-            let sampled = latest[index].is_some();
+        if !graph_indices.is_empty() {
             let sender = sender.clone();
             let edge = &edge;
             let stop = &stop;
-            let interval = Duration::from_millis(match source {
-                Source::Pr(_) => settings.pr_interval_ms,
-                Source::Graph(_) | Source::UnreadableGraph(..) => settings.local_interval_ms,
-            });
-            scope.spawn(move || {
-                if sampled
-                    && !stop.pause(interval.min(deadline.saturating_duration_since(Instant::now())))
-                {
-                    return;
-                }
-                let mut reads = Reads::default();
-                let mut session = None;
-                loop {
-                    let left = deadline.saturating_duration_since(Instant::now());
-                    if stop.cancel.is_cancelled() {
-                        break;
-                    }
-                    let project = session
+            let observation = Arc::clone(&observation);
+            let pending = graph_indices
+                .iter()
+                .copied()
+                .filter(|index| {
+                    latest[*index]
                         .as_ref()
-                        .map(|context: &provenant_cli::fabric::Context| context.identity.project);
-                    let stamped = stamp(source, edge.roots.state.as_path(), project);
-                    if !left.is_zero()
-                        && !reads.due(Instant::now(), stamped.as_ref(), left, interval)
-                    {
-                        if !stop.pause(interval.min(left)) {
-                            break;
-                        }
+                        .is_none_or(|reading| !reading.done())
+                })
+                .collect::<Vec<_>>();
+            let initial_reads = pending
+                .iter()
+                .copied()
+                .filter(|index| latest[*index].is_none())
+                .collect::<Vec<_>>();
+            let graph_sources = graph_indices
+                .iter()
+                .map(|index| (*index, sources[*index].clone()))
+                .collect::<Vec<_>>();
+            let local_host = local_host.clone();
+            let mut watcher = event_watcher.take();
+            let mut fallback_reason = fallback_reason.clone();
+            let mut remote_indices = pending
+                .iter()
+                .copied()
+                .filter(|index| {
+                    latest[*index].as_ref().is_none_or(|reading| {
+                        !reading_locally_represented(reading, local_host.as_ref())
+                    })
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            let mut observation_history = ObservationHistory::default();
+            for index in &pending {
+                if let Some(reading) = latest[*index].as_ref() {
+                    observation_history.record(reading, local_host.as_ref());
+                }
+            }
+            if let Ok(mut current) = observation.lock() {
+                *current = observation_history.render(
+                    watcher.as_ref(),
+                    interval,
+                    fallback_reason.as_deref(),
+                );
+            }
+            scope.spawn(move || {
+                let mut session = None;
+                let mut observation_history = observation_history;
+                let mut pending = pending;
+                // Read once for rows that arrived after preflight or were not
+                // represented in its sample before waiting for an event.
+                for index in initial_reads {
+                    let Some((_, source)) = graph_sources
+                        .iter()
+                        .find(|(candidate, _)| *candidate == index)
+                    else {
                         continue;
-                    }
-                    let (reading, local) = read(
+                    };
+                    let reading = read(
                         source,
                         edge,
                         &mut session,
@@ -656,7 +1032,184 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         pr_read_timeout,
                         &stop.cancel,
                     );
-                    reads.record(Instant::now(), stamped, local);
+                    observation_history.record(&reading, local_host.as_ref());
+                    let locally_represented =
+                        reading_locally_represented(&reading, local_host.as_ref());
+                    if locally_represented {
+                        remote_indices.remove(&index);
+                    } else {
+                        remote_indices.insert(index);
+                    }
+                    let finished = reading.done();
+                    if finished {
+                        remote_indices.remove(&index);
+                        pending.retain(|candidate| *candidate != index);
+                    }
+                    if let Ok(mut current) = observation.lock() {
+                        *current = observation_history.render(
+                            watcher.as_ref(),
+                            interval,
+                            fallback_reason.as_deref(),
+                        );
+                    }
+                    if sender
+                        .send(Update {
+                            target: index,
+                            reading,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                let mut next_remote_poll = Instant::now() + interval;
+                while !pending.is_empty() && !stop.cancel.is_cancelled() {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        break;
+                    }
+                    let wake = if let Some(source) = watcher.as_mut() {
+                        let until_remote = if remote_indices.is_empty() {
+                            left
+                        } else {
+                            next_remote_poll.saturating_duration_since(Instant::now())
+                        };
+                        let wait_for = left.min(until_remote);
+                        match source.wait(wait_for) {
+                            Ok(provenant_os::changes::watch::WaitOutcome::Changed) => {
+                                Some(GraphWake::Event)
+                            }
+                            Ok(provenant_os::changes::watch::WaitOutcome::TimedOut) => {
+                                if deadline.saturating_duration_since(Instant::now()).is_zero() {
+                                    break;
+                                }
+                                Some(GraphWake::NativeTimeout)
+                            }
+                            Ok(provenant_os::changes::watch::WaitOutcome::Woken) => break,
+                            Err(error) => {
+                                watcher = None;
+                                fallback_reason = Some(format!("event source failed: {error}"));
+                                if let Ok(mut current) = observation.lock() {
+                                    *current = observation_history.render(
+                                        None,
+                                        interval,
+                                        fallback_reason.as_deref(),
+                                    );
+                                }
+                                let left = deadline.saturating_duration_since(Instant::now());
+                                if !stop.pause(interval.min(left)) {
+                                    break;
+                                }
+                                Some(GraphWake::PacedFallback)
+                            }
+                        }
+                    } else {
+                        if !stop.pause(interval.min(left)) {
+                            break;
+                        }
+                        Some(GraphWake::PacedFallback)
+                    };
+                    let Some(wake) = wake else {
+                        continue;
+                    };
+                    // A local event may race with the remote cadence boundary.
+                    // Include remote targets whenever that absolute deadline has
+                    // elapsed, regardless of how often local events arrive.
+                    let remote_poll_due =
+                        !remote_indices.is_empty() && Instant::now() >= next_remote_poll;
+                    let mut reads = graph_reads_for_wake(&pending, &remote_indices, wake);
+                    include_due_remote_reads(
+                        &mut reads,
+                        &pending,
+                        &remote_indices,
+                        remote_poll_due,
+                    );
+                    let polled_remote = reads.iter().any(|index| remote_indices.contains(index));
+                    for index in reads {
+                        if stop.cancel.is_cancelled() {
+                            break;
+                        }
+                        let Some((_, source)) = graph_sources
+                            .iter()
+                            .find(|(candidate, _)| *candidate == index)
+                        else {
+                            continue;
+                        };
+                        let reading = read(
+                            source,
+                            edge,
+                            &mut session,
+                            deadline,
+                            pr_read_timeout,
+                            &stop.cancel,
+                        );
+                        observation_history.record(&reading, local_host.as_ref());
+                        let locally_represented =
+                            reading_locally_represented(&reading, local_host.as_ref());
+                        if locally_represented {
+                            remote_indices.remove(&index);
+                        } else {
+                            remote_indices.insert(index);
+                        }
+                        let finished = reading.done();
+                        if finished {
+                            remote_indices.remove(&index);
+                            pending.retain(|candidate| *candidate != index);
+                        }
+                        if let Ok(mut current) = observation.lock() {
+                            *current = observation_history.render(
+                                watcher.as_ref(),
+                                interval,
+                                fallback_reason.as_deref(),
+                            );
+                        }
+                        if sender
+                            .send(Update {
+                                target: index,
+                                reading,
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    if polled_remote {
+                        next_remote_poll = Instant::now() + interval;
+                    }
+                }
+            });
+        }
+        for (index, source) in sources.iter().enumerate() {
+            if !matches!(source, Source::Pr { .. })
+                || latest[index].as_ref().is_some_and(Reading::done)
+            {
+                continue;
+            }
+            let sampled = latest[index].is_some();
+            let sender = sender.clone();
+            let edge = &edge;
+            let stop = &stop;
+            let interval = Duration::from_millis(settings.pr_interval_ms);
+            scope.spawn(move || {
+                if sampled
+                    && !stop.pause(interval.min(deadline.saturating_duration_since(Instant::now())))
+                {
+                    return;
+                }
+                let mut session = None;
+                loop {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if stop.cancel.is_cancelled() {
+                        break;
+                    }
+                    let reading = read(
+                        source,
+                        edge,
+                        &mut session,
+                        deadline,
+                        pr_read_timeout,
+                        &stop.cancel,
+                    );
                     let finished = reading.done();
                     if sender
                         .send(Update {
@@ -725,11 +1278,18 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     if !done {
         human.push_str("wait timed out; the work continues\n");
     }
+    let observation = observation
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_else(|_| "event source status unavailable".into());
+    if !graph_indices.is_empty() {
+        human.push_str(&format!("local observation: {observation}\n"));
+    }
     crate::emit(
         &provenant_records::CommandResult::new(
             "wait",
             outcome,
-            json!({"targets":rows,"timed_out":!done}),
+            json!({"targets":rows,"timed_out":!done,"local_observation":if graph_indices.is_empty(){Value::Null}else{json!(observation)}}),
         ),
         globals,
         &human,
@@ -748,6 +1308,179 @@ fn write_line(line: &str) -> std::io::Result<()> {
 #[allow(dead_code)] // Also included by the worktree driver without libtest.
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_selection_with_peer_or_relayed_attempts_is_not_locally_represented() {
+        let row = |id: &str| json!({"kind": "attempt", "attempt_id": id});
+        let here = "aa".to_owned();
+        assert!(rows_local(
+            &[row("aa/1"), json!({"kind": "graph"})],
+            Some(&here)
+        ));
+        assert!(!rows_local(&[row("aa/1"), row("bb/2")], Some(&here)));
+        assert!(!rows_local::<String>(&[row("aa/1")], None));
+    }
+
+    #[test]
+    fn completed_peer_source_remains_in_final_observation() {
+        let host = "aa".to_owned();
+        let completed_peer = Reading {
+            settle: Settle::Succeeded,
+            line: "peer settled".into(),
+            data: json!({"rows":[{"kind":"attempt","attempt_id":"bb/2"}]}),
+        };
+        let mut history = ObservationHistory::default();
+        history.record(&completed_peer, Some(&host));
+
+        let final_observation = history.render(
+            None,
+            Duration::from_millis(500),
+            Some("event source unavailable: fixture parent missing"),
+        );
+        assert!(completed_peer.done());
+        assert!(final_observation.contains("peer/relay or unrepresented rows reread every 500 ms"));
+    }
+
+    #[test]
+    fn local_observation_reports_the_fallback_source_and_reason() {
+        let observation = LocalObservation::paced(
+            Duration::from_millis(40),
+            "fixture has no native event backend",
+        );
+        let report = observation.report(false);
+        assert!(report.contains("domains.wait.local_interval_ms"));
+        assert!(report.contains("fixture has no native event backend"));
+    }
+
+    #[test]
+    fn repeated_short_waits_eventually_reach_one_paced_fallback_tick() {
+        let interval = Duration::from_millis(40);
+        let mut observation = LocalObservation::paced(interval, "fixture event source unavailable");
+        let clock = provenant_core::TestClock::new(
+            provenant_core::WallTime::from_micros(0).expect("valid fixture time"),
+            provenant_core::MonoTime::from_micros(0),
+        );
+        for _ in 0..3 {
+            assert_eq!(
+                observation
+                    .wait(Duration::from_millis(10), &CancelToken::new(), &clock)
+                    .expect("fixture clock can advance"),
+                ObservationWake::NativeTimeout
+            );
+        }
+        assert_eq!(
+            observation
+                .wait(Duration::from_millis(10), &CancelToken::new(), &clock)
+                .expect("fixture clock can advance"),
+            ObservationWake::PacedFallback
+        );
+        assert_eq!(clock.mono_now().as_micros(), 40_000);
+        assert_eq!(
+            observation
+                .wait(Duration::from_millis(10), &CancelToken::new(), &clock)
+                .expect("next cadence remains paced"),
+            ObservationWake::NativeTimeout
+        );
+        assert_eq!(clock.mono_now().as_micros(), 50_000);
+    }
+
+    #[test]
+    fn registration_does_not_create_an_event_log_and_empty_timeout_is_not_a_read() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let log = directory.path().join("graph.events.jsonl");
+        let mut observation = LocalObservation::subscribe(&[log.clone()], Duration::from_secs(1));
+        assert!(!log.exists());
+        let clock = provenant_core::TestClock::new(
+            provenant_core::WallTime::from_micros(0).expect("valid fixture time"),
+            provenant_core::MonoTime::from_micros(0),
+        );
+        let wake = observation
+            .wait(Duration::ZERO, &CancelToken::new(), &clock)
+            .expect("zero deadline does not touch the clock");
+        assert_eq!(wake, ObservationWake::NativeTimeout);
+    }
+
+    #[test]
+    fn a_short_fallback_deadline_is_not_mistaken_for_a_paced_tick() {
+        let mut observation = LocalObservation::paced(
+            Duration::from_secs(1),
+            "fixture has no native event backend",
+        );
+        let clock = provenant_core::TestClock::new(
+            provenant_core::WallTime::from_micros(0).expect("valid fixture time"),
+            provenant_core::MonoTime::from_micros(0),
+        );
+        let wake = observation
+            .wait(Duration::ZERO, &CancelToken::new(), &clock)
+            .expect("zero deadline does not touch the clock");
+        assert_eq!(wake, ObservationWake::NativeTimeout);
+    }
+
+    #[test]
+    fn graph_events_read_only_local_sources_and_remote_deadlines_add_remote_sources() {
+        let pending = [0, 1, 2];
+        let remote = [1, 2].into_iter().collect();
+        let as_set = |indices: Vec<usize>| {
+            indices
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let event_reads = graph_reads_for_wake(&pending, &remote, GraphWake::Event);
+        assert_eq!(as_set(event_reads.clone()), [0].into_iter().collect());
+        let native_timeout = graph_reads_for_wake(&pending, &remote, GraphWake::NativeTimeout);
+        assert!(native_timeout.is_empty());
+        let mut due_event_reads = event_reads;
+        include_due_remote_reads(&mut due_event_reads, &pending, &remote, true);
+        assert_eq!(as_set(due_event_reads), pending.into_iter().collect());
+        let mut due_timeout_reads = native_timeout;
+        include_due_remote_reads(&mut due_timeout_reads, &pending, &remote, true);
+        assert_eq!(as_set(due_timeout_reads), [1, 2].into_iter().collect());
+        assert_eq!(
+            as_set(graph_reads_for_wake(
+                &pending,
+                &remote,
+                GraphWake::PacedFallback
+            )),
+            pending.into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn a_flood_of_local_events_cannot_starve_a_due_remote_poll() {
+        let pending = [0, 1];
+        let remote = [1].into_iter().collect();
+        let origin = Instant::now();
+        let interval = Duration::from_millis(100);
+        let next_remote_poll = origin + interval;
+
+        for elapsed in (0..100).step_by(10) {
+            let now = origin + Duration::from_millis(elapsed);
+            let mut reads = graph_reads_for_wake(&pending, &remote, GraphWake::Event);
+            include_due_remote_reads(&mut reads, &pending, &remote, now >= next_remote_poll);
+            assert_eq!(reads, [0]);
+        }
+        let due = origin + interval;
+        let mut due_reads = graph_reads_for_wake(&pending, &remote, GraphWake::Event);
+        include_due_remote_reads(&mut due_reads, &pending, &remote, due >= next_remote_poll);
+        assert_eq!(due_reads, pending);
+        let next_remote_poll = due + interval;
+        let mut next_reads = graph_reads_for_wake(&pending, &remote, GraphWake::Event);
+        include_due_remote_reads(
+            &mut next_reads,
+            &pending,
+            &remote,
+            due + Duration::from_millis(99) >= next_remote_poll,
+        );
+        assert_eq!(next_reads, [0]);
+        let mut second_due_reads = graph_reads_for_wake(&pending, &remote, GraphWake::Event);
+        include_due_remote_reads(
+            &mut second_due_reads,
+            &pending,
+            &remote,
+            due + interval >= next_remote_poll,
+        );
+        assert_eq!(second_due_reads, pending);
+    }
 
     #[test]
     fn failed_reread_retains_the_last_snapshot_as_stale() {
@@ -830,7 +1563,7 @@ mod tests {
             .into_iter()
             .find(|graph| graph.target.name == "broken")
             .ok_or("broken graph was hidden")?;
-        let (reading, _) = read(
+        let reading = read(
             &Source::UnreadableGraph(graph.target, graph.error.ok_or("decode failure")?),
             &edge,
             &mut None,
@@ -843,47 +1576,11 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn idle_source_skips_reads_until_its_files_change_or_the_refresh_lapses() {
-        let now = Instant::now();
-        let (base, far) = (Duration::from_millis(500), Duration::from_secs(60));
-        let stamp = vec![Some((1, 10, 5, 0))];
-        let mut reads = Reads::default();
-        assert!(
-            reads.due(now, Some(&stamp), far, base),
-            "first read is always due"
-        );
-        reads.record(now, Some(stamp.clone()), true);
-        let soon = now + IDLE_REFRESH / 2;
-        assert!(!reads.due(soon, Some(&stamp), far, base));
-        assert!(reads.due(soon, Some(&vec![Some((1, 11, 6, 0))]), far, base));
-        assert!(reads.due(now + IDLE_REFRESH, Some(&stamp), far, base));
-        assert!(
-            reads.due(soon, None, far, base),
-            "sources without a file hint always read"
-        );
-        assert!(
-            reads.due(now, Some(&stamp), base, base),
-            "the last tick before the deadline reads whatever the stamp says"
-        );
-        reads.record(soon, Some(stamp.clone()), false);
-        assert!(
-            reads.due(soon, Some(&stamp), far, base),
-            "a failed read, or one the files do not fully represent, is never gated"
-        );
-    }
+    // File-stamp gates were removed with local polling; native event wake
+    // coverage lives beside the OS port, with paced fallback exercised by reads.
 
-    #[test]
-    fn a_selection_with_peer_or_relayed_attempts_is_not_locally_represented() {
-        let row = |id: &str| json!({"kind": "attempt", "attempt_id": id});
-        let here = "aa".to_owned();
-        assert!(rows_local(
-            &[row("aa/1"), json!({"kind": "graph"})],
-            Some(&here)
-        ));
-        assert!(!rows_local(&[row("aa/1"), row("bb/2")], Some(&here)));
-        assert!(!rows_local::<String>(&[row("aa/1")], None));
-    }
+    // Local-stamp ownership checks were removed with file polling. Native graph
+    // event subscription is covered by the OS port's multi-log invariant.
 
     #[test]
     fn preflight_expiry_and_cancellation_use_wait_exit_codes() {

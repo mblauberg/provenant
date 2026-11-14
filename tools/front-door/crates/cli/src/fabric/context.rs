@@ -29,6 +29,7 @@ pub struct Context {
     pub roots: Roots,
     pub identity: Identity,
     pub config: FabricConfig,
+    pub local_observation: provenant_fabric_runtime::coordination::ObservationSettings,
     /// Project ports resolved once from the discovered project root.
     pub port_table: provenant_config::PortTable,
     /// Origin captured with the effective graph configuration.
@@ -192,11 +193,11 @@ pub fn acquire_custody(
         )),
     }
 }
-pub fn checkout_branch(path: &Path) -> Result<Option<String>, EdgeError> {
+pub fn checkout_branch(roots: &Roots, path: &Path) -> Result<Option<String>, EdgeError> {
     use provenant_confinement::repo::GitRevision;
     use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime};
     let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
-    let runtime = UtilityRuntime::read_only(git)?;
+    let runtime = UtilityRuntime::read_only(git, roots.state.as_path())?;
     let executor = SystemExecutor::new(1)?;
     let cancel = CancelToken::new();
     let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
@@ -250,6 +251,7 @@ impl Context {
         let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
+        let local_observation = crate::wait::observation_settings(&resolved);
         let config = resolved.domains.fabric;
         private_dir(roots.state.as_path(), roots.state.as_path())?;
         let utility_root = if in_lane() {
@@ -266,10 +268,11 @@ impl Context {
         private_dir(utility_anchor, &utility_home)?;
         let lane = in_lane();
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
-        let runtime = provenant_confinement::UtilityRuntime::new(&git, &utility_home)?
-            .with_lane_roots(provenant_confinement::utility::lane_state_roots(
-                roots.state.as_path(),
-            ));
+        let runtime =
+            provenant_confinement::UtilityRuntime::new(&git, &utility_home, roots.state.as_path())?
+                .with_lane_roots(provenant_confinement::utility::lane_state_roots(
+                    roots.state.as_path(),
+                ));
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
@@ -277,7 +280,8 @@ impl Context {
             .repository
             .as_ref()
             .map_or(discovered.location.common_dir(), |repo| repo.root_path());
-        let port_table = provenant_config::PortTable::read_project(project_root)?;
+        let port_table =
+            provenant_config::PortTable::read_for(Some(project_root), roots.state.as_path())?;
         let binding = if lane {
             provenant_config::lookup_project(&roots, &discovered.location)?
                 .ok_or(EdgeError::Invalid)?
@@ -309,6 +313,7 @@ impl Context {
             roots,
             identity,
             config,
+            local_observation,
             port_table,
             graph_prompt_limit_source,
             graph_decide_timeout_source,
@@ -323,9 +328,10 @@ impl Context {
         let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
+        let local_observation = crate::wait::observation_settings(&resolved);
         let config = resolved.domains.fabric;
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
-        let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+        let runtime = provenant_confinement::UtilityRuntime::read_only(git, roots.state.as_path())?;
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
@@ -333,7 +339,8 @@ impl Context {
             .repository
             .as_ref()
             .map_or(discovered.location.common_dir(), |repo| repo.root_path());
-        let port_table = provenant_config::PortTable::read_project(project_root)?;
+        let port_table =
+            provenant_config::PortTable::read_for(Some(project_root), roots.state.as_path())?;
         let binding = provenant_config::lookup_project(&roots, &discovered.location)?
             .ok_or(EdgeError::Invalid)?;
         let host = provenant_config::lookup_host(&roots)?.ok_or(EdgeError::Invalid)?;
@@ -360,6 +367,7 @@ impl Context {
             roots,
             identity,
             config,
+            local_observation,
             port_table,
             graph_prompt_limit_source,
             graph_decide_timeout_source,
@@ -375,9 +383,10 @@ impl Context {
         let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
+        let local_observation = crate::wait::observation_settings(&resolved);
         let config = resolved.domains.fabric;
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
-        let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+        let runtime = provenant_confinement::UtilityRuntime::read_only(git, roots.state.as_path())?;
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
@@ -385,7 +394,8 @@ impl Context {
             .repository
             .as_ref()
             .map_or(discovered.location.common_dir(), |repo| repo.root_path());
-        let port_table = provenant_config::PortTable::read_project(project_root)?;
+        let port_table =
+            provenant_config::PortTable::read_for(Some(project_root), roots.state.as_path())?;
         let state_present = roots.state.as_path().try_exists()?;
         let binding = if state_present {
             provenant_config::lookup_project(&roots, &discovered.location)?
@@ -426,6 +436,7 @@ impl Context {
             roots,
             identity,
             config,
+            local_observation,
             port_table,
             graph_prompt_limit_source,
             graph_decide_timeout_source,
@@ -444,10 +455,11 @@ impl Context {
     ) -> Result<Self, EdgeError> {
         // Its working directory is the project's, as if started there.
         let cwd = binding.common_dir().parent().ok_or(EdgeError::Invalid)?;
-        let port_table = provenant_config::PortTable::read_project(cwd)?;
+        let port_table = provenant_config::PortTable::read_for(Some(cwd), roots.state.as_path())?;
         let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
+        let local_observation = crate::wait::observation_settings(&resolved);
         let config = resolved.domains.fabric;
         let host = provenant_config::lookup_host(&roots)?.ok_or(EdgeError::Invalid)?;
         let key = match CrossHostProjectKey::from_home(home, binding.common_dir()) {
@@ -469,6 +481,7 @@ impl Context {
             roots,
             identity,
             config,
+            local_observation,
             port_table,
             graph_prompt_limit_source,
             graph_decide_timeout_source,

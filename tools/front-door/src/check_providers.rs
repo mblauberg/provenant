@@ -136,6 +136,7 @@ struct Row {
     attempt_id: Option<AttemptId>,
     graph: Option<String>,
     error_code: Option<String>,
+    observation: Option<String>,
     #[serde(skip)]
     effort: Option<String>,
 }
@@ -282,6 +283,7 @@ fn inventory(roots: &provenant_core::Roots) -> Result<Vec<Row>, Box<dyn std::err
                 attempt_id: None,
                 graph: None,
                 error_code: None,
+                observation: None,
                 effort: efforts
                     .iter()
                     .find(|effort| effort.as_str() == "low")
@@ -355,6 +357,12 @@ fn settlement(row: &mut Row, run: &GraphRun) -> bool {
     false
 }
 
+fn mark_settlement_wait_expired(row: &mut Row) {
+    row.status = Verdict::Fail;
+    row.cause = Cause::Check(CheckCause::SettlementFailed);
+    row.error_code = Some("settlement_wait_expired".into());
+}
+
 fn live(
     row: &mut Row,
     settings: Settings,
@@ -367,6 +375,7 @@ fn live(
     let entropy = provenant_os::fs::entropy_128()?;
     let name = format!("provider-check-{:032x}", u128::from_le_bytes(entropy));
     row.graph = Some(name.clone());
+    let interval = Duration::from_micros(u64::try_from(interval.as_micros()).unwrap_or_default());
     let budget =
         provenant_core::WaitBudget::cli(factory.clock.mono_now(), settings.timeout_seconds.value)?;
     let on_stop = provenant_records::OnStop::new(
@@ -386,8 +395,29 @@ fn live(
     if let Some(error) = &launch_error {
         row.error_code = Some(error.code().to_owned());
     }
-    // Re-read the typed graph state at the configured local wait interval
-    // (domains.wait.local_interval_ms) until it settles or the budget ends.
+    // The graph directory is created by launch; subscribe before the first
+    // authoritative status read. Settlement before subscription is visible in
+    // that read, and later settlements remain queued by the native port.
+    let (mut watcher, setup_error) =
+        match provenant_fabric_runtime::graph::FileJournal::observation_paths(
+            &factory.context.roots.state,
+            factory.context.identity.project,
+            &name,
+        )
+        .map_err(|error| error.to_string())
+        .and_then(|paths| {
+            provenant_os::changes::watch::Watcher::subscribe(&paths)
+                .map_err(|error| error.to_string())
+        }) {
+            Ok(watcher) => (Some(watcher), None),
+            Err(error) => (None, Some(error)),
+        };
+    row.observation = Some(crate::status_wait::observation_text(
+        watcher.as_ref(),
+        interval,
+        setup_error.as_deref(),
+    ));
+    // Wait on settlement events; paced rereads remain only the event-source fallback.
     let wait = provenant_core::WaitBudget::cli(
         factory.clock.mono_now(),
         settings
@@ -396,7 +426,12 @@ fn live(
             .saturating_add(factory.context.config.graph.launch_wait_seconds)
             .min(14_400),
     )?;
+    let interval_micros = u64::try_from(interval.as_micros())?;
     loop {
+        if cancel.is_cancelled() || wait.remaining(factory.clock.mono_now()).as_micros() == 0 {
+            mark_settlement_wait_expired(row);
+            return Ok(());
+        }
         let run = factory.graph(
             GraphInput::Status {
                 extra: Default::default(),
@@ -408,17 +443,75 @@ fn live(
         if settlement(row, &run) {
             return Ok(());
         }
-        let remaining = wait.remaining(factory.clock.mono_now());
-        if remaining.as_micros() == 0 || cancel.is_cancelled() {
-            row.status = Verdict::Fail;
-            row.cause = Cause::Check(CheckCause::SettlementFailed);
-            row.error_code = Some("settlement_wait_expired".into());
-            return Ok(());
+
+        let mut refresh_status = false;
+        while !refresh_status {
+            let remaining = wait.remaining(factory.clock.mono_now()).as_micros();
+            if remaining == 0 || cancel.is_cancelled() {
+                mark_settlement_wait_expired(row);
+                return Ok(());
+            }
+            let native_wait = watcher.as_mut().map(|source| {
+                let timeout = Duration::from_micros(remaining.min(250_000));
+                source.wait(timeout)
+            });
+            if let Some(outcome) = native_wait {
+                match outcome {
+                    Ok(provenant_os::changes::watch::WaitOutcome::Changed) => {
+                        refresh_status = true;
+                    }
+                    Ok(provenant_os::changes::watch::WaitOutcome::TimedOut) => {
+                        // An empty native timeout is only a cancellation/deadline
+                        // checkpoint, never a request to reread graph status.
+                    }
+                    Ok(provenant_os::changes::watch::WaitOutcome::Woken) => {
+                        if cancel.is_cancelled()
+                            || wait.remaining(factory.clock.mono_now()).as_micros() == 0
+                        {
+                            mark_settlement_wait_expired(row);
+                        } else {
+                            row.status = Verdict::Fail;
+                            row.cause = Cause::Check(CheckCause::SettlementFailed);
+                            row.error_code = Some("settlement_wait_interrupted".into());
+                        }
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        watcher = None;
+                        row.observation = Some(crate::status_wait::observation_text(
+                            None,
+                            interval,
+                            Some(&format!("event source failed: {error}")),
+                        ));
+                    }
+                }
+            } else {
+                let next_fallback = factory
+                    .clock
+                    .mono_now()
+                    .checked_add(DurationMicros::from_micros(interval_micros))?;
+                loop {
+                    let now = factory.clock.mono_now();
+                    let remaining = wait.remaining(now).as_micros();
+                    if remaining == 0 || cancel.is_cancelled() {
+                        mark_settlement_wait_expired(row);
+                        return Ok(());
+                    }
+                    let until_fallback = next_fallback.as_micros().saturating_sub(now.as_micros());
+                    if until_fallback == 0 {
+                        refresh_status = true;
+                        break;
+                    }
+                    // ThreadPause itself caps one wait at 250 ms. Repeat against
+                    // the injected monotonic clock so the configured interval is
+                    // honored while cancellation remains bounded.
+                    let slice = until_fallback.min(remaining).min(250_000);
+                    factory
+                        .backoff
+                        .wait(DurationMicros::from_micros(slice), &cancel);
+                }
+            }
         }
-        let pause = remaining.as_micros().min(interval.as_micros());
-        factory
-            .backoff
-            .wait(DurationMicros::from_micros(pause), &cancel);
     }
 }
 
@@ -496,7 +589,7 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
                     .and_then(|value| value.as_str().map(str::to_owned))
                     .unwrap_or_else(|| "settlement_failed".into());
                 human += &format!(
-                    "{} {} {} attempt={} harness={} signed_in={} signin_source={} quota={} quota_source={} pools={}\n",
+                    "{} {} {} attempt={} harness={} signed_in={} signin_source={} quota={} quota_source={} pools={} observation={}\n",
                     row.route,
                     if row.status == Verdict::Pass {
                         "pass"
@@ -515,7 +608,8 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
                     row.signin_source,
                     row.quota.coverage.label(),
                     row.quota.source,
-                    row.pools.join(",")
+                    row.pools.join(","),
+                    row.observation.as_deref().unwrap_or("-")
                 );
             }
             crate::emit(

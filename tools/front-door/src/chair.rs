@@ -568,7 +568,10 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
         match command {
             ChairSummary::Show { ref session } | ChairSummary::Diff { ref session, .. } => {
                 let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-                let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+                let runtime = provenant_confinement::UtilityRuntime::read_only(
+                    git,
+                    resolved.roots.state.as_path(),
+                )?;
                 let executor = SystemExecutor::new(1)?;
                 let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
                 let location = runtime
@@ -803,7 +806,10 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                 limit,
             } => {
                 let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-                let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+                let runtime = provenant_confinement::UtilityRuntime::read_only(
+                    git,
+                    resolved.roots.state.as_path(),
+                )?;
                 let executor = SystemExecutor::new(1)?;
                 let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
                 let location = runtime
@@ -920,40 +926,34 @@ fn config_hint(context: &Context) -> Option<String> {
             .all(|part| matches!(part, std::path::Component::Normal(_))))
     .then(|| text.to_owned())
 }
-// The config directory selects the provider auth interface to observe; its
-// path never supplies identity. Registration's detector bypasses stale cache.
+// Identity is resolved through the provider adapter on every session start.
+// The config directory selects auth state and never supplies account identity.
 fn session_identity(context: &Context) -> provenant_telemetry::usage::AccountIdentity {
     use provenant_telemetry::usage::AccountIdentity;
 
-    let identity = (|| {
-        let executable = provenant_cli::run::provider_executable("claude").ok()?;
-        let user = std::env::var_os("USER")?;
-        let executor = SystemExecutor::new(1).ok()?;
-        let probe = provenant_providers::host::HostProbeExecutor::new(
-            &executor,
-            context.roots.state.as_path(),
+    let identity = (|| -> Result<_, provenant_providers::ProviderError> {
+        let live = provenant_providers::quota_live::LiveQuota::new(
+            &context.roots,
+            &context.home,
+            &provenant_providers::accounts::Settings::default(),
         )
-        .ok()?;
+        .map_err(|_| provenant_providers::ProviderError::UnknownIdentity)?;
+        let adapter = provenant_providers::REGISTRY
+            .iter()
+            .find(|registration| registration.adapter.id() == "claude")
+            .ok_or(provenant_providers::ProviderError::UnknownIdentity)?;
         let directory = context
             .claude_config
             .clone()
             .unwrap_or_else(|| context.home.join(".claude"));
-        let (account_key, _) = provenant_providers::accounts::detect_for_registration(
-            &probe,
-            "claude",
-            &executable,
-            &context.home,
-            &user,
-            &directory,
-            context.roots.state.as_path(),
-        )
-        .ok()?;
-        Some(AccountIdentity::provider_observation(
-            "claude",
-            &account_key,
-        ))
+        adapter.adapter.session_identity(&live, &directory)
     })();
-    identity.unwrap_or_else(AccountIdentity::unknown)
+    identity.unwrap_or_else(|_| {
+        eprintln!(
+            "provenant: warning: Claude account identity could not be verified; usage is attributed as unknown"
+        );
+        AccountIdentity::unknown()
+    })
 }
 
 // Attribution is best effort and must not prevent consuming a handoff.

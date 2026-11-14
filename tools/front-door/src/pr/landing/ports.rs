@@ -85,6 +85,8 @@ pub trait Forge {
         Ok(provenant_records::landing::Capabilities::default())
     }
     fn set_project_path(&mut self, _path: &std::path::Path) {}
+    /// `Some` fixes polling for this landing; `None` leaves adapter cadence in control.
+    fn set_poll_interval_override(&mut self, _interval: Option<std::time::Duration>) {}
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError>;
     /// The stack's pull requests in bottom-to-top order.
     fn stack_members(&mut self, number: u64) -> Result<Vec<StackMember>, LandingError>;
@@ -95,6 +97,11 @@ pub trait Forge {
     fn head(&mut self, number: u64) -> Result<String, LandingError>;
     fn approvals(&mut self, number: u64, head: &str) -> Result<Vec<Approval>, LandingError>;
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError>;
+    /// Adapter-selected cadence for the next observation, if it owns one.
+    /// Callers use their declared policy cadence when the adapter has none.
+    fn observation_interval(&self) -> Option<std::time::Duration> {
+        None
+    }
     fn checks_with_timeout(
         &mut self,
         commit: &str,
@@ -198,6 +205,8 @@ pub trait Repo {
 }
 pub trait GateRunner {
     fn set_project_path(&mut self, _path: &std::path::Path) {}
+    /// Forward the landing's explicit fixed cadence to an adapter-owned observer.
+    fn set_poll_interval_override(&mut self, _interval: Option<std::time::Duration>) {}
     fn gate(
         &mut self,
         candidate: &Candidate,

@@ -25,10 +25,9 @@ pub(super) fn observe(
     let read =
         |args: &[&str]| super::super::successful(super::super::execute(project, args).ok()?).ok();
     let evidence = |head: &Head| {
-        Observer::open(state, project, &head.repository, READ_BUDGET)
-            .ok()?
-            .checks(&head.sha, crate::pr::observer::POLL, READ_BUDGET)
-            .ok()
+        let mut observer = Observer::open(state, project, &head.repository, READ_BUDGET).ok()?;
+        let max_age = observer.fast_interval();
+        observer.checks(&head.sha, max_age, READ_BUDGET).ok()
     };
     let mut result = observe_with(target, names, &read, evidence, |head| {
         required_checks(project, &policy_target(target, head, &read)?)

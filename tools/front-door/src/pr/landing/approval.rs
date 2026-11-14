@@ -317,6 +317,7 @@ impl ReviewGit for RepoGit<'_> {
 /// request merges into, as the forge reports it, without moving any reference.
 pub(crate) fn graph_coverage(
     project: &std::path::Path,
+    host_state: &std::path::Path,
     branch: &str,
     reviewed: Reviewed<'_>,
     head: &str,
@@ -327,7 +328,7 @@ pub(crate) fn graph_coverage(
     let base_branch = crate::pr::pull_for_branch(project, branch, oid)
         .map_err(|error| LandingError::Failed(error.to_string()))?
         .base_branch;
-    let mut repo = super::adapters::GitRepo::new(project)?;
+    let mut repo = super::adapters::GitRepo::new(project, host_state)?;
     let target = repo.fetch_target_untracked(&base_branch)?;
     review_cover::coverage(&mut RepoGit(&mut repo), reviewed, head, &target)
 }

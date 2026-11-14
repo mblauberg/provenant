@@ -130,27 +130,313 @@ fn required<'a>(input: &'a Value, field: &str) -> Result<&'a str, FacadeError> {
         .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field(field.into())))
 }
 
-/// Observe a submitted graph within the caller's original wait budget.
-pub(super) fn wait_submission(
+fn graph_run_has_remote_pending(
+    run: &provenant_fabric_runtime::graph::GraphRun,
+    local_host: Option<provenant_core::HostId>,
+    target: Option<&super::unified::GraphTarget>,
+) -> bool {
+    use provenant_fabric_runtime::graph::AttemptState;
+    run.checkpoint
+        .nodes
+        .iter()
+        .filter(|node| {
+            target.is_none_or(|target| {
+                target.node.as_ref().is_none_or(|id| {
+                    &node.id == id
+                        || node.extra.get("subtree_cancel").and_then(Value::as_str) == Some(id)
+                })
+            })
+        })
+        .flat_map(|node| node.recorded_attempts())
+        .filter(|attempt| {
+            attempt.state != AttemptState::Terminal
+                && target
+                    .and_then(|target| target.attempt.as_deref())
+                    .is_none_or(|reference| attempt.attempt_ref.as_deref() == Some(reference))
+        })
+        .any(|attempt| {
+            let Some(reference) = attempt.attempt_ref.as_deref() else {
+                return false;
+            };
+            let Some(local_host) = local_host.as_ref() else {
+                return true;
+            };
+            !reference
+                .split_once('/')
+                .and_then(|(owner, _)| owner.parse::<provenant_core::HostId>().ok())
+                .is_some_and(|owner| &owner == local_host)
+        })
+}
+
+fn observation_clock_error(error: provenant_core::TimeError) -> FacadeError {
+    FacadeError::StateCorruptDetail {
+        detail: format!("graph observation clock: {error}"),
+    }
+}
+
+fn next_launch_retry_delay(
+    run: &provenant_fabric_runtime::graph::GraphRun,
+    clock: &(impl provenant_core::Clock + ?Sized),
+) -> Result<Option<std::time::Duration>, provenant_core::TimeError> {
+    let wake_at = run
+        .checkpoint
+        .nodes
+        .iter()
+        .filter_map(|node| node.launch_retry.as_ref()?.wake_at)
+        .min();
+    let Some(wake_at) = wake_at else {
+        return Ok(None);
+    };
+    let now = clock.wall_now()?;
+    Ok(Some(std::time::Duration::from_micros(
+        wake_at.as_micros().saturating_sub(now.as_micros()).max(0) as u64,
+    )))
+}
+
+fn launch_retry_due(
+    run: &provenant_fabric_runtime::graph::GraphRun,
+    clock: &(impl provenant_core::Clock + ?Sized),
+) -> Result<bool, provenant_core::TimeError> {
+    let wake_at = run
+        .checkpoint
+        .nodes
+        .iter()
+        .filter_map(|node| node.launch_retry.as_ref()?.wake_at)
+        .min();
+    let Some(wake_at) = wake_at else {
+        return Ok(false);
+    };
+    Ok(clock.wall_now()? >= wake_at)
+}
+
+pub(super) fn graph_wait_needs_refresh(
+    wake: crate::status_wait::ObservationWake,
+    launch_retry_due: bool,
+) -> bool {
+    use crate::status_wait::ObservationWake;
+    match wake {
+        ObservationWake::Changed | ObservationWake::PacedFallback => true,
+        ObservationWake::NativeTimeout => launch_retry_due,
+        ObservationWake::Woken | ObservationWake::Cancelled => false,
+    }
+}
+
+#[derive(Default)]
+struct GraphObservationHistory {
+    remote_source_seen: bool,
+    reader_woken: bool,
+}
+impl GraphObservationHistory {
+    fn record(
+        &mut self,
+        run: &provenant_fabric_runtime::graph::GraphRun,
+        local_host: Option<provenant_core::HostId>,
+        target: Option<&super::unified::GraphTarget>,
+    ) -> bool {
+        let remote_pending = graph_run_has_remote_pending(run, local_host, target);
+        self.remote_source_seen |= remote_pending;
+        remote_pending
+    }
+
+    fn report(&self, observation: &crate::status_wait::LocalObservation) -> String {
+        observation.report(self.remote_source_seen)
+    }
+}
+
+fn interval_micros(interval: std::time::Duration) -> u64 {
+    u64::try_from(interval.as_micros()).unwrap_or(u64::MAX)
+}
+
+pub(super) fn next_remote_deadline(
+    previous: Option<u64>,
+    remote_pending: bool,
+    remote_due: bool,
+    now: u64,
+    interval: u64,
+) -> Option<u64> {
+    if !remote_pending {
+        None
+    } else if previous.is_none() || remote_due {
+        Some(now.saturating_add(interval))
+    } else {
+        previous
+    }
+}
+
+fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
     mut run: provenant_fabric_runtime::graph::GraphRun,
     wait: WaitBudget,
-    clock: &dyn Clock,
-    pause: &dyn provenant_core::Pause,
+    clock: &C,
     cancel: &CancelToken,
-    mut observe: impl FnMut(&str) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
-) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
-    while run.status == GraphStatus::Pending && !cancel.is_cancelled() {
-        let remaining = wait.remaining(clock.mono_now());
-        if remaining.as_micros() == 0 {
+    observation: &mut crate::status_wait::LocalObservation,
+    local_host: Option<provenant_core::HostId>,
+    remote_target: Option<&super::unified::GraphTarget>,
+    watch_launch_retries: bool,
+    mut active: impl FnMut(&provenant_fabric_runtime::graph::GraphRun) -> bool,
+    mut observe: impl FnMut(
+        &provenant_fabric_runtime::graph::GraphRun,
+    ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
+    mut observe_remote: impl FnMut(
+        &provenant_fabric_runtime::graph::GraphRun,
+    ) -> Result<(), FacadeError>,
+) -> Result<
+    (
+        provenant_fabric_runtime::graph::GraphRun,
+        GraphObservationHistory,
+    ),
+    FacadeError,
+> {
+    use crate::status_wait::ObservationWake;
+    let interval = observation.interval();
+    let mut history = GraphObservationHistory::default();
+    let mut remote_pending = history.record(&run, local_host, remote_target);
+    let mut remote_deadline = next_remote_deadline(
+        None,
+        remote_pending,
+        false,
+        clock.mono_now().as_micros(),
+        interval_micros(interval),
+    );
+
+    // The observer is registered before this refresh, closing the race between
+    // submission/stop and the first status read.
+    if active(&run) && !cancel.is_cancelled() && wait.remaining(clock.mono_now()).as_micros() > 0 {
+        run = observe(&run)?;
+        remote_pending = history.record(&run, local_host, remote_target);
+        if remote_pending {
+            observe_remote(&run)?;
+        }
+        remote_deadline = next_remote_deadline(
+            remote_deadline,
+            remote_pending,
+            remote_pending,
+            clock.mono_now().as_micros(),
+            interval_micros(interval),
+        );
+    }
+
+    while active(&run) && !cancel.is_cancelled() {
+        let now = clock.mono_now();
+        let remaining = wait.remaining(now).as_micros();
+        if remaining == 0 {
             break;
         }
-        pause.wait(
-            provenant_core::DurationMicros::from_micros(250_000.min(remaining.as_micros())),
-            cancel,
+        let retry_due = watch_launch_retries
+            && launch_retry_due(&run, clock).map_err(observation_clock_error)?;
+        let remote_due = remote_deadline.is_some_and(|deadline| now.as_micros() >= deadline);
+        if retry_due || remote_due {
+            if retry_due {
+                run = observe(&run)?;
+                remote_pending = history.record(&run, local_host, remote_target);
+            }
+            if remote_due && remote_pending {
+                observe_remote(&run)?;
+            }
+            remote_deadline = next_remote_deadline(
+                remote_deadline,
+                remote_pending,
+                remote_due,
+                clock.mono_now().as_micros(),
+                interval_micros(interval),
+            );
+            continue;
+        }
+
+        let mut maximum_micros = remaining;
+        if watch_launch_retries
+            && let Some(delay) =
+                next_launch_retry_delay(&run, clock).map_err(observation_clock_error)?
+        {
+            maximum_micros = maximum_micros.min(interval_micros(delay));
+        }
+        if let Some(deadline) = remote_deadline {
+            maximum_micros = maximum_micros.min(deadline.saturating_sub(now.as_micros()));
+        }
+        let wake = observation
+            .wait(
+                std::time::Duration::from_micros(maximum_micros),
+                cancel,
+                clock,
+            )
+            .map_err(|error| FacadeError::StateCorruptDetail {
+                detail: format!("graph observation clock: {error}"),
+            })?;
+        if matches!(wake, ObservationWake::Woken | ObservationWake::Cancelled) {
+            history.reader_woken = true;
+            break;
+        }
+        if wait.remaining(clock.mono_now()).as_micros() == 0 {
+            break;
+        }
+        let now = clock.mono_now();
+        let retry_due = watch_launch_retries
+            && launch_retry_due(&run, clock).map_err(observation_clock_error)?;
+        let remote_due = remote_deadline.is_some_and(|deadline| now.as_micros() >= deadline);
+        if graph_wait_needs_refresh(wake, retry_due) {
+            run = observe(&run)?;
+            remote_pending = history.record(&run, local_host, remote_target);
+        }
+        if remote_due && remote_pending {
+            observe_remote(&run)?;
+        }
+        remote_deadline = next_remote_deadline(
+            remote_deadline,
+            remote_pending,
+            remote_due,
+            clock.mono_now().as_micros(),
+            interval_micros(interval),
         );
-        run = observe(&run.checkpoint.graph_id)?;
     }
-    Ok(run)
+    Ok((run, history))
+}
+
+/// Observe a submitted graph within the caller's original wait budget.
+pub(super) fn wait_submission<C: provenant_core::Clock + ?Sized>(
+    run: provenant_fabric_runtime::graph::GraphRun,
+    wait: WaitBudget,
+    clock: &C,
+    cancel: &CancelToken,
+    observation: &mut crate::status_wait::LocalObservation,
+    local_host: Option<provenant_core::HostId>,
+    mut observe: impl FnMut(&str) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
+    observe_remote: impl FnMut(&provenant_fabric_runtime::graph::GraphRun) -> Result<(), FacadeError>,
+) -> Result<(provenant_fabric_runtime::graph::GraphRun, String, bool), FacadeError> {
+    let (run, history) = wait_graph_updates(
+        run,
+        wait,
+        clock,
+        cancel,
+        observation,
+        local_host,
+        None,
+        true,
+        |run| run.status == GraphStatus::Pending,
+        |run| observe(&run.checkpoint.graph_id),
+        observe_remote,
+    )?;
+    Ok((run, history.report(observation), !history.reader_woken))
+}
+
+fn control_receipt_unfinished(
+    run: &provenant_fabric_runtime::graph::GraphRun,
+    target: &super::unified::GraphTarget,
+    stopping: bool,
+) -> bool {
+    if stopping {
+        run.checkpoint
+            .nodes
+            .iter()
+            .filter(|node| {
+                target.node.as_ref().is_none_or(|id| {
+                    &node.id == id
+                        || node.extra.get("subtree_cancel").and_then(Value::as_str) == Some(id)
+                })
+            })
+            .flat_map(|node| &node.attempts)
+            .any(|attempt| attempt.state != provenant_fabric_runtime::graph::AttemptState::Terminal)
+    } else {
+        run.status == GraphStatus::Pending
+    }
 }
 
 /// Attempt settings are reserved launch controls, not template parameters.
@@ -334,7 +620,12 @@ fn bind_submission_subject(
 }
 
 /// Apply plain-task execution controls before template lowering and patch admission.
-fn bind_launch_controls(input: &Value, node: &mut Value, cwd: &Path) -> Result<(), FacadeError> {
+fn bind_launch_controls(
+    input: &Value,
+    node: &mut Value,
+    cwd: &Path,
+    ports: &provenant_config::PortTable,
+) -> Result<(), FacadeError> {
     let invalid = |field: &str| FacadeError::invalid(InvalidInputDetail::Field(field.into()));
     let branch = input.get("branch").filter(|value| !value.is_null());
     let base = input.get("base").filter(|value| !value.is_null());
@@ -369,7 +660,8 @@ fn bind_launch_controls(input: &Value, node: &mut Value, cwd: &Path) -> Result<(
             None => "refs/remotes/origin/HEAD",
         };
         provenant_confinement::repo::GitRevision::new(base).map_err(|_| invalid("base"))?;
-        let worktree = provenant_confinement::worktrees::managed_writer_relative_path(cwd, branch)
+        let worktree = ports
+            .managed_writer_path(branch)
             .map_err(|_| invalid("branch"))?;
         node["worktree"] = json!(cwd.join(worktree));
         if node.get("attempt").is_none() {
@@ -644,13 +936,38 @@ impl Factory {
             if remaining == 0 {
                 return Ok(json!({"receipt":receipt,"observation_error":"child wait timed out"}));
             }
+            let (interval, configuration_warning) =
+                match provenant_cli::config_reads::read_for(&self.context.roots, "wait") {
+                    Ok(config) => (
+                        std::time::Duration::from_millis(config.domains.wait.local_interval_ms),
+                        None,
+                    ),
+                    Err(error) => (
+                        std::time::Duration::from_millis(
+                            provenant_cli::wait::Settings::default().local_interval_ms,
+                        ),
+                        Some(format!(
+                            "configuration unavailable; compiled default: {error}"
+                        )),
+                    ),
+                };
+            let mut observation =
+                provenant_cli::fabric::graph_relay::child_wait_observation(interval);
+            if let Some(warning) = configuration_warning {
+                observation.push_str(&format!("; {warning}"));
+            }
             return Ok(
                 match provenant_cli::fabric::graph_relay::wait_for_children(
                     cancel,
                     std::time::Duration::from_micros(remaining),
+                    interval,
                 ) {
-                    Ok(children) => json!({"receipt":receipt,"children":children}),
-                    Err(error) => json!({"receipt":receipt,"observation_error":error.to_string()}),
+                    Ok(children) => {
+                        json!({"receipt":receipt,"children":children,"observation":observation})
+                    }
+                    Err(error) => {
+                        json!({"receipt":receipt,"observation_error":error.to_string(),"observation":observation})
+                    }
                 },
             );
         }
@@ -815,7 +1132,7 @@ impl Factory {
             }
             node["with"] = parameters;
         }
-        bind_launch_controls(input, &mut node, &self.cwd)?;
+        bind_launch_controls(input, &mut node, &self.cwd, &self.context.port_table)?;
         node["id"] = json!(key);
         let resolvers = self.launch_resolvers_for_tier(raw, route.as_ref())?;
         let mut compiled = provenant_fabric_runtime::graph::template::Compiler {
@@ -1403,7 +1720,7 @@ impl Factory {
                     "launch controls require a leaf template".into(),
                 )));
             }
-            bind_launch_controls(input, &mut node, &self.cwd)?;
+            bind_launch_controls(input, &mut node, &self.cwd, &self.context.port_table)?;
             let mut parameters = node.get("with").cloned().unwrap_or_else(|| json!({}));
             let overrides = input
                 .get("set")
@@ -1710,8 +2027,8 @@ impl Factory {
             announce,
             Some(&mut replayed),
         )?;
-        let run = if replayed {
-            run
+        let (run, wait_observation, observation_wait, remote_read_allowed) = if replayed {
+            (run, None, None, true)
         } else {
             self.wait_document(run, input, budget, cancel, &path, &scratch)?
         };
@@ -1739,19 +2056,27 @@ impl Factory {
                             && attempt.attempt_ref.as_deref() == row["attempt_id"].as_str()
                     })
         });
-        if !rows.is_empty() {
+        if !rows.is_empty()
+            && remote_read_allowed
+            && !cancel.is_cancelled()
+            && observation_wait
+                .is_none_or(|wait| wait.remaining(self.clock.mono_now()).as_micros() > 0)
+        {
             super::unified::enrich_status_rows_within(
                 &mut rows,
                 &self.context,
                 &self.clock,
                 cancel,
-                budget,
+                observation_wait.unwrap_or(budget),
             )?;
         }
         let mut result = encode(run)?;
         result["replayed"] = json!(replayed);
         report_launch_refusals(&mut result, &rows);
         result["timed_out"] = json!(timed_out);
+        if let Some(observation) = wait_observation {
+            result["observation"] = json!(observation);
+        }
         Ok(result)
     }
 
@@ -1940,63 +2265,74 @@ impl Factory {
     ) -> Result<Value, FacadeError> {
         let cancellation_request = run.checkpoint.extra.remove("cancellation_request_receipt");
         let mut timed_out = false;
+        let mut observation_report = None;
+        let mut observation_wait = None;
+        let mut remote_read_allowed = true;
         if let Some(seconds) = input.get("wait_seconds").and_then(Value::as_u64) {
             let wait = WaitBudget::cli(self.clock.mono_now(), seconds)
                 .map_err(|_| FacadeError::InvalidInput { detail: None })?
                 .cap_at(budget.deadline().as_mono_time());
-            loop {
-                let unfinished = if stopping {
-                    run.checkpoint
-                        .nodes
-                        .iter()
-                        .filter(|node| {
-                            target.node.as_ref().is_none_or(|id| {
-                                &node.id == id
-                                    || node.extra.get("subtree_cancel").and_then(Value::as_str)
-                                        == Some(id)
-                            })
-                        })
-                        .flat_map(|node| &node.attempts)
-                        .any(|attempt| {
-                            attempt.state != provenant_fabric_runtime::graph::AttemptState::Terminal
-                        })
-                } else {
-                    run.status == GraphStatus::Pending
-                };
-                if !unfinished {
-                    break;
+            let interval = self.wait_interval()?;
+            let mut observation = self.local_graph_observation(&target.graph, interval);
+            let remote_target = if stopping {
+                target.clone()
+            } else {
+                super::unified::GraphTarget {
+                    graph: target.graph.clone(),
+                    node: None,
+                    attempt: None,
                 }
-                let remaining = wait.remaining(self.clock.mono_now());
-                if remaining.as_micros() == 0 || cancel.is_cancelled() {
-                    timed_out = true;
-                    break;
-                }
-                provenant_core::Pause::wait(
-                    &self.backoff,
-                    provenant_core::DurationMicros::from_micros(250_000.min(remaining.as_micros())),
-                    cancel,
-                );
-                // The original stop request is durable. Rechecking status
-                // must not append another request while its owner is busy.
-                run = self.graph(
-                    GraphInput::Status {
-                        extra: Default::default(),
-                        id: target.graph.clone(),
-                    },
-                    budget,
-                    cancel,
-                )?;
-            }
+            };
+            let (observed, history) = wait_graph_updates(
+                run,
+                wait,
+                &self.clock,
+                cancel,
+                &mut observation,
+                Some(self.context.identity.host),
+                stopping.then_some(target),
+                false,
+                |run| control_receipt_unfinished(run, target, stopping),
+                |_| {
+                    // The original stop request is durable. Rechecking status
+                    // must not append another request while its owner is busy.
+                    self.graph(
+                        GraphInput::Status {
+                            extra: Default::default(),
+                            id: target.graph.clone(),
+                        },
+                        wait,
+                        cancel,
+                    )
+                },
+                |run| self.observe_remote_graph_attempts(run, &remote_target, wait, cancel),
+            )?;
+            run = observed;
+            observation_wait = Some(wait);
+            remote_read_allowed = !history.reader_woken;
+            timed_out = control_receipt_unfinished(&run, target, stopping)
+                && (wait.remaining(self.clock.mono_now()).as_micros() == 0
+                    || cancel.is_cancelled());
+            observation_report = Some(history.report(&observation));
         }
         let mut rows = super::unified::status_rows(&run, target);
-        super::unified::enrich_status_rows_within(
-            &mut rows,
-            &self.context,
-            &self.clock,
-            cancel,
-            budget,
-        )?;
+        if remote_read_allowed
+            && !cancel.is_cancelled()
+            && observation_wait
+                .is_none_or(|wait| wait.remaining(self.clock.mono_now()).as_micros() > 0)
+        {
+            super::unified::enrich_status_rows_within(
+                &mut rows,
+                &self.context,
+                &self.clock,
+                cancel,
+                observation_wait.unwrap_or(budget),
+            )?;
+        }
         let mut receipt = json!({"rows":rows,"timed_out":timed_out});
+        if let Some(observation) = observation_report {
+            receipt["observation"] = json!(observation);
+        }
         if let Some(request_id) = cancellation_request
             .as_ref()
             .and_then(|receipt| receipt.get("request_id"))
@@ -2018,6 +2354,72 @@ impl Factory {
         Ok(receipt)
     }
 
+    fn observe_remote_graph_attempts(
+        &self,
+        run: &provenant_fabric_runtime::graph::GraphRun,
+        target: &super::unified::GraphTarget,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<(), FacadeError> {
+        if cancel.is_cancelled() || budget.remaining(self.clock.mono_now()).as_micros() == 0 {
+            return Ok(());
+        }
+        let mut rows = super::unified::status_rows(run, target);
+        let local_host = self.context.identity.host;
+        rows.retain(|row| {
+            row["kind"] == "attempt"
+                && row["attempt_id"].as_str().is_some_and(|reference| {
+                    reference.split_once('/').is_some_and(|(owner, _)| {
+                        owner
+                            .parse::<provenant_core::HostId>()
+                            .map_or(true, |host| host != local_host)
+                    })
+                })
+        });
+        if rows.is_empty() {
+            return Ok(());
+        }
+        super::unified::enrich_status_rows_within(
+            &mut rows,
+            &self.context,
+            &self.clock,
+            cancel,
+            budget,
+        )
+    }
+
+    fn wait_interval(&self) -> Result<std::time::Duration, FacadeError> {
+        let config = provenant_cli::config_reads::read_for(&self.context.roots, "wait")
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        Ok(std::time::Duration::from_millis(
+            config.domains.wait.local_interval_ms,
+        ))
+    }
+
+    fn local_graph_observation(
+        &self,
+        graph: &str,
+        interval: std::time::Duration,
+    ) -> crate::status_wait::LocalObservation {
+        if self.context.in_lane {
+            return crate::status_wait::LocalObservation::paced(
+                interval,
+                "lane graph state is observed through the host relay without a local event log",
+            );
+        }
+        match provenant_fabric_runtime::graph::FileJournal::observation_paths(
+            &self.context.roots.state,
+            self.context.identity.project,
+            graph,
+        ) {
+            Ok(paths) => crate::status_wait::LocalObservation::subscribe(&paths, interval),
+            Err(error) => crate::status_wait::LocalObservation::paced(
+                interval,
+                format!("cannot resolve graph observation paths: {error}"),
+            ),
+        }
+    }
+
     fn wait_document(
         &self,
         run: provenant_fabric_runtime::graph::GraphRun,
@@ -2026,9 +2428,17 @@ impl Factory {
         cancel: &CancelToken,
         document: &Path,
         scratch: &Path,
-    ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
+    ) -> Result<
+        (
+            provenant_fabric_runtime::graph::GraphRun,
+            Option<String>,
+            Option<WaitBudget>,
+            bool,
+        ),
+        FacadeError,
+    > {
         let Some(seconds) = input.get("wait_seconds").and_then(Value::as_u64) else {
-            return Ok(run);
+            return Ok((run, None, None, true));
         };
         let now = self.clock.mono_now();
         let deadline = now
@@ -2037,40 +2447,62 @@ impl Factory {
         let wait = WaitBudget::cli(now, seconds)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?
             .cap_at(deadline);
-        wait_submission(run, wait, &self.clock, &self.backoff, cancel, |id| {
-            let observed = self.graph(
-                GraphInput::Status {
-                    extra: Default::default(),
-                    id: id.to_owned(),
-                },
-                budget,
-                cancel,
-            )?;
-            // A waited submission owns admission progress. Status itself remains
-            // read-only; only a due launch retry is advanced under the journal lock.
-            let now = self.clock.wall_now().ok();
-            let due = observed.checkpoint.nodes.iter().any(|node| {
-                node.launch_retry
-                    .as_ref()
-                    .and_then(|retry| retry.wake_at)
-                    .zip(now)
-                    .is_some_and(|(wake, now)| now >= wake)
-            });
-            if !due || budget.remaining(self.clock.mono_now()).as_micros() == 0 {
-                return Ok(observed);
-            }
-            self.graph_with_scratch(
-                GraphInput::Run {
-                    extra: Default::default(),
-                    document: document.to_owned(),
-                },
-                budget,
-                cancel,
-                Some(scratch),
-                None,
-                None,
-            )
-        })
+        let interval = self.wait_interval()?;
+        let mut observation = self.local_graph_observation(&run.checkpoint.graph_id, interval);
+        let (run, observation_report, remote_read_allowed) = wait_submission(
+            run,
+            wait,
+            &self.clock,
+            cancel,
+            &mut observation,
+            Some(self.context.identity.host),
+            |id| {
+                let observed = self.graph(
+                    GraphInput::Status {
+                        extra: Default::default(),
+                        id: id.to_owned(),
+                    },
+                    wait,
+                    cancel,
+                )?;
+                // A waited submission owns admission progress. Status itself remains
+                // read-only; only a due launch retry is advanced under the journal lock.
+                let due =
+                    launch_retry_due(&observed, &self.clock).map_err(observation_clock_error)?;
+                if !due || wait.remaining(self.clock.mono_now()).as_micros() == 0 {
+                    return Ok(observed);
+                }
+                self.graph_with_scratch(
+                    GraphInput::Run {
+                        extra: Default::default(),
+                        document: document.to_owned(),
+                    },
+                    wait,
+                    cancel,
+                    Some(scratch),
+                    None,
+                    None,
+                )
+            },
+            |run| {
+                self.observe_remote_graph_attempts(
+                    run,
+                    &super::unified::GraphTarget {
+                        graph: run.checkpoint.graph_id.clone(),
+                        node: None,
+                        attempt: None,
+                    },
+                    wait,
+                    cancel,
+                )
+            },
+        )?;
+        Ok((
+            run,
+            Some(observation_report),
+            Some(wait),
+            remote_read_allowed,
+        ))
     }
 
     fn graph_trace(&self, selector: &str) -> Result<Value, FacadeError> {
@@ -2927,11 +3359,13 @@ mod tests {
             serde_json::to_vec(&ports)?,
         )?;
 
+        let ports = provenant_config::PortTable::read_for(Some(project.path()), project.path())?;
         let mut node = json!({"use":"task"});
         bind_launch_controls(
             &json!({"branch":"feature/topic"}),
             &mut node,
             project.path(),
+            &ports,
         )?;
         assert_eq!(node["worktree"], ".claude/worktrees/feature-topic");
         Ok(())
@@ -2944,6 +3378,7 @@ mod tests {
             &json!({"branch":"topic"}),
             &mut node,
             Path::new("/repo/src"),
+            &provenant_config::PortTable::builtin(),
         )?;
         assert_eq!(
             node["attempt"]["new_worktree"]["base"],
@@ -2955,6 +3390,7 @@ mod tests {
             &json!({"branch":"topic", "base":"refs/remotes/origin/HEAD"}),
             &mut explicit,
             Path::new("/repo"),
+            &provenant_config::PortTable::builtin(),
         )?;
         assert!(
             explicit["attempt"]["new_worktree"]
@@ -2962,7 +3398,13 @@ mod tests {
                 .is_none()
         );
         assert!(
-            bind_launch_controls(&json!({"base":"HEAD"}), &mut node, Path::new("/repo")).is_err()
+            bind_launch_controls(
+                &json!({"base":"HEAD"}),
+                &mut node,
+                Path::new("/repo"),
+                &provenant_config::PortTable::builtin()
+            )
+            .is_err()
         );
         Ok(())
     }
@@ -3669,6 +4111,7 @@ mod tests {
             &json!({"branch":"fix/parser","base":"origin/main"}),
             &mut node,
             cwd,
+            &provenant_config::PortTable::builtin(),
         )?;
         assert_eq!(node["worktree"], "/fixture/project/.worktrees/fix-parser");
         let mut explicit = json!({"id":"task","use":"task"});
@@ -3676,6 +4119,7 @@ mod tests {
             &json!({"worktree":".worktrees/fix-parser"}),
             &mut explicit,
             Path::new("/fixture/project"),
+            &provenant_config::PortTable::builtin(),
         )?;
         assert_eq!(
             node["worktree"].as_str().ok_or("branch path")?,
@@ -3686,6 +4130,7 @@ mod tests {
             &json!({"worktree":"writer"}),
             &mut relative,
             Path::new("/fixture/project/src"),
+            &provenant_config::PortTable::builtin(),
         )?;
         assert_eq!(relative["worktree"], "/fixture/project/src/writer");
         assert_eq!(
@@ -3700,7 +4145,15 @@ mod tests {
             json!({"access":"unknown"}),
             json!({"write_scope":[1]}),
         ] {
-            assert!(bind_launch_controls(&input, &mut json!({"use":"task"}), cwd).is_err());
+            assert!(
+                bind_launch_controls(
+                    &input,
+                    &mut json!({"use":"task"}),
+                    cwd,
+                    &provenant_config::PortTable::builtin()
+                )
+                .is_err()
+            );
         }
         Ok(())
     }

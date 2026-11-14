@@ -532,8 +532,9 @@ impl MandatoryRoots {
                 continue;
             }
             controls.push((subtree(common), true));
-            for allocation in crate::worktrees::allocation_directories(common)
-                .map_err(|_| inventory_error(common, "worktree allocation inventory"))?
+            for allocation in
+                crate::worktrees::allocation_directories(common, roots.state.as_path())
+                    .map_err(|_| inventory_error(common, "worktree allocation inventory"))?
             {
                 controls.push((subtree(&allocation), false));
             }

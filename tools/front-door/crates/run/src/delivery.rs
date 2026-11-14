@@ -1067,9 +1067,12 @@ impl HostDeliveryContext {
     fn host_environment(&mut self, writer: &WriterRequest) -> Result<()> {
         // A graph delivery runs in the project checkout itself, which is not a
         // lane.
-        self.lane_roots = provenant_confinement::transport::LaneRoots::project(&writer.project)
-            .map_err(|error| prepare_error("lane roots", error))?
-            .into_paths();
+        self.lane_roots = provenant_confinement::transport::LaneRoots::project(
+            &writer.project,
+            &self.writer_registry,
+        )
+        .map_err(|error| prepare_error("lane roots", error))?
+        .into_paths();
         if writer.worktree != writer.project {
             self.lane_roots.push(writer.worktree.clone());
         }

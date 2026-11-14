@@ -324,7 +324,15 @@ pub fn create(
     request: WorktreeCreate,
     cancel: &CancelToken,
 ) -> Result<WorktreeInfo, WorktreeError> {
-    create_with_default(context, request, cancel, None)
+    let (branch, warning) = setup::branch_name(context, &request.branch, cancel);
+    let request = WorktreeCreate { branch, ..request };
+    create_with_default(
+        context,
+        request,
+        cancel,
+        None,
+        warning.into_iter().collect(),
+    )
 }
 
 /// Fetch a remote branch when no local branch exists and return its exact tip.
@@ -397,6 +405,7 @@ fn create_with_default(
     request: WorktreeCreate,
     cancel: &CancelToken,
     default: Option<(GitOid, Vec<String>)>,
+    naming_warnings: Vec<String>,
 ) -> Result<WorktreeInfo, WorktreeError> {
     validate_binding(context)?;
     let branch = GitRefName::branch(&request.branch).map_err(|_| WorktreeError::InvalidRequest)?;
@@ -471,7 +480,7 @@ fn create_with_default(
         // only the exact commit the remote fetch proved.
         drop(_lock);
         let default = default_creation_base(context, facts, cancel)?;
-        return create_with_default(context, request, cancel, Some(default));
+        return create_with_default(context, request, cancel, Some(default), naming_warnings);
     }
 
     if create_branch {
@@ -506,7 +515,14 @@ fn create_with_default(
     } else {
         default.as_ref().ok_or(WorktreeError::InvalidRequest)?.0
     };
-    let ports = provenant_config::PortTable::read_project(context.repo.root_path())
+    let state = context
+        .project_state
+        .current_path()
+        .map_err(|_| WorktreeError::InvalidRequest)?
+        .parent()
+        .and_then(Path::parent)
+        .ok_or(WorktreeError::InvalidRequest)?;
+    let ports = provenant_config::PortTable::read_for(Some(context.repo.root_path()), state)
         .map_err(WorktreeError::PortConfiguration)?;
     let target_relative = ports
         .managed_writer_path(&request.branch)
@@ -596,11 +612,10 @@ fn create_with_default(
     // Still under the registry lock, so no sibling create can interleave
     // between the ref mutation and its ownership record. A failed record
     // leaves the branch unobserved, which only ever retains it.
-    let mut warnings = if create_branch && request.base.is_none() {
-        default.map_or_else(Vec::new, |(_, warnings)| warnings)
-    } else {
-        Vec::new()
-    };
+    let mut warnings = naming_warnings;
+    if create_branch && request.base.is_none() {
+        warnings.extend(default.map_or_else(Vec::new, |(_, warnings)| warnings));
+    }
     if let Err(error) = refs::record_local_branch(context, &branch, base, create_branch, cancel) {
         warnings.push(format!(
             "could not record ownership of {}: {error}; it is retained as unobserved",
@@ -610,7 +625,7 @@ fn create_with_default(
     // The mutation and registration checks are complete. The advisory census
     // must not keep other branches from acquiring the repository registry.
     drop(_lock);
-    warnings.extend(setup::run(context, &target, cancel));
+    warnings.extend(setup::run(context, &target, branch.as_str(), cancel));
     // Setup may leave build output or local edits; report those honestly
     // without turning an advisory setup failure into a creation refusal.
     let dirty = verify_probed_worktree(context, &target, cancel)

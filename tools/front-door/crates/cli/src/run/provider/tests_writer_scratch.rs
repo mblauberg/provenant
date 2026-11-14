@@ -86,7 +86,11 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         ..provenant_core::RootInputs::new(home.clone(), project.clone())
     }
     .resolve(&provenant_os::fs::SystemPathResolver)?;
-    let utility = UtilityRuntime::new(&git, &git_home)?;
+    let utility = UtilityRuntime::new(
+        &git,
+        &git_home,
+        roots.state.as_path(),
+    )?;
     let cancel = CancelToken::new();
     let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
     let repo = utility.open_repo(&executor, &project, budget, &cancel)?;

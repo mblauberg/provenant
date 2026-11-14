@@ -459,7 +459,7 @@ fn await_pr_ci_with(
     (poll_seconds, patience_seconds): (u64, u64),
     sleep: &dyn Fn(Duration),
 ) -> Result<(), LandingError> {
-    let poll = Duration::from_secs(poll_seconds.max(1));
+    let poll = Duration::from_secs(poll_seconds);
     let patience = Duration::from_secs(patience_seconds);
     let mut waited = Duration::ZERO;
     for pr in prs {
@@ -477,15 +477,17 @@ fn await_pr_ci_with(
                 }
                 Err(error) => return Err(error),
             }
-            if waited >= patience {
+            let remaining = patience.saturating_sub(waited);
+            if remaining.is_zero() {
                 return Err(LandingError::Pending(format!(
                     "warning: pull request #{} CI is still running after {}s; resubmit to resume",
                     pr.number,
                     waited.as_secs()
                 )));
             }
-            sleep(poll);
-            waited += poll;
+            let pause = forge.observation_interval().unwrap_or(poll).min(remaining);
+            sleep(pause);
+            waited += pause;
         }
     }
     Ok(())
@@ -706,6 +708,36 @@ mod tests {
         assert!(waits(PrCiMode::OptIn, Some("full-ci"), true, true) > 0);
         assert!(waits(PrCiMode::Affected, None, false, true) > 0);
         assert_eq!(waits(PrCiMode::Affected, None, false, false), 0);
+    }
+
+    #[test]
+    fn pr_ci_wait_uses_adapter_cadence_and_bounds_it_by_patience() {
+        let settings = provenant_cli::wait::Settings {
+            pr_interval_ms: 37,
+            ..Default::default()
+        };
+        let fast = Duration::from_millis(settings.pr_interval_ms);
+        let mut forge = pending_forge();
+        forge.next_observation_interval = Some(fast);
+        let pauses = std::cell::RefCell::new(Vec::new());
+        let result = await_pr_ci_with(
+            &mut forge,
+            &[pr(1, "h1")],
+            &PrCiSettings {
+                mode: PrCiMode::Always,
+                label: None,
+            },
+            &[],
+            (3, 1),
+            &|pause| pauses.borrow_mut().push(pause),
+        );
+        assert!(matches!(result, Err(LandingError::Pending(_))));
+        let pauses = pauses.borrow();
+        assert!(pauses.iter().all(|pause| *pause <= fast));
+        assert_eq!(
+            pauses.iter().copied().sum::<Duration>(),
+            Duration::from_secs(1)
+        );
     }
 
     #[test]

@@ -271,7 +271,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "existing_branch_with_base_names_the_repair_in_json_and_human_output",
             "create_from_remote_base_reports_ok_and_exists",
             "create_list_and_remove_a_managed_worktree",
-            "project_setup_runs_once_and_failure_retains_the_worktree",
+            "naming_and_post_create_ports_are_advisory_and_evidenced",
             "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache",
             "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_locks",
             "gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks",
@@ -388,8 +388,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "create_list_and_remove_a_managed_worktree" => {
                     create_list_and_remove_a_managed_worktree()
                 }
-                "project_setup_runs_once_and_failure_retains_the_worktree" => {
-                    project_setup_runs_once_and_failure_retains_the_worktree()
+                "naming_and_post_create_ports_are_advisory_and_evidenced" => {
+                    naming_and_post_create_ports_are_advisory_and_evidenced()
                 }
                 "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache" => {
                     gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache()
@@ -1262,6 +1262,7 @@ fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBu
     let runtime = UtilityRuntime::new(
         fs::canonicalize(provenant_os::git::git_executable().ok_or("Git executable unavailable")?)?,
         rig.state.join("utility-home"),
+        &rig.state,
     )?;
     let executor = SystemExecutor::new(1)?;
     let repo = runtime.open_repo(

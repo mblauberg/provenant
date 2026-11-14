@@ -137,6 +137,26 @@ pub struct CancellationTarget<'a> {
 }
 
 impl FileJournal {
+    /// Resolve owner-managed observation paths without creating graph state.
+    /// The event log is pre-commit; the checkpoint path signals the following
+    /// authoritative publication, and the sidecar changes displayed status.
+    pub fn observation_paths(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+    ) -> Result<Vec<std::path::PathBuf>, JournalError> {
+        if !valid_identifier(graph_id) {
+            return Err(JournalError::InvalidGraphId);
+        }
+        let directory = graph_directory(root, project)?;
+        let path = directory.current_path()?;
+        Ok(vec![
+            path.join(events::name(graph_id)),
+            path.join(checkpoint_file_name(graph_id)),
+            path.join(advance_error_name(graph_id)),
+        ])
+    }
+
     /// Persist cancellation without waiting for the graph's journal lock.
     pub fn request_cancellation(
         root: &StateRoot,
@@ -879,7 +899,7 @@ impl FileJournal {
     }
 
     pub(super) fn checkpoint_name(&self) -> OsString {
-        format!("graph-{}.json", self.graph_id).into()
+        checkpoint_file_name(&self.graph_id)
     }
 
     /// The immutable origin binding retained with the graph's name after
@@ -1166,6 +1186,10 @@ pub(super) fn unreadable_marker_name(graph_id: &str) -> OsString {
 
 pub(super) fn advance_error_name(graph_id: &str) -> OsString {
     format!("graph-{graph_id}.advance-error").into()
+}
+
+fn checkpoint_file_name(graph_id: &str) -> OsString {
+    format!("graph-{graph_id}.json").into()
 }
 
 pub(super) fn graph_directory(root: &StateRoot, project: ProjectId) -> Result<Directory, FsError> {

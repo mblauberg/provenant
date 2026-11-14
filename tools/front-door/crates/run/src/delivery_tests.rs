@@ -340,6 +340,7 @@ impl PrepareFixture {
         let utility = UtilityRuntime::new(
             provenant_os::git::git_executable().ok_or("git executable")?,
             self.root.join("home"),
+            &state,
         )?;
         let executor = SystemExecutor::new(1)?;
         let cancel = CancelToken::new();
@@ -525,7 +526,8 @@ fn stopped_merge_is_restored(
             let attempt_path = fixture.root.join("attempt");
             let scratch = attempt_path.join("tmp/candidate-0");
             std::fs::create_dir_all(&scratch)?;
-            let utility = UtilityRuntime::new(&git, fixture.root.join("home"))?;
+            let utility =
+                UtilityRuntime::new(&git, fixture.root.join("home"), fixture.root.join("state"))?;
             let executor = SystemExecutor::new(1)?;
             let cancel = CancelToken::new();
             let repo = utility.open_repo(
@@ -666,7 +668,7 @@ fn lane_with_committed_merge() -> std::result::Result<
         fixture.root.join("home"),
         std::fs::Permissions::from_mode(0o700),
     )?;
-    let utility = UtilityRuntime::new(&git, fixture.root.join("home"))?;
+    let utility = UtilityRuntime::new(&git, fixture.root.join("home"), fixture.root.join("state"))?;
     let executor = SystemExecutor::new(1)?;
     let cancel = CancelToken::new();
     let repo = utility.open_repo(
@@ -837,7 +839,11 @@ fn unpublished_lane_leaves_the_worktree_clean_and_names_the_commit_and_branch()
         worktree_git(&fixture, &git, &["status", "--porcelain"])?,
         "?? ours.txt"
     );
-    let utility = provenant_confinement::UtilityRuntime::new(&git, fixture.root.join("home"))?;
+    let utility = provenant_confinement::UtilityRuntime::new(
+        &git,
+        fixture.root.join("home"),
+        fixture.root.join("state"),
+    )?;
     let executor = SystemExecutor::new(1)?;
     let repo = utility.open_repo(
         &executor,
@@ -895,7 +901,11 @@ fn unpublished_lane_files_move_back_without_touching_foreign_edits()
     let (base_oid, tip_oid) = (GitOid::parse(&base)?, GitOid::parse(&tip)?);
     let scratch_git = scratch.join("git-common");
     let objects = scratch.join("git-objects");
-    let utility = provenant_confinement::UtilityRuntime::new(&git, fixture.root.join("home"))?;
+    let utility = provenant_confinement::UtilityRuntime::new(
+        &git,
+        fixture.root.join("home"),
+        fixture.root.join("state"),
+    )?;
     let executor = SystemExecutor::new(1)?;
     let repo = utility.open_repo(
         &executor,

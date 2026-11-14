@@ -5,7 +5,10 @@ Anchor: `tests/parser.rs`, `crates/cli/src/render.rs`, `tests/catalogue_read_onl
 
 Use `provenant help --all` for commands and `provenant config schema` for configuration.
 The outward contract is declared in `crates/cli/src/external_contract.rs`, covering commands, lane environment and JSON schemas.
+`scripts/generate-reference` renders `external-contract.md` from that declaration through `provenant-cli print-reference-data`; the same data derives threshold behaviour from the policy table.
 No command currently promises cross-version stability, and direct internal-state readers are unsupported.
+Conditional PR wait observations report `review=unknown` because the REST response has no GraphQL review decision; CI settlement still determines the wait verdict. One-shot `pr status` keeps its detailed review observation.
+Repository CI reads its tier declaration from `config/ports.json`; the optional `.provenant/ports.json` entry links that same table, so running repository checks requires neither an installed Provenant nor a `.provenant` directory.
 
 ## Targets
 
@@ -76,14 +79,18 @@ command catalogue owns the list of codes and their meanings.
 
 Waiting observes work; timeout or cancellation does not stop it. A target
 settles by its own state, so an older settlement cannot satisfy a wait for new
-work. Settlement events are emitted as they are observed.
+work. Local graph waiters share one filesystem event source (inotify or kqueue)
+for settlement logs and store changes. When that source is unavailable, the result reports why
+and rereads at `domains.wait.local_interval_ms`. Peer or relayed rows also use
+paced rereads at that setting because the relay socket has no remote event
+subscription; the result identifies that source. Pull requests use forge
+observation. Settlement events are emitted as they are observed. Expiry ends blocking observation. Local stores take one final snapshot; remote reads use only the original wait budget. Results identify unsatisfied waits as timed out.
 Wait budgets clamp to `domains.wait.max_timeout_seconds` (shipped default four
 hours), warning once with the effective limit and source when exceeded. A larger
 request remains a blocking wait. Parsing retains the request so configured
 limits, including limits above the shipped default, take effect in one place.
 - Why: an oversized budget must not turn a blocking call into a retry loop.
 - Test: `crates/cli/src/wait.rs::requested_wait_is_bounded_by_the_effective_maximum`
-
 With `--json`, wait emits JSONL events followed by a terminal command-result envelope, including without `--follow`.
 
 - Why: a reader must neither terminate healthy work nor wake on stale evidence.
@@ -157,6 +164,12 @@ target rules, risk tier and invocation resolve into one saved plan with sources.
 `--explain --json` reports repository, target, effective plan, capability decisions
 and unavailable alternatives. An unavailable execution returns its landing record
 ID and typed alternatives without silently selecting another strategy.
+
+Landing CI, candidate gate, and post-merge waits use the forge observer's adaptive
+cadence when `poll_seconds` comes from the bundled default. Supplying `poll_seconds`
+at any supported configuration layer or using `land --poll` selects that fixed interval for
+all three waits. Source provenance decides this, so an explicit value is fixed even when it
+matches the bundled default.
 
 The `command` strategy invokes `land.command.argv` in the repository checkout,
 with the full pending intent as JSON on stdin. Its required declaration includes

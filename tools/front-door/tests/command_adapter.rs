@@ -753,3 +753,178 @@ fn disk_report_json_and_human_output_leave_missing_state_absent() -> support::Re
     rig.assert_legacy_unchanged()?;
     Ok(())
 }
+
+fn verify_fixture_port(backend: serde_json::Value) -> Result<serde_json::Value> {
+    let mut ports: serde_json::Value =
+        serde_json::from_str(include_str!("../crates/config/assets/ports.json"))?;
+    ports["verify"]["backend"] = backend;
+    ports["verify"]["default_tier"] = json!("security/default");
+    ports["verify"]["tiers"] = json!({
+        "security/default": {
+            "commands": ["unused-by-port-dispatch"],
+            "selection": "all",
+            "warn_for_host_load": false
+        },
+        "security/linux": {
+            "commands": ["unused-by-port-dispatch"],
+            "selection": "all",
+            "warn_for_host_load": false
+        }
+    });
+    Ok(ports)
+}
+
+fn fixture_verify_command() -> provenant_config::PortCommand {
+    provenant_config::PortCommand {
+        argv: vec!["/bin/sh".into(), "verify-port.sh".into(), "{tier}".into()],
+        exit_codes: provenant_config::CommandExitCodes {
+            success: vec![0],
+            unknown: vec![75],
+            other: provenant_config::ExitDisposition::Refused,
+        },
+    }
+}
+
+fn write_project_verify_port(rig: &TestRig, ports: &serde_json::Value) -> Result {
+    let directory = rig.project.join(".provenant");
+    fs::create_dir_all(&directory)?;
+    fs::write(directory.join("ports.json"), serde_json::to_vec(ports)?)?;
+    Ok(())
+}
+
+#[test]
+fn verify_command_substitutes_free_form_tier_and_records_content_free_custody() -> Result {
+    let rig = TestRig::new()?;
+    let command = fixture_verify_command();
+    let backend = json!({"kind":"command","command":serde_json::to_value(&command)?});
+    let ports = verify_fixture_port(backend)?;
+    write_project_verify_port(&rig, &ports)?;
+    fs::write(
+        rig.project.join("verify-port.sh"),
+        r#"#!/bin/sh
+printf '%s|%s\n' "$1" "$PROVENANT_VERIFY_TIER" > verify-call.txt
+printf 'private-output\n'
+"#,
+    )?;
+
+    let output = rig.command(&["verify", "security/linux", "--json"])?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["data"]["tier"], "security/linux");
+    assert_eq!(result["data"]["backend"], "command");
+    assert_eq!(result["data"]["source"], "project");
+    assert_eq!(
+        fs::read_to_string(rig.project.join("verify-call.txt"))?,
+        "security/linux|security/linux\n"
+    );
+
+    let mut receipts = Vec::new();
+    for entry in fs::read_dir(&rig.state)? {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("port-command-verify-tier-")
+        {
+            receipts.push(serde_json::from_slice::<Value>(&fs::read(entry.path())?)?);
+        }
+    }
+    assert_eq!(receipts.len(), 1);
+    let receipt = &receipts[0];
+    assert_eq!(receipt["owner"], "verify");
+    assert_eq!(receipt["backend"], "repository_command");
+    assert_eq!(receipt["source"], "project");
+    assert_eq!(receipt["phase"], "tier");
+    assert_eq!(receipt["outcome"], "succeeded");
+    assert_eq!(receipt["exit_code"], 0);
+    assert_eq!(receipt["command_digest"], command.digest().to_string());
+    assert!(receipt["request_key_digest"].as_str().is_some());
+    assert!(receipt["stdout_digest"].as_str().is_some());
+    assert!(
+        receipt["capture_complete"]
+            .as_bool()
+            .ok_or("capture_complete")?
+    );
+    let receipt_text = serde_json::to_string(receipt)?;
+    assert!(!receipt_text.contains("verify-port.sh"));
+    assert!(!receipt_text.contains("private-output"));
+    Ok(())
+}
+
+#[test]
+fn project_none_verify_port_overrides_host_command_without_executing_it() -> Result {
+    let rig = TestRig::new()?;
+    let marker = rig.project.join("verify-call.txt");
+    fs::write(
+        rig.project.join("verify-port.sh"),
+        r#"#!/bin/sh
+printf 'executed\n' > verify-call.txt
+"#,
+    )?;
+    let command = fixture_verify_command();
+    let host_ports = verify_fixture_port(json!({
+        "kind": "command",
+        "command": serde_json::to_value(&command)?
+    }))?;
+    fs::write(
+        rig.state.join("ports.json"),
+        serde_json::to_vec(&host_ports)?,
+    )?;
+    let project_ports = verify_fixture_port(json!({"kind":"none"}))?;
+    write_project_verify_port(&rig, &project_ports)?;
+
+    let output = rig.command(&["verify", "--json"])?;
+    assert_eq!(
+        code(&output),
+        4,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(result["status"], "unavailable");
+    assert_eq!(result["data"]["backend"], "none");
+    assert_eq!(result["error"]["code"], "VERIFY_UNAVAILABLE");
+    assert!(!marker.exists());
+    for entry in fs::read_dir(&rig.state)? {
+        let entry = entry?;
+        assert!(
+            !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("port-command-verify-tier-"),
+            "disabled verify port wrote command evidence"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn builtin_verification_failure_is_not_a_refusal() -> Result {
+    let rig = TestRig::new()?;
+    let ports = verify_fixture_port(json!({"kind":"builtin"}))?;
+    write_project_verify_port(&rig, &ports)?;
+    fs::create_dir_all(rig.project.join("scripts"))?;
+    fs::write(
+        rig.project.join("scripts/verify-tier"),
+        "raise SystemExit(1)\n",
+    )?;
+    let output = rig.command(&["verify", "security/linux", "--json"])?;
+    assert_ne!(code(&output), 0);
+    let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(result["data"]["backend"], "builtin");
+    assert_eq!(
+        result["data"]["disposition"],
+        serde_json::to_value(provenant_config::PortCommandDisposition::Failed)?
+    );
+    assert_eq!(
+        result["status"],
+        serde_json::to_value(provenant_records::Outcome::Error)?
+    );
+    Ok(())
+}

@@ -60,6 +60,7 @@ impl Request<'_> {
 pub struct Store {
     pub(crate) db: Connection,
     pub(crate) state_root: StateRoot,
+    database_path: std::path::PathBuf,
     // SQLite supports movable connections, but Fabric requires worker ownership.
     _owner: PhantomData<Rc<()>>,
 }
@@ -136,6 +137,7 @@ impl Store {
             Error::UnsafePath(path.join(name))
         })?;
         let path = path.join(database);
+        let database_path = path.clone();
         let mut db = if writable {
             provenant_sqlite::open_connection(&path, false)?
         } else if read_only_wal {
@@ -160,6 +162,7 @@ impl Store {
         let store = Self {
             db,
             state_root: root.clone(),
+            database_path,
             _owner: PhantomData,
         };
         if provenant_sqlite::stored_version(&store.db)? != SCHEMA.version {
@@ -201,7 +204,8 @@ impl Store {
             Ok(_) => {}
         }
         companions(&fabric, &path, "fabric.sqlite3")?;
-        let db = provenant_sqlite::open_connection(&path.join("fabric.sqlite3"), true)?;
+        let database_path = path.join("fabric.sqlite3");
+        let db = provenant_sqlite::open_connection(&database_path, true)?;
         if provenant_sqlite::stored_version(&db)? == 0 {
             return Err(Error::NotFound);
         }
@@ -209,12 +213,34 @@ impl Store {
         Ok(Self {
             db,
             state_root: root.clone(),
+            database_path,
             _owner: PhantomData,
         })
     }
 
     pub fn open(root: &StateRoot, request: &Request<'_>) -> Result<Self> {
         Self::open_database(root, request, "fabric.sqlite3", true)
+    }
+
+    /// Files that change when owner commits append a Fabric event. The post-commit
+    /// hint is lossy, so watchers also follow SQLite's event database companions.
+    pub fn event_observation_paths(&self) -> Vec<std::path::PathBuf> {
+        let mut paths = vec![self.database_path.clone()];
+        for suffix in ["-wal", "-journal"] {
+            let mut name = self
+                .database_path
+                .file_name()
+                .unwrap_or_default()
+                .to_os_string();
+            name.push(suffix);
+            paths.push(self.database_path.with_file_name(name));
+        }
+        paths.push(
+            self.state_root
+                .as_path()
+                .join(provenant_core::changes::FILE_NAME),
+        );
+        paths
     }
 
     /// Host-only records live outside the exact coordination DB grants lanes
@@ -334,6 +360,7 @@ impl Store {
         Ok(Self {
             db,
             state_root: root.clone(),
+            database_path: db_path,
             _owner: PhantomData,
         })
     }

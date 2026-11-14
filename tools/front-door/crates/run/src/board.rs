@@ -5,6 +5,7 @@ use rusqlite::params;
 
 #[derive(Debug, serde::Serialize)]
 pub struct BoardLane {
+    #[serde(serialize_with = "provenant_records::run::serialize_public_attempt")]
     pub attempt: AttemptRecord,
     /// The operation that admitted the attempt.
     pub operation: OperationRecord,

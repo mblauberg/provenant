@@ -1104,6 +1104,9 @@ fn collect_impl(
     validate_binding(context)?;
     let entries = context.facts.fresh_inventory(context, cancel)?;
     let primary = canonicalize(context.repo.root_path())?;
+    let ports = provenant_config::PortTable::read_for(Some(&primary), &context.host_state()?)
+        .map_err(WorktreeError::PortConfiguration)?;
+    let layout_roots = ports.worktree_layout.roots.clone();
     let known_refs = RefLedger::observe_context(context)?
         .map(|ledger| ledger.list())
         .transpose()?
@@ -1251,8 +1254,6 @@ fn collect_impl(
                 dry_run: dry,
                 ..*policy
             };
-            let ports = provenant_config::PortTable::read_project(&primary)
-                .map_err(WorktreeError::PortConfiguration)?;
             let protected =
                 output_protection(context, locked.verified.repo(), policy.keep, cancel)?;
             let output = if (policy.terminal)(&lane.path) {
@@ -1266,7 +1267,7 @@ fn collect_impl(
                 &lane.path,
                 Path::new(""),
                 &effective,
-                &ports.worktree_layout.roots,
+                &layout_roots,
                 &protected,
                 output,
                 0,
@@ -2181,8 +2182,11 @@ fn prepare_removal_before(
     preview_only: bool,
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
-    let ports = provenant_config::PortTable::read_project(context.repo.root_path())
-        .map_err(WorktreeError::PortConfiguration)?;
+    let ports = provenant_config::PortTable::read_for(
+        Some(context.repo.root_path()),
+        &context.host_state()?,
+    )
+    .map_err(WorktreeError::PortConfiguration)?;
     let layout_roots = ports.worktree_layout.roots;
     let protected = output_protection(context, repo, keep, cancel)?;
     let mut policy = WorktreeGcPolicy {

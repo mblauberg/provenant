@@ -300,6 +300,7 @@ struct SeedPass {
 /// failure never stops the others.
 fn refresh_projects(
     projects: &[std::path::PathBuf],
+    host_state: &std::path::Path,
     refresh: impl Fn(
         &std::path::Path,
     ) -> Result<crate::target_seed_build::Refresh, Box<dyn std::error::Error>>,
@@ -307,7 +308,7 @@ fn refresh_projects(
     use crate::target_seed_build::Refresh;
     let mut pass = SeedPass::default();
     for project in projects {
-        match provenant_run::target_seed::cargo_build_directory(project) {
+        match provenant_run::target_seed::cargo_build_directory(project, host_state) {
             Ok(Some(_)) => {}
             Ok(None) => {
                 pass.skipped += 1;
@@ -346,6 +347,7 @@ fn backed_off_note(commits: &[String]) -> Option<String> {
 /// disabled seed, returns without touching the result file.
 fn seed_pass(
     directory: &Directory,
+    host_state: &Path,
     clock: &dyn Clock,
     enabled: bool,
     projects: impl FnOnce() -> Result<Vec<std::path::PathBuf>, String>,
@@ -363,7 +365,7 @@ fn seed_pass(
         return write_result(directory, SEED_RESULT, "tick-seed", at()?, "disabled", None);
     }
     write_result(directory, SEED_RESULT, "tick-seed", at()?, "running", None)?;
-    let outcome = projects().map(|projects| refresh_projects(&projects, refresh));
+    let outcome = projects().map(|projects| refresh_projects(&projects, host_state, refresh));
     let (state, error) = match outcome {
         Ok(pass) if !pass.errors.is_empty() => ("failed", Some(pass.errors.join("; "))),
         Ok(pass) if pass.busy > 0 => (
@@ -406,6 +408,7 @@ pub(crate) fn seed_worker(globals: &Globals) -> u8 {
         let state = resolved.roots.state.as_path();
         seed_pass(
             &directory,
+            state,
             &SystemClock,
             config.domains.fabric.lanes.cargo_seed.enabled,
             || {
@@ -762,6 +765,7 @@ mod tests {
         let listed = projects.clone();
         seed_pass(
             &directory,
+            &root,
             &seed_clock(),
             true,
             || Ok(listed),
@@ -781,7 +785,7 @@ mod tests {
             error.unwrap(),
             format!("{}: origin/main missing", projects[1].display())
         );
-        let pass = refresh_projects(&projects, |project| {
+        let pass = refresh_projects(&projects, &root, |project| {
             match project.file_name().unwrap().to_str().unwrap() {
                 "a" => Ok(Refresh::Busy),
                 "b" => Err("origin/main missing".into()),
@@ -796,6 +800,7 @@ mod tests {
         let clean = vec![projects[0].clone()];
         seed_pass(
             &directory,
+            &root,
             &seed_clock(),
             true,
             || Ok(clean),
@@ -811,6 +816,7 @@ mod tests {
         assert!(seed_retry_due(&directory, far), "busy is retried next tick");
         seed_pass(
             &directory,
+            &root,
             &seed_clock(),
             true,
             || Ok(vec![projects[0].clone()]),
@@ -833,6 +839,7 @@ mod tests {
         let called = std::cell::RefCell::new(Vec::new());
         seed_pass(
             &directory,
+            &root,
             &seed_clock(),
             true,
             || Ok(listed),
@@ -849,7 +856,7 @@ mod tests {
             note.unwrap(),
             "commit abc123 failed; waiting for origin/main to move"
         );
-        let pass = refresh_projects(&[bare], |_| panic!("no manifest, no refresh"));
+        let pass = refresh_projects(&[bare], &root, |_| panic!("no manifest, no refresh"));
         assert_eq!(
             pass,
             SeedPass {
@@ -890,6 +897,7 @@ mod tests {
             .unwrap();
         seed_pass(
             &directory,
+            &root,
             &seed_clock(),
             true,
             || panic!("a second worker must not enumerate projects"),
@@ -922,6 +930,7 @@ mod tests {
         assert_eq!(seed_state(&directory), "disabled");
         seed_pass(
             &directory,
+            &root,
             &seed_clock(),
             true,
             || Err("registry unreadable".into()),

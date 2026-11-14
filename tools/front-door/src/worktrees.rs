@@ -1451,7 +1451,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         }
     } else {
         let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
-        let runtime = UtilityRuntime::read_only(&git)?;
+        let runtime = UtilityRuntime::read_only(&git, roots.state.as_path())?;
         let executor = SystemExecutor::new(1)?;
         let repo = runtime.open_repo(
             &executor,
@@ -2122,10 +2122,14 @@ fn with_context_mode<T>(
     };
     let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
     // Lane scratch and provider state live below the state directory's runs.
-    let runtime = UtilityRuntime::new(git, roots.state.as_path().join("utility-home"))?
-        .with_lane_roots(provenant_confinement::utility::lane_state_roots(
-            roots.state.as_path(),
-        ));
+    let runtime = UtilityRuntime::new(
+        git,
+        roots.state.as_path().join("utility-home"),
+        roots.state.as_path(),
+    )?
+    .with_lane_roots(provenant_confinement::utility::lane_state_roots(
+        roots.state.as_path(),
+    ));
     let executor = SystemExecutor::new(1)?;
     let cancel = CancelToken::new();
     let budget = UtilityBudget::bounded(Duration::from_secs(5))?;

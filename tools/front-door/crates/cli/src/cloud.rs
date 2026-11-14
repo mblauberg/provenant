@@ -255,6 +255,7 @@ pub fn parse_session(output: &str) -> Option<(String, Option<String>)> {
 /// The default follows the project's sourced worktree layout.
 pub fn collect_path(
     project: &Path,
+    host_state: &Path,
     main: &Path,
     path: Option<&Path>,
     branch: &str,
@@ -262,7 +263,7 @@ pub fn collect_path(
     match path {
         Some(path) => Ok(project.join(path)),
         None => {
-            let ports = provenant_config::PortTable::read_project(project)?;
+            let ports = provenant_config::PortTable::read_for(Some(project), host_state)?;
             Ok(main.join(ports.managed_writer_path(branch)?))
         }
     }
@@ -299,7 +300,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            collect_path(temp.path(), Path::new("/repo"), None, "cloud/abc").unwrap(),
+            collect_path(
+                temp.path(),
+                temp.path(),
+                Path::new("/repo"),
+                None,
+                "cloud/abc"
+            )
+            .unwrap(),
             Path::new("/repo/.claude/worktrees/cloud-abc")
         );
     }
@@ -374,11 +382,18 @@ mod tests {
             Path::new("/repo/sub/wt")
         );
         assert_eq!(
-            collect_path(project, main, Some(Path::new("/elsewhere/wt")), "x").unwrap(),
+            collect_path(
+                project,
+                project,
+                main,
+                Some(Path::new("/elsewhere/wt")),
+                "x"
+            )
+            .unwrap(),
             Path::new("/elsewhere/wt")
         );
         assert_eq!(
-            collect_path(project, main, None, "cloud/abc").unwrap(),
+            collect_path(project, project, main, None, "cloud/abc").unwrap(),
             Path::new("/repo/.worktrees/cloud-abc")
         );
     }

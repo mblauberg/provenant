@@ -50,6 +50,7 @@ mod state_reset;
 mod status_wait;
 mod target_seed_build;
 mod usage;
+mod verify;
 #[cfg(test)]
 pub mod worktree_tests;
 mod worktrees;
@@ -598,6 +599,7 @@ fn sync_registered_account(
 /// What a config command does: show, describe the schema, edit, or list history.
 enum ConfigAction<'a> {
     Show,
+    Ports,
     Schema {
         all: bool,
     },
@@ -633,6 +635,30 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
         let sections = &provenant_cli::domains::SECTIONS;
         let options = config::EditOptions::new("cli");
         Ok(match action {
+            ConfigAction::Ports => {
+                let table = config::PortTable::read_for_inspection(
+                    Some(&context.project),
+                    roots.state.as_path(),
+                )?;
+                let ports: Vec<_> = table
+                    .entries()
+                    .map(|(name, source, backend, _, unavailable_reason)| {
+                        let backend = match backend {
+                            config::PortBackendKind::Builtin => "builtin",
+                            config::PortBackendKind::Command => "command",
+                            config::PortBackendKind::None => "none",
+                        };
+                        serde_json::json!({
+                            "name": name,
+                            "backend": backend,
+                            "source": source,
+                            "available": unavailable_reason.is_none(),
+                            "unavailable_reason": unavailable_reason,
+                        })
+                    })
+                    .collect();
+                serde_json::json!({ "schema_version": table.schema_version, "ports": ports })
+            }
             ConfigAction::Show => {
                 let (resolved, revision) = config::show(&roots, sections)?;
                 let mut value = serde_json::to_value(&resolved)?;
@@ -844,8 +870,44 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
                 globals,
             );
         };
+        let (resource_sample_interval, resource_sample_interval_source) =
+            match roots::resolve(globals, Workspace::Project, Product::Optional) {
+                Ok(resolved) => match provenant_cli::config_reads::read_for(&resolved.roots, "internal") {
+                    Ok(config) => {
+                        let millis = config.domains.run.resource_sample_interval_ms;
+                        let source = config
+                            .origins
+                            .get("domains.run.resource_sample_interval_ms")
+                            .map(|origin| format!("{origin:?}"))
+                            .unwrap_or_else(|| "compiled default (origin unavailable)".into());
+                        if (1..=60_000).contains(&millis) {
+                            (Some(std::time::Duration::from_millis(millis)), source)
+                        } else {
+                            let _ = writeln!(io::stderr().lock(),
+                                "warning: domains.run.resource_sample_interval_ms is outside 1..=60000; using compiled {}ms default", provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL_MS);
+                            (None, "compiled default (invalid configured value)".into())
+                        }
+                    }
+                    Err(error) => {
+                        let _ = writeln!(io::stderr().lock(),
+                            "warning: domains.run resource sampling configuration unavailable; using compiled {}ms default: {error}", provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL_MS);
+                        (None, "compiled default (configuration unavailable)".into())
+                    }
+                },
+                Err(error) => {
+                    let _ = writeln!(io::stderr().lock(),
+                        "warning: resource sampling configuration roots unavailable; using compiled {}ms default: {error}", provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL_MS);
+                    (None, "compiled default (roots unavailable)".into())
+                }
+            };
+        let effective_interval = resource_sample_interval
+            .unwrap_or(provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL);
+        let _ = writeln!(io::stderr().lock(),
+            "resource sampling interval: {}ms (source: {})",
+            effective_interval.as_millis(), resource_sample_interval_source);
         let hooks = provenant_supervisor::GuardianHooks {
             disk: Some(&disk),
+            resource_sample_interval,
             holder: Some(&holder),
             stdout_decoder: Some(holder.stdout_decoder()),
             stderr_decoder: Some(holder.stderr_decoder()),
@@ -1147,6 +1209,9 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             "help must be resolved by the parser",
             globals,
         ),
+        Command::Config(provenant_cli::Config::Ports) => {
+            config_command("config ports", ConfigAction::Ports, globals)
+        }
         Command::Config(provenant_cli::Config::Check(page)) => checks::config(page, globals),
         Command::Config(provenant_cli::Config::Show) => {
             config_command("config show", ConfigAction::Show, globals)
@@ -1549,6 +1614,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Disk(provenant_cli::Disk::Report) => disk::run(globals),
         Command::Cloud(command) => cloud::run(command, globals),
         Command::Tracker(command) => tracker::run(command, globals),
+        Command::Verify { tier } => verify::run(tier.as_deref(), globals),
         Command::Check(check) => checks::run(check, globals, process.workers()),
         Command::Hook(hook) => hooks::run(hook, globals),
     }

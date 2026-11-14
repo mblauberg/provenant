@@ -61,7 +61,9 @@ impl Fixture {
             run_fixture_git(&executor, &git, temp.path(), &env, &args)?;
         }
 
-        let runtime = UtilityRuntime::new(&git, &home)?;
+        let state = temp.path().join("state");
+        provenant_os::fixture::private_state_dir(&state)?;
+        let runtime = UtilityRuntime::new(&git, &home, &state)?;
         let probe_budget = UtilityBudget::bounded(Duration::from_secs(10))?;
         let repo = runtime.open_repo(&executor, &root, probe_budget, &CancelToken::new())?;
         Ok(Self {

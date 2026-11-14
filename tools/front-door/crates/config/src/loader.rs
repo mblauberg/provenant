@@ -630,11 +630,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
                 .or_insert_with(|| compiled.clone());
         }
     }
-    for key in [
-        "worktrees.setup",
-        "worktrees.timeout_seconds",
-        "worktrees.projects",
-    ] {
+    for key in ["worktrees.timeout_seconds", "worktrees.projects"] {
         origins.insert(key.into(), compiled.clone());
     }
     if let Some(item) = &worktrees_item {

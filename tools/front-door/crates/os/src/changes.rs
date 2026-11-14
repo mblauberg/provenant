@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::Duration;
+pub mod watch;
 
 use crate::fs::{Directory, FsError, LockMode, LockRefusal};
 use crate::sys::fs as os;
