@@ -3,9 +3,10 @@
 //! commit statuses for an exact commit through [`Observer::checks`].
 //!
 //! Reads are cached in host state by repository and commit, so waiters in any
-//! process share one answer per poll interval: a waiter accepts an answer
-//! younger than its own interval. An older answer is refreshed by a
-//! conditional request, so an unchanged commit costs a `304`. A one-shot
+//! process share one answer per configured observation interval. Settled CI
+//! uses the fast interval; pending CI slows until near the same check's recent
+//! median completion time. A zero caller max age always revalidates. An older
+//! answer is refreshed conditionally, so an unchanged commit costs a `304`. A one-shot
 //! decision accepts no age and always revalidates. A rate-limited
 //! response is recorded once for the repository with its reset time, and
 //! every waiter holds off until then instead of retrying on its own.
@@ -112,6 +113,7 @@ struct Cached {
 
 #[derive(Clone)]
 struct RunDuration {
+    id: u64,
     name: String,
     duration_ms: i64,
     completed_at_ms: i64,
@@ -119,6 +121,7 @@ struct RunDuration {
 
 #[derive(Clone, Copy)]
 struct Cadence {
+    fast: Duration,
     slow: Duration,
     near_end: Duration,
     conditional_requests: bool,
@@ -135,13 +138,14 @@ static WAIT_SECTIONS: [provenant_config::DomainSection; 1] =
 fn adaptive_freshness(
     cached: &Cached,
     history: &[RunDuration],
-    fast: Duration,
+    caller_max_age: Duration,
     cadence: Cadence,
     now_ms: i64,
 ) -> Duration {
-    if fast.is_zero() {
-        return fast;
+    if caller_max_age.is_zero() {
+        return Duration::ZERO;
     }
+    let fast = cadence.fast;
     let pending = cached
         .runs
         .iter()
@@ -176,8 +180,37 @@ fn durations_from_cache(cached: &Cached) -> Vec<RunDuration> {
             let started = time(run.get("started_at"))?.flatten()?.as_millisecond();
             let completed = time(run.get("completed_at"))?.flatten()?.as_millisecond();
             let duration_ms = completed.checked_sub(started).filter(|duration| *duration > 0)?;
-            Some(RunDuration { name: run.get("name")?.as_str()?.to_owned(), duration_ms, completed_at_ms: completed })
+            Some(RunDuration {
+                id: run.get("id")?.as_u64()?,
+                name: run.get("name")?.as_str()?.to_owned(),
+                duration_ms,
+                completed_at_ms: completed,
+            })
         }).collect()
+}
+
+fn unique_run_history(samples: impl IntoIterator<Item = RunDuration>) -> Vec<RunDuration> {
+    let mut by_id = std::collections::BTreeMap::<u64, RunDuration>::new();
+    for sample in samples {
+        match by_id.entry(sample.id) {
+            std::collections::btree_map::Entry::Vacant(entry) => { entry.insert(sample); }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let old = entry.get();
+                if sample.completed_at_ms > old.completed_at_ms
+                    || (sample.completed_at_ms == old.completed_at_ms
+                        && sample.duration_ms > old.duration_ms)
+                {
+                    entry.insert(sample);
+                }
+            }
+        }
+    }
+    let mut history = by_id.into_values().collect::<Vec<_>>();
+    history.sort_by_key(|sample| sample.completed_at_ms);
+    if history.len() > RUN_HISTORY_LIMIT {
+        history.drain(..history.len() - RUN_HISTORY_LIMIT);
+    }
+    history
 }
 
 fn cached_run_history(dir: &Directory) -> Option<Vec<RunDuration>> {
@@ -198,11 +231,7 @@ fn cached_run_history(dir: &Directory) -> Option<Vec<RunDuration>> {
         let cached: Cached = serde_json::from_slice(&bytes).ok()?;
         history.extend(durations_from_cache(&cached));
     }
-    history.sort_by_key(|sample| sample.completed_at_ms);
-    history.dedup_by(|left, right| left.name == right.name && left.duration_ms == right.duration_ms
-        && left.completed_at_ms == right.completed_at_ms);
-    if history.len() > RUN_HISTORY_LIMIT { history.drain(..history.len() - RUN_HISTORY_LIMIT); }
-    Some(history)
+    Some(unique_run_history(history))
 }
 
 fn settings_roots(state: &Path, project: &Path) -> Result<provenant_core::Roots, ObserveError> {
@@ -231,7 +260,7 @@ enum Fetch {
 
 pub(crate) struct Observer<F, C> {
     dir: Directory, repository: String, forge: F, clock: C,
-    cadence: Cadence, history: Vec<RunDuration>,
+    cadence: Cadence, history: Vec<RunDuration>, next_poll_interval: Duration,
 }
 
 impl Observer<GhTransport, WallClock> {
@@ -304,16 +333,29 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                 Vec::new()
             }
         };
-        let cadence = Cadence { slow: Duration::from_millis(settings.pr_slow_interval_ms),
+        let cadence = Cadence {
+            fast: Duration::from_millis(settings.pr_interval_ms),
+            slow: Duration::from_millis(settings.pr_slow_interval_ms),
             near_end: Duration::from_millis(settings.pr_near_end_window_ms),
-            conditional_requests: settings.pr_conditional_requests };
-        Ok(Self { dir, repository, forge, clock, cadence, history })
+            conditional_requests: settings.pr_conditional_requests,
+        };
+        let next_poll_interval = cadence.fast;
+        Ok(Self { dir, repository, forge, clock, cadence, history, next_poll_interval })
     }
 
-    /// Every check reported for `commit`. An answer any waiter on the host
-    /// read less than `max_age` ago is served without a request. Transient
-    /// failures are retried within `budget`; a rate limit returns at once, so
-    /// the caller skips one poll instead of sleeping to the reset.
+    /// The configured fast interval for PR and CI observation.
+    pub(crate) fn fast_interval(&self) -> Duration {
+        self.cadence.fast
+    }
+
+    /// The interval selected from the last CI observation for the next read.
+    pub(crate) fn next_poll_interval(&self) -> Duration {
+        self.next_poll_interval
+    }
+
+    /// Every check reported for `commit`. A zero `max_age` forces a fresh read;
+    /// any nonzero value enables the configured adaptive cadence. Transient
+    /// failures are retried within `budget`; a rate limit returns at once.
     pub(crate) fn checks(
         &mut self,
         commit: &str,
@@ -364,8 +406,16 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                 .read_bounded(OsStr::new(&name), CACHE_LIMIT)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-            let freshness = cached.as_ref().map_or(max_age, |cached|
-                adaptive_freshness(cached, &self.history, max_age, self.cadence, now.as_millisecond()));
+            let freshness = cached.as_ref().map_or_else(
+                || if max_age.is_zero() { Duration::ZERO } else { self.cadence.fast },
+                |cached| adaptive_freshness(
+                    cached,
+                    &self.history,
+                    max_age,
+                    self.cadence,
+                    now.as_millisecond(),
+                ),
+            );
             let fresh = cached.as_ref().is_some_and(|cached| {
                 let age = now.as_millisecond().saturating_sub(cached.fetched_at);
                 (0..i64::try_from(freshness.as_millis()).unwrap_or(i64::MAX)).contains(&age)
@@ -375,14 +425,11 @@ impl<F: Forge, C: Clock> Observer<F, C> {
             } else {
                 match self.fetch(commit, cached.unwrap_or_default()) {
                     Ok(mut fetched) => {
-                        self.history.extend(durations_from_cache(&fetched));
-                        self.history.sort_by_key(|sample| sample.completed_at_ms);
-                        self.history.dedup_by(|left, right| left.name == right.name
-                            && left.duration_ms == right.duration_ms
-                            && left.completed_at_ms == right.completed_at_ms);
-                        if self.history.len() > RUN_HISTORY_LIMIT {
-                            self.history.drain(..self.history.len() - RUN_HISTORY_LIMIT);
-                        }
+                        self.history = unique_run_history(
+                            std::mem::take(&mut self.history)
+                                .into_iter()
+                                .chain(durations_from_cache(&fetched)),
+                        );
                         fetched.fetched_at = now.as_millisecond();
                         let bytes = serde_json::to_vec(&fetched).map_err(|error| {
                             ObserveError::Unavailable(format!("cannot encode CI: {error}"))
@@ -422,6 +469,13 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                     Err(Fetch::Failed(message)) => return Err(ObserveError::Unavailable(message)),
                 }
             };
+            self.next_poll_interval = adaptive_freshness(
+                &cached,
+                &self.history,
+                max_age,
+                self.cadence,
+                self.clock.now().as_millisecond(),
+            );
             drop(guard);
             return parse(&cached, commit).ok_or_else(|| {
                 ObserveError::Unavailable(
@@ -1260,17 +1314,48 @@ mod tests {
         let cached = Cached { runs: vec![Page { etag: None, body: json!({"check_runs":[{
             "name":"build", "status":"in_progress", "started_at":"1970-01-01T00:00:00Z"
         }]}) }], ..Cached::default() };
-        let history = [RunDuration { name: "build".into(), duration_ms: 300_000, completed_at_ms: 300_000 }];
-        let cadence = Cadence { slow: Duration::from_secs(15), near_end: Duration::from_secs(30), conditional_requests: true };
+        let history = [RunDuration { id: 1, name: "build".into(), duration_ms: 300_000, completed_at_ms: 300_000 }];
+        let cadence = Cadence { fast: Duration::from_secs(5), slow: Duration::from_secs(15), near_end: Duration::from_secs(30), conditional_requests: true };
         assert_eq!(adaptive_freshness(&cached, &history, Duration::from_secs(5), cadence, 100_000), Duration::from_secs(15));
         assert_eq!(adaptive_freshness(&cached, &history, Duration::from_secs(5), cadence, 280_000), Duration::from_secs(5));
         assert_eq!(adaptive_freshness(&cached, &[], Duration::from_secs(5), cadence, 280_000), Duration::from_secs(15));
     }
 
     #[test]
+    fn configured_fast_cadence_drives_cache_age_and_zero_forces_refresh() {
+        let cadence = Cadence {
+            fast: Duration::from_secs(2),
+            slow: Duration::from_secs(15),
+            near_end: Duration::from_secs(30),
+            conditional_requests: true,
+        };
+        assert_eq!(
+            adaptive_freshness(&Cached::default(), &[], Duration::from_secs(30), cadence, 0),
+            Duration::from_secs(2),
+        );
+        assert_eq!(
+            adaptive_freshness(&Cached::default(), &[], Duration::ZERO, cadence, 0),
+            Duration::ZERO,
+        );
+    }
+
+    #[test]
+    fn duration_history_deduplicates_run_identity_not_equal_measurements() {
+        let sample = |id| RunDuration {
+            id,
+            name: "build".into(),
+            duration_ms: 300_000,
+            completed_at_ms: 600_000,
+        };
+        let history = unique_run_history([sample(1), sample(2), sample(1)]);
+        assert_eq!(history.iter().filter(|run| run.id == 1).count(), 1);
+        assert_eq!(history.iter().filter(|run| run.id == 2).count(), 1);
+    }
+
+    #[test]
     fn etag_requests_follow_the_sourced_conditional_setting() {
         let previous = Page { etag: Some("validator".into()), body: Value::Null };
-        let mut cadence = Cadence { slow: Duration::from_secs(15), near_end: Duration::from_secs(30), conditional_requests: true };
+        let mut cadence = Cadence { fast: Duration::from_secs(5), slow: Duration::from_secs(15), near_end: Duration::from_secs(30), conditional_requests: true };
         assert_eq!(request_etag(cadence, Some(&previous)), Some("validator"));
         cadence.conditional_requests = false;
         assert_eq!(request_etag(cadence, Some(&previous)), None);

@@ -277,10 +277,9 @@ fn pull_for_branch_with(
         .into()),
     }
 }
-/// How long `pr watch` waits for CI to report its first check, and how often
-/// it asks. A push is followed by a gap before any workflow registers.
+/// How long `pr watch` waits for CI to report its first check. Its poll
+/// interval comes from the observer's configured adaptive cadence.
 const UNREPORTED_WAIT: Duration = Duration::from_secs(180);
-const UNREPORTED_POLL: Duration = Duration::from_secs(10);
 /// The longest `pr watch` follows the CI of one head.
 const WATCH_BUDGET: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -293,6 +292,7 @@ type Observed = std::result::Result<Vec<observer::Check>, observer::ObserveError
 fn watch_with(
     read: &mut dyn FnMut() -> Observed,
     sleep: &dyn Fn(Duration),
+    poll_interval: &dyn Fn() -> Duration,
     number: &str,
 ) -> Result<()> {
     let mut waited = Duration::ZERO;
@@ -314,12 +314,15 @@ fn watch_with(
                     ),
                 ));
             }
-            sleep(UNREPORTED_POLL);
-            waited += UNREPORTED_POLL;
+            let delay = poll_interval()
+                .max(Duration::from_millis(1))
+                .min(UNREPORTED_WAIT.saturating_sub(waited));
+            sleep(delay);
+            waited += delay;
             continue;
         }
         if checks.iter().any(|check| check.bucket == "pending") {
-            sleep(observer::POLL);
+            sleep(poll_interval().max(Duration::from_millis(1)));
             continue;
         }
         if !checks.iter().any(|check| check.bucket == "pass")
@@ -339,15 +342,20 @@ fn watch(project: &Path, state: &Path, number: &str, head: GitOid, repository: &
     let mut ci = observer::Observer::open(state, project, repository, WATCH_BUDGET)
         .map_err(|error| wait::ci_failure(error, &format!("provenant pr watch {number}")))?;
     let commit = head.to_string();
+    let max_age = ci.fast_interval();
+    let next_poll = std::cell::Cell::new(max_age);
     watch_with(
         &mut || {
-            ci.checks(
+            let result = ci.checks(
                 &commit,
-                observer::POLL,
+                max_age,
                 WATCH_BUDGET.saturating_sub(started.elapsed()),
-            )
+            );
+            next_poll.set(ci.next_poll_interval());
+            result
         },
         &std::thread::sleep,
+        &|| next_poll.get(),
         number,
     )?;
     if self::head(project, number)? != head {
@@ -621,11 +629,40 @@ mod unreported_checks_tests {
                 })
             },
             &|delay| slept.set(slept.get() + delay),
+            &|| observer::POLL,
             "7",
         )
         .expect("checks registered after three empty reads and then passed");
         assert_eq!(reads.get(), 5);
-        assert_eq!(slept.get(), UNREPORTED_POLL * 3 + observer::POLL);
+        assert_eq!(slept.get(), observer::POLL * 4);
+    }
+
+    #[test]
+    fn watch_uses_the_adapter_interval_selected_after_each_pending_read() {
+        let reads = Cell::new(0);
+        let interval = Cell::new(Duration::from_secs(1));
+        let slept = Cell::new(Duration::ZERO);
+        watch_with(
+            &mut || {
+                reads.set(reads.get() + 1);
+                match reads.get() {
+                    1 => {
+                        interval.set(Duration::from_secs(15));
+                        Ok(vec![check("pending")])
+                    }
+                    2 => {
+                        interval.set(Duration::from_secs(2));
+                        Ok(vec![check("pending")])
+                    }
+                    _ => Ok(vec![check("pass")]),
+                }
+            },
+            &|delay| slept.set(slept.get() + delay),
+            &|| interval.get(),
+            "7",
+        )
+        .expect("checks settle after slow and fast pending intervals");
+        assert_eq!(slept.get(), Duration::from_secs(17));
     }
 
     #[test]
@@ -640,10 +677,11 @@ mod unreported_checks_tests {
                 })
             },
             &|_| {},
+            &|| observer::POLL,
             "7",
         )
         .expect("the real workflow registered and passed");
-        let error = watch_with(&mut || Ok(vec![check("skipping")]), &|_| {}, "7");
+        let error = watch_with(&mut || Ok(vec![check("skipping")]), &|_| {}, &|| observer::POLL, "7");
         assert!(error.is_err(), "only skipped checks at the bound");
     }
 
@@ -653,6 +691,7 @@ mod unreported_checks_tests {
         let error = watch_with(
             &mut || Ok(Vec::new()),
             &|delay| slept.set(slept.get() + delay),
+            &|| observer::POLL,
             "7",
         )
         .expect_err("checks never registered");
@@ -674,6 +713,7 @@ mod unreported_checks_tests {
             let error = watch_with(
                 &mut || Ok(buckets.iter().map(|bucket| check(bucket)).collect()),
                 &|_| panic!("a finished run must not wait"),
+                &|| observer::POLL,
                 "7",
             );
             assert!(error.is_err(), "{buckets:?}");
@@ -691,6 +731,7 @@ mod unreported_checks_tests {
                 })
             },
             &|_| panic!("the observer owns the rate-limit wait"),
+            &|| observer::POLL,
             "7",
         )
         .expect_err("the rate limit outlasts the budget");
