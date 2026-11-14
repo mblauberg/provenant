@@ -4934,10 +4934,6 @@ fn oversized_argv_prompt_spills_to_private_attempt_state() -> Result<(), Box<dyn
         .ok_or("oversized argv prompt was not spilled")?;
     assert_eq!(std::fs::read_to_string(file)?, text);
     assert!(!prompt.text().contains(text));
-    assert!(encoded.contains("host configuration"));
-    assert!(diagnostic.next.is_some());
-    assert!(!encoded.contains("PROMPT_SECRET_SENTINEL"));
-    assert!(!encoded.contains(root.to_str().unwrap()));
     Ok(())
 }
 

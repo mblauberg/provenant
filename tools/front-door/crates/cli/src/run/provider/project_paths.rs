@@ -762,7 +762,8 @@ mod tests {
             assert_eq!(
                 result.termination,
                 Termination::Exit(0),
-                "{}",
+                "writer={writer}, writable={}, stderr={}",
+                tools.join("write-probe").exists(),
                 String::from_utf8_lossy(&result.stderr.bytes)
             );
             assert!(!tools.join("write-probe").exists());

@@ -555,9 +555,8 @@ pub(crate) fn lane_provider() -> Result {
     use provenant_os::exec::Executor;
     use provenant_os::exec::StreamPolicy;
     use provenant_os::exec::SystemExecutor;
-    let state_directory = PathBuf::from(
-        std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).ok_or("state dir")?,
-    );
+    let state_directory =
+        PathBuf::from(std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).ok_or("state dir")?);
     let argv: Vec<OsString> = vec![
         std::env::current_exe()?.into_os_string(),
         "--state-dir".into(),
