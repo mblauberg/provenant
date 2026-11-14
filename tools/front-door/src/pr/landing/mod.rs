@@ -629,6 +629,19 @@ fn run_inner(
         report.warnings.push(warning);
     }
     let mut response = batch_response(report, submission.failure);
+    // A durable replay has no new local steps, but still names its pinned head.
+    if response.data["head"].is_null()
+        && let Some(number) = response.data["number"].as_u64()
+        && let Some(member) = submission.record.as_ref().and_then(|record| {
+            record
+                .request
+                .members
+                .iter()
+                .find(|member| member.pr == number)
+        })
+    {
+        response.data["head"] = serde_json::json!(member.head);
+    }
     response.data["landing_id"] = serde_json::json!(submission.id);
     response.data["members"] =
         serde_json::json!(submission.record.as_ref().map(|record| &record.outcomes));

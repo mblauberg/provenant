@@ -84,23 +84,6 @@ pub trait Forge {
     ) -> Result<provenant_records::landing::Capabilities, LandingError> {
         Ok(provenant_records::landing::Capabilities::default())
     }
-    /// Async submission/observation execute in 2.1. The port freezes their contract.
-    fn submit_landing(
-        &mut self,
-        _intent: &provenant_records::landing::PublishIntent,
-    ) -> Result<provenant_records::landing::Submission, LandingError> {
-        Err(LandingError::Unimplemented(
-            "asynchronous publication executes in 2.1",
-        ))
-    }
-    fn observe_landing(
-        &mut self,
-        _operation: &provenant_records::landing::OperationRef,
-    ) -> Result<provenant_records::landing::ForgeObservation, LandingError> {
-        Err(LandingError::Unimplemented(
-            "asynchronous observation executes in 2.1",
-        ))
-    }
     fn set_project_path(&mut self, _path: &std::path::Path) {}
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError>;
     /// The stack's pull requests in bottom-to-top order.

@@ -1199,7 +1199,7 @@ pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
     assert_ne!(git(rig, &["rev-parse", "main"])?, landing.stale);
     assert!(!landing.worktree.exists());
     assert!(!branch_exists(rig, "feat")?);
-    // Landing again finds nothing left to prune, and the text form names each step.
+    // Replaying a landed request keeps its identity without repeating cleanup.
     let text = command(rig, &["land", NUMBER, "--full"])
         .map_err(|error| format!("run text land command: {error}"))?;
     assert_eq!(code(&text), 0);
@@ -1208,8 +1208,9 @@ pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
         text.starts_with(&format!("merged #{NUMBER} {}\n", landing.head)),
         "{text}"
     );
-    assert!(text.contains("  worktree skipped"), "{text}");
-    assert!(text.contains("  branch skipped"), "{text}");
+    assert!(!landing.worktree.exists());
+    assert!(!branch_exists(rig, "feat")?);
+    assert_eq!(git(rig, &["rev-parse", "main"])?, landing.head);
     Ok(())
 }
 

@@ -31,7 +31,7 @@ use provenant_records::landing::{
 };
 use provenant_records::landing::{
     CandidateKind, CleanupDebt, CleanupDebtItem, Dependencies, LandingChanged, LandingContext,
-    MemberProgress, Observation, OutboxEntry, PublicationGuarantee, Submission,
+    MemberProgress, OutboxEntry, PublicationGuarantee, Submission,
 };
 
 /// The landing port every publisher uses.
@@ -40,12 +40,6 @@ pub trait LandingOwner {
     fn submit(&mut self, request: LandRequest) -> Result<LandingId, LandingError>;
     /// The durable record of a submitted landing.
     fn record(&self, id: &LandingId) -> Result<Option<LandingRecord>, LandingError>;
-    /// Observation execution follows in 2.1; its correlation contract is frozen now.
-    fn observe(&mut self, _event: Observation) -> Result<LandingRecord, LandingError> {
-        Err(LandingError::Unimplemented(
-            "landing observation executes in 2.1",
-        ))
-    }
 }
 
 /// Effects and fresh policy enter through the adapter. Resumption restores the
