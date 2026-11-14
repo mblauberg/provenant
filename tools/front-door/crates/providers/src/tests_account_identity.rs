@@ -12,9 +12,13 @@ fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
             ..fixture_input(&route, plan, &prompt, Path::new("/fixture/repo"), None)
         })
     };
-    // Without Rust installed the lane keeps only the system tools.
+    // Without Rust installed the lane keeps system tools and its own Cargo cache.
     let spec = prepare(&home, &plan)?;
-    assert!(spec.env.iter().all(|(name, _)| name != "CARGO_HOME"));
+    let provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) =
+        &plan.permissions().mode else { panic!("writer fixture") };
+    assert!(spec.env.iter().any(|(name, value)|
+        name == "CARGO_HOME" && value == authority.cargo_cache().path.join("cargo-home").as_os_str()
+    ));
     std::fs::create_dir_all(home.join(".cargo/bin"))?;
     std::fs::create_dir_all(home.join(".rustup/toolchains"))?;
     let cache = Path::new("/fixture/home/Library/Caches/provenant-lane-cargo/fixture");

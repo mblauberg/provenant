@@ -916,10 +916,16 @@ pub(crate) fn prepare_tool_requirements(
 /// when the host environment is sparse or sandboxing is disabled.
 pub(crate) fn finalise_provider_env(input: &PrepareInput<'_>, spec: &mut LaunchSpec) {
     let scratch = &input.confined.permissions().scratch.path;
+    let home = spec
+        .env
+        .iter()
+        .find(|(key, _)| key == "HOME")
+        .map(|(_, value)| value.clone())
+        .unwrap_or_else(|| input.home.into());
     spec.env
         .retain(|(key, _)| !matches!(key.to_str(), Some("HOME" | "TMPDIR" | "TMPPREFIX")));
     spec.env.extend([
-        ("HOME".into(), input.home.into()),
+        ("HOME".into(), home),
         ("TMPDIR".into(), scratch.into()),
         ("TMPPREFIX".into(), scratch.join("zsh").into()),
     ]);

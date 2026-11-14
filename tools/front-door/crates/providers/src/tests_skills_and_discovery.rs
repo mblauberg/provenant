@@ -1042,7 +1042,7 @@ fn tool_search_path_preserves_native_home_and_omits_unusable_entry() {
 }
 
 #[test]
-fn claude_writer_requires_private_state() -> Result<(), ProviderError> {
+fn claude_writer_uses_scratch_when_private_state_is_absent() -> Result<(), ProviderError> {
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     let original = fixture_access_plan(Access::WorktreeWrite, None, false);
     let mut permissions = original.permissions().clone();
@@ -1059,21 +1059,25 @@ fn claude_writer_requires_private_state() -> Result<(), ProviderError> {
     route.account_key = None;
     let prompt = Prompt::new("fixture".into());
     let token = fixture_token();
-    assert!(matches!(
-        claude::Claude.prepare(fixture_input(
-            &route,
-            &plan,
-            &prompt,
-            Path::new("/fixture/repo"),
-            Some(&token),
-        )),
-        Err(ProviderError::UnsupportedPolicy)
-    ));
+    let launch = claude::Claude.prepare(fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        Path::new("/fixture/repo"),
+        Some(&token),
+    ))?;
+    assert!(launch.env.iter().any(|(key, value)| {
+        key == "CLAUDE_CONFIG_DIR"
+            && value == plan.permissions().scratch.path.join("claude-config").as_os_str()
+    }));
+    assert!(launch.profile.spec.state_writes.iter().all(|grant| {
+        !grant.path.starts_with("/fixture/home/.claude")
+    }));
     Ok(())
 }
 
 #[test]
-fn opencode_requires_private_state() -> Result<(), ProviderError> {
+fn opencode_uses_scratch_when_private_state_is_absent() -> Result<(), ProviderError> {
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     let route = route("opencode", "fixture-model");
     let prompt = Prompt::new("fixture".into());
@@ -1089,16 +1093,27 @@ fn opencode_requires_private_state() -> Result<(), ProviderError> {
             agy_state: None,
         })
         .expect("fixture plan");
-        assert!(matches!(
-            opencode::OpenCode.prepare(fixture_input(
-                &route,
-                &plan,
-                &prompt,
-                Path::new("/fixture/repo"),
-                None,
-            )),
-            Err(ProviderError::UnsupportedPolicy)
-        ));
+        let launch = opencode::OpenCode.prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            None,
+        ))?;
+        let scratch = &plan.permissions().scratch.path;
+        for (key, expected) in [
+            ("XDG_CONFIG_HOME", scratch.join("config")),
+            ("XDG_DATA_HOME", scratch.join("data")),
+            ("XDG_CACHE_HOME", scratch.join("cache")),
+            ("XDG_STATE_HOME", scratch.join("state")),
+        ] {
+            assert!(launch.env.iter().any(|(name, value)| {
+                name == key && value == expected.as_os_str()
+            }));
+        }
+        assert!(launch.profile.spec.state_writes.iter().all(|grant| {
+            !grant.path.starts_with("/fixture/home/.config/opencode")
+        }));
     }
     Ok(())
 }

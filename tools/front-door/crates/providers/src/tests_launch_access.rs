@@ -1552,9 +1552,15 @@ fn every_adapter_finalises_missing_lane_environment() -> Result<(), ProviderErro
                 });
             }
             let mut spec = entry.adapter.prepare(input)?;
+            let selected_home = spec
+                .env
+                .iter()
+                .find(|(key, _)| key == "HOME")
+                .map(|(_, value)| value.clone())
+                .expect("adapter HOME");
             let assert_bindings = |spec: &LaunchSpec| {
                 for (key, expected) in [
-                    ("HOME", Path::new("/fixture/home").to_path_buf()),
+                    ("HOME", Path::new(&selected_home).to_path_buf()),
                     ("TMPDIR", plan.permissions().scratch.path.clone()),
                     (
                         "CARGO_HOME",
@@ -1576,7 +1582,7 @@ fn every_adapter_finalises_missing_lane_environment() -> Result<(), ProviderErro
             };
             assert_bindings(&spec);
             spec.env
-                .retain(|(key, _)| !matches!(key.to_str(), Some("HOME" | "TMPDIR" | "CARGO_HOME")));
+                .retain(|(key, _)| !matches!(key.to_str(), Some("TMPDIR" | "CARGO_HOME")));
             let mut input = fixture_input(
                 &route,
                 &plan,

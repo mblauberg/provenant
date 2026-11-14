@@ -1073,7 +1073,14 @@ fn claude_network_on_enables_web_tools_and_codex_toolchain_without_writer_grants
                 }
             }
             if access == Access::ReadOnly && network != NetworkAccess::Open {
-                assert!(launch.env.iter().all(|(key, _)| key != "CARGO_HOME"));
+                assert_eq!(
+                    launch
+                        .env
+                        .iter()
+                        .find(|(key, _)| key == "CARGO_HOME")
+                        .map(|(_, value)| value.as_os_str()),
+                    Some(std::ffi::OsStr::new("/fixture/scratch/cargo-home"))
+                );
                 assert_eq!(
                     launch.env.iter().find(|(key, _)| key == "PATH").unwrap().1,
                     "/fixture/scratch/read-only-git:/fixture/scratch/bin:/usr/bin:/bin"
@@ -1166,7 +1173,14 @@ fn claude_network_on_without_complete_rust_keeps_public_system_tools()
                 Some(&token),
             )
         })?;
-        assert!(launch.env.iter().all(|(key, _)| key != "CARGO_HOME"));
+        assert_eq!(
+            launch
+                .env
+                .iter()
+                .find(|(key, _)| key == "CARGO_HOME")
+                .map(|(_, value)| value.as_os_str()),
+            Some(std::ffi::OsStr::new("/fixture/scratch/cargo-home"))
+        );
         assert!(
             launch
                 .profile
@@ -1237,7 +1251,20 @@ fn rust_less_hosts_keep_repository_execution_in_the_rendered_profile()
             "claude" => claude::Claude.prepare(input)?,
             _ => crate::codex::Codex.prepare(input)?,
         };
-        assert!(launch.env.iter().all(|(key, _)| key != "CARGO_HOME"));
+        let expected_cargo_home = match access {
+            Access::ReadOnly => std::path::PathBuf::from("/fixture/scratch/cargo-home"),
+            Access::WorktreeWrite => std::path::PathBuf::from(
+                "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/cargo-home",
+            ),
+        };
+        assert_eq!(
+            launch
+                .env
+                .iter()
+                .find(|(key, _)| key == "CARGO_HOME")
+                .map(|(_, value)| std::path::PathBuf::from(value)),
+            Some(expected_cargo_home)
+        );
         let spec = &launch.profile.spec;
         assert!(
             spec.runtime_reads

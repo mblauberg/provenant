@@ -2353,11 +2353,12 @@ pub(crate) mod tests {
     fn executable_pin_keeps_the_locator_and_follows_a_swapped_target() -> Result<(), Box<dyn Error>>
     {
         let temp = tempfile::tempdir()?;
-        let (first, second) = (temp.path().join("v1/git"), temp.path().join("v2/git"));
+        let root = temp.path().canonicalize()?;
+        let (first, second) = (root.join("v1/git"), root.join("v2/git"));
         executable(&first, 0o755)?;
         executable(&second, 0o755)?;
-        let link = temp.path().join("bin/git");
-        fs::create_dir(temp.path().join("bin"))?;
+        let link = root.join("bin/git");
+        fs::create_dir(root.join("bin"))?;
         std::os::unix::fs::symlink(&first, &link)?;
 
         // The locator is what runs; it is never replaced by the canonical path.
@@ -2367,15 +2368,12 @@ pub(crate) mod tests {
         // `brew upgrade`: the link moves to a new version and the old one is
         // removed. The pin follows without the old target existing.
         relink(&link, &second)?;
-        fs::remove_dir_all(temp.path().join("v1"))?;
+        fs::remove_dir_all(root.join("v1"))?;
         assert_eq!(pin.program()?, link);
         let pinned = pin.state.lock().map_err(|_| "pin poisoned")?.target;
-        assert!(
-            pinned.same_identity(
-                &Directory::open_anchor(&temp.path().join("v2"))?
-                    .metadata_at(OsStr::new("git"), false)?
-            )
-        );
+        assert!(pinned.same_identity(
+            &Directory::open_anchor(&root.join("v2"))?.metadata_at(OsStr::new("git"), false)?
+        ));
 
         // Removing the target leaves nothing to run.
         fs::remove_file(&second)?;
@@ -2389,15 +2387,16 @@ pub(crate) mod tests {
     #[test]
     fn executable_pin_revalidates_a_replaced_or_loosened_target() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
-        let target = temp.path().join("target/git");
+        let root = temp.path().canonicalize()?;
+        let target = root.join("target/git");
         executable(&target, 0o755)?;
-        let link = temp.path().join("git");
+        let link = root.join("git");
         std::os::unix::fs::symlink(&target, &link)?;
         let pin = ExecutablePin::new(&link, "git")?;
         pin.program()?;
 
         // A sound replacement is accepted.
-        let replacement = temp.path().join("target/replacement");
+        let replacement = root.join("target/replacement");
         executable(&replacement, 0o755)?;
         fs::rename(&replacement, &target)?;
         pin.program()?;
@@ -2447,13 +2446,14 @@ pub(crate) mod tests {
             }
         }
         let temp = tempfile::tempdir()?;
-        let target = temp.path().join("target/git");
+        let root = temp.path().canonicalize()?;
+        let target = root.join("target/git");
         executable(&target, 0o755)?;
-        let link = temp.path().join("git");
+        let link = root.join("git");
         std::os::unix::fs::symlink(&target, &link)?;
         let pin = ExecutablePin::new(&link, "git")?;
         let argv = [link.as_os_str().to_owned()];
-        let options = || ExecOptions::new(&argv, temp.path(), Duration::from_secs(1));
+        let options = || ExecOptions::new(&argv, &root, Duration::from_secs(1));
 
         let executor = VanishesOnce(Default::default());
         pin.execute(&executor, options)?;
@@ -2502,10 +2502,11 @@ pub(crate) mod tests {
     #[test]
     fn executable_pin_refuses_a_writable_file_and_a_loose_ancestor() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
-        let target_dir = temp.path().join("target");
+        let root = temp.path().canonicalize()?;
+        let target_dir = root.join("target");
         let target = target_dir.join("git");
         executable(&target, 0o755)?;
-        let link = temp.path().join("git");
+        let link = root.join("git");
         std::os::unix::fs::symlink(&target, &link)?;
         let pin = |file: u32, directory: u32| -> Result<ExecutablePin, UtilityError> {
             fs::set_permissions(&target, fs::Permissions::from_mode(file))
@@ -2538,7 +2539,7 @@ pub(crate) mod tests {
         // The rule covers every ancestor, not only the parent.
         let nested = target_dir.join("nested/git");
         executable(&nested, 0o755)?;
-        let nested_link = temp.path().join("nested-git");
+        let nested_link = root.join("nested-git");
         std::os::unix::fs::symlink(&nested, &nested_link)?;
         fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o777))?;
         assert!(matches!(

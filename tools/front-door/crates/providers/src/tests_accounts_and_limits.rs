@@ -774,7 +774,8 @@ fn lanes_read_git_global_ignore_and_attributes_only_when_present()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::permissions::PathScope;
     let temp = tempfile::tempdir()?;
-    let home = temp.path();
+    let canonical_home = temp.path().canonicalize()?;
+    let home = canonical_home.as_path();
     let git = home.join(".config/git");
     let mut route = route("codex", "fixture-model");
     route.account_key = None;
