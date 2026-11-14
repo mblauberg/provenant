@@ -73,9 +73,9 @@ pub fn bind_project(
     }
 
     let state = provenant_os::fs::Directory::open_anchor(roots.state.as_path())?;
-    verify_directory(&state, false)?;
+    verify_directory(&state)?;
     let projects = open_or_create_projects(&state)?;
-    verify_directory(&projects, true)?;
+    verify_directory(&projects)?;
 
     if let Some(binding) = find_binding(&projects, &location.canonical_common_dir)? {
         return Ok(binding);
@@ -221,13 +221,13 @@ fn existing_projects_at_state(state: &Path) -> Result<Option<Directory>, ConfigE
         Err(error) if error.is_not_found() => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    verify_directory(&state, true)?;
+    verify_directory(&state)?;
     let projects = match state.open_verified_directory(OsStr::new(PROJECTS_DIR)) {
         Ok(projects) => projects,
         Err(error) if error.is_not_found() => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    verify_directory(&projects, true)?;
+    verify_directory(&projects)?;
     Ok(Some(projects))
 }
 
@@ -269,7 +269,7 @@ fn bindings(projects: &Directory) -> Result<Vec<ProjectBinding>, ConfigError> {
             .parse::<ProjectId>()
             .map_err(|_| ConfigError::InvalidProjectBinding)?;
         let directory = projects.open_verified_directory(&entry)?;
-        verify_directory(&directory, true)?;
+        verify_directory(&directory)?;
         let entry = match directory.metadata_at(OsStr::new(RECORD), false) {
             Ok(entry) => entry,
             // A concurrent first binding may have made the directory but not
@@ -304,7 +304,7 @@ fn create_binding(
         Err(error) => return Err(error.into()),
     }
     let directory = projects.open_verified_directory(&name)?;
-    verify_directory(&directory, true)?;
+    verify_directory(&directory)?;
     let record = ProjectBindingRecord {
         schema_version: 1,
         project,
@@ -361,12 +361,11 @@ fn open_or_create_projects(state: &Directory) -> Result<Directory, ConfigError> 
     }
 }
 
-fn verify_directory(directory: &Directory, private: bool) -> Result<(), ConfigError> {
+fn verify_directory(directory: &Directory) -> Result<(), ConfigError> {
     let metadata = directory.metadata()?;
     if metadata.kind != FileKind::Directory
         || metadata.uid != effective_uid()
-        || metadata.mode & 0o022 != 0
-        || (private && metadata.mode & 0o077 != 0)
+        || metadata.mode & 0o077 != 0
     {
         return Err(ConfigError::InvalidProjectBinding);
     }
@@ -428,7 +427,7 @@ fn decode_location(value: &str) -> Result<PathBuf, ConfigError> {
 /// Never reads legacy roots.
 pub fn bind_host(roots: &Roots) -> Result<provenant_core::HostId, ConfigError> {
     let state = provenant_os::fs::Directory::open_anchor(roots.state.as_path())?;
-    verify_directory(&state, true)?;
+    verify_directory(&state)?;
     let name = OsStr::new("host-id");
     match read_host(&state, name) {
         Ok(Some(host)) => Ok(host),
@@ -460,7 +459,7 @@ pub fn bind_host(roots: &Roots) -> Result<provenant_core::HostId, ConfigError> {
 /// Read an existing host identity without creating state or a lock.
 pub fn lookup_host(roots: &Roots) -> Result<Option<provenant_core::HostId>, ConfigError> {
     let state = provenant_os::fs::Directory::open_anchor(roots.state.as_path())?;
-    verify_directory(&state, true)?;
+    verify_directory(&state)?;
     read_host(&state, OsStr::new("host-id"))
 }
 
@@ -632,6 +631,26 @@ mod tests {
     }
 
     // Competing no-replace publishers converge by validating the winning record.
+    #[test]
+    fn binding_creation_and_lookup_share_private_state_authority() {
+        for mode in [0o700, 0o750, 0o755, 0o777] {
+            let temp = tempdir();
+            let roots = roots(&temp);
+            let common = canonical_base(&temp).join("project/.git");
+            fs::create_dir_all(&common).unwrap();
+            let location = ProjectLocation::new(common).unwrap();
+            fs::set_permissions(roots.state.as_path(), fs::Permissions::from_mode(mode)).unwrap();
+            let created = bind_project(&roots, location.clone());
+            let found = lookup_project(&roots, &location);
+            if mode & 0o077 == 0 {
+                assert_eq!(found.unwrap(), Some(created.unwrap()));
+            } else {
+                assert!(matches!(created, Err(ConfigError::InvalidProjectBinding)));
+                assert!(matches!(found, Err(ConfigError::InvalidProjectBinding)));
+            }
+        }
+    }
+
     #[test]
     fn concurrent_first_bindings_converge_on_one_atomic_record() {
         let temp = tempdir();

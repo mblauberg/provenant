@@ -1768,7 +1768,8 @@ mod cargo_setup_tests {
         let second_lane = root.join("second-lane");
         let state = root.join("state");
         std::fs::create_dir(&project)?;
-        std::fs::create_dir(&state)?;
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(&state)?;
         let git_dir = project.join(".git");
         let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
         let run = |args: &[&str]| -> std::result::Result<String, Box<dyn std::error::Error>> {
