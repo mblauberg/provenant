@@ -185,6 +185,10 @@ fn merge_calls(rig: &TestRig) -> Result<usize> {
 fn rest_merge_refusal(flag: &str, expected: &str) -> Result {
     let rig = self::rig()?;
     let head = live_pr_origin(&rig)?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.pr.land]\napproval_tier='none'\npublish='rest_ordered'\n",
+    )?;
     fs::write(rig.project.join(flag), "")?;
     let output = rig.command(&["land", "1668", "--head", &head, "--json"])?;
     let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
@@ -666,11 +670,9 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                 .and_then(|part| part.split('/').next())
                 .ok_or("check commit")?;
             if Path::new("live-pr").exists() {
-                assert!(
-                    matches!(commit.len(), 40 | 64)
-                        && commit.bytes().all(|byte| byte.is_ascii_hexdigit()),
-                    "{value}"
-                );
+                let live_head: serde_json::Value = serde_json::from_slice(&fs::read("head.json")?)?;
+                let base = fs::read_to_string("base-sha")?;
+                assert!(Some(commit) == live_head["headRefOid"].as_str() || commit == base, "{value}");
             } else {
                 assert!(commit == HEAD || commit == OTHER, "{value}");
             }
