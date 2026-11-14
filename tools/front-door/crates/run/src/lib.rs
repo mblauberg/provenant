@@ -438,7 +438,7 @@ pub enum RunError {
     #[error("writer import retained for worktree {}, lane {} (attempt {}), fence {}; run `{}` or `{}`", worktree.display(), fence.lane, fence.scope.attempt, fence.fence.display(), fence.reconcile(), fence.abandon())]
     RetainedWriterImport {
         worktree: std::path::PathBuf,
-        fence: provenant_supervisor::custody::PendingImport,
+        fence: Box<provenant_supervisor::custody::PendingImport>,
     },
     #[error(transparent)]
     Plan(#[from] provenant_confinement::PlanError),

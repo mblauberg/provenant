@@ -38,6 +38,65 @@ fn rig() -> Result<TestRig> {
     )?;
     Ok(rig)
 }
+fn fixture_git(rig: &TestRig, args: &[&str]) -> Result<String> {
+    let git = provenant_os::git::resolve_git_executable(None).ok_or("native Git executable")?;
+    let output = rig.execute(&git, args, None)?;
+    assert_eq!(
+        code(&output),
+        0,
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
+}
+
+/// A real PR with local and remote refs for the landing repository adapter.
+fn live_pr_origin(rig: &TestRig) -> Result<String> {
+    fixture_git(rig, &["init", "-q", "--initial-branch=main"])?;
+    fixture_git(rig, &["config", "user.name", "Fixture"])?;
+    fixture_git(rig, &["config", "user.email", "fixture@example.invalid"])?;
+    fixture_git(rig, &["config", "maintenance.auto", "false"])?;
+    fixture_git(rig, &["config", "gc.auto", "0"])?;
+    fs::write(rig.project.join("base.txt"), "base\n")?;
+    fixture_git(rig, &["add", "base.txt"])?;
+    fixture_git(rig, &["commit", "-qm", "base"])?;
+    let base = fixture_git(rig, &["rev-parse", "HEAD"])?;
+
+    let origin = rig.root.join("origin.git");
+    let origin = origin.to_str().ok_or("origin path")?;
+    fixture_git(
+        rig,
+        &["init", "-q", "--bare", "--initial-branch=main", origin],
+    )?;
+    fixture_git(rig, &["remote", "add", "origin", origin])?;
+    fixture_git(rig, &["push", "-q", "--set-upstream", "origin", "main"])?;
+    fixture_git(rig, &["checkout", "-q", "-b", "feature"])?;
+    fs::write(rig.project.join("feature.txt"), "feature\n")?;
+    fixture_git(rig, &["add", "feature.txt"])?;
+    fixture_git(rig, &["commit", "-qm", "feature"])?;
+    let head = fixture_git(rig, &["rev-parse", "HEAD"])?;
+    fixture_git(rig, &["push", "-q", "origin", "feature"])?;
+
+    fs::write(
+        rig.project.join("head.json"),
+        serde_json::to_vec(&serde_json::json!({"headRefOid": head}))?,
+    )?;
+    fs::write(rig.project.join("base-sha"), &base)?;
+    fs::write(rig.project.join("live-pr"), "")?;
+    let refs = fixture_git(rig, &["ls-remote", "--heads", "origin"])?;
+    assert!(
+        refs.lines()
+            .any(|line| line.starts_with(&format!("{base}\trefs/heads/main"))),
+        "{refs}"
+    );
+    assert!(
+        refs.lines()
+            .any(|line| line.starts_with(&format!("{head}\trefs/heads/feature"))),
+        "{refs}"
+    );
+    Ok(head)
+}
+
 fn merge(rig: &TestRig) -> Result<provenant_os::exec::ExecOutcome> {
     rig.command(&["land", "1668", "--head", HEAD, "--json"])
 }
@@ -125,8 +184,9 @@ fn merge_calls(rig: &TestRig) -> Result<usize> {
 
 fn rest_merge_refusal(flag: &str, expected: &str) -> Result {
     let rig = self::rig()?;
+    let head = live_pr_origin(&rig)?;
     fs::write(rig.project.join(flag), "")?;
-    let output = merge(&rig)?;
+    let output = rig.command(&["land", "1668", "--head", &head, "--json"])?;
     let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(report["error"]["code"], expected, "{report}");
     assert_eq!(report["status"], "refused", "{report}");
@@ -485,7 +545,12 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                 Some("UNKNOWN") => None,
                 _ => Some(true),
             };
-            let body = serde_json::json!({"state":if merged {"closed"} else {"open"}, "head":{"sha":next,"ref":"feature","repo":{"full_name":"owner/repo"}}, "base":{"sha":HEAD,"ref":"main","repo":{"full_name":"owner/repo"}}, "mergeable":mergeable,"mergeable_state":"clean","merged_at":if merged {Some("2020-01-01T00:00:00Z")} else {None},"merge_commit_sha":null,"title":"fixture","user":{"login":"fixture-author"}});
+            let base = if Path::new("live-pr").exists() {
+                fs::read_to_string("base-sha")?
+            } else {
+                HEAD.to_owned()
+            };
+            let body = serde_json::json!({"state":if merged {"closed"} else {"open"}, "head":{"sha":next,"ref":"feature","repo":{"full_name":"owner/repo"}}, "base":{"sha":base,"ref":"main","repo":{"full_name":"owner/repo"}}, "mergeable":mergeable,"mergeable_state":"clean","merged_at":if merged {Some("2020-01-01T00:00:00Z")} else {None},"merge_commit_sha":null,"title":"fixture","user":{"login":"fixture-author"}});
             io::stdout().write_all(&serde_json::to_vec(&body)?)?;
         }
         "pr view 1668 --json headRefOid" | "pr view 1668 --json headRefOid,mergeable" => {
@@ -524,7 +589,22 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             )?;
         }
         value if value.starts_with("api repos/{owner}/{repo}/git/commits/") => {
-            let body = serde_json::json!({"tree":{"sha":OTHER}});
+            let commit = value.rsplit('/').next().ok_or("commit")?;
+            let tree = if Path::new("live-pr").exists() {
+                let git = provenant_os::git::resolve_git_executable(None)
+                    .ok_or("native Git executable")?;
+                let output = provenant_os::fixture::git_command_at(git)
+                    .current_dir(".")
+                    .args(["rev-parse", &format!("{commit}^{{tree}}")])
+                    .output()?;
+                if !output.status.success() {
+                    return Err("cannot resolve live PR commit tree".into());
+                }
+                String::from_utf8(output.stdout)?.trim().to_owned()
+            } else {
+                OTHER.to_owned()
+            };
+            let body = serde_json::json!({"tree":{"sha":tree}});
             io::stdout().write_all(&serde_json::to_vec(&body)?)?;
         }
         "api repos/owner/repo/branches/main" => {
@@ -585,7 +665,15 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                 .nth(1)
                 .and_then(|part| part.split('/').next())
                 .ok_or("check commit")?;
-            assert!(commit == HEAD || commit == OTHER, "{value}");
+            if Path::new("live-pr").exists() {
+                assert!(
+                    matches!(commit.len(), 40 | 64)
+                        && commit.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                    "{value}"
+                );
+            } else {
+                assert!(commit == HEAD || commit == OTHER, "{value}");
+            }
             let page: usize = value.rsplit("&page=").next().ok_or("page")?.parse()?;
             if Path::new("checks-fail").exists() {
                 io::stdout().write_all(b"HTTP/2.0 404 Not Found\r\n\r\n{}")?;

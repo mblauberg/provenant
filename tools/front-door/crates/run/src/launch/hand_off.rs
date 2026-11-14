@@ -742,7 +742,7 @@ mod tests {
             }
         ));
         let retained = RunError::RetainedWriterImport {
-            fence: custody::PendingImport {
+            fence: Box::new(custody::PendingImport {
                 scope: custody::Scope {
                     attempt: provenant_core::AttemptId::from_bytes([4; 16]),
                     generation: 1,
@@ -755,7 +755,7 @@ mod tests {
                     1,
                 )
                 .expect("key"),
-            },
+            }),
             worktree: "/tmp/writer".into(),
         };
         assert!(matches!(

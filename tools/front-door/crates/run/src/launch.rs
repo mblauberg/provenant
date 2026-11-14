@@ -1419,7 +1419,7 @@ impl RunStore {
                             ),
                             HandOff::RetainedImport { fence, worktree } => (
                                 RunError::RetainedWriterImport {
-                                    fence: fence.clone(),
+                                    fence: Box::new(fence.clone()),
                                     worktree: worktree.clone(),
                                 }
                                 .to_string(),
