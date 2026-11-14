@@ -811,6 +811,7 @@ pub(super) mod tests {
         use super::super::ports::{Approval, PullRequestInfo, PullRequestState};
         let mut forge = FakeForge {
             direct_push: true,
+            target_branch: "main".into(),
             ..FakeForge::default()
         };
         for n in 1..=count {

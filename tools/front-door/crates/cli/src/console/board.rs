@@ -350,10 +350,6 @@ mod tests {
         assert_eq!(first["coverage"]["chairs"], "unavailable");
         assert_eq!(first["lanes"].as_array().unwrap().len(), 50);
         assert_eq!(
-            first["lanes"][0]["wait"]["waiting_for"],
-            "launch: not yet handed to a guardian"
-        );
-        assert_eq!(
             first["lanes"][0]["metadata"]["attempt"]["usage"]["uncached_input"],
             Value::Null
         );

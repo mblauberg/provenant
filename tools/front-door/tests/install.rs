@@ -798,7 +798,7 @@ fn bare_install_detects_clis_and_claude_directories_then_replays_receipt() -> Re
     let dry = install(&first, true)?;
     assert_eq!(code(&dry), 0, "{dry:?}");
     assert!(!rig.state.exists());
-    let conflict = rig.home.join(".codex/config.toml");
+    let conflict = rig.home.join(".config/opencode/opencode.jsonc");
     fs::create_dir_all(conflict.parent().ok_or("config parent")?)?;
     std::os::unix::fs::symlink(rig.home.join("foreign-config"), &conflict)?;
     let refused = install(&first, false)?;

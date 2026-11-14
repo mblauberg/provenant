@@ -1116,12 +1116,25 @@ mod tests {
             if shell != "/bin/sh" && !Path::new(shell).is_file() {
                 continue;
             }
-            let argv = vec![shell.into(), "-c".into(), command.clone().into()];
+            let argv = if shell == "/bin/zsh" {
+                vec![
+                    shell.into(),
+                    "-f".into(),
+                    "-c".into(),
+                    command.clone().into(),
+                ]
+            } else {
+                vec![shell.into(), "-c".into(), command.clone().into()]
+            };
             let mut options = ExecOptions::new(&argv, &home, Duration::from_secs(2));
             options.env = Some(env.as_slice());
             options.stdout = StreamPolicy::Capture { limit: 16 * 1024 };
             let output = SystemExecutor::new(1)?.execute(options)?;
-            assert_eq!(output.termination, Termination::Exit(0));
+            assert_eq!(
+                output.termination,
+                Termination::Exit(0),
+                "shell={shell} outcome={output:?}"
+            );
             let output = std::str::from_utf8(&output.stdout.bytes)?;
             let mut lines = output.lines();
             assert_eq!(lines.next(), cwd.to_str());
@@ -1149,7 +1162,11 @@ mod tests {
                     .as_str()
                 )
             );
-            let hook_argv = vec![shell.into(), "-c".into(), hook.into()];
+            let hook_argv = if shell == "/bin/zsh" {
+                vec![shell.into(), "-f".into(), "-c".into(), hook.into()]
+            } else {
+                vec![shell.into(), "-c".into(), hook.into()]
+            };
             let mut hook_options = ExecOptions::new(&hook_argv, &home, Duration::from_secs(2));
             hook_options.stdout = StreamPolicy::Capture { limit: 16 * 1024 };
             let hook_output = SystemExecutor::new(1)?.execute(hook_options)?;
