@@ -233,9 +233,6 @@ pub struct WriterLaunch {
     pub(crate) custody: Option<(Directory, WriterBinding)>,
     /// Repository observations and caps shared by this writer operation.
     pub(crate) facts: worktrees::RepoFacts,
-    /// Paths the project lets this writer change without review, read from the
-    /// host config when the launch was prepared.
-    pub(crate) review_exempt: provenant_confinement::review_exempt::ReviewExempt,
 }
 impl WriterLaunch {
     /// The verified branch head captured while preparing this writer.
@@ -916,10 +913,6 @@ pub fn prepare_writer_with_facts(
         base,
         custody: Some((directory, binding)),
         facts: facts.clone(),
-        review_exempt: provenant_confinement::run_config::RunConfig::review_exempt_at(
-            state,
-            &project.to_string(),
-        ),
     })
 }
 
@@ -1873,7 +1866,6 @@ mod cargo_setup_tests {
             base: GitOid::parse(&expected)?,
             custody: None,
             facts: Default::default(),
-            review_exempt: Default::default(),
         };
         // Use a real unrelated root, so both named commits exist.
         let tree = run(&["rev-parse", "HEAD^{tree}"])?;
@@ -1959,7 +1951,6 @@ mod cargo_setup_tests {
             base: GitOid::parse(&expected)?,
             custody: None,
             facts: Default::default(),
-            review_exempt: Default::default(),
         };
         let mut siblings = Vec::new();
         for index in 2..8 {
@@ -1978,7 +1969,6 @@ mod cargo_setup_tests {
                 base: source_oid,
                 custody: None,
                 facts: Default::default(),
-                review_exempt: Default::default(),
             });
         }
         // Eight real worktrees share .git/config. When a sibling holds an
@@ -3374,6 +3364,7 @@ impl WriterLaunch {
     /// it committed or its tree is clean. Call it after `terminal` succeeds.
     pub(crate) fn uncommitted(
         &self,
+        review_exempt: &provenant_confinement::review_exempt::ReviewExempt,
         state: &Path,
         custody: &provenant_supervisor::custody::Recovery,
         cancel: &CancelToken,
@@ -3398,12 +3389,10 @@ impl WriterLaunch {
             budget()?,
             cancel,
         );
-        let paths = git
-            .uncommitted_since(base, &self.review_exempt)
-            .map_err(error(
-                "read writer uncommitted changes",
-                Some(self.worktree.path()),
-            ))?;
+        let paths = git.uncommitted_since(base, review_exempt).map_err(error(
+            "read writer uncommitted changes",
+            Some(self.worktree.path()),
+        ))?;
         Ok(uncommitted_reason(&paths))
     }
 }

@@ -1150,7 +1150,7 @@ mod answer_delivery_tests {
             snapshot
                 .warnings
                 .iter()
-                .any(|w| w.message.contains("schedule.expires"))
+                .all(|warning| { !warning.message.contains("schedule.expires") })
         );
         let event = serde_json::from_value(
             json!({"hook_event_name":"PreToolUse", "tool_name":"Bash", "tool_input":{"command":"git status"}, "cwd":temp.path()}),
@@ -1166,11 +1166,11 @@ mod answer_delivery_tests {
             Ok(None)
         );
         assert_eq!(std::fs::read_dir(&state)?.count(), 1);
-        std::fs::write(state.join("config.toml"), "schema_version = [")?;
-        assert!(
-            provenant_config::config_show(&resolved.roots, &provenant_cli::domains::SECTIONS)
-                .is_err()
-        );
+        std::fs::write(
+            state.join("config.toml"),
+            "schema_version=1\n[domains.run]\nreview_exempt=false\n",
+        )?;
+        assert!(provenant_cli::config_reads::show_for(&resolved.roots, "hook").is_err());
         Ok(())
     }
 

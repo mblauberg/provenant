@@ -293,22 +293,27 @@ fn gate_definition(
 
 /// Freeze the project and exemption patterns used by every resumed approval read.
 fn review_scope(
-    state: &std::path::Path,
+    run: &provenant_confinement::run_config::RunConfig,
     project: Option<&str>,
 ) -> Result<provenant_records::landing::ReviewScope, Box<dyn std::error::Error>> {
-    let exempt = project.map_or_else(ReviewExempt::none, |project| {
-        provenant_confinement::run_config::RunConfig::review_exempt_at(state, project)
-    });
+    let exempt = project.map_or_else(ReviewExempt::none, |project| run.review_exempt(project));
     Ok(provenant_records::landing::ReviewScope {
         project: project.map(provenant_core::ProjectId::parse).transpose()?,
         exempt_patterns: exempt.patterns().into_iter().map(str::to_owned).collect(),
     })
 }
 
+fn branch_name(value: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let branch = provenant_confinement::repo::GitRefName::branch(value)
+        .map_err(|_| "landing target must be a valid branch name")?;
+    Ok(branch.short_name().to_owned())
+}
+
 /// The landing policy one adapter call resolved for a checkout.
 pub(crate) struct Prepared {
     resolved: crate::roots::Resolved,
     project: Option<String>,
+    review_scope: provenant_records::landing::ReviewScope,
     policy: policy::LandPolicy,
     effective: provenant_cli::domains::LandSettings,
     tier_warning: Option<String>,
@@ -323,12 +328,28 @@ pub(crate) fn prepare(
     strategy: Option<provenant_records::landing::Strategy>,
     target: Option<&str>,
 ) -> Result<Prepared, Box<dyn std::error::Error>> {
-    use provenant_cli::domains::LandOverride;
-    let resolved = crate::roots::resolve(
+    let resolved = resolve_checkout(globals)?;
+    prepare_resolved(resolved, tier, poll, strategy, target)
+}
+
+fn resolve_checkout(
+    globals: &provenant_cli::Globals,
+) -> Result<crate::roots::Resolved, Box<dyn std::error::Error>> {
+    Ok(crate::roots::resolve(
         globals,
         crate::roots::Workspace::Checkout,
         crate::roots::Product::Optional,
-    )?;
+    )?)
+}
+
+fn prepare_resolved(
+    resolved: crate::roots::Resolved,
+    tier: Option<&str>,
+    poll: Option<u64>,
+    strategy: Option<provenant_records::landing::Strategy>,
+    target: Option<&str>,
+) -> Result<Prepared, Box<dyn std::error::Error>> {
+    use provenant_cli::domains::LandOverride;
     let config = provenant_cli::config_reads::read_for(&resolved.roots, "land policy")?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
@@ -340,15 +361,7 @@ pub(crate) fn prepare(
         provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))?,
         &provenant_core::CancelToken::new(),
     )?;
-    use ports::Forge as _;
-    let target = match target {
-        Some(target) => target.to_owned(),
-        None => adapters::GhForge::new(&resolved.project, resolved.roots.state.as_path())
-            .target_branch()?,
-    };
-    if !super::git::plain_ref(&target) {
-        return Err("landing target must be a plain branch name".into());
-    }
+    let review_scope = review_scope(&config.domains.run, project.as_deref())?;
     let repository_path = resolved.project.join(provenant_config::REPOSITORY_CONFIG);
     let repository = provenant_config::read_land::<LandOverride>(&resolved.project)?;
     let invocation = LandOverride {
@@ -356,40 +369,61 @@ pub(crate) fn prepare(
         poll_seconds: poll,
         ..LandOverride::default()
     };
-    let policy = policy::LandPolicy::resolve_for(
-        &config.domains.pr.land,
-        &config.origins,
-        project.as_deref(),
-        tier,
-        &invocation,
-        repository
-            .as_ref()
-            .map(|declaration| (declaration, repository_path.as_path())),
-        Some(&target),
-    )?;
-    let effective = policy.settings()?;
+    let resolve_policy = |target: Option<&str>| {
+        policy::LandPolicy::resolve_for(
+            &config.domains.pr.land,
+            &config.origins,
+            project.as_deref(),
+            tier,
+            &invocation,
+            repository
+                .as_ref()
+                .map(|declaration| (declaration, repository_path.as_path())),
+            target,
+        )
+        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })
+    };
+    let validate_policy = |policy: policy::LandPolicy| -> Result<
+        (policy::LandPolicy, provenant_cli::domains::LandSettings),
+        Box<dyn std::error::Error>,
+    > {
+        let effective = policy.settings()?;
+        let errors =
+            provenant_config::DomainConfig::validate(&provenant_cli::domains::PrSettings {
+                land: effective.clone(),
+            });
+        if !errors.is_empty() {
+            return Err(format!(
+                "invalid effective landing policy: {}",
+                errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+            .into());
+        }
+        Ok((policy, effective))
+    };
+    let mut target = target.map(branch_name).transpose()?;
+    let (mut policy, mut effective) = validate_policy(resolve_policy(target.as_deref())?)?;
+    if target.is_none() {
+        use ports::Forge as _;
+        let default = adapters::GhForge::new(&resolved.project, resolved.roots.state.as_path())
+            .target_branch()?;
+        target = Some(branch_name(&default)?);
+        (policy, effective) = validate_policy(resolve_policy(target.as_deref())?)?;
+    }
+    let target = target.ok_or("landing target is unavailable")?;
     let tier_warning = tier
         .filter(|tier| !config.domains.pr.land.tiers.contains_key(*tier))
         .map(|tier| {
             format!("no landing override is configured for tier {tier}; inherited settings apply")
         });
-    let errors = provenant_config::DomainConfig::validate(&provenant_cli::domains::PrSettings {
-        land: effective.clone(),
-    });
-    if !errors.is_empty() {
-        return Err(format!(
-            "invalid effective landing policy: {}",
-            errors
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-        .into());
-    }
     Ok(Prepared {
         resolved,
         project,
+        review_scope,
         policy,
         effective,
         tier_warning,
@@ -419,6 +453,7 @@ pub(crate) fn submit(
     let Prepared {
         resolved,
         project,
+        review_scope,
         policy,
         effective,
         ..
@@ -451,7 +486,6 @@ pub(crate) fn submit(
         tracking,
     )?;
     let reviews = adapters::ProvenantReviews::new(resolved.roots.state.clone());
-    let review_scope = review_scope(resolved.roots.state.as_path(), project.as_deref())?;
     let mut owner = owner::Owner {
         forge: &mut *forge,
         repo: &mut *repo,
@@ -461,7 +495,7 @@ pub(crate) fn submit(
         policy,
         gate: &definition,
         reviews: &reviews,
-        review_scope,
+        review_scope: review_scope.clone(),
         shadow,
         last: None,
     };
@@ -522,8 +556,24 @@ fn run_inner(
 ) -> Result<u8, Box<dyn std::error::Error>> {
     use provenant_cli::domains::LandSettings;
     use provenant_records::{CommandResult, Outcome};
-    let prepared = prepare(
-        globals,
+    if !options.explain && options.numbers.is_empty() {
+        return Err("supply at least one pull request number".into());
+    }
+    if !options.explain && options.head.is_some() && options.numbers.len() > 1 {
+        return Err("--head pins one pull request; land a batch without it".into());
+    }
+    let resolved = resolve_checkout(globals)?;
+    let head = if options.explain {
+        None
+    } else {
+        options
+            .head
+            .as_deref()
+            .map(|name| super::git::Git::new()?.resolve_commit(&resolved.project, name))
+            .transpose()?
+    };
+    let prepared = prepare_resolved(
+        resolved,
         options.tier.as_deref(),
         options.poll,
         options.strategy,
@@ -567,13 +617,7 @@ fn run_inner(
                 }
             }
         };
-        let plan = policy.plan(
-            capabilities,
-            &review_scope(
-                prepared.resolved.roots.state.as_path(),
-                prepared.project.as_deref(),
-            )?,
-        )?;
+        let plan = policy.plan(capabilities, &prepared.review_scope)?;
         let unavailable = plan.strategy.ensure_executable(&plan.plan).err();
         let value = serde_json::json!({"repository": repository, "target": prepared.target, "resolved_plan": plan, "unavailable": unavailable, "fields": policy.fields, "budget_rate_micros_per_minute": policy.budget_rate_micros_per_minute, "ci_patience_seconds": patience, "ci_patience_source": if options.wait.is_some() { "--wait" } else { "gate.timeout_seconds" }, "warnings": warnings});
         let text = format!("{}\n", serde_json::to_string_pretty(&value)?);
@@ -584,17 +628,6 @@ fn run_inner(
             true,
         ));
     }
-    if options.numbers.is_empty() {
-        return Err("supply at least one pull request number".into());
-    }
-    if options.head.is_some() && options.numbers.len() > 1 {
-        return Err("--head pins one pull request; land a batch without it".into());
-    }
-    let head = options
-        .head
-        .as_deref()
-        .map(|name| super::git::Git::new()?.resolve_commit(&prepared.resolved.project, name))
-        .transpose()?;
     let review_proof = options
         .accept_delta
         .clone()

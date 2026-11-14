@@ -362,7 +362,6 @@ impl PrepareFixture {
             base,
             custody: None,
             facts: Default::default(),
-            review_exempt: Default::default(),
         };
         let scope = provenant_supervisor::custody::Scope {
             generation: 1,
@@ -852,7 +851,6 @@ fn unpublished_lane_leaves_the_worktree_clean_and_names_the_commit_and_branch()
         base: GitOid::parse(&base)?,
         custody: None,
         facts: Default::default(),
-        review_exempt: Default::default(),
     };
     let note = launch.unpublish(&Directory::open_anchor(&fixture.root.join("attempt"))?);
     assert!(note.contains(&tip), "{note}");

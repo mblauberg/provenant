@@ -61,7 +61,7 @@ pub enum Console {
     /// Read one attempt's bounded metadata and artifact inventory
     Detail {
         /// Attempt, as NAME[/NODE[#N]]
-        #[arg(value_name = "TARGET")]
+        #[arg(value_name = "TARGET", catalog_graph_target)]
         target: crate::Target,
     },
     /// Search local prompt or result content; returns the first match per artifact.

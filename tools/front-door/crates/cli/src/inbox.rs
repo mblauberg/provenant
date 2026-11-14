@@ -197,7 +197,7 @@ pub struct Answer {
 #[derive(Debug, Args)]
 pub struct Steer {
     /// Attempt to steer, as NAME[/NODE[#N]]; a node steers its live attempt
-    #[arg(value_name = "TARGET")]
+    #[arg(value_name = "TARGET", catalog_graph_target)]
     pub target: crate::Target,
     /// Steering message
     #[arg(

@@ -2311,25 +2311,25 @@ mod tests {
         );
     }
 
-    /// Every public command, from the model the help catalogue renders, with
-    /// the option that takes a TARGET (empty for a positional).
-    fn target_commands() -> Vec<(Vec<String>, String)> {
-        fn walk(command: &clap::Command, words: &[String], found: &mut Vec<(Vec<String>, String)>) {
+    /// Target parsers declared on the command model, with the option that takes one.
+    fn target_commands() -> Vec<(Vec<String>, String, super::metadata::TargetSyntax)> {
+        fn walk(
+            command: &clap::Command,
+            words: &[String],
+            found: &mut Vec<(Vec<String>, String, super::metadata::TargetSyntax)>,
+        ) {
             for argument in command.get_arguments() {
-                // `edit` takes a graph NAME; every other verb a TARGET.
-                let target = if words == ["edit"] { "NAME" } else { "TARGET" };
-                if argument.is_hide_set()
-                    || !argument
-                        .get_value_names()
-                        .is_some_and(|names| names.iter().any(|name| name == target))
-                {
+                if argument.is_hide_set() {
                     continue;
                 }
+                let Some(grammar) = argument.get::<super::metadata::TargetGrammar>() else {
+                    continue;
+                };
                 let flag = argument
                     .get_long()
                     .map(|long| format!("--{long}"))
                     .unwrap_or_default();
-                found.push((words.to_vec(), flag));
+                found.push((words.to_vec(), flag, grammar.0));
             }
             for child in command
                 .get_subcommands()
@@ -2364,17 +2364,17 @@ mod tests {
     fn every_target_verb_parses_the_generated_target_table_alike() {
         let names = ["a", "fix-login", "g-0123abcd", &"n".repeat(48)];
         let nodes = ["review", "build.v2", "x_y-z", &"N".repeat(200)];
-        let mut table = Vec::new();
+        let mut graph_targets = Vec::new();
         for name in names {
-            table.push(name.to_string());
+            graph_targets.push(name.to_string());
             for node in nodes {
-                table.push(format!("{name}/{node}"));
+                graph_targets.push(format!("{name}/{node}"));
                 for number in [1, 2, 10, u32::MAX] {
-                    table.push(format!("{name}/{node}#{number}"));
+                    graph_targets.push(format!("{name}/{node}#{number}"));
                 }
             }
         }
-        let refused = [
+        let graph_refused = [
             "",
             "Fix",
             "1fix",
@@ -2391,48 +2391,93 @@ mod tests {
             "fix#1",
             "fix/a/b",
         ];
-        for text in &table {
+        for text in &graph_targets {
             let target: Target = text.parse().unwrap_or_else(|e| panic!("{text}: {e}"));
             assert_eq!(target.to_string(), *text);
             assert_eq!(target.to_string().parse::<Target>().ok(), Some(target));
         }
-        for text in refused {
+        for text in graph_refused {
             assert!(text.parse::<Target>().is_err(), "{text}");
         }
-        // The full Cartesian table above checks the target grammar directly.
-        // At the CLI boundary, cover every component boundary and target shape
-        // once per verb, without rebuilding the entire command tree for every
-        // redundant combination of already-validated components.
-        let mut cli_table = Vec::new();
-        for (i, name) in names.iter().enumerate() {
-            cli_table.push((*name).to_owned());
-            let node = nodes[i];
-            cli_table.push(format!("{name}/{node}"));
-            cli_table.push(format!("{name}/{node}#{}", [1, 2, 10, u32::MAX][i]));
-        }
+        let graph_names = names
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        let branch_names = ["main", "release/2.0", "feature_x", "@"].map(str::to_owned);
+        let branch_refused = ["", "-main", "HEAD", "main..next", "release/", "x @{y"];
+        let cases = [
+            (
+                super::metadata::TargetSyntax::Graph,
+                graph_targets,
+                graph_refused
+                    .iter()
+                    .map(|value| (*value).to_owned())
+                    .collect(),
+            ),
+            (
+                super::metadata::TargetSyntax::GraphName,
+                graph_names,
+                vec!["fix/review".to_owned(), "fix#1".to_owned()],
+            ),
+            (
+                super::metadata::TargetSyntax::Branch,
+                branch_names,
+                branch_refused
+                    .iter()
+                    .map(|value| (*value).to_owned())
+                    .collect(),
+            ),
+        ];
         let commands = target_commands();
-        assert!(commands.len() >= 12, "{commands:?}");
-        for (words, flag) in &commands {
+        assert!(
+            !commands.is_empty(),
+            "command grammar has no target declarations"
+        );
+        for (words, flag, syntax) in &commands {
+            let (accepted_values, refused_values) = cases
+                .iter()
+                .find(|(kind, _, _)| kind == syntax)
+                .map(|(_, accepted, refused)| (accepted, refused))
+                .expect("every target declaration has a case table");
             let extras = required_extras(words, flag);
-            let mut accepted = Vec::new();
-            for text in cli_table.iter().map(String::as_str).chain(refused) {
+            let mut observed = Vec::new();
+            for text in accepted_values
+                .iter()
+                .chain(refused_values)
+                .map(String::as_str)
+            {
                 let mut argv: Vec<&str> = words.iter().map(String::as_str).collect();
                 if !flag.is_empty() {
                     argv.push(flag);
                 }
                 argv.push(text);
                 argv.extend(&extras);
-                accepted.push(matches!(parsed(&argv), ParseOutcome::Invocation(_)));
+                observed.push(matches!(parsed(&argv), ParseOutcome::Invocation(_)));
             }
-            let reference = cli_table
+            let expected = accepted_values
                 .iter()
-                .map(|text| {
-                    // `edit` takes a graph name only.
-                    words.first().map(String::as_str) != Some("edit") || !text.contains('/')
+                .map(|text| match syntax {
+                    super::metadata::TargetSyntax::Graph => text.parse::<Target>().is_ok(),
+                    super::metadata::TargetSyntax::GraphName => text
+                        .parse::<Target>()
+                        .is_ok_and(|target| target.node.is_none()),
+                    super::metadata::TargetSyntax::Branch => {
+                        provenant_confinement::repo::GitRefName::branch(text).is_ok()
+                    }
                 })
-                .chain(refused.iter().map(|_| false))
+                .chain(refused_values.iter().map(|text| {
+                    match syntax {
+                        super::metadata::TargetSyntax::Graph => text.parse::<Target>().is_ok(),
+                        super::metadata::TargetSyntax::GraphName => text
+                            .parse::<Target>()
+                            .is_ok_and(|target| target.node.is_none()),
+                        super::metadata::TargetSyntax::Branch => {
+                            provenant_confinement::repo::GitRefName::branch(text).is_ok()
+                        }
+                    }
+                }))
                 .collect::<Vec<_>>();
-            assert_eq!(accepted, reference, "{words:?} {flag}");
+            assert_eq!(observed, expected, "{words:?} {flag} {syntax:?}");
         }
     }
 

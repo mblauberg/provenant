@@ -116,7 +116,7 @@ pub enum Command {
         #[arg(long, value_parser = landing_strategy_parser())]
         strategy: Option<provenant_records::landing::Strategy>,
         /// Root branch to land against (defaults to the repository default branch)
-        #[arg(long)]
+        #[arg(long, catalog_branch_target)]
         target: Option<String>,
         /// Compute the candidate and decisions without publishing
         #[arg(long)]
@@ -344,11 +344,11 @@ pub enum Pr {
 #[derive(Debug, Args)]
 pub struct PrOpen {
     /// The writer attempt that made the change, as NAME[/NODE[#N]]
-    #[arg(long, value_name = "TARGET")]
+    #[arg(long, value_name = "TARGET", catalog_graph_target)]
     pub from_attempt: Target,
     /// An independent review attempt (repeatable); the attempt's delivery
     /// receipt supplies them when omitted
-    #[arg(long, value_name = "TARGET")]
+    #[arg(long, value_name = "TARGET", catalog_graph_target)]
     pub review: Vec<Target>,
     /// Markdown for the summary section; its first line titles the pull request
     #[arg(long)]
@@ -686,7 +686,7 @@ pub enum Part {
 #[derive(Clone, Debug, Args)]
 pub struct Output {
     /// Attempt to read, as NAME[/NODE[#N]]; a node reads its newest settled attempt
-    #[arg(value_name = "TARGET")]
+    #[arg(value_name = "TARGET", catalog_graph_target)]
     pub target: Target,
     /// Which part to read
     #[arg(long, value_enum, default_value = "result")]
@@ -710,7 +710,7 @@ pub struct Output {
 #[derive(Debug, Args)]
 pub struct Cancel {
     /// Graph, node or attempt to stop, as NAME[/NODE[#N]]
-    #[arg(value_name = "TARGET")]
+    #[arg(value_name = "TARGET", catalog_graph_target)]
     pub target: Target,
     /// Reason to record (up to 256 bytes)
     #[arg(long, value_parser = reason, catalog_bounds = (0, 256))]
@@ -719,7 +719,7 @@ pub struct Cancel {
 #[derive(Debug, Args)]
 pub struct Resume {
     /// Graph, node or attempt to retry, as NAME[/NODE[#N]]
-    #[arg(value_name = "TARGET")]
+    #[arg(value_name = "TARGET", catalog_graph_target)]
     pub target: Target,
     /// Replace the node's brief; a graph target needs exactly one node
     #[arg(long, conflicts_with_all = ["extend", "brief_file"])]
@@ -734,10 +734,19 @@ pub struct Resume {
 #[derive(Debug, Args)]
 pub struct Reconcile {
     /// Reconcile only these graphs, nodes or attempts (NAME[/NODE[#N]])
-    #[arg(value_name = "TARGET", conflicts_with = "abandon")]
+    #[arg(
+        value_name = "TARGET",
+        conflicts_with = "abandon",
+        catalog_graph_target
+    )]
     pub targets: Vec<Target>,
     /// Abandon settlement of this writer attempt, preserving its evidence
-    #[arg(long, value_name = "TARGET", catalog_requires = "reason")]
+    #[arg(
+        long,
+        value_name = "TARGET",
+        catalog_requires = "reason",
+        catalog_graph_target
+    )]
     pub abandon: Option<Target>,
     /// Why the chair is abandoning settlement
     #[arg(long, catalog_requires = "abandon", catalog_bounds = (0, 256))]
@@ -748,7 +757,7 @@ pub enum Lane {
     /// Re-run host delivery, requiring the settled receipt's clean, exact head
     Deliver {
         /// Settled writer attempt, as NAME[/NODE[#N]]
-        #[arg(value_name = "TARGET")]
+        #[arg(value_name = "TARGET", catalog_graph_target)]
         target: Target,
         /// Override the recorded delivery mode (default push when none recorded)
         #[arg(long)]
@@ -895,7 +904,7 @@ pub struct Trace {
     #[arg(long, value_parser = since)]
     pub since: Option<jiff::Timestamp>,
     /// Restrict the trace to one graph, node or attempt (NAME[/NODE[#N]])
-    #[arg(value_name = "TARGET")]
+    #[arg(value_name = "TARGET", catalog_graph_target)]
     pub target: Option<Target>,
     /// Also read the attempts of runs placed on peers, one SSH status read per peer
     #[arg(long)]
@@ -1267,7 +1276,7 @@ pub struct Status {
     #[arg(long, hide = true, conflicts_with = "targets")]
     pub session_stream: bool,
     /// Graphs, nodes or attempts to show (NAME[/NODE[#N]]); every graph when omitted
-    #[arg(value_name = "TARGET")]
+    #[arg(value_name = "TARGET", catalog_graph_target)]
     pub targets: Vec<Target>,
     /// Include every settled graph, paged with --limit and --cursor
     #[arg(long)]
@@ -1284,7 +1293,7 @@ pub struct Status {
 pub struct Wait {
     /// Graphs, nodes or attempts (NAME[/NODE[#N]]); this project's running
     /// graphs when neither a target nor --pr is given
-    #[arg(value_name = "TARGET")]
+    #[arg(value_name = "TARGET", catalog_graph_target)]
     pub targets: Vec<Target>,
     /// Pull request whose required checks, merge or close ends the wait (repeatable)
     #[arg(long = "pr", value_name = "NUMBER", catalog_u64_range = 1..)]
@@ -1303,7 +1312,7 @@ pub struct Wait {
 #[derive(Debug, Args)]
 pub struct GraphTrace {
     /// Graph, node or attempt, as NAME[/NODE[#N]]
-    #[arg(value_name = "TARGET")]
+    #[arg(value_name = "TARGET", catalog_graph_target)]
     pub target: Target,
 }
 
@@ -1315,10 +1324,16 @@ fn parse_landing_tier(value: &str) -> Result<String, String> {
     .map_err(|_| "expected routine, substantial, crucial or terminal".into())
 }
 
+pub(crate) fn branch_name(value: &str) -> Result<String, String> {
+    provenant_confinement::repo::GitRefName::branch(value)
+        .map(|_| value.to_owned())
+        .map_err(|error| error.to_string())
+}
+
 #[derive(Debug, Args)]
 pub struct Edit {
     /// Graph name
-    #[arg(value_name = "NAME", value_parser = edit_graph_name)]
+    #[arg(value_name = "NAME", value_parser = edit_graph_name, catalog_graph_name)]
     pub name: String,
     /// Patch document (JSON or TOML)
     #[arg(long)]

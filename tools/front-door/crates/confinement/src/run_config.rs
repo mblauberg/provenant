@@ -586,15 +586,6 @@ impl RunConfig {
     pub fn review_exempt(&self, project: &str) -> ReviewExempt {
         ReviewExempt::new(&self.review_exempt_for(project))
     }
-
-    /// The matcher a writer settlement uses. A config that cannot be read
-    /// exempts nothing, which may report uncommitted changes.
-    pub fn review_exempt_at(state: &Path, project: &str) -> ReviewExempt {
-        Self::read(state).map_or_else(
-            |_| ReviewExempt::none(),
-            |config| config.review_exempt(project),
-        )
-    }
 }
 fn valid_writer_write(path: &Path) -> bool {
     path.is_absolute()
@@ -1290,7 +1281,7 @@ writer_writes = []
     }
 
     #[test]
-    fn read_uses_the_state_config_and_fails_closed_to_no_exemption() -> std::io::Result<()> {
+    fn read_resolves_review_exemptions_and_rejects_invalid_values() -> std::io::Result<()> {
         let state = tempfile::tempdir()?;
         assert_eq!(RunConfig::read(state.path())?, RunConfig::default());
         let write = |text: &str| std::fs::write(state.path().join("config.toml"), text);
@@ -1300,16 +1291,13 @@ writer_writes = []
         assert_eq!(RunConfig::read(state.path())?.review_exempt, ["a/"]);
         write("schema_version = 1\n[domains.run.projects.p]\nreview_exempt = false\n")?;
         assert!(RunConfig::read(state.path()).is_err());
-        write("schema_version = 1\n[domains.run]\nreview_exempt = ['a/']\n")?;
-        assert!(RunConfig::review_exempt_at(state.path(), "p").covers(b"a/b"));
         // Other domains are not this reader's business.
         write("schema_version = 1\n[domains.other]\nfuture = true\n")?;
         assert_eq!(RunConfig::read(state.path())?, RunConfig::default());
         write("schema_version = 1\n[domains.run]\nreview_exempt = ['../x']\n")?;
         assert!(RunConfig::read(state.path()).is_err());
-        assert!(RunConfig::review_exempt_at(state.path(), "p").is_empty());
         write("not toml [")?;
-        assert!(RunConfig::review_exempt_at(state.path(), "p").is_empty());
+        assert!(RunConfig::read(state.path()).is_err());
         Ok(())
     }
 

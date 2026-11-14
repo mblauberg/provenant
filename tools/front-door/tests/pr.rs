@@ -311,7 +311,8 @@ fn land_explains_poll_and_budget_sources() -> Result {
     fs::write(
         rig.state.join("config.toml"),
         format!(
-            "schema_version=1\n[domains.pr.land.projects.\"{}\"]\npoll_seconds=21\n[domains.pr.land.tiers.crucial]\npoll_seconds=12\n",
+            "schema_version=1\n[domains.pr.land.projects.\"{}\"]\npoll_seconds=21\n[domains.pr.land.tiers.crucial]\npoll_seconds=12\n[domains.run.projects.\"{}\"]\nreview_exempt=['docs/']\n",
+            binding.project_id(),
             binding.project_id()
         ),
     )?;
@@ -327,7 +328,14 @@ fn land_explains_poll_and_budget_sources() -> Result {
         tier["data"]["fields"]["poll_seconds"]["source"]["layer"],
         "tier"
     );
-    assert!(!rig.project.join("gh-calls").exists());
+    assert_eq!(
+        project["data"]["resolved_plan"]["provenance"]["review_scope"]["project"],
+        binding.project_id().to_string()
+    );
+    assert_eq!(
+        project["data"]["resolved_plan"]["provenance"]["review_scope"]["exempt_patterns"],
+        serde_json::json!(["docs/"])
+    );
     Ok(())
 }
 
@@ -367,6 +375,15 @@ fn pr_external_failures_and_invalid_arguments_fail_closed() -> Result {
         String::from_utf8_lossy(&output.stderr.bytes)
     );
     assert!(text.contains("cannot resolve --head abc"), "{text}");
+    assert!(!rig.project.join("gh-calls").exists());
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.run]\nreview_exempt=false\n",
+    )?;
+    let config_refusal = rig.command(&["land", "1668", "--explain", "--json"])?;
+    assert_ne!(code(&config_refusal), 0, "{config_refusal:?}");
+    let refusal: serde_json::Value = serde_json::from_slice(&config_refusal.stdout.bytes)?;
+    assert_eq!(refusal["error"]["code"], "LAND_POLICY", "{refusal}");
     assert!(!rig.project.join("gh-calls").exists());
     Ok(())
 }

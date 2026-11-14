@@ -1,5 +1,5 @@
 //! Arguments of `telemetry value` and `telemetry cost`.
-use crate::Target;
+use crate::{Target, metadata::CatalogueArg};
 use clap::{Args, ValueEnum};
 
 #[derive(Debug, Args)]
@@ -28,7 +28,7 @@ pub enum CostBy {
 #[derive(Debug, Args)]
 pub struct TelemetryCost {
     /// Count only this graph, node or attempt (NAME[/NODE[#N]]); default every attempt in the ledger
-    #[arg(value_name = "TARGET")]
+    #[arg(value_name = "TARGET", catalog_graph_target)]
     pub target: Option<Target>,
     /// Break the cost down; attempts with no value form an `unattributed` group
     #[arg(long, value_enum)]
