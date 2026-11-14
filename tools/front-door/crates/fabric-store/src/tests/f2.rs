@@ -236,7 +236,7 @@ fn retirement_is_custody_owned_and_resumes_by_revision() {
         expected_tip,
         RetirementDecision::Discard {
             authority: actor(1),
-            evidence: subsumed_evidence.clone(),
+            evidence: landed_evidence.clone(),
         },
     )
     .unwrap();
@@ -305,6 +305,14 @@ fn retirement_is_custody_owned_and_resumes_by_revision() {
             .iter()
             .all(|removal| matches!(&removal.outcome, RemovalOutcome::Kept { .. }))
     );
+    assert_eq!(
+        ledger
+            .start_retirement(&record, &fixture.request())
+            .unwrap(),
+        record
+    );
+    // Completion evidence that does not match the decision is refused on a
+    // started record, which stays unchanged.
     assert!(matches!(
         ledger.set_retirement_step(
             project,
@@ -647,7 +655,9 @@ fn retirement_decisions_preserve_archive_proof_and_reference_custody() {
         .unwrap();
         let mut current = ledger
             .start_retirement(&record, &fixture.request())
-            .unwrap();
+            .unwrap_or_else(|error| {
+                panic!("{remove_reference} {with_worktree} {detached}: {error:?} {record:?}")
+            });
         let completion_evidence = if matches!(
             &evidence,
             RemovalEvidence::ExplicitDiscard { archive: Some(_) }

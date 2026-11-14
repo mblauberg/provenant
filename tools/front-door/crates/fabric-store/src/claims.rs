@@ -206,14 +206,21 @@ fn same_retirement_intent(existing: &RetirementRecord, requested: &RetirementRec
 }
 fn save_retirement(db: &rusqlite::Connection, record: &RetirementRecord) -> Result<()> {
     validate_retirement(record)?;
+    // The row is anchored on a subject the retirement actually holds: a
+    // decision that keeps its reference (a detached worktree's HEAD, say)
+    // holds only its related subjects.
+    let anchor = record
+        .subjects()
+        .next()
+        .ok_or(Error::Invalid("retirement without a custodied subject"))?;
     db.execute(
         "INSERT INTO retirements(project,id,revision,kind,subject,record) VALUES(?1,?2,?3,?4,?5,?6)",
         params![
             record.project.to_string(),
             record.id,
             i64::try_from(record.revision).map_err(|_| Error::Invalid("retirement revision"))?,
-            record.subject.kind.as_str(),
-            record.subject.id,
+            anchor.kind.as_str(),
+            anchor.id,
             encode(record)?,
         ],
     )?;

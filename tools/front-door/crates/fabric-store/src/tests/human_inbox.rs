@@ -720,18 +720,24 @@ fn local_delivery_open_allocates_nothing_and_observes_deadline() {
         Store::open_read_only(&f.root, past),
         Err(Error::Busy)
     ));
-    writer.db.execute_batch("PRAGMA user_version=9").unwrap();
+    // A reader refuses a store whose version it does not support and leaves
+    // the writer's version unchanged.
+    let unsupported = crate::db::SCHEMA.version + 1;
+    writer
+        .db
+        .execute_batch(&format!("PRAGMA user_version={unsupported}"))
+        .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
     assert!(matches!(
         Store::open_read_only(&f.root, deadline),
-        Err(Error::Invalid(_))
+        Err(Error::SchemaVersion(found)) if found == unsupported
     ));
     assert_eq!(
         writer
             .db
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
-        9
+        unsupported
     );
 }
 
@@ -759,7 +765,9 @@ fn local_delivery_fresh_process() -> Result<()> {
     };
     if let Some(path) = std::env::var_os("PROVENANT_READER_ROOT") {
         let path = PathBuf::from(path);
-        let mut inputs = RootInputs::new(path.join("home"), path.join("assets"));
+        // Mirror the parent fixture: home and checkout are siblings of state.
+        let base = path.parent().expect("state root has a parent");
+        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
         inputs.state_dir = Some(path);
         let roots = inputs.resolve(&Resolver).unwrap();
         let reader =
