@@ -416,7 +416,9 @@ fn live(
             return Ok(());
         }
         let pause = remaining.as_micros().min(interval.as_micros());
-        factory.backoff.wait(DurationMicros::from_micros(pause), &cancel);
+        factory
+            .backoff
+            .wait(DurationMicros::from_micros(pause), &cancel);
     }
 }
 

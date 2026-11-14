@@ -798,7 +798,6 @@ pub enum RefusalKind {
     RetainedImport {
         fence: provenant_supervisor::custody::PendingImport,
         worktree: std::path::PathBuf,
-        key: provenant_records::WorkKey,
     },
 }
 

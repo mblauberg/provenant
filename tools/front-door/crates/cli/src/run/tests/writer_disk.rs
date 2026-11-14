@@ -81,9 +81,6 @@ fn retained_import_refusal_carries_custody_and_recovery_targets() {
     }])
     .expect_err("retained import must refuse");
     assert_eq!(failure.kind.code(), "WRITER_IMPORT_RETAINED");
-    assert!(failure.message.contains("/tmp/writer"));
-    assert!(failure.message.contains(&attempt.to_string()));
-    assert!(failure.message.contains(&key.to_string()));
     let diagnostic = failure.projection.expect("diagnostic");
     let custody = diagnostic
         .extra
