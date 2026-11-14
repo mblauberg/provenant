@@ -7,7 +7,9 @@ use provenant_os::exec::Executor;
 use provenant_os::exec::{ExecOptions, ExecOutcome, StreamPolicy, Termination};
 #[cfg(target_os = "macos")]
 use provenant_os::fs::FileKind;
-use provenant_records::policy::{Effect, Facts, Policy};
+#[cfg(any(target_os = "macos", all(test, feature = "snapshot")))]
+use provenant_records::policy::Effect;
+use provenant_records::policy::{Facts, Policy};
 #[cfg(target_os = "macos")]
 use std::ffi::OsString;
 #[cfg(target_os = "macos")]
