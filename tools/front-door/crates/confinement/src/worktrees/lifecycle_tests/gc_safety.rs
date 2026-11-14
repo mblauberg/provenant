@@ -1044,7 +1044,7 @@ fn gc_merged_tree_previews_and_removes_declared_output() -> Result<(), Box<dyn E
 }
 
 #[test]
-fn gc_merge_proof_requires_containment_in_the_pinned_default() -> Result<(), Box<dyn Error>> {
+fn gc_retires_only_lanes_contained_in_a_retained_ref() -> Result<(), Box<dyn Error>> {
     // A concurrent test's fork can briefly inherit a just-released lock
     // descriptor; rebuild the whole fixture rather than weaken zero-wait locks.
     for _ in 0..5 {

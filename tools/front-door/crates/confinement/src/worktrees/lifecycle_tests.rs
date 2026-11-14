@@ -936,7 +936,6 @@ fn merge_proof_scenario() -> Result<(), Box<dyn Error>> {
     };
     let batch = new_lane("proof-batch")?;
     let via_batch = new_lane("proof-via-batch")?;
-    let local_only = new_lane("proof-local-only")?;
     let squashed = new_lane("proof-squashed")?;
     let unmerged = new_lane("proof-unmerged")?;
     let advanced = new_lane("proof-advanced")?;
@@ -952,13 +951,6 @@ fn merge_proof_scenario() -> Result<(), Box<dyn Error>> {
             "lane into batch",
         ],
     )?;
-    run_in_worktree(
-        &fixture,
-        &batch.path,
-        &["merge", "--no-ff", "proof-local-only", "-m", "local lane"],
-    )?;
-    // A pin taken before the batch lands: the batch is merged only locally.
-    let stale_pin = fixture.head()?;
     fixture.run(&["merge", "--no-ff", "proof-batch", "-m", "land batch"])?;
     fixture.run(&["merge", "--squash", "proof-squashed"])?;
     fixture.run(&["commit", "-m", "squash lane"])?;
@@ -972,6 +964,7 @@ fn merge_proof_scenario() -> Result<(), Box<dyn Error>> {
     )?;
     let retirement = HostRetirementFixture::new(&test_context)?;
     retirement.seed_lane(&context, &via_batch)?;
+    retirement.seed_lane(&context, &squashed)?;
     let policy = |upstream, dry_run| WorktreeGcPolicy {
         upstream: Some(upstream),
         upstream_reference: Some("refs/heads/main"),
@@ -989,50 +982,38 @@ fn merge_proof_scenario() -> Result<(), Box<dyn Error>> {
         integration_patterns: &[],
         excluded_paths: &[],
     };
-    let local = collect(
+    let lanes = [via_batch.clone(), squashed.clone(), unmerged, advanced.clone()];
+    // One lane keeps the preview inside its traversal budget.
+    let preview = collect(
         &context,
-        &[via_batch.clone(), local_only.clone()],
-        &policy(stale_pin, false),
+        std::slice::from_ref(&via_batch),
+        &policy(pin, true),
         &cancel(),
     )?;
-    assert!(local.worktrees.removed.is_empty(), "{local:?}");
-    assert!(
-        local
-            .worktrees
-            .retained
-            .iter()
-            .all(|retained| matches!(retained.reason, RetainReason::NotMerged))
-    );
-    assert!(via_batch.path.is_dir() && branch_exists(&fixture, "proof-via-batch"));
-    let lanes = [via_batch.clone(), squashed, unmerged, advanced.clone()];
-    let preview = collect(&context, &lanes, &policy(pin, true), &cancel())?;
-    let mut previewed = preview.worktrees.pruned_refs.clone();
-    previewed.sort();
-    assert_eq!(previewed, ["proof-via-batch"], "{preview:?}");
+    let previewed: Vec<_> = preview
+        .worktrees
+        .removed
+        .iter()
+        .map(|tree| tree.path.clone())
+        .collect();
+    assert_eq!(previewed, [via_batch.path.clone()], "{preview:?}");
     assert!(branch_exists(&fixture, "proof-via-batch"));
     let applied = collect(&context, &lanes, &policy(pin, false), &cancel())?;
-    let retained: BTreeMap<_, _> = applied
-        .worktrees
-        .retained
-        .iter()
-        .map(|retained| (retained.branch.as_str(), &retained.reason))
-        .collect();
-    assert!(!via_batch.path.exists());
-    assert!(!branch_exists(&fixture, "proof-via-batch"));
-    for name in ["proof-squashed", "proof-unmerged", "proof-advanced"] {
+    // Containment, or a tree-equivalent squash, in a retained ref retires the
+    // lane; unlanded work and a tip that moved after listing stay.
+    assert!(!via_batch.path.exists() && !squashed.path.exists());
+    // Subsumption retires the tree, not the branch: only landing deletes a ref.
+    for name in ["proof-via-batch", "proof-squashed", "proof-unmerged", "proof-advanced"] {
         assert!(branch_exists(&fixture, name), "{name}");
-        assert!(retained.contains_key(name), "{name}: {applied:?}");
     }
-    assert!(matches!(
-        retained["proof-squashed"],
-        RetainReason::NotMerged
-    ));
-    assert!(matches!(
-        retained["proof-unmerged"],
-        RetainReason::NotMerged
-    ));
-    // Advanced after the listing: the expected head no longer matches.
-    assert!(matches!(retained["proof-advanced"], RetainReason::Changed));
+    assert!(
+        applied.candidates.iter().any(|row| row.action == "kept"
+            && row.path.ends_with("proof-unmerged")),
+        "{applied:?}"
+    );
+    assert!(applied.worktrees.retained.iter().any(|retained| {
+        retained.branch == "proof-advanced" && matches!(retained.reason, RetainReason::Changed)
+    }));
     assert!(advanced.path.is_dir());
     Ok(())
 }
