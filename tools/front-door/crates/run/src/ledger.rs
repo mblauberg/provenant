@@ -121,8 +121,8 @@ pub(crate) fn lease_with_policy(
 ) -> Result<(Option<WallTime>, Vec<String>)> {
     let (project, class) = (ticket.project_id, ticket.lane_class);
     let id = ticket.attempt_id.to_string();
-    let mut warnings = Vec::new();
-    let admitted = immediate(db, request, |tx| {
+    immediate(db, request, |tx| {
+        let mut warnings = Vec::new();
         let now = time
             .wall_now()
             .map_err(|_| RunError::Validation("wall clock"))?;
@@ -132,7 +132,7 @@ pub(crate) fn lease_with_policy(
             |r| r.get(0),
         )?;
         if held {
-            return Ok(Some(now));
+            return Ok((Some(now), warnings));
         }
         // Reusing this attempt's lease adds no capacity. For new leases, count
         // and publish in this same transaction so concurrent stores cannot
@@ -175,7 +175,7 @@ pub(crate) fn lease_with_policy(
         // A yielded lease retains its original guardian and store identity.
         // Reclaim runs in the relay, which need not be the guardian process.
         if tx.execute("UPDATE leases SET yielded=0 WHERE attempt=?1", [&id])? > 0 {
-            return Ok(Some(now));
+            return Ok((Some(now), warnings));
         }
         let identity = owner.identity.as_ref().ok_or_else(|| {
             policy.boundary_error(
@@ -207,9 +207,8 @@ pub(crate) fn lease_with_policy(
                 owner_id
             ],
         )?;
-        Ok(Some(now))
-    })?;
-    Ok((admitted, warnings))
+        Ok((Some(now), warnings))
+    })
 }
 /// Give up both host and project capacity, retaining custody for reclaim.
 pub(crate) fn yield_lease(
