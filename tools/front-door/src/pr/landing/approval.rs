@@ -33,7 +33,7 @@ pub enum Decision {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Approved {
     pub reference: String,
-    pub evidence: Option<ApprovalEvidence>,
+    pub evidence: Vec<ApprovalEvidence>,
     pub accepted: Option<Accepted>,
 }
 
@@ -41,7 +41,7 @@ impl Approved {
     fn by(reference: impl Into<String>) -> Self {
         Self {
             reference: reference.into(),
-            evidence: None,
+            evidence: Vec::new(),
             accepted: None,
         }
     }
@@ -176,6 +176,7 @@ impl Approver<'_, '_> {
         }
         let mut unusable = Vec::new();
         let mut failures = Vec::new();
+        let mut evidence_set = Vec::new();
         for source in approvals.sources {
             let candidates = match source {
                 ApprovalSource::ProvenantReview => match approvals.records.reviews(number, head) {
@@ -224,16 +225,21 @@ impl Approver<'_, '_> {
                     }
                 },
             };
-            if let Some(evidence) = candidates
+            for evidence in candidates
                 .into_iter()
-                .find(|record| !record.reference.is_empty() && !record.reviewer.is_empty())
+                .filter(|record| !record.reference.is_empty() && !record.reviewer.is_empty())
             {
-                return Ok(Decision::Approved(Approved {
-                    reference: evidence.reference.clone(),
-                    evidence: Some(evidence),
-                    accepted: None,
-                }));
+                if !evidence_set.contains(&evidence) {
+                    evidence_set.push(evidence);
+                }
             }
+        }
+        if let Some(first) = evidence_set.first() {
+            return Ok(Decision::Approved(Approved {
+                reference: first.reference.clone(),
+                evidence: evidence_set,
+                accepted: None,
+            }));
         }
         let accepted = approvals
             .acceptances
@@ -371,7 +377,11 @@ mod tests {
                     "configured source did not approve".into(),
                 ));
             };
-            assert_eq!(approved.evidence.map(|e| e.source), Some(sources[0]));
+            assert!(
+                sources
+                    .iter()
+                    .all(|source| approved.evidence.iter().any(|e| e.source == *source))
+            );
         }
         let disabled = Approvals::new(&[], &reviews)
             .at(&mut repo, "base")
@@ -408,7 +418,7 @@ mod tests {
             .ok_or_else(|| LandingError::Failed("missing owner evidence".into()))?;
         assert_eq!(accepted.actor, "chair");
         assert_eq!(accepted.reason, "owner accepts delta");
-        assert!(approved.evidence.is_none());
+        assert!(approved.evidence.is_empty());
         Ok(())
     }
 }

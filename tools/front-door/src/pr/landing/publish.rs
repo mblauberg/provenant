@@ -75,26 +75,60 @@ pub fn decide_candidate(
     }
     decide(forge, target, requested, method)
 }
+/// Publication engine is selected once, from the shared strategy declaration.
+pub fn decide_strategy(
+    forge: &mut dyn Forge,
+    target: &str,
+    settings: &provenant_cli::domains::LandSettings,
+    candidate: &Candidate,
+) -> Result<PublishDecision, LandingError> {
+    match settings.strategy.declaration().execution {
+        provenant_records::landing::Execution::Command => {
+            if !settings
+                .command
+                .as_ref()
+                .is_some_and(|command| command.valid())
+            {
+                return Err(LandingError::Failed(
+                    "command strategy requires a valid land.command declaration".into(),
+                ));
+            }
+            Ok(PublishDecision {
+                mode: PublishMode::Command,
+                reason: "land.strategy selects the repository command".into(),
+            })
+        }
+        provenant_records::landing::Execution::Builtin => {
+            decide_candidate(forge, target, settings.publish, settings.method, candidate)
+        }
+        provenant_records::landing::Execution::Unavailable => Err(LandingError::Unimplemented(
+            "strategy execution follows in 2.1",
+        )),
+    }
+}
+
 /// Return PRs whose pinned head or approval changed immediately before publication.
 pub fn revalidate(
     forge: &mut dyn Forge,
     approver: &mut Approver<'_, '_>,
     candidate: &Candidate,
 ) -> Result<Vec<EligiblePr>, LandingError> {
-    Ok(revalidate_with_reasons(forge, approver, candidate)?
-        .into_iter()
-        .map(|(pr, _)| pr)
-        .collect())
+    Ok(
+        revalidate_with_reasons(forge, approver, &mut candidate.clone())?
+            .into_iter()
+            .map(|(pr, _)| pr)
+            .collect(),
+    )
 }
 
 pub fn revalidate_with_reasons(
     forge: &mut dyn Forge,
     approver: &mut Approver<'_, '_>,
-    candidate: &Candidate,
+    candidate: &mut Candidate,
 ) -> Result<Vec<(EligiblePr, String)>, LandingError> {
     let mut excluded = Vec::new();
-    for step in &candidate.steps {
-        let pr = &step.pr;
+    for step in &mut candidate.steps {
+        let pr = &mut step.pr;
         let head = forge.head(pr.number)?;
         let info = forge.pull_request(pr.number)?;
         let reason = if info.base_branch != pr.base_branch {
@@ -103,8 +137,10 @@ pub fn revalidate_with_reasons(
             Some("head changed".to_owned())
         } else {
             match approver.decide(forge, pr.number, &pr.head, &info.author)? {
-                Decision::Approved(approved) if approved.reference == pr.approval => None,
-                Decision::Approved(_) => Some("approval for the pinned head changed".to_owned()),
+                Decision::Approved(approved) => {
+                    pr.extend_approval_evidence(approved.evidence);
+                    None
+                }
                 Decision::Refused(reason) => Some(reason),
             }
         };
@@ -238,7 +274,7 @@ mod tests {
                 number,
                 head: head.into(),
                 approval: format!("approval-{number}"),
-                approval_evidence: None,
+                approval_evidence: Vec::new(),
                 accepted: None,
                 base_branch: "main".into(),
             },
@@ -381,6 +417,64 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn approval_evidence_unions_across_source_and_arrival_orders() -> Result<(), LandingError> {
+        use crate::pr::landing::{fakes::FakeReviews, ports::ReviewRecord};
+        use provenant_cli::domains::ApprovalSource;
+        for sources in [
+            vec![ApprovalSource::ProvenantReview, ApprovalSource::Forge],
+            vec![ApprovalSource::Forge, ApprovalSource::ProvenantReview],
+        ] {
+            for review_first in [false, true] {
+                let mut forge = FakeForge::default();
+                prepare(&mut forge);
+                let mut repo = FakeRepo::default();
+                let mut reviews = FakeReviews::default();
+                let mut c = candidate();
+                c.steps.truncate(1);
+                let pr = c.steps[0].pr.clone();
+                let review = ReviewRecord {
+                    reference: "provenant-review".into(),
+                    reviewer: "independent".into(),
+                    head: pr.head.clone(),
+                    verdict: provenant_records::workflow::ReviewVerdict::Approve,
+                    independent: true,
+                };
+                if review_first {
+                    forge.approvals_at_head.clear();
+                    reviews.records.insert(pr.number, vec![review.clone()]);
+                }
+                assert!(
+                    revalidate_with_reasons(
+                        &mut forge,
+                        &mut Approvals::new(&sources, &reviews).at(&mut repo, ""),
+                        &mut c
+                    )?
+                    .is_empty()
+                );
+                let initial = c.steps[0].pr.approval_evidence.clone();
+                reviews.records.insert(pr.number, vec![review]);
+                prepare(&mut forge);
+                assert!(
+                    revalidate_with_reasons(
+                        &mut forge,
+                        &mut Approvals::new(&sources, &reviews).at(&mut repo, ""),
+                        &mut c
+                    )?
+                    .is_empty()
+                );
+                let evidence = &c.steps[0].pr.approval_evidence;
+                assert!(sources.iter().all(|source| {
+                    evidence
+                        .iter()
+                        .any(|proof| proof.source == *source && proof.head == pr.head)
+                }));
+                assert!(initial.iter().all(|proof| evidence.contains(proof)));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn revalidation_excludes_changed_head_and_lost_approval() -> Result<(), LandingError> {
         let mut forge = FakeForge::default();
         prepare(&mut forge);
@@ -464,7 +558,7 @@ mod tests {
         let excluded = revalidate_with_reasons(
             &mut forge,
             &mut Approvals::new(&[ApprovalSource::ProvenantReview], &reviews).at(&mut repo, "base"),
-            &c,
+            &mut c.clone(),
         )?;
         assert_eq!(excluded.len(), 1, "{excluded:?}");
         assert_eq!(excluded[0].0, c.steps[1].pr);
