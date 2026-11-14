@@ -32,42 +32,16 @@ other edge cases get a note, or a typed refusal of that one operation
 ([ADR 0034](0034-refusals-carry-stable-typed-codes.md)). Persisted formats are
 versioned and tolerate extra fields.
 
-Interfaces change without compatibility shims, before and after 1.0: no legacy
-readers, aliases, fallback paths or dual formats. A breaking change ships with
-a release note and a clear operator step, such as draining active work or
-moving to a fresh state root
-([install](../runbooks/install.md#from-1x-to-20)).
+Interfaces change without compatibility shims, legacy readers, aliases or dual formats. Breaking changes include a clear operator step when one is needed.
 
-The format-1 reset moved off the 2.0.0 install path. Deleting 1.x state in
-place was a one-way step on owner data, with a recovery story that depended on
-every store being classified correctly. 2.0.0 instead runs from a fresh state
-root, copies only the owner configuration out of the 1.x root and never writes
-that root, so no 2.0 code reads 1.x-shaped state and rollback is reinstalling
-1.x. The reset code stays for a later, owner-gated removal of the 1.x root.
-
-Provider and launch guards outside the four boundaries warn and continue, or
-are configurable defaults with a visible source. They do not refuse a lane.
-Dropping an optional grant, skill or tool with a named warning is preferred
-over refusing the launch.
-
-`crates/run/assets/policy.toml` is the single executable policy table. Records
-owns `Rule`, `Policy` and `Effect`; consumers call `policy.check(code, facts)`.
-Each row names credentials, Git isolation, data integrity, authority or no
-boundary, its default strength and its knob. No rule without a boundary defaults
-to refuse. Host, project and dispatch overrides resolve in that order, and
-`provenant config show` includes the effective policy with its source. Lane
-preambles render these same rows. Process census is advisory for admission;
-only rules with a real waiting action support Queue. The exclusive writer lease
-and retained-work Git fences remain authoritative. Declared paths within a
-worktree are advisory write scope; settlement and handoff report out-of-scope
-paths. `policy.WRITE_SCOPE=refuse` explicitly selects strict scope.
+Provider and launch guards outside the four boundaries warn and continue, or are configurable defaults with a visible source. The policy is declared once and overrides remain visible.
 
 ## Consequences
 
-New guards need an observed failure in one of the four classes. Reviews treat
+Hard holds require a real boundary in one of the four classes. Reviews treat
 a lane or launch refusal outside them, or any guard that blocks ordinary work,
 as a defect to loosen, not a safety gain. See
-[Simple first](../specs/rust-workspace.md#simple-first) and the
+[Build for change](../specs/rust-workspace.md#build-for-change-refuse-what-can-lose-data) and the
 [supervisor spec](../specs/supervisor.md).
 
 Overturn when: data loss, credential exposure or unauthorised change is traced

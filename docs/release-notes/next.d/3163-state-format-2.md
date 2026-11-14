@@ -1,4 +1,4 @@
 ## Breaking changes
 ### CLI and install
 
-- **2.0.0 runs from a fresh state root and leaves the 1.x root in place.** The default state root is `~/.local/share/provenant/v2`. The first install there, while it is absent or empty, stops the 1.x launch agents and then copies only `config.toml`, `host-id` and `install/receipt.json` from `~/.local/share/provenant/v1`; run records, stores, ledgers, quota and usage history, worktree records and caches stay behind. The JSON result names the copy under `state_copy` and a dry run reports it without writing. 2.0 never writes, moves or deletes the 1.x root and refuses a state root inside it. An explicit `--state-dir` elsewhere is never seeded. Rollback is `provenant uninstall` and reinstalling 1.x. See the [install runbook](../../runbooks/install.md#from-1x-to-20). (#3078)
+- **Provenant 2.0 uses a fresh state root.** Drain active lanes and land or park their work before upgrading; run records and other old state do not carry over. See the [install runbook](../../runbooks/install.md). (#3078)
