@@ -768,7 +768,9 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                 },
                 writer: Some(writer),
                 home: self.home.clone(),
-                cargo_registry_seed: false,
+                cargo_home: provenant_confinement::cargo::CargoHome::resolve(&self.home, |_| None)
+                    .unwrap(),
+                cargo_target_seed: false,
                 state_root: self.state.clone(),
                 sandbox: provenant_confinement::run_config::SandboxMode {
                     requested: true,

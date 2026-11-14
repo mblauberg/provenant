@@ -739,7 +739,7 @@ mod tests {
         fs::create_dir_all(&lint).unwrap();
         fs::write(lint.join(CARGO_LOCK), b"").unwrap();
         fs::write(lint.join("payload"), vec![1; 4096]).unwrap();
-        let stray = fixture.cache('a').join("cargo-home");
+        let stray = fixture.cache('a').join("private-config");
         fs::create_dir_all(&stray).unwrap();
         fs::write(stray.join(CARGO_LOCK), b"").unwrap();
         let report = sweep(fixture.home.path(), limits(0, 0), false, now(), &mut plenty);

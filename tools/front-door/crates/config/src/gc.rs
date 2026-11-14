@@ -116,14 +116,6 @@ macro_rules! retention_classes {
 }
 
 retention_classes! {
-    CargoDownloads => {
-        owner: "Cargo package-cache",
-        measure: AllocatedTree,
-        eligibility: Declared,
-        detail: "shared content-addressed downloads; Cargo owns locking and eviction, never a per-worktree removal",
-        settings: [],
-        triggers: NEVER
-    },
     LaneCargoCaches => {
         owner: "confinement/cache",
         measure: AllocatedTree,
@@ -326,6 +318,8 @@ pub struct LaneBuildSettings {
     pub cargo_incremental: Option<bool>,
     /// `CARGO_PROFILE_DEV_DEBUG` for lanes; `line-tables-only` unless set.
     pub cargo_debug: Option<String>,
+    /// Allow dependency downloads and source updates in the host Cargo home.
+    pub cargo_source_writes: Option<bool>,
     /// Cap on the allocated bytes of all lane Cargo profile directories, idle
     /// and busy. Collection removes idle ones, least recently used first; when
     /// busy directories alone exceed the cap it removes every eligible idle

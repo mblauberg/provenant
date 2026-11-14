@@ -930,8 +930,10 @@ pub struct LaunchConfinement {
     pub writer: Option<WriterLaunch>,
     /// Canonical host home; the writer's lane cargo cache derives from it.
     pub home: PathBuf,
-    /// Opt in to shared lane downloads and private host target seeding.
-    pub cargo_registry_seed: bool,
+    /// Opt in to private host target seeding.
+    pub cargo_target_seed: bool,
+    /// Resolved once by the host, reused after all late environment additions.
+    pub cargo_home: provenant_confinement::cargo::CargoHome,
     /// Host state root containing target seed generations.
     pub state_root: PathBuf,
     /// Whether the lane runs under the compiled sandbox profile. Without it
@@ -1081,7 +1083,7 @@ impl LaunchConfinement {
             cancel,
         )
     }
-    /// Prepare shared downloads and a private target while writer custody is held.
+    /// Prepare a private target from host-built output while writer custody is held.
     pub(crate) fn seed_cargo(
         &self,
         environment: &mut Vec<(OsString, OsString)>,
@@ -1091,51 +1093,15 @@ impl LaunchConfinement {
         if cancel.is_cancelled() {
             return;
         }
-        if let AccessMode::WorktreeWrite(authority) = &self.plan.permissions().mode {
-            lane_cargo_environment(&self.home, &authority.cargo_cache().path, environment);
-        }
+        let cache = match &self.plan.permissions().mode {
+            AccessMode::WorktreeWrite(authority) => &authority.cargo_cache().path,
+            AccessMode::ReadOnly => &self.plan.permissions().scratch.path,
+        };
+        self.cargo_home
+            .lane_cargo_environment(&self.home, cache, environment);
+        self.cargo_home
+            .source_environment(self.plan.permissions().network, environment);
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
-        let outcome = match &self.plan.permissions().mode {
-            AccessMode::WorktreeWrite(authority) => crate::cargo_seed::seed_registry(
-                self.cargo_registry_seed,
-                &self.home,
-                &authority.cargo_cache().path,
-                cancel,
-            ),
-            AccessMode::ReadOnly => crate::cargo_seed::Outcome::skipped("read_only_lane"),
-        };
-        // Diagnostic publication must never prevent lane launch.
-        if let Err(error) = record_cargo_setup(attempt_dir, &outcome) {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: could not record Cargo setup: {error}"
-            );
-        }
-        if cancel.is_cancelled() {
-            return;
-        }
-        let git_outcome = match &self.plan.permissions().mode {
-            AccessMode::WorktreeWrite(authority) => crate::cargo_seed::seed_git(
-                self.cargo_registry_seed,
-                &self.home,
-                &authority.cargo_cache().path,
-                cancel,
-            ),
-            AccessMode::ReadOnly => crate::cargo_seed::Outcome::skipped("read_only_lane"),
-        };
-        if let Err(error) =
-            record_cargo_setup_file(attempt_dir, "cargo-git-setup.json", &git_outcome)
-        {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: could not record Cargo Git setup: {error}"
-            );
-        }
-        if cancel.is_cancelled() {
-            return;
-        }
         let target_outcome = match (&self.plan.permissions().mode, writer) {
             (AccessMode::WorktreeWrite(authority), Some((worktree, _))) => self.seed_cargo_target(
                 worktree.path(),
@@ -1168,7 +1134,7 @@ impl LaunchConfinement {
         cancel: &CancelToken,
     ) -> crate::cargo_seed::Outcome {
         use crate::cargo_seed::Outcome;
-        if !self.cargo_registry_seed {
+        if !self.cargo_target_seed {
             return Outcome::skipped("disabled");
         }
         let build = match crate::target_seed::cargo_build_directory(worktree) {
@@ -1182,14 +1148,18 @@ impl LaunchConfinement {
             }
         };
         if cfg!(unix)
-            && let Err(detail) = verified_cargo_config(&build, cache, environment).and_then(|()| {
-                trusted_lane_toolchain(
-                    &self.home,
-                    worktree,
-                    environment,
-                    &provenant_confinement::write_grants(self.plan.permissions(), &self.profile),
-                )
-            })
+            && let Err(detail) =
+                verified_cargo_config(&build, &self.cargo_home.path).and_then(|()| {
+                    trusted_lane_toolchain(
+                        &self.home,
+                        worktree,
+                        environment,
+                        &provenant_confinement::write_grants(
+                            self.plan.permissions(),
+                            &self.profile,
+                        ),
+                    )
+                })
         {
             return Outcome::fallback_detail("toolchain_unverified", detail);
         }
@@ -1225,31 +1195,6 @@ impl LaunchConfinement {
         ))?;
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
         self.prepare_writer_directories()?;
-        // Treat the separate shared store as a read root too, so normal
-        // compilation holds and revalidates its canonical directory identity.
-        // An absent store grants nothing when seeding is disabled.
-        let shared = self.home.join("Library/Caches/provenant-cargo-downloads");
-        if let Some(grant) = self
-            .profile
-            .spec
-            .tool_writes
-            .iter()
-            .find(|grant| grant.path == shared)
-            .cloned()
-        {
-            match std::fs::symlink_metadata(&shared) {
-                Ok(_) if !self.profile.spec.runtime_reads.contains(&grant) => {
-                    self.profile.spec.runtime_reads.push(grant)
-                }
-                Ok(_) => {}
-                Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {}
-                Err(failure) => {
-                    return Err(error("verify shared Cargo downloads", Some(&shared))(
-                        failure,
-                    ));
-                }
-            }
-        }
         let directories = required_anchors(self.plan.permissions(), &self.profile, writer)
             .into_iter()
             .map(AnchoredDirectory::open_canonical)
@@ -1549,45 +1494,12 @@ pub(super) fn verify_writer_git_paths(common: &Path, branch: &GitRefName) -> Res
     Ok(())
 }
 
-// Finalise the selectors on the actual launch environment before any seed
-// validation, even when an adapter did not discover Rust on the host. These
-// values are derived from the lane's authority, never inherited Cargo state.
-pub(super) fn lane_cargo_environment(
-    home: &Path,
-    cache: &Path,
-    environment: &mut Vec<(OsString, OsString)>,
-) {
-    let selectors = [
-        ("CARGO_HOME", cache.join("cargo-home").into_os_string()),
-        ("RUSTUP_HOME", home.join(".rustup").into_os_string()),
-        ("RUSTUP_AUTO_INSTALL", OsString::from("0")),
-        ("CARGO_TARGET_DIR", cache.join("target").into_os_string()),
-        (
-            "CARGO_BUILD_BUILD_DIR",
-            cache.join("target").into_os_string(),
-        ),
-    ];
-    environment.retain(|(key, _)| !selectors.iter().any(|(name, _)| key == *name));
-    environment.extend(selectors.map(|(key, value)| (OsString::from(key), value)));
-}
-
 // Cargo configuration can override rustc independently of the rustup pin.
 // Refuse ambiguous configurations without executing or interpreting them.
 // Refusals are stable snake_case codes, recorded as the outcome `detail`.
-fn verified_cargo_config(
-    build: &Path,
-    cache: &Path,
-    environment: &[(OsString, OsString)],
-) -> std::result::Result<(), &'static str> {
-    let cargo_home = cache.join("cargo-home");
-    let mut values = environment.iter().filter(|(key, _)| key == "CARGO_HOME");
-    match (values.next(), values.next()) {
-        (Some((_, value)), None) if Path::new(value) == cargo_home => {}
-        (None, _) => return Err(codes::CARGO_HOME_ENV_MISSING),
-        _ => return Err(codes::CARGO_HOME_ENV_UNEXPECTED),
-    }
+fn verified_cargo_config(build: &Path, cargo_home: &Path) -> std::result::Result<(), &'static str> {
     let present = |directory: &Path| {
-        ["config", "config.toml"]
+        provenant_confinement::cargo::CONFIG_FILES
             .iter()
             .map(|name| directory.join(name))
             .filter(|path| {
@@ -1596,9 +1508,9 @@ fn verified_cargo_config(
             })
             .collect::<Vec<_>>()
     };
-    // The lane's own Cargo home is lane-writable state: any file there is refused.
-    if !present(&cargo_home).is_empty() {
-        return Err(codes::CARGO_HOME_CONFIG_PRESENT);
+    // The host config is data, with the same compiler-selection check as project config.
+    for path in present(cargo_home) {
+        cargo_config_cannot_select_compiler(&path)?;
     }
     // A checked-in `.cargo/config.toml` is ordinary (this repository has one).
     // It is read as data and refused only if it can select the compiler.
@@ -1728,13 +1640,6 @@ fn trusted_lane_toolchain(
         }
     }
     Err(codes::RUSTC_NOT_ON_PATH)
-}
-
-fn record_cargo_setup(
-    directory: &Directory,
-    outcome: &crate::cargo_seed::Outcome,
-) -> std::result::Result<(), String> {
-    record_cargo_setup_file(directory, "cargo-setup.json", outcome)
 }
 
 fn record_cargo_setup_file(
@@ -2278,57 +2183,21 @@ mod cargo_setup_tests {
     }
 
     #[test]
-    fn lane_cargo_home_is_host_owned_before_seed_validation() {
-        let tmp = tempfile::tempdir().unwrap();
-        let worktree = tmp.path().join("worktree");
-        let cache = tmp.path().join("cache");
-        std::fs::create_dir_all(&worktree).unwrap();
-        std::fs::create_dir_all(cache.join("cargo-home")).unwrap();
-        let inherited = (OsString::from("CARGO_HOME"), OsString::from("/inherited"));
-        for mut environment in [
-            vec![],
-            vec![inherited.clone()],
-            vec![inherited.clone(), inherited],
-        ] {
-            environment.push((OsString::from("LANE_INPUT"), OsString::from("preserved")));
-            lane_cargo_environment(tmp.path(), &cache, &mut environment);
-            // Validation requires exactly one CARGO_HOME equal to the lane cache.
-            assert_eq!(
-                verified_cargo_config(&worktree, &cache, &environment),
-                Ok(())
-            );
-            assert!(
-                environment
-                    .iter()
-                    .any(|(key, value)| { key == "LANE_INPUT" && value == "preserved" })
-            );
-        }
-    }
-
-    #[test]
     fn cargo_config_makes_toolchain_unverifiable() {
         let tmp = tempfile::tempdir().unwrap();
         let worktree = tmp.path().join("worktree");
         let cache = tmp.path().join("cache");
         std::fs::create_dir_all(&worktree).unwrap();
-        std::fs::create_dir_all(cache.join("cargo-home")).unwrap();
-        let mut env = vec![];
-        lane_cargo_environment(tmp.path(), &cache, &mut env);
-        assert!(verified_cargo_config(&worktree, &cache, &env).is_ok());
+        std::fs::create_dir_all(cache.join(".cargo")).unwrap();
+        assert!(verified_cargo_config(&worktree, &cache.join(".cargo")).is_ok());
+        let host_config = cache.join(".cargo/config.toml");
+        std::fs::write(&host_config, "[build]\nrustc = 'evil'\n").unwrap();
         assert_eq!(
-            verified_cargo_config(&worktree, &cache, &[]),
-            Err(codes::CARGO_HOME_ENV_MISSING)
+            verified_cargo_config(&worktree, &cache.join(".cargo")),
+            Err(codes::CARGO_CONFIG_SELECTS_COMPILER)
         );
-        std::fs::write(
-            cache.join("cargo-home/config.toml"),
-            "[build]\nrustc = 'evil'\n",
-        )
-        .unwrap();
-        assert_eq!(
-            verified_cargo_config(&worktree, &cache, &env),
-            Err(codes::CARGO_HOME_CONFIG_PRESENT)
-        );
-        std::fs::remove_file(cache.join("cargo-home/config.toml")).unwrap();
+        std::fs::write(&host_config, "[build]\njobs = 2\n").unwrap();
+        assert!(verified_cargo_config(&worktree, &cache.join(".cargo")).is_ok());
         std::fs::create_dir_all(worktree.join(".cargo")).unwrap();
         let config = worktree.join(".cargo/config.toml");
         // Selecting a compiler, directly or through include or [env], is refused.
@@ -2363,7 +2232,7 @@ mod cargo_setup_tests {
         ] {
             std::fs::write(&config, text).unwrap();
             assert_eq!(
-                verified_cargo_config(&worktree, &cache, &env),
+                verified_cargo_config(&worktree, &cache.join(".cargo")),
                 Err(expected),
                 "{text:?}"
             );
@@ -2371,7 +2240,7 @@ mod cargo_setup_tests {
         std::fs::write(worktree.join(".cargo/config"), "[build]\nrustc = 'evil'\n").unwrap();
         std::fs::remove_file(&config).unwrap();
         assert_eq!(
-            verified_cargo_config(&worktree, &cache, &env),
+            verified_cargo_config(&worktree, &cache.join(".cargo")),
             Err(codes::CARGO_CONFIG_SELECTS_COMPILER)
         );
     }
@@ -2398,54 +2267,44 @@ mod cargo_setup_tests {
         let build = crate::target_seed::cargo_build_directory(&worktree)
             .unwrap()
             .unwrap();
-        std::fs::create_dir_all(cache.join("cargo-home")).unwrap();
-        let env = vec![(
-            OsString::from("CARGO_HOME"),
-            cache.join("cargo-home").into_os_string(),
-        )];
+        std::fs::create_dir_all(cache.join(".cargo")).unwrap();
         let config = nested.join(".cargo/config.toml");
         for text in [
             "# comments only\n",
             "[alias]\nxtask = 'run -p xtask'\n[target.aarch64-apple-darwin]\nrustflags = ['-C', 'link-arg=-s']\n[env]\nFOO = 'bar'\n",
         ] {
             std::fs::write(&config, text).unwrap();
-            assert_eq!(verified_cargo_config(&build, &cache, &env), Ok(()));
+            assert_eq!(verified_cargo_config(&build, &cache.join(".cargo")), Ok(()));
         }
         // An intermediate config belongs to this Cargo invocation's cone too.
         let ancestor_config = nested.parent().unwrap().join(".cargo/config.toml");
         std::fs::create_dir_all(ancestor_config.parent().unwrap()).unwrap();
         std::fs::write(&ancestor_config, "[build]\nrustc = 'evil'\n").unwrap();
         assert_eq!(
-            verified_cargo_config(&build, &cache, &env),
+            verified_cargo_config(&build, &cache.join(".cargo")),
             Err(codes::CARGO_CONFIG_SELECTS_COMPILER)
         );
         std::fs::remove_file(ancestor_config).unwrap();
         std::os::unix::fs::symlink("/etc/hosts", nested.join(".cargo/config")).unwrap();
         assert_eq!(
-            verified_cargo_config(&build, &cache, &env),
+            verified_cargo_config(&build, &cache.join(".cargo")),
             Err(codes::CARGO_CONFIG_UNREADABLE)
         );
     }
 
     #[test]
-    fn cargo_setup_record_reports_writer_and_read_only_outcomes() {
+    fn target_setup_record_reports_seed_outcomes_and_publication_failures() {
         let tmp = tempfile::tempdir().unwrap();
         let directory = Directory::open_anchor(tmp.path()).unwrap();
         for reason in ["disabled", "read_only_lane"] {
             let outcome = crate::cargo_seed::Outcome::skipped(reason);
-            record_cargo_setup(&directory, &outcome).unwrap();
+            record_cargo_setup_file(&directory, "cargo-target-setup.json", &outcome).unwrap();
             let record: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(tmp.path().join("cargo-setup.json")).unwrap(),
+                &std::fs::read(tmp.path().join("cargo-target-setup.json")).unwrap(),
             )
             .unwrap();
             assert_eq!(record["status"], "skipped");
             assert_eq!(record["reason"], reason);
-            record_cargo_setup_file(&directory, "cargo-git-setup.json", &outcome).unwrap();
-            let git_record: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(tmp.path().join("cargo-git-setup.json")).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(git_record["reason"], reason);
         }
         // A fallback names the specific refusal; other outcomes carry no detail.
         let refusal = crate::cargo_seed::Outcome::fallback_detail(
@@ -2461,11 +2320,15 @@ mod cargo_setup_tests {
             record,
             serde_json::json!({"status":"fallback","reason":"toolchain_unverified","detail":codes::PATH_ENTRY_WRITABLE})
         );
-        std::fs::remove_file(tmp.path().join("cargo-setup.json")).unwrap();
-        std::fs::create_dir(tmp.path().join("cargo-setup.json")).unwrap();
+        std::fs::remove_file(tmp.path().join("cargo-target-setup.json")).unwrap();
+        std::fs::create_dir(tmp.path().join("cargo-target-setup.json")).unwrap();
         assert!(
-            record_cargo_setup(&directory, &crate::cargo_seed::Outcome::skipped("disabled"))
-                .is_err()
+            record_cargo_setup_file(
+                &directory,
+                "cargo-target-setup.json",
+                &crate::cargo_seed::Outcome::skipped("disabled")
+            )
+            .is_err()
         );
     }
 }

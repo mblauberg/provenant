@@ -1,4 +1,4 @@
-//! Shared lane Cargo downloads and best-effort private target seeds.
+//! Best-effort private target seeds from host-built generations.
 use provenant_core::{Clock, Deadline, DurationMicros, WaitBudget};
 use provenant_os::clock::SystemClock;
 use std::path::Path;
@@ -44,9 +44,6 @@ macro_rules! detail_codes {
 detail_codes! {
     CARGO_WORKSPACE_UNREADABLE = "cargo_workspace_unreadable",
     CARGO_WORKSPACE_MISSING = "cargo_workspace_missing",
-    CARGO_HOME_ENV_MISSING = "cargo_home_env_missing",
-    CARGO_HOME_ENV_UNEXPECTED = "cargo_home_env_unexpected",
-    CARGO_HOME_CONFIG_PRESENT = "cargo_home_config_present",
     CARGO_CONFIG_UNREADABLE = "cargo_config_unreadable",
     CARGO_CONFIG_TOO_LARGE = "cargo_config_too_large",
     CARGO_CONFIG_INVALID = "cargo_config_invalid",
@@ -133,142 +130,6 @@ impl Outcome {
             reason,
             detail: Some(detail),
         }
-    }
-}
-
-pub(crate) fn seed_registry(
-    enabled: bool,
-    home: &Path,
-    cache: &Path,
-    cancel: &provenant_core::CancelToken,
-) -> Outcome {
-    if !enabled {
-        return Outcome::skipped("disabled");
-    }
-    share_store(home, cache, "registry", cancel)
-}
-
-/// Git downloads share the same lane-only store and Cargo locks as the registry.
-pub(crate) fn seed_git(
-    enabled: bool,
-    home: &Path,
-    cache: &Path,
-    cancel: &provenant_core::CancelToken,
-) -> Outcome {
-    if !enabled {
-        return Outcome::skipped("disabled");
-    }
-    share_store(home, cache, "git", cancel)
-}
-
-fn share_store(
-    home: &Path,
-    cache: &Path,
-    store: &str,
-    cancel: &provenant_core::CancelToken,
-) -> Outcome {
-    if cancel.is_cancelled() {
-        return Outcome::fallback("cancelled");
-    }
-    #[cfg(unix)]
-    {
-        use provenant_os::fs::Directory;
-        use std::ffi::OsStr;
-        let result = (|| {
-            // Separate from ~/.cargo: lanes must never mutate sources the host
-            // later builds outside confinement. Only downloads and their locks
-            // are shared; configuration and credential state stay private.
-            let mut shared = Directory::open_anchor(home).map_err(|_| "home_unavailable")?;
-            for name in ["Library", "Caches", "provenant-cargo-downloads"] {
-                let name = OsStr::new(name);
-                if let Err(error) = shared.mkdir(name, 0o700)
-                    && !error.is_exists()
-                {
-                    return Err("shared_store_unavailable");
-                }
-                shared = shared
-                    .open_verified_directory(name)
-                    .map_err(|_| "shared_store_unavailable")?;
-            }
-            let name = OsStr::new(store);
-            if let Err(error) = shared.mkdir(name, 0o700)
-                && !error.is_exists()
-            {
-                return Err("shared_store_unavailable");
-            }
-            shared
-                .open_verified_directory(name)
-                .map_err(|_| "shared_store_unavailable")?;
-            let cache = Directory::open_anchor(cache).map_err(|_| "cache_unavailable")?;
-            let name = OsStr::new("cargo-home");
-            if let Err(error) = cache.mkdir(name, 0o700)
-                && !error.is_exists()
-            {
-                return Err("cargo_home_unavailable");
-            }
-            let cargo = cache
-                .open_verified_directory(name)
-                .map_err(|_| "cargo_home_unavailable")?;
-            cargo.make_private().map_err(|_| "cargo_home_not_private")?;
-            // Cargo serialises cache mutations via these locks, which must name
-            // the same inodes in every private home that uses the shared stores.
-            for lock in [".package-cache", ".package-cache-mutate"] {
-                let name = OsStr::new(lock);
-                if let Err(error) = shared.create_new(name)
-                    && !error.is_exists()
-                {
-                    return Err("shared_lock_unavailable");
-                }
-                shared
-                    .open_read(name)
-                    .map_err(|_| "shared_lock_unavailable")?;
-            }
-            // Preflight every entry before publishing any link. An old private
-            // package-cache lock must never accompany a newly shared registry.
-            for entry in [store, ".package-cache", ".package-cache-mutate"] {
-                let name = OsStr::new(entry);
-                let target = home
-                    .join("Library/Caches/provenant-cargo-downloads")
-                    .join(entry);
-                match cargo.metadata_at(name, false) {
-                    Ok(_) if cargo.read_link(name).is_ok_and(|path| path == target) => {}
-                    Ok(_) => return Err("existing_private_store"),
-                    Err(error) if error.is_not_found() => {}
-                    Err(_) => return Err("shared_link_failed"),
-                }
-            }
-            // Locks first: a failed download link leaves only harmless shared
-            // lock links, never shared downloads without shared locking.
-            for entry in [".package-cache", ".package-cache-mutate", store] {
-                let name = OsStr::new(entry);
-                let target = home
-                    .join("Library/Caches/provenant-cargo-downloads")
-                    .join(entry);
-                match cargo.symlink(&target, name) {
-                    Ok(()) => {}
-                    Err(error)
-                        if error.is_exists()
-                            && cargo.read_link(name).is_ok_and(|path| path == target) => {}
-                    Err(_) => return Err("shared_link_failed"),
-                }
-            }
-
-            Ok(())
-        })();
-        match result {
-            Ok(()) => Outcome {
-                status: "shared",
-                reason: "lane_download_cache",
-                detail: None,
-            },
-            Err("existing_private_store") => Outcome::skipped("existing_private_store"),
-            Err(reason) => Outcome::fallback(reason),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (home, cache, store);
-        Outcome::skipped("unsupported_platform")
     }
 }
 
@@ -819,7 +680,9 @@ mod tests {
         // No ambient CARGO_HOME: the same finalisation used by handoff must
         // make a fresh, arbitrarily nested Cargo project seedable.
         let mut env = vec![];
-        crate::writer::lane_cargo_environment(&home, &cache, &mut env);
+        provenant_confinement::cargo::CargoHome::resolve(&home, |_| None)
+            .unwrap()
+            .lane_cargo_environment(&home, &cache, &mut env);
         let outcome = seed_target(
             true,
             &state,
@@ -923,93 +786,5 @@ mod tests {
             Err("seed_budget_exhausted")
         );
         assert!(std::fs::read_dir(tmp.path()).unwrap().next().is_none());
-    }
-
-    #[test]
-    fn disabled_does_not_touch_cache() {
-        let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(
-            seed_registry(
-                false,
-                tmp.path(),
-                tmp.path(),
-                &provenant_core::CancelToken::new()
-            ),
-            Outcome::skipped("disabled")
-        );
-        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn download_stores_are_shared_without_reading_host_registry() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join("home");
-        std::fs::create_dir_all(home.join(".cargo/registry")).unwrap();
-        // A source entry that the old recursive clone would reject. Sharing
-        // neither reads nor copies anything from the host's registry.
-        std::os::unix::fs::symlink("/unavailable", home.join(".cargo/registry/link")).unwrap();
-        let cancel = provenant_core::CancelToken::new();
-        for lane in ["one", "two"] {
-            let cache = tmp.path().join(lane);
-            std::fs::create_dir(&cache).unwrap();
-            for store in ["registry", "git"] {
-                assert_eq!(share_store(&home, &cache, store, &cancel).status, "shared");
-                assert_eq!(
-                    std::fs::read_link(cache.join("cargo-home").join(store)).unwrap(),
-                    home.join("Library/Caches/provenant-cargo-downloads")
-                        .join(store)
-                );
-            }
-            for lock in [".package-cache", ".package-cache-mutate"] {
-                assert_eq!(
-                    std::fs::read_link(cache.join("cargo-home").join(lock)).unwrap(),
-                    home.join("Library/Caches/provenant-cargo-downloads")
-                        .join(lock)
-                );
-            }
-            assert!(!cache.join("cargo-home/registry/link").exists());
-        }
-        let one = tmp.path().join("one/cargo-home/registry");
-        let two = tmp.path().join("two/cargo-home/registry");
-        std::fs::write(one.join("download"), b"shared").unwrap();
-        assert_eq!(std::fs::read(two.join("download")).unwrap(), b"shared");
-        assert!(!home.join(".cargo/registry/download").exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn existing_private_downloads_are_retained_without_a_walk() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("cargo-home/registry")).unwrap();
-        std::fs::write(tmp.path().join("cargo-home/registry/keep"), b"keep").unwrap();
-        assert_eq!(
-            seed_registry(
-                true,
-                tmp.path(),
-                tmp.path(),
-                &provenant_core::CancelToken::new()
-            ),
-            Outcome::skipped("existing_private_store")
-        );
-        assert_eq!(
-            std::fs::read(tmp.path().join("cargo-home/registry/keep")).unwrap(),
-            b"keep"
-        );
-        std::fs::write(
-            tmp.path().join("cargo-home/.package-cache"),
-            b"private lock",
-        )
-        .unwrap();
-        assert_eq!(
-            seed_git(
-                true,
-                tmp.path(),
-                tmp.path(),
-                &provenant_core::CancelToken::new()
-            ),
-            Outcome::skipped("existing_private_store")
-        );
-        assert!(std::fs::symlink_metadata(tmp.path().join("cargo-home/git")).is_err());
     }
 }

@@ -18,6 +18,30 @@ its graph-assigned attempt number.
 - Why: lost replies and concurrent requests must not duplicate work or identity.
 - Test: `crates/run/src/tests.rs::concurrent_creates_of_one_work_key_admit_one_attempt`; `tests/graph_cli.rs::a_named_run_replays_its_input_and_a_changed_input_takes_the_next_name`
 
+## Host Cargo home
+
+Every lane uses the host-resolved `CARGO_HOME` (the host process's environment,
+otherwise its `HOME/.cargo`), preserving the absolute source path Cargo fingerprints.
+Adapter-selected homes and launching-shell values cannot replace that binding.
+The launch's `cargo_home` diagnostic names both the path source and the effective
+`domains.fabric.lanes.cargo_source_writes` setting source.
+
+Registry index, cache and sources and Git databases and checkouts are read-only
+by default. Cargo can write only its package-cache locks and global-cache database
+(including its rollback journal). `cargo_source_writes = true` permits downloads
+and source updates; Cargo also needs open network access to fetch. The default
+runs Cargo offline; a missing dependency fails, and the Cargo shim names the knob
+and suggests fetching on the host. Cargo credentials (`credentials` and
+`credentials.toml`) remain mandatory read/write denials, including relocated homes.
+Host `config` and `config.toml` are read-only data; target seeding checks them with
+the same compiler-selection validation as checked-in Cargo configuration.
+Build directories and lane-specific tool configuration remain private to the lane
+cache (or attempt scratch for read-only lanes). No separate lane download store,
+Cargo home or symlink setup exists. The host's own build output supplies target
+seed generations.
+- Why: Cargo fingerprints dependency source paths; changing the home path defeats reuse even when symlinks reach the same content.
+- Test: `crates/confinement/src/cargo.rs::tests`; `crates/confinement/src/permissions/policy/host.rs::tests::relocated_cargo_credentials_are_mandatory_denials`; `crates/run/src/writer.rs::cargo_setup_tests::cargo_config_makes_toolchain_unverifiable`
+
 ## Cargo target seed
 
 A target seed is cloned only for a matching compiler and target. A published

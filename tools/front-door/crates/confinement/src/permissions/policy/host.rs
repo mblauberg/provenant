@@ -46,6 +46,13 @@ pub fn host_credential_roots(lookup: impl Fn(&str) -> Option<OsString>) -> Vec<P
             scope: PathScope::Exact,
         });
     }
+    if let Some(path) = lookup("CARGO_HOME").filter(|value| !value.is_empty()) {
+        let path = std::path::absolute(PathBuf::from(path)).expect("host cwd resolves CARGO_HOME");
+        roots.extend(crate::cargo::CREDENTIAL_FILES.iter().map(|name| PathGrant {
+            path: path.join(name),
+            scope: PathScope::Exact,
+        }));
+    }
     roots.retain(|root| root.path.is_absolute());
     roots
 }
@@ -599,6 +606,33 @@ impl MandatoryRoots {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relocated_cargo_credentials_are_mandatory_denials() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let roots = fixture_roots(&root)?;
+        let home = root.join("home");
+        let cargo = root.join("custom-cargo");
+        let inventory = host_credential_roots(|name| {
+            (name == "CARGO_HOME").then(|| cargo.clone().into_os_string())
+        });
+        let mandatory =
+            MandatoryRoots::for_host(&roots, &home, &root.join("source"), &inventory, &[], &[])?;
+        for name in crate::cargo::CREDENTIAL_FILES {
+            let credential = PathGrant {
+                path: cargo.join(name),
+                scope: PathScope::Exact,
+            };
+            assert!(mandatory.credentials().contains(&credential));
+            assert!(matches!(
+                mandatory.validate_extra_write(&credential),
+                Err(PermissionError::CredentialRootAt { .. })
+            ));
+        }
+        Ok(())
+    }
 
     fn fixture_roots(root: &Path) -> Result<Roots, Box<dyn std::error::Error>> {
         for name in ["home", "state", "source"] {

@@ -1,5 +1,5 @@
 #[test]
-fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
+fn opencode_writer_uses_host_cargo_home_and_private_build_outputs()
 -> Result<(), Box<dyn std::error::Error>> {
     let prompt = Prompt::new("fixture prompt".into());
     let route = route("opencode", "configured/model");
@@ -12,16 +12,12 @@ fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
             ..fixture_input(&route, plan, &prompt, Path::new("/fixture/repo"), None)
         })
     };
-    // Without Rust installed the lane keeps system tools and its own Cargo cache.
+    // Without Rust installed the lane keeps system tools and the resolved host Cargo home.
     let spec = prepare(&home, &plan)?;
-    let provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) =
-        &plan.permissions().mode else { panic!("writer fixture") };
-    assert!(spec.env.iter().any(|(name, value)|
-        name == "CARGO_HOME" && value == authority.cargo_cache().path.join("cargo-home").as_os_str()
-    ));
+    assert_eq!(cargo_home_path(&spec), home.join(".cargo"));
+    assert_read_only_cargo_access(&spec);
     std::fs::create_dir_all(home.join(".cargo/bin"))?;
     std::fs::create_dir_all(home.join(".rustup/toolchains"))?;
-    let cache = Path::new("/fixture/home/Library/Caches/provenant-lane-cargo/fixture");
     let spec = prepare(&home, &plan)?;
     let env = |key: &str| {
         spec.env
@@ -36,8 +32,9 @@ fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
     );
     let cache = env("CARGO_TARGET_DIR")
         .and_then(|target| target.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| cache.to_path_buf());
-    assert_eq!(env("CARGO_HOME"), Some(cache.join("cargo-home")));
+        .expect("private target cache");
+    assert_eq!(env("CARGO_HOME"), Some(home.join(".cargo")));
+    assert_read_only_cargo_access(&spec);
     assert_eq!(env("CARGO_TARGET_DIR"), Some(cache.join("target")));
     assert!(cache.ends_with("fixture"), "{cache:?}");
     for root in [
@@ -54,7 +51,7 @@ fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
         spec.profile
             .spec
             .runtime_reads
-            .contains(&crate::launch::subtree(home.join(".cargo")))
+            .contains(&crate::launch::subtree(home.join(".cargo/bin")))
     );
     // Read-only lanes get system shell utilities for progress updates, plus
     // search and guarded Git. They still receive no writer toolchain.
@@ -78,9 +75,8 @@ fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
             crate::launch::subtree(plan.permissions().scratch.path.join("read-only-git")),
         ]
     );
-    assert!(spec.env.iter().any(|(name, value)|
-        name == "CARGO_HOME" && value == plan.permissions().scratch.path.join("cargo-home").as_os_str()
-    ));
+    assert_eq!(cargo_home_path(&spec), home.join(".cargo"));
+    assert_read_only_cargo_access(&spec);
     Ok(())
 }
 

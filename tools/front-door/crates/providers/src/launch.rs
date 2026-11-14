@@ -71,6 +71,7 @@ pub struct PreparedToolRequirement {
 /// applied once, after the adapter has assembled its required profile.
 #[derive(Debug, Default)]
 pub(crate) struct ToolRequirements {
+    pub(crate) cargo_home: Option<provenant_confinement::cargo::CargoHome>,
     pub(crate) reads: Vec<PathGrant>,
     pub(crate) exec: Vec<PathGrant>,
     pub(crate) writes: Vec<PathGrant>,
@@ -918,7 +919,10 @@ pub(crate) fn prepare_tool_requirements(
 /// Every adapter finishes here, after provider-specific environment changes.
 /// Identity, temporary files and Cargo configuration are lane bindings even
 /// when the host environment is sparse or sandboxing is disabled.
-pub(crate) fn finalise_provider_env(input: &PrepareInput<'_>, spec: &mut LaunchSpec) {
+pub(crate) fn finalise_provider_env(
+    input: &PrepareInput<'_>,
+    spec: &mut LaunchSpec,
+) -> Result<(), ProviderError> {
     let scratch = &input.confined.permissions().scratch.path;
     let home = spec
         .env
@@ -938,13 +942,31 @@ pub(crate) fn finalise_provider_env(input: &PrepareInput<'_>, spec: &mut LaunchS
         provenant_confinement::permissions::AccessMode::WorktreeWrite(_) => Access::WorktreeWrite,
     };
     let cache = lane_cache(input);
-    // Writer caches are host-owned and prepared under writer custody. Provider
-    // setup may create only the read-only lane's attempt-owned Cargo home.
-    if access == Access::ReadOnly {
-        spec.setup
-            .push(SetupStep::CreateDir(cache.join("cargo-home")));
+    if spec.tool_requirements.cargo_home.is_none() {
+        let binding = provenant_confinement::cargo::CargoHome::resolve(input.home, input.host_var)
+            .map_err(|_| ProviderError::InvalidPath)?;
+        if input.sandboxed() {
+            spec.tool_requirements.reads.extend(binding.reads());
+            spec.tool_requirements.writes.extend(binding.writes());
+            spec.tool_requirements.applied = false;
+        }
+        spec.tool_requirements.cargo_home = Some(binding);
     }
-    cargo_environment(input.home, cache, access, !input.sandboxed(), &mut spec.env);
+    let binding = spec
+        .tool_requirements
+        .cargo_home
+        .as_ref()
+        .expect("host Cargo binding");
+    cargo_environment(
+        binding,
+        input.home,
+        cache,
+        access,
+        !input.sandboxed(),
+        &mut spec.env,
+    );
+    binding.source_environment(input.confined.permissions().network, &mut spec.env);
+    Ok(())
 }
 
 impl LaunchSpec {
@@ -952,6 +974,55 @@ impl LaunchSpec {
         self.env.iter().any(|(name, value)| {
             name == provenant_confinement::run_config::SANDBOX_ENV && value == "off"
         })
+    }
+
+    pub fn cargo_home(&self) -> &provenant_confinement::cargo::CargoHome {
+        self.tool_requirements
+            .cargo_home
+            .as_ref()
+            .expect("host finalises Cargo before handoff")
+    }
+
+    /// Effective host Cargo identity and source-write setting, for launch evidence.
+    pub fn cargo_home_receipt(&self) -> serde_json::Value {
+        serde_json::to_value(self.cargo_home()).expect("Cargo binding is serialisable")
+    }
+
+    pub fn configure_cargo_sources(
+        &mut self,
+        setting: Option<bool>,
+        network: provenant_confinement::permissions::NetworkAccess,
+    ) {
+        let binding = self
+            .tool_requirements
+            .cargo_home
+            .as_mut()
+            .expect("host finalises Cargo before source configuration");
+        let sources: Vec<_> = {
+            let mut widened = binding.clone();
+            widened.configure_source_writes(Some(true));
+            widened.source_writes().collect()
+        };
+        self.tool_requirements
+            .writes
+            .retain(|grant| !sources.contains(grant));
+        self.profile
+            .spec
+            .tool_writes
+            .retain(|grant| !sources.contains(grant));
+        binding.configure_source_writes(setting);
+        if !self.native_environment() && setting == Some(true) {
+            self.tool_requirements.writes.extend(sources.clone());
+            if self.tool_requirements.applied {
+                self.profile.spec.tool_writes.extend(sources);
+            }
+        }
+        let binding = self
+            .tool_requirements
+            .cargo_home
+            .as_ref()
+            .expect("host Cargo binding");
+        binding.source_environment(network, &mut self.env);
     }
 
     /// Resolve any additional exact executables added by launch configuration.
@@ -962,18 +1033,6 @@ impl LaunchSpec {
         cwd: &Path,
     ) -> Result<(), ProviderError> {
         if self.native_environment() {
-            if let provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) =
-                &plan.permissions().mode
-                && rust_tools_available(home)
-            {
-                cargo_environment(
-                    home,
-                    &authority.cargo_cache().path,
-                    Access::WorktreeWrite,
-                    true,
-                    &mut self.env,
-                );
-            }
             return Ok(());
         }
         let spec = self;
@@ -1298,9 +1357,8 @@ pub(crate) fn add_existing_tool(executable: &Path, tool_exec_roots: &mut Vec<Pat
 }
 
 /// Rust tools for every shell-capable lane. Installed toolchains and the host's
-/// Cargo sources stay read-only. Writers share a separate download store, with
-/// private configuration and build output. Native lanes use the same cache
-/// environment so their target can be verified and seeded before launch.
+/// Cargo sources stay read-only unless configured otherwise. Build output stays
+/// private. Native lanes use the same environment for target seed validation.
 pub(crate) fn rust_tools(
     input: &PrepareInput<'_>,
     access: Access,
@@ -1320,14 +1378,8 @@ pub(crate) fn rust_tools(
             access,
             &mut requirements.reads,
             &mut requirements.exec,
-            env,
             setup,
         );
-    }
-    if access == Access::WorktreeWrite && rust_tools_available(input.home) {
-        requirements.writes.push(subtree(
-            input.home.join("Library/Caches/provenant-cargo-downloads"),
-        ));
     }
     system_tools(access, &mut requirements.reads, &mut requirements.exec, env);
     crate::swift::swift_tools(input, access, requirements, env, setup);
@@ -1361,7 +1413,6 @@ fn rust_toolchain(
     access: Access,
     runtime_reads: &mut Vec<PathGrant>,
     tool_exec_roots: &mut Vec<PathGrant>,
-    env: &mut Vec<(OsString, OsString)>,
     setup: &mut Vec<SetupStep>,
 ) {
     let cargo = input.home.join(".cargo");
@@ -1374,7 +1425,7 @@ fn rust_toolchain(
     // TMPDIR) for the doc-test binaries it compiles and runs. The lane can
     // already execute everything it builds and its read-only worktree.
     tool_exec_roots.push(subtree(cache));
-    runtime_reads.extend([subtree(&cargo), subtree(&rustup)]);
+    runtime_reads.extend([subtree(cargo.join("bin")), subtree(&rustup)]);
     tool_exec_roots.extend([
         subtree(cargo.join("bin")),
         subtree(rustup.join("toolchains")),
@@ -1382,26 +1433,7 @@ fn rust_toolchain(
     for name in ["cargo", "rustc", "rustfmt", "clippy-driver"] {
         add_existing_tool(&cargo.join("bin").join(name), tool_exec_roots);
     }
-    let cargo_home = cache.join("cargo-home");
     if access == Access::ReadOnly {
-        // Builds can use the already-extracted shared sources. The
-        // links point at stores the lane cannot write, so it cannot alter
-        // them; Cargo's lock files and downloads need writes, so it cannot
-        // fetch either.
-        setup.push(SetupStep::CreateDir(cargo_home.clone()));
-        setup.extend(["registry", "git"].map(|name| SetupStep::Symlink {
-            link: cargo_home.join(name),
-            target: cargo.join(name),
-        }));
-    }
-    cargo_environment(input.home, cache, access, !input.sandboxed(), env);
-    if access == Access::ReadOnly {
-        // Cache clean-up must not touch shared stores behind the links.
-        if input.confined.permissions().network
-            != provenant_confinement::permissions::NetworkAccess::Open
-        {
-            env.push(("CARGO_NET_OFFLINE".into(), "true".into()));
-        }
         setup.push(SetupStep::CreateDir(target));
     }
 }
@@ -1409,31 +1441,14 @@ fn rust_toolchain(
 /// One finalisation seam for all native adapters, including those that skip
 /// sandbox-only tool discovery. This must run before Run verifies target seeds.
 fn cargo_environment(
+    binding: &provenant_confinement::cargo::CargoHome,
     home: &Path,
     cache: &Path,
     access: Access,
     native: bool,
     env: &mut Vec<(OsString, OsString)>,
 ) {
-    let cargo_home = cache.join("cargo-home");
-    let rustup = home.join(".rustup");
-    let target = cache.join("target");
-    // Replace inherited native values too: seeding and the launched Cargo must
-    // agree on one home, compiler and target. No duplicate selectors.
-    env.retain(|(key, _)| {
-        ![
-            "CARGO_HOME",
-            "RUSTUP_HOME",
-            "RUSTUP_AUTO_INSTALL",
-            "CARGO_TARGET_DIR",
-            "CARGO_BUILD_BUILD_DIR",
-            "CARGO_CACHE_AUTO_CLEAN_FREQUENCY",
-            "PROVENANT_LANE_CARGO_LINT_TARGET",
-        ]
-        .iter()
-        .any(|name| key == *name)
-    });
-    env.push(("CARGO_CACHE_AUTO_CLEAN_FREQUENCY".into(), "never".into()));
+    env.retain(|(key, _)| key != "PROVENANT_LANE_CARGO_LINT_TARGET");
     if native {
         for (name, value) in [
             (
@@ -1450,17 +1465,7 @@ fn cargo_environment(
             }
         }
     }
-    env.extend([
-        ("CARGO_HOME".into(), cargo_home.into_os_string()),
-        ("RUSTUP_HOME".into(), rustup.into_os_string()),
-        ("RUSTUP_AUTO_INSTALL".into(), "0".into()),
-        ("CARGO_TARGET_DIR".into(), target.clone().into_os_string()),
-        // Override build.build-dir inherited from host or ancestor Cargo config.
-        (
-            "CARGO_BUILD_BUILD_DIR".into(),
-            target.clone().into_os_string(),
-        ),
-    ]);
+    binding.lane_cargo_environment(home, cache, env);
     if access == Access::WorktreeWrite {
         // Lint-only runs set both CARGO_TARGET_DIR and CARGO_BUILD_BUILD_DIR to
         // this sibling. Cargo locks the build directory, so they then do not

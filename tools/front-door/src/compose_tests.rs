@@ -80,6 +80,9 @@ fn fixture() -> Result<TestRig> {
         fs::create_dir_all(rig.home.join(name))?;
     }
     fs::write(rig.home.join(".rustup/settings.toml"), b"")?;
+    for name in provenant_confinement::cargo::CREDENTIAL_FILES {
+        fs::write(rig.home.join(".cargo").join(name), b"synthetic cargo token")?;
+    }
     // The rig's CODEX_HOME is the auto-detected Codex identity.
     fs::write(
         rig.root.join("codex/auth.json"),
@@ -238,7 +241,7 @@ pub(crate) fn read_only_dispatch_applies_bound_git_and_project_writes() -> Resul
         let mode = if configured { "reader" } else { "reader-empty" };
         let attempt = dispatch(&rig, mode)?;
         let cargo: serde_json::Value =
-            serde_json::from_slice(&fs::read(attempt.join("cargo-setup.json"))?)?;
+            serde_json::from_slice(&fs::read(attempt.join("cargo-target-setup.json"))?)?;
         assert_eq!(
             cargo,
             serde_json::json!({"status": "skipped", "reason": "read_only_lane"})
@@ -281,7 +284,7 @@ pub(crate) fn writer_dispatch_uses_lane_cache_and_narrow_provider_state() -> Res
     let cleanup = super::worktree_tests::writer_process_cleanup(&context);
     let attempt = dispatch(&rig, "writer")?;
     let cargo: serde_json::Value =
-        serde_json::from_slice(&fs::read(attempt.join("cargo-setup.json"))?)?;
+        serde_json::from_slice(&fs::read(attempt.join("cargo-target-setup.json"))?)?;
     assert_eq!(
         cargo,
         serde_json::json!({"status": "skipped", "reason": "disabled"})
@@ -334,13 +337,19 @@ pub(crate) fn provider() -> Result {
             PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").ok_or("CARGO_TARGET_DIR missing")?);
         let cargo = PathBuf::from(std::env::var_os("CARGO_HOME").ok_or("CARGO_HOME missing")?);
         let cache = target.parent().ok_or("cache")?;
-        // Cargo home is lane-private, inside the writer cache. The user's
-        // own stores and installed binaries are read-only.
-        assert_eq!(cargo, cache.join("cargo-home"));
+        // Source identity is shared with the host; only build output is private.
+        assert_eq!(cargo, home.join(".cargo"));
+        assert!(!cargo.starts_with(cache));
         fs::create_dir_all(&target)?;
         fs::write(target.join("compose-target"), b"target")?;
-        fs::create_dir_all(cargo.join("registry"))?;
-        fs::write(cargo.join("registry/compose-home"), b"cargo")?;
+        denied(&cargo.join("registry/compose-home"))?;
+        for name in provenant_confinement::cargo::CREDENTIAL_FILES {
+            assert!(fs::read(cargo.join(name)).is_err());
+            denied(&cargo.join(name))?;
+        }
+        for name in provenant_confinement::cargo::TRACKING_FILES {
+            fs::write(cargo.join(name), b"fixture tracking")?;
+        }
         let host_state = PathBuf::from(
             std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV)
                 .ok_or("host state missing")?,

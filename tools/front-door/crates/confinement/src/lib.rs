@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod cache;
+pub mod cargo;
 pub mod disclosure;
 pub mod disk;
 pub mod git_evidence;

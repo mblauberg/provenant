@@ -473,6 +473,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
             .adapter
             .prepare(fixture_input(&route, &confined, &prompt, repo, token));
         let spec = result?;
+        assert_eq!(cargo_home_path(&spec), Path::new("/fixture/home/.cargo"));
         // Only Agy runs its commands on a pseudo-terminal.
         assert_eq!(spec.profile.spec.allow_pseudo_tty, id == "agy");
         // Agy keeps its prompt on argv and has no lane runtime; its own test pins its launch.
@@ -1486,10 +1487,8 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
             .filter(|(key, _)| key == "CARGO_HOME")
             .collect();
         assert_eq!(homes.len(), 1);
-        assert_eq!(
-            homes[0].1,
-            "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/cargo-home"
-        );
+        assert_eq!(homes[0].1, "/fixture/home/.cargo");
+        assert_eq!(cargo_home_path(&native), Path::new("/fixture/home/.cargo"));
         if let Some((_, host_path)) = host.iter().find(|(key, _)| key == "PATH") {
             let child_path = &native.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
             let child_paths: Vec<_> = std::env::split_paths(child_path).collect();
@@ -1563,10 +1562,7 @@ fn every_adapter_finalises_missing_lane_environment() -> Result<(), ProviderErro
                 for (key, expected) in [
                     ("HOME", Path::new(&selected_home).to_path_buf()),
                     ("TMPDIR", plan.permissions().scratch.path.clone()),
-                    (
-                        "CARGO_HOME",
-                        plan.permissions().scratch.path.join("cargo-home"),
-                    ),
+                    ("CARGO_HOME", cargo_home_path(spec)),
                 ] {
                     let values: Vec<_> = spec
                         .env
@@ -1592,10 +1588,10 @@ fn every_adapter_finalises_missing_lane_environment() -> Result<(), ProviderErro
                 (id == "claude").then_some(&token),
             );
             input.host_var = &host_var;
-            crate::launch::finalise_provider_env(&input, &mut spec);
+            crate::launch::finalise_provider_env(&input, &mut spec)?;
             assert_bindings(&spec);
             spec.env.retain(|(key, _)| key != "HOME");
-            crate::launch::finalise_provider_env(&input, &mut spec);
+            crate::launch::finalise_provider_env(&input, &mut spec)?;
             let homes: Vec<_> = spec
                 .env
                 .iter()

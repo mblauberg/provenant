@@ -31,7 +31,10 @@ can differ. Partial observations and failed paths remain visible in JSON and tex
 `gc.free_floor` is an advisory collection target. New builds warn below it and
 stop only below `gc.critical_free` (2 GiB by default); diagnostics show the effective
 threshold and source. Settlement releases private Cargo output and attempt scratch
-without waiting for worktree removal. Registry and Git downloads remain shared.
+without waiting for worktree removal. Registry and Git downloads live in the host CARGO_HOME and are owned by Cargo,
+not lane retention. Lanes use those sources read-only unless
+`domains.fabric.lanes.cargo_source_writes = true`; a missing offline dependency
+requires a host fetch or this setting plus open network access.
 
 Cleanup separates **subsumed** (the exact tip is retained elsewhere, including
 verified tree equivalence) from **landed** (integration-target or forge merge

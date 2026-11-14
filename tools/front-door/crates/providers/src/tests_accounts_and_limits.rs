@@ -398,10 +398,6 @@ fn claude_writer_shell_has_private_config_and_rust_tools() -> Result<(), Provide
     assert!(launch.profile.spec.authentication.is_empty());
     for (key, value) in [
         (
-            "CARGO_HOME",
-            "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/cargo-home",
-        ),
-        (
             "CARGO_TARGET_DIR",
             "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target",
         ),
@@ -437,17 +433,8 @@ fn claude_writer_shell_has_private_config_and_rust_tools() -> Result<(), Provide
             "{path}"
         );
     }
-    // Only lane downloads are shared for writes. Host toolchains, trusted
-    // sources and Cargo credentials remain protected.
-    let shared = Path::new("/fixture/home/Library/Caches/provenant-cargo-downloads");
-    assert!(
-        launch
-            .profile
-            .spec
-            .tool_writes
-            .iter()
-            .all(|grant| grant.path == shared)
-    );
+    assert_eq!(cargo_home_path(&launch), Path::new("/fixture/home/.cargo"));
+    assert_read_only_cargo_access(&launch);
     // Claude's env scrub drops GIT_CONFIG_GLOBAL from Bash, so scratch git is a
     // wrapper that sets it, and its directory is executable.
     assert!(launch.setup.iter().any(|step| matches!(

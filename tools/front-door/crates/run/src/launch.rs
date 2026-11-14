@@ -1932,7 +1932,12 @@ mod policy_reporting_tests {
                 },
                 writer: None,
                 home: "/fixture/home".into(),
-                cargo_registry_seed: false,
+                cargo_home: provenant_confinement::cargo::CargoHome::resolve(
+                    std::path::Path::new("/fixture/home"),
+                    |_| None,
+                )
+                .unwrap(),
+                cargo_target_seed: false,
                 state_root: "/fixture/state".into(),
                 sandbox: provenant_confinement::run_config::SandboxMode {
                     requested: true,

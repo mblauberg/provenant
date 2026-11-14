@@ -1899,7 +1899,7 @@ printf 'agy 1.0.0\n'
     // The default config enables the cargo seed, and prepare hands that to the
     // lane's launch confinement, where `seed_target` reads it.
     assert!(
-        confinement.cargo_registry_seed,
+        confinement.cargo_target_seed,
         "the default FabricConfig must reach the writer launch with the seed enabled"
     );
     assert!(!confinement.plan.permissions().writer_publishing());

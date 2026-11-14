@@ -1721,8 +1721,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 );
             }
             // Custody-only and append-triggered classes never enter GC.
-            RetentionKind::CargoDownloads
-            | RetentionKind::ObservationLedgers
+            RetentionKind::ObservationLedgers
             | RetentionKind::QuotaHistory
             | RetentionKind::Usage
             // Payload and scratch collection is owned by the ProviderState pass.
