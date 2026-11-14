@@ -903,3 +903,28 @@ printf 'executed\n' > verify-call.txt
     }
     Ok(())
 }
+
+#[test]
+fn builtin_verification_failure_is_not_a_refusal() -> Result {
+    let rig = TestRig::new()?;
+    let ports = verify_fixture_port(json!({"kind":"builtin"}))?;
+    write_project_verify_port(&rig, &ports)?;
+    fs::create_dir_all(rig.project.join("scripts"))?;
+    fs::write(
+        rig.project.join("scripts/verify-tier"),
+        "raise SystemExit(1)\n",
+    )?;
+    let output = rig.command(&["verify", "security/linux", "--json"])?;
+    assert_ne!(code(&output), 0);
+    let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(result["data"]["backend"], "builtin");
+    assert_eq!(
+        result["data"]["disposition"],
+        serde_json::to_value(provenant_config::PortCommandDisposition::Failed)?
+    );
+    assert_eq!(
+        result["status"],
+        serde_json::to_value(provenant_records::Outcome::Error)?
+    );
+    Ok(())
+}
