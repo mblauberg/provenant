@@ -75,7 +75,7 @@ fn lane_prepare_cases(cases: &[(&str, bool, bool, u8)]) -> Result {
 }
 
 fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
-    use provenant_confinement::permissions::PathScope;
+    use provenant_confinement::permissions::{PathGrant, PathScope};
     let rig = repository()?;
     let cleanup = provenant_supervisor::fixture::ProcessCleanupGuard::new(&rig.state);
     ok(
@@ -271,6 +271,54 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         // The active release root is its own directory, never the project.
         let release = rig.state.with_file_name("release");
         fs::create_dir_all(&release)?;
+        fs::create_dir_all(home.join(".config"))?;
+        fs::create_dir_all(home.join(".local/share"))?;
+        let host_git = provenant_os::git::git_executable()
+            .ok_or("host Git")?
+            .to_owned();
+        let mut host =
+            provenant_run::HostLaunchContext::from_environment(&rig.state, &rig.project, host_git);
+        host.default_account_directories = [
+            ("codex".into(), home.join(".codex")),
+            ("claude".into(), home.join(".claude-fixture")),
+        ]
+        .into();
+        host.credential_roots.clear();
+        host.credential_roots.extend([
+            PathGrant {
+                path: home.join(".cargo/credentials.toml"),
+                scope: PathScope::Exact,
+            },
+            PathGrant {
+                path: home.join(".cargo/credentials"),
+                scope: PathScope::Exact,
+            },
+            PathGrant {
+                path: home.join("Library/Keychains/login.keychain-db"),
+                scope: PathScope::Exact,
+            },
+        ]);
+        host.github_roots = vec![home.join(".config/gh")];
+        host.provider_path_environment = [
+            ("CODEX_HOME".into(), home.join(".codex").into_os_string()),
+            (
+                "CLAUDE_CONFIG_DIR".into(),
+                home.join(".claude-fixture").into_os_string(),
+            ),
+            (
+                "GH_CONFIG_DIR".into(),
+                home.join(".config/gh").into_os_string(),
+            ),
+            (
+                "XDG_CONFIG_HOME".into(),
+                home.join(".config").into_os_string(),
+            ),
+            (
+                "XDG_DATA_HOME".into(),
+                home.join(".local/share").into_os_string(),
+            ),
+        ]
+        .into();
         let registry = provenant_cli::run::Registry {
             roots: Some(&roots),
             home: Some(&home),
@@ -278,7 +326,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             cwd: Some(&rig.project),
             state_root: Some(roots.state.as_path()),
             project_id: Some(context.project_id),
-            host: None,
+            host: Some(&host),
             cancel: None,
             repo_facts: Default::default(),
         };
