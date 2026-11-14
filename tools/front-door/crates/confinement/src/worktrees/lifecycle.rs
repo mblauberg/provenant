@@ -881,6 +881,10 @@ pub(super) fn execute_mutation(
     let _ = context.facts.take_inventory(context);
     context.workers.invalidate();
     let operation = match &mutation {
+        GitMutation::BundleCreate { .. } | GitMutation::CreateArchiveRef { .. } => {
+            GitMutationOperation::BundleCreate
+        }
+        GitMutation::DiscardWorktree { .. } => GitMutationOperation::WorktreeRemove,
         GitMutation::FastForward { .. } => GitMutationOperation::FastForward,
         GitMutation::WorktreeAdd { .. } => GitMutationOperation::WorktreeAdd,
         GitMutation::WorktreeRemove { .. } => GitMutationOperation::WorktreeRemove,
@@ -914,6 +918,7 @@ pub(super) fn execute_mutation(
 pub(super) const MAX_PRUNE_BRANCHES: usize = 100;
 
 pub(super) struct RemovedTree {
+    archive: Option<ArchiveInfo>,
     pub(super) info: WorktreeInfo,
     pub(super) lane_cache: Option<PathBuf>,
     pub(super) _writer: LockGuard,
@@ -930,6 +935,8 @@ pub(super) enum Repository<'a> {
     /// Ordinary removal refreshes the census before locking, then rechecks
     /// ownership under the repository lock.
     Remove,
+    /// Explicit destructive authority, requiring an archive before mutation.
+    Discard,
     /// Output is deleted under writer custody alone. The lock is taken for the
     /// final registration recheck and the Git mutation, and returned with the
     /// tree. `lanes` is the cheap fence rechecked under it.
@@ -1064,7 +1071,7 @@ pub(super) fn remove_tree_when(
     eligible()?;
     let prepared =
         worktree_dirty_at(context, locked.verified.repo(), cancel)? == WorktreeCondition::Ignored;
-    if prepared {
+    if prepared && !matches!(repository, Repository::Discard) {
         let settings = output.cloned().unwrap_or_default();
         gc::prepare_removal(
             context,
@@ -1073,7 +1080,10 @@ pub(super) fn remove_tree_when(
             &settings.keep,
             cancel,
         )?;
-        if matches!(repository, Repository::Held | Repository::Remove) {
+        if matches!(
+            repository,
+            Repository::Held | Repository::Remove | Repository::Discard
+        ) {
             refresh_census_under_custody(context, &canonical)?;
         }
     }
@@ -1081,7 +1091,7 @@ pub(super) fn remove_tree_when(
     // eligibility before removing the tree while writer exclusion is held.
     let repository_guard = match repository {
         Repository::Held => None,
-        Repository::Acquire { .. } | Repository::Remove => {
+        Repository::Acquire { .. } | Repository::Remove | Repository::Discard => {
             // Any slow census happens before the repository lock is taken.
             if prepared {
                 eligible()?;
@@ -1096,7 +1106,7 @@ pub(super) fn remove_tree_when(
         expected_head,
     )?;
     let fenced = match repository {
-        Repository::Held | Repository::Remove => {
+        Repository::Held | Repository::Remove | Repository::Discard => {
             eligible()?;
             true
         }
@@ -1105,15 +1115,29 @@ pub(super) fn remove_tree_when(
     if !fenced {
         return Err(WorktreeError::UnknownWriter);
     }
-    match worktree_cleanliness_at(context, locked.verified.repo(), cancel)? {
+    let cleanliness = worktree_cleanliness_at(context, locked.verified.repo(), cancel)?;
+    let discard = matches!(repository, Repository::Discard);
+    match &cleanliness {
         WorktreeCleanliness::Clean => {}
-        WorktreeCleanliness::Dirty(paths) => return Err(WorktreeError::Dirty(paths)),
+        WorktreeCleanliness::Dirty(_) | WorktreeCleanliness::Ignored if discard => {}
+        WorktreeCleanliness::Dirty(paths) => return Err(WorktreeError::Dirty(paths.clone())),
         WorktreeCleanliness::Ignored => return Err(WorktreeError::Dirty(String::new())),
         WorktreeCleanliness::GitOperationInProgress => {
             return Err(WorktreeError::GitOperationInProgress);
         }
         WorktreeCleanliness::Unknown => return Err(WorktreeError::UnknownWriter),
     }
+    let archive = if discard {
+        let captured = archive::capture(context, locked.verified.repo(), expected_head, cancel)?;
+        tree_unchanged(
+            &context.facts.fresh_inventory(context, cancel)?,
+            entry,
+            expected_head,
+        )?;
+        Some(captured)
+    } else {
+        None
+    };
     // A cache that cannot be derived must not block removal; warn and skip it.
     let cargo_cache = crate::permissions::worktree_cargo_cache(context.home, &locked.verified)
         .map_err(|error| warn_cache_removal(&error))
@@ -1121,8 +1145,14 @@ pub(super) fn remove_tree_when(
     let verified_path = locked.verified.path().to_path_buf();
     execute_mutation(
         context,
-        GitMutation::WorktreeRemove {
-            path: verified_path,
+        if discard {
+            GitMutation::DiscardWorktree {
+                path: verified_path,
+            }
+        } else {
+            GitMutation::WorktreeRemove {
+                path: verified_path,
+            }
         },
         cancel,
     )?;
@@ -1144,6 +1174,7 @@ pub(super) fn remove_tree_when(
     };
     let writer = locked.writer.take().ok_or(WorktreeError::UnknownWriter)?;
     Ok(RemovedTree {
+        archive,
         info,
         lane_cache: cargo_cache.map(|cache| cache.path),
         _writer: writer,
@@ -1488,6 +1519,9 @@ pub(super) fn remove_merged_candidate(
             }
             match remove_tree(context, entry, tip, cancel, output) {
                 Ok(removed) => {
+                    if let Some(archive) = removed.archive.take() {
+                        outcome.archives.push(archive);
+                    }
                     outcome.removed.push(removed.info.clone());
                     Some(removed)
                 }
@@ -1642,7 +1676,11 @@ fn remove_with_owner(
                         cancel,
                         &eligible,
                         Some(output),
-                        Repository::Remove,
+                        if discard {
+                            Repository::Discard
+                        } else {
+                            Repository::Remove
+                        },
                     )
                 };
                 // `remove_tree` rechecks this tip under the worktree lock, so
@@ -1659,6 +1697,9 @@ fn remove_with_owner(
                         return Err(WorktreeError::DetachedUnmerged { head: tip });
                     }
                     let mut removed = remove_named()?;
+                    if let Some(archive) = removed.archive.take() {
+                        outcome.archives.push(archive);
+                    }
                     outcome.removed.push(removed.info.clone());
                     removed.repository = None;
                     detached.push(removed);
@@ -1680,6 +1721,9 @@ fn remove_with_owner(
                 );
                 // A dirty or live worktree fails here, before any branch changes.
                 let mut removed = remove_named()?;
+                if let Some(archive) = removed.archive.take() {
+                    outcome.archives.push(archive);
+                }
                 outcome.removed.push(removed.info.clone());
                 let settled =
                     settle_branch(context, branch, tip, disposition, cancel, &mut outcome);

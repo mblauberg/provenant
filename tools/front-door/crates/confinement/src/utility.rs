@@ -231,6 +231,14 @@ pub enum GitObjectKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitRead {
+    DirtyPatch,
+    IndexPatch,
+    Untracked,
+    MergeTree {
+        target: GitOid,
+        head: GitOid,
+    },
+    IsShallow,
     PushPatch {
         base: Option<GitOid>,
         head: GitOid,
@@ -349,6 +357,17 @@ pub enum GitRead {
 /// narrower policy services that own each operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GitMutation {
+    BundleCreate {
+        output: PathBuf,
+        reference: GitRefName,
+    },
+    CreateArchiveRef {
+        reference: GitRefName,
+        tip: GitOid,
+    },
+    DiscardWorktree {
+        path: PathBuf,
+    },
     FastForward {
         head: GitOid,
     },
@@ -1248,6 +1267,36 @@ fn git_args(
     args.extend(GIT_COMMON.iter().map(OsString::from));
     args.push(format!("--attr-source={attribute_source}").into());
     let tail = match operation {
+        GitRead::DirtyPatch => vec![
+            "diff".into(),
+            "--binary".into(),
+            "--no-ext-diff".into(),
+            "--no-textconv".into(),
+            "HEAD".into(),
+            "--".into(),
+        ],
+        GitRead::IndexPatch => vec![
+            "diff".into(),
+            "--cached".into(),
+            "--binary".into(),
+            "--no-ext-diff".into(),
+            "--no-textconv".into(),
+            "HEAD".into(),
+            "--".into(),
+        ],
+        GitRead::Untracked => vec![
+            "ls-files".into(),
+            "--others".into(),
+            "-z".into(),
+            "--".into(),
+        ],
+        GitRead::MergeTree { target, head } => vec![
+            "merge-tree".into(),
+            "--write-tree".into(),
+            target.to_string().into(),
+            head.to_string().into(),
+        ],
+        GitRead::IsShallow => vec!["rev-parse".into(), "--is-shallow-repository".into()],
         GitRead::Status => vec![
             "status".into(),
             "--porcelain=v2".into(),
@@ -2232,6 +2281,36 @@ fn run_git_probe(
 fn mutation_args(mutation: GitMutation) -> Result<(Vec<OsString>, Option<Vec<u8>>), UtilityError> {
     let mut args = GIT_COMMON.iter().map(OsString::from).collect::<Vec<_>>();
     let input = match mutation {
+        GitMutation::CreateArchiveRef { reference, tip } => {
+            args.extend([
+                "update-ref".into(),
+                reference.as_str().into(),
+                tip.to_string().into(),
+                "0000000000000000000000000000000000000000".into(),
+            ]);
+            None
+        }
+        GitMutation::BundleCreate { output, reference } => {
+            let output = validate_absolute_mutation_path(&output)?;
+            args.extend([
+                "bundle".into(),
+                "create".into(),
+                output.into_os_string(),
+                reference.as_str().into(),
+            ]);
+            None
+        }
+        GitMutation::DiscardWorktree { path } => {
+            let path = validate_absolute_mutation_path(&path)?;
+            args.extend([
+                "worktree".into(),
+                "remove".into(),
+                "--force".into(),
+                "--".into(),
+                path.into_os_string(),
+            ]);
+            None
+        }
         GitMutation::FastForward { head } => {
             args.extend([
                 "merge".into(),

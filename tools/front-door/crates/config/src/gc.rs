@@ -215,12 +215,12 @@ retention_classes! {
         triggers: GC_SETTLEMENT
     },
     DiscardArchives => {
-        owner: "confinement/worktrees/removal",
-        measure: OwnerDefined,
-        eligibility: Unknown,
-        detail: "archive writer and retention policy are not yet declared",
-        settings: [],
-        triggers: NEVER
+        owner: "confinement/worktrees/archive",
+        measure: AllocatedTree,
+        eligibility: Declared,
+        detail: "published discard archive older than the configured recovery window",
+        settings: ["gc.discard_archive_days"],
+        triggers: GC
     },
 }
 
@@ -556,6 +556,7 @@ pub struct GcSettings {
     pub schedule: bool,
     pub idle_days: u64,
     pub graph_checkpoint_days: u64,
+    pub discard_archive_days: u64,
     pub free_floor: Option<String>,
     /// Only this small critical threshold may stop new builds; free_floor warns.
     pub critical_free: Option<String>,
@@ -571,6 +572,7 @@ impl Default for GcSettings {
             schedule: true,
             idle_days: 7,
             graph_checkpoint_days: 90,
+            discard_archive_days: 90,
             free_floor: None,
             critical_free: None,
             lane_cargo_cache_max: None,
@@ -649,6 +651,9 @@ impl GcSettings {
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
         if !(1..=3650).contains(&self.idle_days) {
             return Err("idle_days_range");
+        }
+        if !(1..=3650).contains(&self.discard_archive_days) {
+            return Err("discard_archive_days_range");
         }
         if !(1..=3650).contains(&self.graph_checkpoint_days) {
             return Err("graph_checkpoint_days_range");

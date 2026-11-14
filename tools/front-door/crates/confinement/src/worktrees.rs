@@ -1,5 +1,7 @@
 //! Repository-scoped linked-worktree lifecycle and merged-ref pruning.
 
+mod archive;
+pub use archive::{ArchiveError, ArchiveInfo, ArchiveReport, collect_archives};
 mod census;
 mod context;
 mod custody;
@@ -174,6 +176,8 @@ impl From<provenant_config::ConfigError> for WorktreeError {
 
 #[derive(Debug, Error)]
 pub enum WorktreeError {
+    #[error(transparent)]
+    Archive(#[from] ArchiveError),
     #[error("worktree census configuration refused: {0}")]
     Configuration(#[from] Box<provenant_config::ConfigError>),
     #[error("worktree port configuration refused: {0}")]
@@ -294,6 +298,8 @@ pub enum WorktreeError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(rename_all = "snake_case")]
 pub enum GitMutationOperation {
+    #[error("git bundle create")]
+    BundleCreate,
     #[error("git merge --ff-only")]
     FastForward,
     #[error("git worktree add")]
@@ -734,6 +740,7 @@ pub struct RemoveOutcome {
     /// Unmerged branches deleted with `discard`. `head` is the commit the
     /// branch pointed at, which recovers it while Git still holds the object.
     pub discarded: Vec<DiscardedRef>,
+    pub archives: Vec<ArchiveInfo>,
     pub retained: Vec<RetainedBranch>,
 }
 

@@ -47,6 +47,7 @@ const GC_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::new("schedule", "bool"),
     FieldMetadata::int("idle_days", 1, 3650),
     FieldMetadata::int("graph_checkpoint_days", 1, 3650),
+    FieldMetadata::int("discard_archive_days", 1, 3650),
     FieldMetadata::new("free_floor", "string"),
     FieldMetadata::new("critical_free", "string"),
     FieldMetadata::new("lane_cargo_cache_max", "string"),

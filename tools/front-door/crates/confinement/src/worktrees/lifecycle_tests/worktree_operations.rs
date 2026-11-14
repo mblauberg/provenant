@@ -762,3 +762,46 @@ fn writer_busy_names_the_holder_only_when_known() {
         "worktree writer is busy"
     );
 }
+
+#[test]
+fn explicit_discard_publishes_recoverable_data_before_removing_work() -> Result<(), Box<dyn Error>>
+{
+    let fixture = Fixture::new()?;
+    let owner = TestContext::new(&fixture)?;
+    let context = owner.context();
+    let created = create(
+        &context,
+        WorktreeCreate {
+            branch: "scratch/archive".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    run_in_worktree(
+        &fixture,
+        &created.path,
+        &["commit", "--allow-empty", "-m", "unique work"],
+    )?;
+    fs::write(created.path.join("private-note"), b"untracked evidence")?;
+    let result = remove(
+        &context,
+        WorktreeRemove::Name {
+            name: "scratch/archive".into(),
+            discard: true,
+            integration: None,
+            expected_head: None,
+        },
+        &cancel(),
+    )?;
+    let archive = result.archives.first().ok_or("discard had no archive")?;
+    assert!(archive.path.join("tip.bundle").is_file());
+    assert!(archive.path.join("manifest.json").is_file());
+    let tar = fs::read(archive.path.join("untracked.tar"))?;
+    assert!(
+        tar.windows(b"untracked evidence".len())
+            .any(|bytes| bytes == b"untracked evidence")
+    );
+    assert!(!created.path.exists());
+    assert!(!branch_exists(&fixture, "scratch/archive"));
+    Ok(())
+}

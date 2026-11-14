@@ -402,6 +402,7 @@ struct GcData {
     target_seeds: provenant_run::target_seed_gc::Report,
     build_dirs: provenant_run::build_dir_gc::Report,
     graph_checkpoints_removed: usize,
+    discard_archives: worktrees::ArchiveReport,
     staging_busy: Vec<PathBuf>,
     worktree_cleanup: Vec<worktrees::WorktreeGcReport>,
     alerts: Vec<String>,
@@ -433,6 +434,9 @@ fn gc_retention_bytes(data: &GcData) -> Vec<provenant_config::RetentionBytes> {
                 },
                 RetentionKind::BuildDirectories => ByteObservation::Measured {
                     bytes: data.build_dirs.bytes,
+                },
+                RetentionKind::DiscardArchives => ByteObservation::Measured {
+                    bytes: data.discard_archives.bytes,
                 },
                 RetentionKind::PayloadCap => ByteObservation::Measured {
                     bytes: data.provider_state.payload.reclaimed_bytes,
@@ -500,7 +504,10 @@ pub(crate) fn scheduled_gc(
         idle_days,
     };
     let data = gc(&command, globals, workers).map_err(|error| error.local_message())?;
-    if !data.provider_state.errors.is_empty() || !data.chair_logs.errors.is_empty() {
+    if !data.provider_state.errors.is_empty()
+        || !data.chair_logs.errors.is_empty()
+        || !data.discard_archives.errors.is_empty()
+    {
         return Err("retention incomplete; next: provenant gc --apply".into());
     }
     let upstream_failures = data
@@ -527,8 +534,9 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
     match gc(&command, globals, workers) {
         Ok(data) => {
             let human = gc_data_summary(&data);
-            let failed =
-                !data.provider_state.errors.is_empty() || !data.chair_logs.errors.is_empty();
+            let failed = !data.provider_state.errors.is_empty()
+                || !data.chair_logs.errors.is_empty()
+                || !data.discard_archives.errors.is_empty();
             let result = if failed {
                 gc_failure(&data, "retention incomplete", globals.json)
             } else {
@@ -556,6 +564,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
                 target_seeds: Default::default(),
                 build_dirs: Default::default(),
                 graph_checkpoints_removed: 0,
+                discard_archives: Default::default(),
                 staging_busy: Vec::new(),
                 worktree_cleanup,
                 alerts,
@@ -690,6 +699,14 @@ fn gc_data_summary(data: &GcData) -> String {
     }
     for error in &data.chair_logs.errors {
         human.push_str(&format!("{}: {}\n", error.path.display(), error.reason));
+    }
+    for error in &data.discard_archives.errors {
+        human.push_str(&format!(
+            "{}: {}: {}\n",
+            error.path.display(),
+            error.operation,
+            error.cause
+        ));
     }
     for error in &data.report.errors {
         human.push_str(&format!(
@@ -1322,6 +1339,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .max(free_floor);
     use provenant_config::{RetentionKind, RetentionTrigger, retention_schedule};
     let mut report = Ok(Default::default());
+    let mut discard_archives = worktrees::ArchiveReport::default();
     let mut staging_busy = Vec::new();
     let mut provider_state = Default::default();
     let mut chair_logs = Default::default();
@@ -1517,6 +1535,15 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         }
     }
             }
+            RetentionKind::DiscardArchives => {
+                for project in &projects {
+                    let mut archived = worktrees::collect_archives(&project.state,
+                        now_ns - i128::from(config.gc.discard_archive_days) * 86_400 * 1_000_000_000, command.dry_run);
+                    discard_archives.bytes = discard_archives.bytes.saturating_add(archived.bytes);
+                    discard_archives.removed.append(&mut archived.removed);
+                    discard_archives.errors.append(&mut archived.errors);
+                }
+            }
             RetentionKind::Staging => {
                 staging_busy = crate::staging_gc::collect(
                     roots.state.as_path(),
@@ -1585,8 +1612,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             // These owners run at their existing checkpoint/install boundaries,
             // or have no behaviour declared yet.
             | RetentionKind::GraphCheckpoints
-            | RetentionKind::ManagedReleases
-            | RetentionKind::DiscardArchives => {}
+            | RetentionKind::ManagedReleases => {}
         }
     }
     // Observe after every collection class, including a partially failed sweep.
@@ -1644,6 +1670,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         target_seeds,
         build_dirs,
         graph_checkpoints_removed,
+        discard_archives,
         staging_busy,
         unobserved_projects,
         skipped_transient,
