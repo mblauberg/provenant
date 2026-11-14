@@ -766,6 +766,130 @@ mod tests {
         Ok(())
     }
 
+    #[derive(Debug, PartialEq)]
+    enum Decision {
+        /// The plan selects exactly this store for reset.
+        Reset,
+        /// The plan identifies no store: fresh, or format-2 and protected.
+        Keep,
+        /// The plan refuses; no state may be touched.
+        Refuse,
+    }
+
+    fn decide(
+        state: &Path,
+        store: &str,
+        receipt: Option<u64>,
+    ) -> Result<Decision, Box<dyn std::error::Error>> {
+        Ok(match plan(state, receipt) {
+            Err(_) => Decision::Refuse,
+            Ok(Some(plan)) if plan.dropped == [PathBuf::from(store)] => Decision::Reset,
+            Ok(Some(plan)) => {
+                assert!(plan.dropped.is_empty(), "{store}: {:?}", plan.dropped);
+                Decision::Keep
+            }
+            Ok(None) => Decision::Keep,
+        })
+    }
+
+    /// The exhaustive store x header-version x receipt matrix. The install
+    /// boundary only needs one mixed-state run per receipt kind.
+    #[test]
+    fn receipt_and_header_decide_reset_per_store() -> TestResult {
+        // Never-shipped intermediate schema versions, one per store.
+        let intermediate = [
+            ("run.sqlite3", 5),
+            ("fabric/fabric.sqlite3", 8),
+            ("fabric/host.sqlite3", 8),
+            ("admission.sqlite3", 3),
+            ("pr-contributions.sqlite3", 2),
+        ];
+        assert_eq!(intermediate.len(), FORMAT_ONE_VERSIONS.len());
+        for (&(name, shipped, current), (row, intermediate)) in
+            FORMAT_ONE_VERSIONS.iter().zip(intermediate)
+        {
+            assert_eq!(name, row);
+            let old = *shipped.iter().max().ok_or("shipped versions")?;
+            assert!(!shipped.contains(&intermediate) && intermediate < old);
+            for receipt in [None, Some(1), Some(2)] {
+                let temp = tempfile::tempdir()?;
+                let state = temp.path();
+                std::fs::create_dir(state.join("install"))?;
+                let path = state.join(name);
+                std::fs::create_dir_all(path.parent().ok_or("store parent")?)?;
+                for version in [0, old, intermediate, current - 1, current, current + 1] {
+                    let bytes = header(version);
+                    std::fs::write(&path, &bytes)?;
+                    let expected = match receipt {
+                        Some(1) if version == 0 => Decision::Keep,
+                        Some(1) if version < current => Decision::Reset,
+                        Some(1) => Decision::Refuse,
+                        _ if version == old => Decision::Reset,
+                        _ if version == 0 => Decision::Keep,
+                        Some(2) if version > old => Decision::Keep,
+                        _ => Decision::Refuse,
+                    };
+                    assert_eq!(
+                        decide(state, name, receipt)?,
+                        expected,
+                        "{name} {version} {receipt:?}"
+                    );
+                    assert_eq!(std::fs::read(&path)?, bytes);
+                }
+                let zero_header = header(0);
+                for (bytes, companion, unknown) in [
+                    (Vec::new(), None, false),
+                    (Vec::new(), Some("-wal"), false),
+                    (vec![0; 12], Some("-wal"), true),
+                    (vec![0; 12], Some("-shm"), true),
+                    (zero_header.clone(), Some("-wal"), false),
+                    (zero_header.clone(), Some("-shm"), false),
+                    (b"not a database".to_vec(), None, true),
+                ] {
+                    std::fs::write(&path, &bytes)?;
+                    let companion = companion.map(|suffix| {
+                        path.with_file_name(format!(
+                            "{}{suffix}",
+                            name.rsplit('/').next().unwrap_or(name)
+                        ))
+                    });
+                    if let Some(companion) = &companion {
+                        std::fs::write(companion, "uncheckpointed")?;
+                    }
+                    let expected = if unknown {
+                        Decision::Refuse
+                    } else {
+                        Decision::Keep
+                    };
+                    assert_eq!(
+                        decide(state, name, receipt)?,
+                        expected,
+                        "{name} {} {companion:?} {receipt:?}",
+                        bytes.len()
+                    );
+                    assert_eq!(std::fs::read(&path)?, bytes);
+                    if let Some(companion) = companion {
+                        assert_eq!(std::fs::read(&companion)?, b"uncheckpointed");
+                        std::fs::remove_file(companion)?;
+                    }
+                }
+                // Each identified store is removable without a sibling authorising it.
+                std::fs::write(
+                    &path,
+                    header(if receipt == Some(1) {
+                        intermediate
+                    } else {
+                        old
+                    }),
+                )?;
+                let reset = plan(state, receipt)?.ok_or("reset plan")?;
+                remove(&reset, || Ok(()))?;
+                assert!(!path.exists(), "{name} {receipt:?}");
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn healthy_format_two_openers_never_plan_a_reset_even_with_uncheckpointed_wal() -> TestResult {
         use provenant_core::{ActorId, AttemptId, CancelToken, ProjectId, RootInputs};
