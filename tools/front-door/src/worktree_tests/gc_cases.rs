@@ -1258,7 +1258,7 @@ pub(super) fn gc_collects_a_fast_forwarded_lane_its_settlement_missed() -> Resul
         let delivered = fixture.store.deliver(
             fixture.settled.attempt_id,
             None,
-            provenant_run::HostDeliveryContext::new(rig.env.clone()),
+            provenant_run::HostDeliveryContext::capture(),
             false,
             &call,
         )?;
