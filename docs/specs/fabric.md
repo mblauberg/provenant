@@ -40,7 +40,7 @@ mutations refuse. A caller-supplied sender is rejected at the relay boundary.
 
 ### Private, versioned, atomic store
 
-The store is one private SQLite database; symlinked or shared components and a
+Coordination and the host custody ledger use private SQLite databases; symlinked or shared components and a
 future schema are refused before any mutation, and config may lower limits but
 never raise them. A mutation and its event commit together, and no transaction
 stays open across waits, spawns, Git or SSH. A retried operation ID returns its
@@ -50,23 +50,39 @@ stored receipt; the same ID with a different digest conflicts.
   `crates/fabric-store/src/tests.rs::event_failure_rolls_back_mail_mutations`;
   `crates/fabric-store/src/tests/operations.rs::concurrent_duplicate_operations_apply_once_and_share_the_committed_receipt`
 
-### Fences and cursors
+### Custody and cursors
 
-Generations survive release and expiry, and claims use the home host's clock.
-Path claims are advisory and never authorise writing. Cursors advance
-monotonically, only for the caller, in the same transaction as deduplication;
-an unreachable peer is `Unknown`, never complete.
-- Why: a stale holder must never act, and a reader must never skip events.
-- Test: `crates/fabric-store/src/tests/f2.rs::canonical_overlap_expiry_release_and_generation`
+Fabric claims and graph chair identity use one host-owned custody ledger.
+Subject kinds are declared once in `records::custody::SubjectKind`: graph,
+attempt, branch, worktree, pr, issue, path and cloud key. Records retain holder
+(chair or attempt nested under a chair), project, origin, active/landed/retired/
+released state, last activity, related artefacts and dispatch provenance.
+`LandedEvidence` names its predicate (subsumed or landed) and proof source;
+`RetirementRecord` retains that evidence. These records are defined in records
+for landing and retention to share; state alone never authorises deletion.
+
+Claims do not expire, lock or refuse overlapping advisory ownership. Acquiring
+another holder's item warns, records the previous holder in the same transaction
+as the custody change, and proceeds. Gone holders leave unattended items for
+adoption. Unknown native presence stays unknown. Run writer leases still own
+Git isolation. Cursors advance monotonically; an unreachable peer is Unknown.
+- Why: unattended work must remain discoverable without making advisory custody
+  another admission boundary.
+- Test: `crates/fabric-store/src/tests/f2.rs::custody_is_durable_advisory_and_queryable_by_declared_kinds`;
+  `crates/fabric-store/src/tests/f2.rs::custody_event_failure_rolls_back_the_record`;
+  `crates/fabric-store/src/tests/f2.rs::custody_queries_page_and_include_nested_lanes_without_crossing_chairs`
+- Owner: `crates/records/src/custody.rs`, `crates/fabric-store/src/claims.rs`
 
 ### Chair bindings follow graph names
 
-The host chair index is keyed by project and graph name. A graph's first
-launch seals its binding; every later attempt in the graph resolves it, and a
-request naming a different chair conflicts. A graph launched from another
-inherits the parent graph's binding; a missing parent can only produce an
-unbound association. The graph name is the index key, so no attempt or
-operation identifier participates in lookup.
+The host chair index reads graph subjects in the custody ledger, keyed by
+project and graph name. A graph's first launch seals its dispatch provenance;
+every later attempt resolves it. Direct host launch observes the chair when
+its canonical request names none, without rewriting that request. An explicit
+chair change warns and records the previous holder. Child graphs inherit their
+parent's chair; an unknown parent stays unbound. Explicit adoption changes
+advisory custody and is recorded. Graph names, rather than attempt or operation
+identifiers, address this view.
 - Why: every node in a graph resolves the same dispatching chair without a
   second identity mapping.
 - Test: `crates/fabric-runtime/src/chairs.rs::tests::associations_are_keyed_by_project_and_graph_and_inherit_by_name`

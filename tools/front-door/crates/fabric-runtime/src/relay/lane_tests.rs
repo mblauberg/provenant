@@ -168,19 +168,27 @@ fn lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal()
     let held = serde_json::to_value(host.mutate(
         Mutation::Claim(ClaimInput::Acquire {
             extra: Default::default(),
-            scope: provenant_fabric_store::WorkScope::Issue {
-                extra: Default::default(),
-                key: "host-claim".into(),
+            subject: provenant_records::custody::Subject::new(
+                provenant_records::custody::SubjectKind::Issue,
+                "host-claim",
+            ),
+            holder: provenant_records::custody::Holder::Chair {
+                chair: provenant_records::custody::Chair {
+                    extra: Default::default(),
+                    host: provenant_core::HostId::from_bytes([1; 16]),
+                    actor,
+                    session: None,
+                    process: None,
+                },
             },
-            lease_seconds: 10,
         }),
         &provenant_core::OperationId::parse("host-claim")?,
         budget,
         &CancelToken::new(),
     )?)?;
     let verified = relay_call(
-        "fabric_lease",
-        json!({"op":"claim_verify","proof":held["proof"]}),
+        "fabric_custody",
+        json!({"op":"claim_verify","subject":held["change"]["record"]["subject"]}),
     )?;
     assert_eq!(verified["result"], "verified");
     let relayed_read = relay_call("fabric_mail", json!({"op":"read","after":0,"limit":10}))?;

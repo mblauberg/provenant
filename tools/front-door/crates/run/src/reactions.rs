@@ -8,7 +8,7 @@ use crate::{
     db::bytes, db::decode,
 };
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, ProjectId};
-use provenant_records::run::ChairBinding;
+use provenant_records::custody::Chair;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
@@ -42,7 +42,7 @@ pub struct Reaction {
     #[serde(default)]
     pub resolved: bool,
     #[serde(default)]
-    pub chair: Option<ChairBinding>,
+    pub chair: Option<Chair>,
     #[serde(default)]
     pub session: Option<String>,
     #[serde(default)]

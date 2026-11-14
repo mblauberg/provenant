@@ -38,7 +38,7 @@ struct GraphRefusalScope {
     actor: provenant_core::ActorId,
     digest: provenant_core::Digest,
     worktree: Option<String>,
-    chair: Option<provenant_run::ChairBinding>,
+    chair: Option<provenant_records::custody::Chair>,
     /// The work key the refused launch would have taken, when the graph named it.
     work: Option<provenant_records::WorkKey>,
 }
@@ -62,7 +62,8 @@ impl GraphRefusalScope {
         // different launch actor cannot acquire the current chair's binding.
         let chair = (!provenant_cli::fabric::in_lane()
             && provenant_cli::workflow::session_actor(context, None).ok() == Some(actor))
-        .then(|| provenant_run::ChairBinding {
+        .then(|| provenant_records::custody::Chair {
+            process: provenant_cli::fabric::chair_process(),
             extra: Default::default(),
             host: context.identity.inbox.host,
             actor,

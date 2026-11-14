@@ -1,4 +1,4 @@
-use super::{EdgeError, Lease};
+use super::EdgeError;
 use provenant_core::{CancelToken, Clock, HostId, Roots, WaitBudget};
 use provenant_fabric_runtime::{
     config::FabricConfig,
@@ -9,6 +9,7 @@ use provenant_fabric_runtime::{
     },
     identity::{CrossHostProjectKey, Identity, IdentityError},
 };
+use provenant_os::clock::SystemClock;
 use provenant_os::{
     exec::{Executor, SystemExecutor},
     fs::{Directory, PublishMode},
@@ -124,6 +125,97 @@ pub fn current_session() -> Option<String> {
     std::env::var("PROVENANT_SESSION_ID")
         .ok()
         .filter(|value| !value.is_empty())
+}
+
+/// Observe the invoking harness rather than the short-lived command process.
+pub fn chair_process() -> Option<provenant_records::custody::HolderProcess> {
+    use provenant_supervisor::census::{
+        ProcessObservation, ProcessObserver, SystemProcessObserver, current_process,
+    };
+    let ProcessObservation::Present(command) = current_process() else {
+        return None;
+    };
+    let ProcessObservation::Present(parent) =
+        SystemProcessObserver.observe_topology(command.parent_pid)
+    else {
+        return None;
+    };
+    Some(provenant_records::custody::HolderProcess {
+        boot: parent.identity.boot,
+        pid: parent.identity.pid,
+        native_start: parent.identity.native_start,
+    })
+}
+pub fn current_chair(context: &Context) -> provenant_records::custody::Chair {
+    provenant_records::custody::Chair {
+        extra: Default::default(),
+        host: context.identity.inbox.host,
+        actor: context.identity.inbox.actor,
+        session: current_session().or_else(|| {
+            provenant_workflow::session::chair_session_for(
+                &context.roots.state,
+                context.identity.project,
+                context.identity.inbox.actor,
+            )
+            .map(|s| s.as_str().to_owned())
+        }),
+        process: chair_process(),
+    }
+}
+
+/// Record a lifecycle acquisition without turning advisory custody into admission.
+pub fn acquire_custody(
+    context: &Context,
+    holder: &provenant_records::custody::Holder,
+    subjects: &[provenant_records::custody::Subject],
+) {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = provenant_fabric_store::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    match provenant_fabric_runtime::custody::acquire(
+        &context.roots.state,
+        context.identity.project,
+        holder,
+        subjects,
+        provenant_records::custody::Origin::Provenant,
+        &call,
+    ) {
+        Ok(changes) => provenant_fabric_runtime::custody::warn(&changes),
+        Err(error) => provenant_fabric_runtime::custody::warning(format_args!(
+            "custody acquisition pending ({error}); use provenant adopt KIND:ID"
+        )),
+    }
+}
+pub fn checkout_branch(path: &Path) -> Result<Option<String>, EdgeError> {
+    use provenant_confinement::repo::GitRevision;
+    use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime};
+    let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
+    let runtime = UtilityRuntime::read_only(git)?;
+    let executor = SystemExecutor::new(1)?;
+    let cancel = CancelToken::new();
+    let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
+    let repo = runtime.open_read_repo(&executor, path, budget, &cancel)?;
+    let result = provenant_confinement::run_read_utility(
+        &executor,
+        GitRead::SymbolicRevision {
+            revision: GitRevision::new("HEAD").map_err(|_| EdgeError::Invalid)?,
+        },
+        &repo,
+        &runtime,
+        budget,
+        &cancel,
+    )?;
+    if !matches!(result.termination, provenant_os::exec::Termination::Exit(0)) {
+        return Ok(None);
+    }
+    let reference = String::from_utf8(result.stdout.bytes).map_err(|_| EdgeError::Invalid)?;
+    Ok(reference
+        .trim()
+        .strip_prefix("refs/heads/")
+        .map(str::to_owned))
 }
 
 fn prompt_limit_source(
@@ -592,12 +684,6 @@ impl Context {
             }
             value => Ok(value),
         }
-    }
-    pub fn lease(&self, lease: Lease) -> Result<u64, EdgeError> {
-        if lease.lease_seconds > self.config.limits.lease_seconds {
-            return Err(EdgeError::Invalid);
-        }
-        Ok(lease.lease_seconds)
     }
 }
 

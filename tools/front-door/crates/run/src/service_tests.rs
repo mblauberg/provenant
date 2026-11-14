@@ -322,7 +322,8 @@ fn chair_binding_replays_the_original_submission() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let mut first = submission("review this code");
-    first.chair = Some(ChairBinding {
+    first.chair = Some(Chair {
+        process: None,
         extra: Default::default(),
         session: None,
         host: provenant_core::HostId::from_bytes([4; 16]),
@@ -608,7 +609,8 @@ fn preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let make = |prompt| {
         let mut input = submission(prompt);
-        input.chair = Some(ChairBinding {
+        input.chair = Some(Chair {
+            process: None,
             extra: Default::default(),
             host: provenant_core::HostId::from_bytes([7; 16]),
             actor: provenant_core::ActorId::from_bytes([8; 16]),
@@ -663,7 +665,8 @@ fn refusal_only_chair_leaves_accepted_identity_and_settlement_unbound() -> TestR
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let chair = ChairBinding {
+    let chair = Chair {
+        process: None,
         extra: Default::default(),
         host: provenant_core::HostId::from_bytes([7; 16]),
         actor: provenant_core::ActorId::from_bytes([8; 16]),

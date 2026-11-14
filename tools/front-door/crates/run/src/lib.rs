@@ -93,6 +93,7 @@ pub use db::{ExecutionContext, Request, RunStore};
 pub const RUN_SCHEMA_VERSION: u32 = db::SCHEMA.version as u32;
 pub const ADMISSION_SCHEMA_VERSION: u32 = ledger::SCHEMA.version as u32;
 pub const CONTRIBUTIONS_SCHEMA_VERSION: u32 = pr_contribution::SCHEMA.version as u32;
+use provenant_records::custody::Chair;
 pub use provenant_records::run::*;
 pub use provenant_supervisor::custody::AdmissionError;
 pub use reader::{

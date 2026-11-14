@@ -1,5 +1,5 @@
 use super::facade::{GraphInput, HostsInput, IdentityInput, OutputInput, RunInput, SubmitInput};
-use super::{ArtifactRef, ClaimInput, EventsInput, MailInput, WorkScope};
+use super::{ArtifactRef, ClaimInput, EventsInput, MailInput, Subject};
 use provenant_core::WaitTransport;
 use provenant_records::run::RequestedRoute;
 
@@ -207,13 +207,6 @@ fn page(limit: u64, path: &str) -> Result<(), InputError> {
     Ok(())
 }
 
-fn lease(seconds: u64) -> Result<(), InputError> {
-    if !(1..=3_600).contains(&seconds) {
-        return Err(field("lease_seconds"));
-    }
-    Ok(())
-}
-
 fn wait(seconds: u64, transport: WaitTransport) -> Result<(), InputError> {
     if seconds > transport.maximum_seconds() {
         return Err(field("wait_seconds"));
@@ -242,20 +235,16 @@ fn path_text(path: &std::path::Path, field_path: &str) -> Result<(), InputError>
     bounded_text(value, field_path, MAX_ARTIFACT_PATH_BYTES)
 }
 
-fn scope(scope: &WorkScope) -> Result<(), InputError> {
-    match scope {
-        WorkScope::Issue { key, .. } => bounded_text(key, "scope.key", MAX_REFERENCE_BYTES),
-        WorkScope::Paths { paths, .. } => {
-            if paths.is_empty() || paths.len() > 100 {
-                return Err(field("scope.paths"));
-            }
-            for (index, path) in paths.iter().enumerate() {
-                path_text(path, &format!("scope.paths[{index}]"))?;
-            }
-            Ok(())
-        }
-        WorkScope::Worktree { path, .. } => path_text(path, "scope.path"),
-    }
+fn subject(subject: &Subject) -> Result<(), InputError> {
+    bounded_text(
+        &subject.id,
+        "subject.id",
+        if subject.kind.is_path() {
+            MAX_ARTIFACT_PATH_BYTES
+        } else {
+            MAX_REFERENCE_BYTES
+        },
+    )
 }
 
 fn route(route: &RequestedRoute, path: &str) -> Result<(), InputError> {
@@ -370,15 +359,23 @@ impl ValidateInput for ClaimInput {
     fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
         match self {
             Self::Acquire {
-                scope: value,
-                lease_seconds,
+                subject: value,
+                holder,
                 ..
             } => {
-                scope(value)?;
-                lease(*lease_seconds)
+                subject(value)?;
+                if let Some(chair) = holder.chair() {
+                    optional_text(
+                        chair.session.as_deref(),
+                        "holder.session",
+                        MAX_REFERENCE_BYTES,
+                    )?;
+                }
+                Ok(())
             }
-            Self::Renew { lease_seconds, .. } => lease(*lease_seconds),
-            Self::Verify { .. } | Self::Release { .. } => Ok(()),
+            Self::Renew { subject: value, .. }
+            | Self::Verify { subject: value, .. }
+            | Self::Release { subject: value, .. } => subject(value),
             Self::List { limit, .. } => page(*limit, "limit"),
         }
     }
@@ -618,25 +615,16 @@ mod tests {
     }
 
     #[test]
-    fn receipts_freeze_the_public_request() {
-        let proof = super::super::ClaimProof {
-            extra: Default::default(),
-            id: provenant_core::ClaimId::from_bytes([1; 16]),
-            generation: 2,
-            token: [0xab; 16],
-        };
-        let mutation = super::super::Mutation::Claim(ClaimInput::Renew {
-            extra: Default::default(),
-            proof,
-            lease_seconds: 3,
-        });
-        assert_eq!(
-            serde_json::to_value(mutation).unwrap(),
-            json!({"domain":"claim","input":{
-                "op":"claim_renew","lease_seconds":3,
-                "proof":{"id":"01".repeat(16),"generation":2,"token":"ab".repeat(16)}
-            }})
-        );
+    fn custody_requests_round_trip_the_subject() {
+        for &kind in provenant_records::custody::SubjectKind::ALL {
+            let input = ClaimInput::Renew {
+                extra: Default::default(),
+                subject: Subject::new(kind, "item"),
+            };
+            let encoded = serde_json::to_value(&input).unwrap();
+            let read: ClaimInput = serde_json::from_value(encoded).unwrap();
+            assert_eq!(input, read);
+        }
     }
 
     #[test]
@@ -720,16 +708,8 @@ mod tests {
     #[test]
     fn serde_rejects_bounds_on_nested_string_fields() {
         rejects::<ClaimInput>(
-            json!({"op":"claim_acquire","scope":{"kind":"issue","key":"k".repeat(1_025)},"lease_seconds":1}),
-            "scope.key",
-        );
-        rejects::<ClaimInput>(
-            json!({"op":"claim_acquire","scope":{"kind":"worktree","path":"/".to_owned() + &"p".repeat(4_096)},"lease_seconds":1}),
-            "scope.path",
-        );
-        rejects::<ClaimInput>(
-            json!({"op":"claim_acquire","scope":{"kind":"paths","paths":["p".repeat(4_097)]},"lease_seconds":1}),
-            "scope.paths[0]",
+            json!({"op":"claim_verify","subject":{"kind":"issue","id":"k".repeat(1_025)}}),
+            "subject.id",
         );
         for name in ["provider", "model", "effort"] {
             let mut route = json!({"kind":"model","provider":"codex","model":"model"});
@@ -760,10 +740,7 @@ mod tests {
 
     #[test]
     fn serde_rejects_numeric_and_collection_bounds() {
-        rejects::<ClaimInput>(
-            json!({"op":"claim_acquire","scope":{"kind":"issue","key":"1"},"lease_seconds":0}),
-            "lease_seconds",
-        );
+        rejects::<ClaimInput>(json!({"op":"claim_list","limit":0}), "limit");
         assert!(
             serde_json::from_value::<super::super::EventsInput>(
                 json!({"op":"read","limit":1,"wait_seconds":0})
@@ -795,26 +772,8 @@ mod tests {
     }
 
     #[test]
-    fn proof_tokens_are_hex_and_binary_output_is_base64() {
-        use crate::coordination::ClaimProof;
+    fn binary_output_is_base64() {
         use crate::coordination::facade::OutputBytes;
-        let proof = ClaimProof {
-            extra: Default::default(),
-            id: provenant_core::ClaimId::from_bytes([1; 16]),
-            generation: 2,
-            token: [0xab; 16],
-        };
-        let value = serde_json::to_value(&proof).unwrap();
-        assert_eq!(value["token"], "ab".repeat(16));
-        assert_eq!(
-            serde_json::from_value::<ClaimProof>(value.clone()).unwrap(),
-            proof
-        );
-        for token in [json!(vec![0; 16]), json!("AB".repeat(16)), json!("ab")] {
-            let mut invalid = value.clone();
-            invalid["token"] = token;
-            assert!(serde_json::from_value::<ClaimProof>(invalid).is_err());
-        }
         let bytes = OutputBytes::from_bytes(vec![0xff, 0x00]);
         let encoded = serde_json::to_value(&bytes).unwrap();
         assert_eq!(encoded, json!({"encoding":"base64","data":"/wA="}));
@@ -893,11 +852,11 @@ mod tests {
             &service,
             crate::coordination::Mutation::Claim(ClaimInput::Acquire {
                 extra: Default::default(),
-                scope: crate::coordination::WorkScope::Issue {
-                    extra: Default::default(),
-                    key: "issue".into(),
+                subject: Subject::new(provenant_records::custody::SubjectKind::Issue, ""),
+                holder: provenant_records::custody::Holder::Attempt {
+                    attempt: provenant_core::AttemptId::from_bytes([1; 16]),
+                    chair: None,
                 },
-                lease_seconds: 0,
             }),
             None,
             budget,
@@ -906,36 +865,7 @@ mod tests {
         .unwrap_err();
         assert!(matches!(
             error,
-            CoordinationError::Input(error) if error.path == "lease_seconds"
+            CoordinationError::Input(error) if error.path == "subject.id"
         ));
-    }
-}
-
-/// Fencing tokens are opaque, lower-case hex at every JSON boundary.
-pub(crate) mod hex_token {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(token: &[u8; 16], serializer: S) -> Result<S::Ok, S::Error> {
-        let text = provenant_core::hex(token);
-        serializer.serialize_str(&text)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u8; 16], D::Error> {
-        let text = String::deserialize(deserializer)?;
-        if text.len() != 32
-            || !text
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(serde::de::Error::custom(
-                "expected a 32-character lower-case hex token",
-            ));
-        }
-        let mut token = [0; 16];
-        for (index, byte) in token.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16)
-                .map_err(serde::de::Error::custom)?;
-        }
-        Ok(token)
     }
 }

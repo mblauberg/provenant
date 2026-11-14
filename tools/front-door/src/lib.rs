@@ -12,6 +12,7 @@ mod cloud;
 #[cfg(test)]
 mod compose_tests;
 mod console;
+mod custody;
 mod disk;
 mod disk_guard;
 mod fabric;
@@ -1186,6 +1187,9 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Edit(cmd) => graph_interface::edit(cmd, globals, process.workers()),
         Command::Templates(cmd) => graph_interface::templates(cmd, globals, process.workers()),
         Command::Trace(cmd) => fabric::unified_graph_trace(&cmd.target, globals, process.workers()),
+        Command::Adopt { subject } => custody::command(globals, subject, false),
+        Command::Release { subject } => custody::command(globals, subject, true),
+        Command::Status(cmd) if cmd.mine => custody::status(&cmd, globals),
         Command::Status(cmd) if cmd.session_stream => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::status_session_stream(cmd, edge, &mut io::stdout().lock())
         }),

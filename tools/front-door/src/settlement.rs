@@ -242,8 +242,15 @@ fn resolve(
     // settlements quiet.
     let chair = match open_host(roots) {
         Ok(Some(host)) => host
-            .graph_chair(reaction.project, key.graph(), &request)?
-            .and_then(|found| found.chair),
+            .custody_item(
+                reaction.project,
+                &provenant_records::custody::Subject::new(
+                    provenant_records::custody::SubjectKind::Graph,
+                    key.graph(),
+                ),
+                &request,
+            )?
+            .and_then(|found| found.holder.chair().cloned()),
         Ok(None) | Err(provenant_fabric_store::Error::NotFound) => None,
         Err(error) => return Err(error.into()),
     };
@@ -330,6 +337,12 @@ fn record_usage(
         clock: &clock,
         cancel: &cancel,
     };
+    crate::custody::settle_attempt(
+        roots,
+        &store.record(reaction.attempt, &call)?,
+        &store.request(reaction.attempt, &call)?,
+        reaction.sender,
+    )?;
     let fact = store.attempt(reaction.attempt, &call)?;
     let key = store.work_key(reaction.attempt, &call)?;
     let prices = crate::fabric::load_graph_prices(assets)?;
@@ -516,7 +529,7 @@ pub(crate) fn append_chair_log(
 mod tests {
     #[allow(unused_imports)]
     use super::*;
-    use provenant_records::run::ChairBinding;
+    use provenant_records::custody::Chair;
     #[allow(unused_imports)]
     use std::cell::RefCell;
     #[test]
@@ -556,7 +569,8 @@ mod tests {
             issue_ids: vec![],
             graph: false,
             resolved: true,
-            chair: Some(ChairBinding {
+            chair: Some(Chair {
+                process: None,
                 extra: Default::default(),
                 host: provenant_core::HostId::from_bytes([1; 16]),
                 actor: ActorId::from_bytes([2; 16]),
@@ -697,8 +711,9 @@ mod tests {
         reaction
     }
 
-    fn binding(session: &str) -> ChairBinding {
-        ChairBinding {
+    fn binding(session: &str) -> Chair {
+        Chair {
+            process: None,
             extra: Default::default(),
             host: provenant_core::HostId::from_bytes([1; 16]),
             actor: ActorId::from_bytes([2; 16]),

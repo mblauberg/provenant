@@ -853,44 +853,30 @@ fn host_store_refuses_unsafe_database_companions() {
 }
 
 #[test]
-fn host_store_ignores_lane_writable_locks_and_shared_rows() {
-    use std::os::unix::fs::PermissionsExt;
+fn custody_is_host_owned_and_does_not_read_lane_writable_rows() {
+    use provenant_records::custody::*;
     let f = Fixture::new();
     let shared = f.open();
     let host = HostStore::open(&f.root, &f.request()).unwrap();
-    let graph = "graph";
-    let value = GraphChair {
-        extra: Default::default(),
-        request_digest: provenant_core::Digest::from_bytes([2; 32]),
+    let subject = Subject::new(SubjectKind::Graph, "graph");
+    let holder = Holder::Attempt {
+        attempt: provenant_core::AttemptId::from_bytes([1; 16]),
         chair: None,
     };
-    host.seal_graph_chair(project(), graph, &value, &f.request())
-        .unwrap();
-    shared
-        .db
-        .execute(
-            "INSERT INTO graph_chairs VALUES(?1,?2,?3)",
-            params![project().to_string(), graph, b"forged".as_slice()],
+    let record = host
+        .acquire_custody(
+            project(),
+            &subject,
+            &holder,
+            Origin::Provenant,
+            &f.request(),
         )
-        .unwrap();
-    std::fs::set_permissions(
-        f.root.as_path().join("fabric/locks"),
-        std::fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
-    assert!(matches!(
-        Store::open(&f.root, &f.request()),
-        Err(Error::UnsafePath(_))
-    ));
-    drop(host);
-    // A current-schema open must not need a migration write transaction.
-    let writer = rusqlite::Connection::open(f.root.as_path().join("fabric/host.sqlite3")).unwrap();
-    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        .unwrap()
+        .record;
+    shared.db.execute("INSERT INTO custody(project,kind,subject,state,holder,record) VALUES(?1,'graph','graph','active','forged',?2)", params![project().to_string(), b"forged".as_slice()]).unwrap();
     assert_eq!(
-        HostStore::open(&f.root, &f.request())
-            .unwrap()
-            .graph_chair(project(), graph, &f.request())
+        host.custody_item(project(), &subject, &f.request())
             .unwrap(),
-        Some(value)
+        Some(record)
     );
 }

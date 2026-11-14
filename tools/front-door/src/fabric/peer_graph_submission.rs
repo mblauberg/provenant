@@ -473,7 +473,7 @@ fn graph_submission_pins_the_integration_base_across_replay()
         &index_call,
     )?
     .ok_or("graph index missing")?;
-    assert!(binding.chair.is_none(), "graph created a chair association");
+    assert!(binding.holder.chair().is_none(), "graph created a chair association");
     let base = {
         let journal = FileJournal::open(
             &fixture.roots.state,

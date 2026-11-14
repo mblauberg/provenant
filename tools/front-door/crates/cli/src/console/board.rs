@@ -169,9 +169,9 @@ pub(super) fn read(
                 Ok(Some(index)) => {
                     match index.read(attempt.project_id, work_key.graph(), &chair_call) {
                         Ok(Some(found))
-                            if found.request_digest == lane.operation.request_digest =>
+                            if found.provenance == Some(lane.operation.request_digest) =>
                         {
-                            found.chair
+                            found.holder.chair().cloned()
                         }
                         Ok(None) => None,
                         _ => {
@@ -261,7 +261,8 @@ mod tests {
             "route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":"high"},
             "authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null},
             "parent":null,"lane_depth":1}))?;
-        request.chair = Some(provenant_run::ChairBinding {
+        request.chair = Some(provenant_records::custody::Chair {
+            process: crate::fabric::chair_process(),
             extra: Default::default(),
             session: None,
             host: provenant_core::HostId::from_bytes([4; 16]),

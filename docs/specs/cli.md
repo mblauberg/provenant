@@ -78,8 +78,23 @@ work. Settlement events are emitted as they are observed.
 
 ### Status selection
 
-Status includes all active work; omitted settled work is counted. Human and
-structured output share the selection.
+Status includes all active graph work; omitted settled work is counted. Human
+and structured output share the selection. `status --mine` reads active custody
+across projects, or one explicit `--project`, including attempts nested under
+the current chair and unattended items available for adoption. It is short by
+default, expands with `--full`, and exposes typed records and native presence
+with `--json`. Pagination uses `--limit` and `--cursor`; `--session` selects the
+exact chair session for the session-start digest. Settled custody leaves the
+active view. The digest reads this view instead of extracting PRs from prose.
+
+`adopt KIND:ID` takes custody of an external item; `release KIND:ID` records an
+explicit release. `fabric claim acquire|renew|verify|release` takes the same
+subject spelling; renew records activity without a lease or secret token.
+Run launch, worktree creation, PR binding/landing and cloud launch acquire
+custody automatically. Attempt/graph settlement releases those subjects; landing
+records typed evidence on PR and associated branch/worktree subjects. Custody
+failures after a successful external action warn and can be retried by adoption.
+Transfer to a named session is deferred.
 
 - Why: a chair acting on a listing must see work still running.
 - Test: `src/fabric/unified.rs::the_listing_never_hides_active_work_and_counts_what_it_omits`

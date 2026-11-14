@@ -8,9 +8,7 @@ pub enum EventKind {
     MailSent,
     MailRead,
     RunChanged,
-    ClaimAcquired,
-    ClaimRenewed,
-    ClaimReleased,
+    CustodyChanged,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventRecord {

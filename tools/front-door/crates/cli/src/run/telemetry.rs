@@ -212,7 +212,10 @@ pub(super) fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, Str
         }
         for graph in graphs {
             if let Ok(Some(binding)) = index.read(context.project_id, &graph, &index_call)
-                && let Some(session) = binding.chair.and_then(|chair| chair.session)
+                && let Some(session) = binding
+                    .holder
+                    .chair()
+                    .and_then(|chair| chair.session.clone())
             {
                 chair_bindings.insert(graph, session);
             }

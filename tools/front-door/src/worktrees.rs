@@ -259,11 +259,23 @@ fn execute(
         |context, cancel| {
             Ok(match command {
                 Worktree::SeedBuild => unreachable!(),
-                Worktree::Create { branch, base } => Data::Created(Box::new(worktrees::create(
-                    context,
-                    WorktreeCreate { branch, base },
-                    cancel,
-                )?)),
+                Worktree::Create { branch, base } => {
+                    let info = worktrees::create(context, WorktreeCreate { branch, base }, cancel)?;
+                    use provenant_records::custody::{Subject, SubjectKind};
+                    let mut subjects = vec![Subject::new(
+                        SubjectKind::Worktree,
+                        info.path.to_string_lossy(),
+                    )];
+                    if let Some(branch) = &info.branch {
+                        subjects.push(Subject::new(SubjectKind::Branch, branch));
+                    }
+                    if let Err(error) = crate::custody::acquire(&resolved, &subjects) {
+                        provenant_fabric_runtime::custody::warning(format_args!(
+                            "worktree custody pending: {error}"
+                        ));
+                    }
+                    Data::Created(Box::new(info))
+                }
                 Worktree::List => Data::Listed(worktrees::list(context, cancel)?),
                 Worktree::Doctor { path } => {
                     Data::Diagnosed(worktrees::doctor(context, &path, cancel)?)

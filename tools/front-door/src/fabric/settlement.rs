@@ -253,13 +253,20 @@ fn advance_attempt_graph(
         tick: false,
     };
     let graph_config = &factory.context.config.graph;
-    advance_with_budget(
+    let advanced = advance_with_budget(
         &execution.document,
         &mut owner,
         &mut journal,
         &graph_config.limits,
         &graph_config.budget,
     )?;
+    if matches!(
+        advanced.status,
+        provenant_fabric_runtime::graph::GraphStatus::Complete
+            | provenant_fabric_runtime::graph::GraphStatus::Cancelled
+    ) {
+        crate::custody::settle_graph(roots, settled.project_id, id, settled.actor_id)?;
+    }
     Ok(())
 }
 
