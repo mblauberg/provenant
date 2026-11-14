@@ -4,7 +4,7 @@
 
 An agent-filed defect cites an event that already happened (a failure,
 contradiction or review finding) with evidence a newcomer can resolve. Refuse a
-speculative defect. A feature the owner has authorised needs no prior event; it needs
+speculative defect; this evidence rule does not constrain forward-looking design. A feature the owner has authorised needs no prior event; it needs
 a spec. Apply `source:agent` where the repository declares that label, through its
 declarative sync, never by hand (pruning deletes undeclared labels). End the body
 with `Filed-by: <PROVENANT_AGENT_LABEL> <run>` using actual identities; the shared

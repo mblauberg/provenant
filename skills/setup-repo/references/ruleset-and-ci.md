@@ -1,6 +1,6 @@
 # Main-branch ruleset and the ci-status aggregate
 
-Pattern from provenant's live ruleset and its `ci-status` job in `.github/workflows/ci.yml`.
+Use this pattern with the target repository's ruleset and CI workflow.
 
 ## Why one aggregate check
 
@@ -16,64 +16,12 @@ ruleset pins.
 
 ## Creating the ruleset
 
-```sh
-gh api repos/<owner>/<repo>/rulesets --method POST --input - <<'JSON'
-{
-  "name": "Protect main",
-  "target": "branch",
-  "enforcement": "active",
-  "conditions": {
-    "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] }
-  },
-  "rules": [
-    {
-      "type": "pull_request",
-      "parameters": {
-        "required_approving_review_count": 0,
-        "dismiss_stale_reviews_on_push": false,
-        "required_reviewers": [],
-        "require_code_owner_review": false,
-        "require_last_push_approval": false,
-        "required_review_thread_resolution": false,
-        "allowed_merge_methods": ["merge", "squash", "rebase"]
-      }
-    },
-    {
-      "type": "required_status_checks",
-      "parameters": {
-        "strict_required_status_checks_policy": false,
-        "do_not_enforce_on_create": false,
-        "required_status_checks": [
-          { "context": "ci-status", "integration_id": 15368 }
-        ]
-      }
-    }
-  ]
-}
-JSON
-```
-
-`integration_id: 15368` is the GitHub Actions app; pinning it (not just the
-`context` string) stops a same-named check from a different app or a
-hand-posted commit status from satisfying the rule. Confirm the id for the
-target repo/org before reuse:
-
-```sh
-gh api repos/<owner>/<repo>/commits/main/check-runs \
-  --jq '.check_runs[] | {name, app: .app.name, integration_id: .app.id}'
-```
-
-`required_approving_review_count: 0` is provenant's own choice for a
-single-maintainer repo; a team repo should raise it and decide
-`require_code_owner_review` deliberately rather than copy the zero.
-
-`strict_required_status_checks_policy` is also a choice. `false` (provenant's
-live setting, and the template above) lets a head merge while it is behind
-`main`, so landing needs no update-merge and `ci-status` gates the exact head
-only. `true` requires an up-to-date head at merge time: every merge to `main`
-then forces each open pull request to update and rerun its exact-head checks.
-Pick `true` when a green check must always describe the post-merge base, and
-record the choice in the repository's runbook.
+1. Inspect the target's check runs with `gh api` to identify the intended CI app.
+2. Decide the review and base-update requirements and record them in the
+   repository's runbook. A strict base-update requirement reruns checks when the
+   base moves; without it, the check covers the pull request head.
+3. Create the branch ruleset through the [GitHub rulesets API](https://docs.github.com/en/rest/repos/rules)
+   with the aggregate check bound to that app. Verify the result below.
 
 ## Verifying it landed
 
