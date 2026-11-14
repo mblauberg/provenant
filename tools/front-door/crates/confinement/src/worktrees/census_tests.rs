@@ -460,7 +460,8 @@ fn native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree()
         &cancel(),
     )?;
     fs::set_permissions(&created.path, fs::Permissions::from_mode(0o700))?;
-    let result = remove(
+    let result = remove_with_port(
+        &test_context,
         &WorktreeContext {
             workers: &workers,
             ..test_context.context()
@@ -2082,7 +2083,8 @@ fn unreadable_occupant_cwd_keeps_the_tree_for_removal() -> Result<(), Box<dyn Er
     )?;
     // The occupant is same-uid, so its unreadable cwd cannot be excluded.
     fs::set_permissions(&created.path, fs::Permissions::from_mode(0o755))?;
-    let refused = remove(
+    let refused = remove_with_port(
+        &test_context,
         &WorktreeContext {
             workers: &observer,
             ..test_context.context()
@@ -2153,7 +2155,8 @@ fn only_a_placed_foreign_process_allows_pruning_a_merged_clean_tree() -> Result<
         })
     };
     let remove_named = |workers: &InjectedCensus, name: &str| {
-        remove(
+        remove_with_port(
+            &test_context,
             &WorktreeContext {
                 workers,
                 ..test_context.context()
@@ -2368,7 +2371,8 @@ mod writer_cohort {
             workers.observe_roots(std::slice::from_ref(&created.path))[&created.path]
                 .is_available()
         );
-        remove(
+        remove_with_port(
+            &context,
             &WorktreeContext {
                 workers: &workers,
                 ..context.context()

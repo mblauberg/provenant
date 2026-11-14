@@ -14,7 +14,8 @@ fn remove_registered_detached_worktree() -> Result<(), Box<dyn Error>> {
         &cancel(),
     )?;
     run_in_worktree(&fixture, &info.path, &["checkout", "--detach"])?;
-    let removed = remove(
+    let removed = remove_with_port(
+        &test,
         &context,
         WorktreeRemove::Name {
             name: "detached".into(),
@@ -64,7 +65,7 @@ fn detached_removal_keeps_dirty_unmerged_and_live_work() -> Result<(), Box<dyn E
             integration: None,
             expected_head: (scenario == "changed-head").then_some(info.head),
         };
-        let error = remove(&context, request(false), &cancel())
+        let error = remove_with_port(&test, &context, request(false), &cancel())
             .err()
             .ok_or("removed protected tree")?;
         assert!(
@@ -81,7 +82,7 @@ fn detached_removal_keeps_dirty_unmerged_and_live_work() -> Result<(), Box<dyn E
         assert!(error.repair().is_some(), "{scenario}: {error}");
         assert!(info.path.exists());
         if scenario == "unmerged" {
-            let removed = remove(&context, request(true), &cancel())?;
+            let removed = remove_with_port(&test, &context, request(true), &cancel())?;
             assert_eq!(removed.removed.len(), 1);
             assert_ne!(removed.removed[0].head, info.head);
             assert!(removed.pruned_refs.is_empty());
@@ -506,7 +507,7 @@ fn gc_output_pruning_holds_writer_but_not_repository_lock() -> Result<(), Box<dy
     fixture.run(&["commit", "-m", "ignore output"])?;
     let test_context = TestContext::new(&fixture)?;
     let context = test_context.context();
-    let mut lane = gc_merged_worktree(&fixture, &context, "gc-output-lock")?;
+    let mut lane = gc_merged_worktree(&test_context, &context, "gc-output-lock")?;
     let target = lane.path.join("target");
     fs::create_dir(&target)?;
     fs::write(target.join("artifact"), "output")?;
@@ -571,7 +572,7 @@ fn gc_foreign_rechecks_changes_before_removal() -> Result<(), Box<dyn Error>> {
         fixture.run(&["commit", "-m", "ignore local environment"])?;
         let test_context = TestContext::new(&fixture)?;
         let context = test_context.context();
-        let lane = gc_merged_worktree(&fixture, &context, "native-recheck")?;
+        let lane = gc_merged_worktree(&test_context, &context, "native-recheck")?;
         let path = lane.path.clone();
         let retirement = HostRetirementFixture::new(&test_context)?;
         retirement.seed_lane(&context, &lane)?;
@@ -654,7 +655,7 @@ fn gc_foreign_prunes_under_writer_then_locks_repository() -> Result<(), Box<dyn 
     fixture.run(&["commit", "-m", "ignore output"])?;
     let test_context = TestContext::new(&fixture)?;
     let context = test_context.context();
-    let mut lane = gc_merged_worktree(&fixture, &context, "foreign-output-lock")?;
+    let mut lane = gc_merged_worktree(&test_context, &context, "foreign-output-lock")?;
     let retirement = HostRetirementFixture::new(&test_context)?;
     retirement.seed_lane(&context, &lane)?;
     let upstream = fixture.head()?;
@@ -727,8 +728,8 @@ fn gc_failed_prune_retains_once_and_continues() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test_context = TestContext::new(&fixture)?;
     let context = test_context.context();
-    let first = gc_merged_worktree(&fixture, &context, "gc-prune-failed")?;
-    let second = gc_merged_worktree(&fixture, &context, "gc-prune-next")?;
+    let first = gc_merged_worktree(&test_context, &context, "gc-prune-failed")?;
+    let second = gc_merged_worktree(&test_context, &context, "gc-prune-next")?;
     let retirement = HostRetirementFixture::new(&test_context)?;
     retirement.seed_lane(&context, &first)?;
     retirement.seed_lane(&context, &second)?;
@@ -809,7 +810,7 @@ fn gc_refreshes_the_owned_ref_generation_before_recording_retirement() -> Result
     let fixture = Fixture::new()?;
     let test_context = TestContext::new(&fixture)?;
     let context = test_context.context();
-    let created = gc_merged_worktree(&fixture, &context, "gc-advanced-generation")?;
+    let created = gc_merged_worktree(&test_context, &context, "gc-advanced-generation")?;
     let branch = GitRefName::branch("gc-advanced-generation")?;
     let ledger = RefLedger::for_context(&context)?;
     let original = ledger
@@ -978,7 +979,7 @@ fn gc_merged_tree_previews_and_removes_declared_output() -> Result<(), Box<dyn E
     fixture.run(&["commit", "-m", "ignore output"])?;
     let test_context = TestContext::new(&fixture)?;
     let context = test_context.context();
-    let mut lane = gc_merged_worktree(&fixture, &context, "gc-recent-merged")?;
+    let mut lane = gc_merged_worktree(&test_context, &context, "gc-recent-merged")?;
     let retirement = HostRetirementFixture::new(&test_context)?;
     retirement.seed_lane(&context, &lane)?;
     let upstream = fixture.head()?;
@@ -1057,7 +1058,7 @@ fn gc_census_never_runs_under_the_repository_lock() -> Result<(), Box<dyn Error>
         let fixture = Fixture::new()?;
         let test_context = TestContext::new(&fixture)?;
         let mut context = test_context.context();
-        let mut lane = gc_merged_worktree(&fixture, &context, "gc-census-lock")?;
+        let mut lane = gc_merged_worktree(&test_context, &context, "gc-census-lock")?;
         let retirement = HostRetirementFixture::new(&test_context)?;
         retirement.seed_lane(&context, &lane)?;
         let upstream = fixture.head()?;

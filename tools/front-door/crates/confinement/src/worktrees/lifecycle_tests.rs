@@ -334,7 +334,9 @@ impl RetirementPort for HostRetirementFixture {
             intent.decision,
         )
         .map_err(Self::error)?;
-        for subject in planned.subjects() {
+        // The store links a retirement to custody of its reference subject
+        // even when the decision keeps the reference.
+        for subject in std::iter::once(&planned.subject).chain(planned.subjects()) {
             if !self.ensure_custody(intent.project, subject, &request)? {
                 return Ok(None);
             }
@@ -566,8 +568,32 @@ pub(super) fn branch_exists(fixture: &Fixture, name: &str) -> bool {
         .is_ok()
 }
 
-pub(super) fn gc_merged_worktree(
-    fixture: &Fixture,
+/// Remove through the production retirement path: every removal is planned,
+/// custody-checked and settled in a persisted `RetirementRecord`. Fence tests
+/// call this rather than a removal that bypasses the durable port.
+pub(super) fn remove_with_port(
+    test: &TestContext<'_>,
+    context: &WorktreeContext<'_>,
+    request: WorktreeRemove,
+    cancel: &CancelToken,
+) -> Result<RemoveOutcome, WorktreeError> {
+    let retirement = HostRetirementFixture::new(test)
+        .map_err(|error| WorktreeError::Retirement(error.to_string().into()))?;
+    remove_with_retirement(
+        context,
+        request,
+        cancel,
+        &Default::default(),
+        &retirement,
+        retirement.actor,
+    )
+}
+
+/// Create a managed lane the way production does: the worktree, then a real
+/// `Lane` owner carrying the RefLedger generation of the branch just created,
+/// recorded before the branch moves. The returned listing carries that owner.
+pub(super) fn gc_owned_lane(
+    test: &TestContext<'_>,
     context: &WorktreeContext<'_>,
     name: &str,
 ) -> Result<WorktreeInfo, Box<dyn Error>> {
@@ -579,12 +605,52 @@ pub(super) fn gc_merged_worktree(
         },
         &cancel(),
     )?;
+    let branch = created
+        .branch
+        .as_deref()
+        .and_then(|branch| branch.strip_prefix("refs/heads/"))
+        .ok_or("fixture lane has no local branch")?;
+    let tree = verify_worktree(context.repo, &created.path)?;
+    save_lane_owner_when_free(
+        context,
+        &tree,
+        &WorktreeOwner {
+            attempt_id: Some(AttemptId::from_bytes([7; 16])),
+            operation_id: Some(format!("gc-fixture-{}", branch.replace('/', "-")).parse()?),
+            branch: branch.to_owned(),
+            base: created.head.to_string(),
+            host: provenant_core::HostId::from_bytes([1; 16]),
+            created_at: test.clock.wall_now()?,
+            origin: WorktreeOrigin::Lane,
+            label: None,
+            reference: branch_ownership(context, branch, created.head)?,
+        },
+        created.head,
+        None,
+        false,
+        &cancel(),
+    )?;
+    list(context, &cancel())?
+        .into_iter()
+        .find(|lane| lane.path == created.path)
+        .ok_or_else(|| "missing GC fixture worktree".into())
+}
+
+/// A custody-aware merged lane: owned as `gc_owned_lane`, then committed and
+/// merged into the default branch.
+pub(super) fn gc_merged_worktree(
+    test: &TestContext<'_>,
+    context: &WorktreeContext<'_>,
+    name: &str,
+) -> Result<WorktreeInfo, Box<dyn Error>> {
+    let created = gc_owned_lane(test, context, name)?;
     run_in_worktree(
-        fixture,
+        test.fixture,
         &created.path,
         &["commit", "--allow-empty", "-m", name],
     )?;
-    fixture.run(&["merge", "--no-ff", name, "-m", "merge GC fixture"])?;
+    test.fixture
+        .run(&["merge", "--no-ff", name, "-m", "merge GC fixture"])?;
     list(context, &cancel())?
         .into_iter()
         .find(|lane| lane.path == created.path)
@@ -831,14 +897,7 @@ fn merge_proof_scenario() -> Result<(), Box<dyn Error>> {
     let test_context = TestContext::new(&fixture)?;
     let context = test_context.context();
     let new_lane = |name: &str| -> Result<WorktreeInfo, Box<dyn Error>> {
-        let created = create(
-            &context,
-            WorktreeCreate {
-                branch: name.to_owned(),
-                base: None,
-            },
-            &cancel(),
-        )?;
+        let created = gc_owned_lane(&test_context, &context, name)?;
         fs::write(created.path.join(format!("{name}.txt")), name)?;
         run_in_worktree(&fixture, &created.path, &["add", "."])?;
         run_in_worktree(&fixture, &created.path, &["commit", "-m", name])?;

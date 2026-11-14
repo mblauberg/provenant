@@ -72,7 +72,8 @@ fn recreating_a_ref_at_the_same_commit_is_a_new_generation() -> Result<(), Box<d
     };
     create(&context, request(), &cancel())?;
     let first = ledger_record(&context, "lane/again")?.ok_or("no first record")?;
-    remove(
+    remove_with_port(
+        &test,
         &context,
         WorktreeRemove::Name {
             name: "lane/again".into(),

@@ -725,7 +725,8 @@ fn git_inventory_accepts_unregistered_and_recreated_worktrees() -> Result<(), Bo
         path.to_str().ok_or("path")?,
     ])?;
     bind("recreated")?;
-    let outcome = remove(
+    let outcome = remove_with_port(
+        &test,
         &context,
         WorktreeRemove::Name {
             name: "recreated".into(),
@@ -770,7 +771,7 @@ fn writer_lock_busy_is_distinct_from_observed_live_process() -> Result<(), Box<d
         integration: None,
         expected_head: None,
     };
-    let error = remove(&context, request(), &cancel())
+    let error = remove_with_port(&test, &context, request(), &cancel())
         .err()
         .ok_or("removed busy tree")?;
     assert!(matches!(error, WorktreeError::LockBusy));
@@ -817,10 +818,10 @@ fn writer_lock_busy_is_distinct_from_observed_live_process() -> Result<(), Box<d
         ..test.context()
     };
     assert!(matches!(
-        remove(&live, request(), &cancel()),
+        remove_with_port(&test, &live, request(), &cancel()),
         Err(WorktreeError::LiveProcess(_))
     ));
-    remove(&context, request(), &cancel())?;
+    remove_with_port(&test, &context, request(), &cancel())?;
     assert!(before.same_identity(&state.metadata_at(OsStr::new(WRITER_LOCK), false)?));
     Ok(())
 }

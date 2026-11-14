@@ -52,14 +52,7 @@ fn removal_preparation_allows_shared_launch_lock() -> Result<(), Box<dyn Error>>
     fs::write(fixture.root.join(".git/info/exclude"), "target/\n")?;
     let test = TestContext::new(&fixture)?;
     let mut context = test.context();
-    let info = create(
-        &context,
-        WorktreeCreate {
-            branch: "removal-launch-lock".into(),
-            base: None,
-        },
-        &cancel(),
-    )?;
+    let info = gc_owned_lane(&test, &context, "removal-launch-lock")?;
     let retirement = HostRetirementFixture::new(&test)?;
     retirement.seed_lane(&context, &info)?;
     let artifact = info.path.join("target/artifact");
@@ -147,14 +140,7 @@ fn removal_refreshes_session_after_output_preparation() -> Result<(), Box<dyn Er
     fs::write(fixture.root.join(".git/info/exclude"), "target/\n")?;
     let test = TestContext::new(&fixture)?;
     let mut context = test.context();
-    let info = create(
-        &context,
-        WorktreeCreate {
-            branch: "late-worker".into(),
-            base: None,
-        },
-        &cancel(),
-    )?;
+    let info = gc_owned_lane(&test, &context, "late-worker")?;
     let retirement = HostRetirementFixture::new(&test)?;
     retirement.seed_lane(&context, &info)?;
     let artifact = info.path.join("target/artifact");
@@ -284,7 +270,8 @@ fn removal_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> 
             Occupancy::Available
         );
         context.workers = &session;
-        let error = remove(
+        let error = remove_with_port(
+            &test,
             &context,
             WorktreeRemove::Name {
                 name: "worker-appears".into(),
@@ -401,7 +388,7 @@ fn gc_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test_context = TestContext::new(&fixture)?;
     let mut context = test_context.context();
-    let lane = gc_merged_worktree(&fixture, &context, "gc-worker-appears")?;
+    let lane = gc_merged_worktree(&test_context, &context, "gc-worker-appears")?;
     let retirement = HostRetirementFixture::new(&test_context)?;
     retirement.seed_lane(&context, &lane)?;
     let evidence = gc_landing_evidence(&fixture, fixture.head()?)?;
@@ -457,7 +444,7 @@ fn gc_managed_removal_needs_a_fresh_free_census_under_custody() -> Result<(), Bo
         let fixture = Fixture::new()?;
         let test_context = TestContext::new(&fixture)?;
         let mut context = test_context.context();
-        let lane = gc_merged_worktree(&fixture, &context, "gc-census-flip")?;
+        let lane = gc_merged_worktree(&test_context, &context, "gc-census-flip")?;
         let upstream = fixture.head()?;
         let retirement = HostRetirementFixture::new(&test_context)?;
         retirement.seed_lane(&context, &lane)?;
@@ -535,7 +522,7 @@ fn gc_preview_and_apply_both_retain_a_managed_tree_with_an_unknown_census()
         let fixture = Fixture::new()?;
         let test_context = TestContext::new(&fixture)?;
         let mut context = test_context.context();
-        let lane = gc_merged_worktree(&fixture, &context, "gc-census-unknown")?;
+        let lane = gc_merged_worktree(&test_context, &context, "gc-census-unknown")?;
         let retirement = HostRetirementFixture::new(&test_context)?;
         retirement.seed_lane(&context, &lane)?;
         let evidence = gc_landing_evidence(&fixture, fixture.head()?)?;
@@ -585,7 +572,7 @@ fn gc_dry_run_retains_merged_worktree_with_unknown_writer() -> Result<(), Box<dy
     let fixture = Fixture::new()?;
     let test_context = TestContext::new(&fixture)?;
     let context = test_context.context();
-    let lane = gc_merged_worktree(&fixture, &context, "gc-dry-unknown")?;
+    let lane = gc_merged_worktree(&test_context, &context, "gc-dry-unknown")?;
     let report = collect(
         &context,
         &[lane],
@@ -625,7 +612,7 @@ fn gc_dry_run_retains_preview_dirty_worktree() -> Result<(), Box<dyn Error>> {
     fixture.run(&["commit", "-m", "ignore cache"])?;
     let test_context = TestContext::new(&fixture)?;
     let context = test_context.context();
-    let mut lane = gc_merged_worktree(&fixture, &context, "gc-dry-dirty")?;
+    let mut lane = gc_merged_worktree(&test_context, &context, "gc-dry-dirty")?;
     // Ignored content outside the regenerable output keeps the worktree
     // dirty once the preview has pruned.
     fs::create_dir(lane.path.join("cache"))?;
@@ -665,8 +652,8 @@ fn gc_settlement_error_retains_ref_and_continues() -> Result<(), Box<dyn Error>>
     let fixture = Fixture::new()?;
     let test_context = TestContext::new(&fixture)?;
     let mut context = test_context.context();
-    let first = gc_merged_worktree(&fixture, &context, "gc-settle-failed")?;
-    let second = gc_merged_worktree(&fixture, &context, "gc-settle-next")?;
+    let first = gc_merged_worktree(&test_context, &context, "gc-settle-failed")?;
+    let second = gc_merged_worktree(&test_context, &context, "gc-settle-next")?;
     let retirement = HostRetirementFixture::new(&test_context)?;
     retirement.seed_lane(&context, &first)?;
     retirement.seed_lane(&context, &second)?;

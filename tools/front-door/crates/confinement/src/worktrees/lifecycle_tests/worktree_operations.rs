@@ -138,7 +138,8 @@ fn remove_reports_stale_registration_by_branch_and_directory() -> Result<(), Box
     )?;
     fs::remove_dir_all(&stale.path)?;
     for name in ["scratch/stale", "scratch-stale"] {
-        let error = remove(
+        let error = remove_with_port(
+            &test_context,
             &context,
             WorktreeRemove::Name {
                 name: name.to_owned(),
@@ -198,7 +199,8 @@ fn prune_treats_a_prunable_branch_as_not_checked_out() -> Result<(), Box<dyn Err
         Some(&fixture.root)
     )?);
     let integration = primary_integration(&context, &cancel())?.0;
-    let result = remove(
+    let result = remove_with_port(
+        &test_context,
         &context,
         WorktreeRemove::Merged {
             integration: integration.as_str().to_owned(),
@@ -322,7 +324,8 @@ fn clean_linked_worktree_reports_and_retains_in_progress_git_operations()
         );
         assert!(
             matches!(
-                remove(
+                remove_with_port(
+                    &test_context,
                     &context,
                     WorktreeRemove::Name {
                         name: "feature/sequencer".into(),
@@ -350,7 +353,8 @@ fn clean_linked_worktree_reports_and_retains_in_progress_git_operations()
             .iter()
             .any(|entry| entry.path == created.path && entry.dirty == WorktreeCondition::Clean)
     );
-    remove(
+    remove_with_port(
+        &test_context,
         &context,
         WorktreeRemove::Name {
             name: "feature/sequencer".into(),
@@ -430,7 +434,8 @@ fn create_list_remove_keeps_branch_and_refuses_primary() -> Result<(), Box<dyn E
             && entry.occupancy.is_available()
     }));
     assert!(matches!(
-        remove(
+        remove_with_port(
+            &test_context,
             &context,
             WorktreeRemove::Name {
                 name: "main".to_owned(),
@@ -448,7 +453,8 @@ fn create_list_remove_keeps_branch_and_refuses_primary() -> Result<(), Box<dyn E
         ..test_context.context()
     };
     // An unobservable process with a free lease and a clean tree is removed.
-    remove(
+    remove_with_port(
+        &test_context,
         &unknown_context,
         WorktreeRemove::Name {
             name: "feature/lifecycle".to_owned(),
@@ -490,7 +496,7 @@ fn ignored_files_prevent_worktree_removal() -> Result<(), Box<dyn Error>> {
     assert_eq!(condition(&cancellation)?, Some(WorktreeCondition::Ignored));
 
     assert!(matches!(
-        remove(
+        remove_with_port(&test_context,
             &context,
             WorktreeRemove::Name {
                 name: "feature/ignored".to_owned(),
@@ -547,7 +553,12 @@ fn named_removal_refuses_a_head_that_moved_after_the_callers_check() -> Result<(
         expected_head,
     };
     assert!(matches!(
-        remove(&context, request(Some(verified)), &cancellation),
+        remove_with_port(
+            &test_context,
+            &context,
+            request(Some(verified)),
+            &cancellation
+        ),
         Err(WorktreeError::IdentityChanged)
     ));
     assert!(created.path.exists(), "the checkout must survive");
@@ -556,7 +567,7 @@ fn named_removal_refuses_a_head_that_moved_after_the_callers_check() -> Result<(
         Some(&moved)
     );
     // Verifying the head it is really at lets the removal proceed.
-    let outcome = remove(&context, request(Some(moved)), &cancellation)?;
+    let outcome = remove_with_port(&test_context, &context, request(Some(moved)), &cancellation)?;
     assert_eq!(outcome.removed.len(), 1);
     assert!(!created.path.exists());
     Ok(())
@@ -590,7 +601,8 @@ fn merged_pruning_is_branch_scoped_and_keeps_unselected_refs() -> Result<(), Box
         },
         &cancellation,
     )?;
-    let removed = remove(
+    let removed = remove_with_port(
+        &test_context,
         &context,
         WorktreeRemove::Merged {
             integration: "main".to_owned(),
@@ -652,7 +664,8 @@ fn merged_pruning_keeps_old_ancestor_and_unmerged_ignored_files() -> Result<(), 
     fs::write(unmerged.path.join("ignored.txt"), "unmerged branch data\n")?;
     fixture.run(&["commit", "--allow-empty", "-m", "advance integration"])?;
 
-    let outcome = remove(
+    let outcome = remove_with_port(
+        &test_context,
         &context,
         WorktreeRemove::Merged {
             integration: "main".to_owned(),
@@ -781,7 +794,8 @@ fn gitlinks_make_remove_and_prune_require_review() -> Result<(), Box<dyn Error>>
     direct_poison.arm()?;
     merged_poison.arm()?;
     assert!(matches!(
-        remove(
+        remove_with_port(
+            &test_context,
             &context,
             WorktreeRemove::Name {
                 name: "feature/direct-gitlink".to_owned(),
@@ -799,7 +813,8 @@ fn gitlinks_make_remove_and_prune_require_review() -> Result<(), Box<dyn Error>>
     );
     direct_poison.arm()?;
     merged_poison.arm()?;
-    let pruned = remove(
+    let pruned = remove_with_port(
+        &test_context,
         &context,
         WorktreeRemove::Merged {
             integration: "main".to_owned(),
@@ -892,14 +907,7 @@ fn explicit_discard_publishes_recoverable_data_before_removing_work() -> Result<
     let fixture = Fixture::new()?;
     let owner = TestContext::new(&fixture)?;
     let context = owner.context();
-    let created = create(
-        &context,
-        WorktreeCreate {
-            branch: "scratch/archive".into(),
-            base: None,
-        },
-        &cancel(),
-    )?;
+    let created = gc_owned_lane(&owner, &context, "scratch/archive")?;
     let worktree_path = fs::canonicalize(&created.path)?;
     let retirement = HostRetirementFixture::new(&owner)?;
     retirement.seed_lane(&context, &created)?;

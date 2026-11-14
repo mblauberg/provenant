@@ -1833,17 +1833,6 @@ pub fn remove_with_retirement(
     )
 }
 
-/// Removal fences without a durable retirement port, for tests of the fences
-/// themselves. Production removal goes through `remove_with_retirement`.
-#[cfg(test)]
-pub fn remove(
-    context: &WorktreeContext<'_>,
-    request: WorktreeRemove,
-    cancel: &CancelToken,
-) -> Result<RemoveOutcome, WorktreeError> {
-    remove_with_owner(context, request, cancel, &Default::default(), None, None)
-}
-
 /// Remove a freshly created lane only while it is still owned by this operation.
 /// The owner is checked again under repository and writer custody.
 #[cfg(test)]

@@ -279,7 +279,7 @@ fn gc_missing_observer_gate_remains_unknown_during_preview_and_apply() -> Result
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
-    let lane = gc_merged_worktree(&fixture, &context, "gc-missing-gate")?;
+    let lane = gc_merged_worktree(&test, &context, "gc-missing-gate")?;
     let retirement = HostRetirementFixture::new(&test)?;
     retirement.seed_lane(&context, &lane)?;
     let upstream = fixture.head()?;
