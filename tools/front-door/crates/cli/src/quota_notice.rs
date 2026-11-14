@@ -106,6 +106,7 @@ pub(super) fn deliver(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn send(
     state: &provenant_core::StateRoot,
     (project, host): (ProjectId, HostId),
@@ -363,6 +364,7 @@ mod tests {
             "session",
             &account,
             140,
+            &crate::wait::non_wait_observation_settings(),
             &clock,
             WaitBudget::cli(clock.mono_now(), 2).unwrap(),
         )
@@ -373,6 +375,7 @@ mod tests {
             "session",
             &account,
             140,
+            &crate::wait::non_wait_observation_settings(),
             &clock,
             WaitBudget::cli(clock.mono_now(), 2).unwrap(),
         )

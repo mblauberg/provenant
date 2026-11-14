@@ -1104,7 +1104,7 @@ fn resolve_managed_writer_path(
     path: &str,
     branch: &str,
 ) -> Result<std::path::PathBuf, provenant_confinement::worktrees::WorktreeError> {
-    use provenant_confinement::worktrees::{self, WorktreeError};
+    use provenant_confinement::worktrees::WorktreeError;
     if !project_root.is_absolute() {
         return Err(WorktreeError::InvalidRequest);
     }
@@ -1298,6 +1298,7 @@ pub fn child_wait_observation(interval: std::time::Duration) -> String {
     )
 }
 
+#[allow(clippy::disallowed_methods)] // Real-time boundary: paced child polling.
 fn pause_child_poll(cancel: &CancelToken, delay: std::time::Duration) {
     let deadline = std::time::Instant::now() + delay;
     while !cancel.is_cancelled() {
@@ -1307,7 +1308,9 @@ fn pause_child_poll(cancel: &CancelToken, delay: std::time::Duration) {
         }
         Pause::wait(
             &provenant_core::ThreadPause,
-            provenant_core::DurationMicros::from_micros(remaining.as_micros()),
+            provenant_core::DurationMicros::from_micros(
+                u64::try_from(remaining.as_micros()).unwrap_or(u64::MAX),
+            ),
             cancel,
         );
     }

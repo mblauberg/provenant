@@ -2403,7 +2403,7 @@ mod tests {
             .iter()
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
-        let branch_names = ["main", "release/2.0", "feature_x", "@"].map(str::to_owned);
+        let branch_names = ["main", "release/2.0", "feature_x", "@"].map(str::to_owned).to_vec();
         let branch_refused = ["", "-main", "HEAD", "main..next", "release/", "x @{y"];
         let cases = [
             (

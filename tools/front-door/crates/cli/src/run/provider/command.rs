@@ -453,7 +453,8 @@ pub(super) fn configure_build_slots(
                     .and_then(|gc| gc.disk_limits(state))
                     .map(Some)
                     .unwrap_or_else(|error| {
-                        eprintln!(
+                        let _ = writeln!(
+                std::io::stderr().lock(),
                             "provenant: build disk limits unavailable; critical limit could not be resolved, so the build may proceed without the disk gate: {error}"
                         );
                         None
@@ -516,7 +517,8 @@ fn check_sandbox_off_build_disk(
     {
         Ok(limits) => limits,
         Err(error) => {
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr().lock(),
                 "provenant: sandbox-off build disk limits unavailable; proceeding without the disk check: {error}"
             );
             return Ok(());
@@ -525,7 +527,8 @@ fn check_sandbox_off_build_disk(
     let root = match existing_ancestor(&target) {
         Ok(root) => root,
         Err(error) => {
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr().lock(),
                 "provenant: sandbox-off build disk observation unavailable; proceeding without the disk check: {error}"
             );
             return Ok(());
@@ -534,7 +537,8 @@ fn check_sandbox_off_build_disk(
     let free = match provenant_os::fs::available_bytes_at(&root) {
         Ok(free) => free,
         Err(error) => {
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr().lock(),
                 "provenant: sandbox-off build disk observation unavailable; proceeding without the disk check: {error}"
             );
             return Ok(());
@@ -546,7 +550,8 @@ fn check_sandbox_off_build_disk(
             limits.detail(free)
         )),
         provenant_config::DiskLevel::Warning => {
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr().lock(),
                 "provenant: warning: {}; sandbox-off lane may build",
                 limits.detail(free)
             );
@@ -589,7 +594,10 @@ pub(super) fn set_cargo_jobs(
 /// already supplied is left alone; `domains.fabric.lanes` overrides the defaults.
 /// Read-only source views never own build output. Scratch already has a
 /// settlement lifetime and no-follow disposal, including crashed attempts.
-pub(super) fn scratch_cargo_output(env: &mut Vec<(OsString, OsString)>, scratch: &Path) {
+pub(super) fn scratch_cargo_output(
+    env: &mut Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    scratch: &Path,
+) {
     let target = scratch.join("target").into_os_string();
     for key in ["CARGO_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"] {
         env.retain(|(name, _)| name != key);

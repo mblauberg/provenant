@@ -24,7 +24,8 @@ pub(crate) enum TargetSyntax {
     Branch,
 }
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct TargetGrammar(pub TargetSyntax);
+/// Read by the catalogue grammar invariant, which parses every marked target.
+pub(crate) struct TargetGrammar(#[cfg_attr(not(test), allow(dead_code))] pub TargetSyntax);
 impl ArgExt for TargetGrammar {}
 
 pub(crate) trait CatalogueArg {

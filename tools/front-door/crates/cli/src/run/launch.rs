@@ -603,7 +603,7 @@ pub(super) fn launch_on_host_with_wait(
                 SubjectKind::Worktree,
                 writer.worktree.to_string_lossy(),
             ));
-            match crate::fabric::checkout_branch(&writer.worktree) {
+            match crate::fabric::checkout_branch(edge.roots, &writer.worktree) {
                 Ok(Some(branch)) => subjects.push(Subject::new(SubjectKind::Branch, branch)),
                 Ok(None) => {}
                 Err(error) => provenant_fabric_runtime::custody::warning(format_args!(

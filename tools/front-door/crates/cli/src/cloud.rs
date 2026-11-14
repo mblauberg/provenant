@@ -378,7 +378,7 @@ mod tests {
         );
         let (project, main) = (Path::new("/repo/sub"), Path::new("/repo"));
         assert_eq!(
-            collect_path(project, main, Some(Path::new("wt")), "cloud/abc").unwrap(),
+            collect_path(project, project, main, Some(Path::new("wt")), "cloud/abc").unwrap(),
             Path::new("/repo/sub/wt")
         );
         assert_eq!(
