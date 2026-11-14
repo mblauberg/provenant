@@ -16,42 +16,12 @@ Layers are bundled, user, repository (`.provenant/templates/`) and inline;
 
 ## Commands
 
-The one canonical command block; other skills name templates and point to
-`provenant help --all`, which owns every flag. Run a graph with `--explain`
-first, check authority, write scope and gates, then submit without it.
-
-```sh
-provenant run plan --brief-file brief.md --explain
-provenant run implement --brief-file brief.md --branch NAME --base REF --route junior
-provenant run explore --over a,b --brief-file questions.md --route junior
-provenant run review --set subject=origin/BRANCH --set review_base=origin/main
-provenant run --file GRAPH --name NAME
-provenant wait NAME --any --timeout 30m
-provenant status [NAME]
-provenant output NAME/NODE
-provenant trace NAME
-provenant retry NAME/NODE --brief TEXT
-provenant stop NAME --reason TEXT
-provenant steer NAME/NODE --brief-file -
-provenant land N --head SHA --wait
-provenant cloud launch --file brief.md --provider codex --environment ENV
-provenant cloud collect KEY
-provenant ask --file question.json --session SESSION
-```
-
-`--file` takes a graph document only; a brief is the positional `BRIEF` or
-`--brief-file`. `--route ROUTE` sets one route for the graph, and
-`--route writer=junior,review=senior` sets a role map. An unknown route or role
-is a usage error that lists the valid values.
-
-`--name NAME` makes a call replayable. The same input returns the existing
-graph with exit 0 and launches nothing; a different input launches the next
-free `NAME-K` and says so. Without `--name`, a graph gets `TEMPLATE-K` and never
-replays.
+Use `provenant help --all` for commands and options. Explain a graph before
+submitting it; check its authority, write scope and gates first.
 
 ## Shape the work
 
-Slice into lanes of about three acceptance items with disjoint write scopes,
+Slice into bounded lanes with disjoint write scopes,
 merged into one integration branch. Settle shared contracts first; use waves
 only for real dependencies. Default slices to junior, contained design to
 senior and root constraints to principal; consult recorded cost per template.
@@ -61,11 +31,11 @@ coupled work that cannot split. Review each slice lightly and the integrated
 head with the full panel.
 
 `run --branch NAME --base REF` creates a single writer's worktree. Register one
-by hand (`provenant worktree create`) only to share it: `batch` gives every
+by hand (`provenant worktree create BRANCH`) only to share it: `batch` gives every
 slice the same worktree, so its writers run in sequence. Parallel writers need
 a graph with a worktree and write scope per node.
 
-Inside a lane, `run TEMPLATE` adds a child node to the calling graph, and
+Inside a lane, `provenant run TEMPLATE` adds a child node to the calling graph, and
 `--name` names it. Attached children are cancelled when their parent settles;
 `wait` collects them first.
 
@@ -89,10 +59,6 @@ Check commits, paths, acceptance evidence, review subject and the resolved
 child blocks dependent work, and a synthesis cannot waive a gate. Integrate
 disjoint heads in dependency order, run the affected checks and review the
 combined head.
-
-To restart a long writer fresh from its handoff, set
-`lanes.context_handoff_tokens` under `[knobs]` in host configuration; it is off
-by default.
 
 [Lanes and panels](references/lanes.md) covers briefs, confinement and review
 independence. [Herdr](references/herdr.md) covers watching panes and peers.
