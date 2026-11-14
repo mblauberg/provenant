@@ -58,6 +58,7 @@ keeps the text it replaces as a bounded, hashed revision. Hooks are advisory:
 they emit only their own key's checkpoint, and mark a missing or slow
 source unavailable, never empty. Autosave never writes the chair's
 `checkpoint.md`.
+Hook state carries custody-ledger, lane and worktree rows; it has no checkpoint-derived PR rows or PR scan.
 - Why: restoring the wrong or a lost checkpoint misdirects an agent, and absent
   evidence must not read as an empty queue.
 - Test: `tests/workflow.rs::session_save_refuses_another_registered_project`;

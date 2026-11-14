@@ -767,10 +767,9 @@ fn autosave(
         clock,
     )?;
     Ok(format!(
-        "Checkpoint state auto-saved: {} lanes in flight, {} settled since the chair's save, {} PRs, {} worktrees.{}",
+        "Checkpoint state auto-saved: {} lanes in flight, {} settled since the chair's save, {} worktrees.{}",
         state.active.len(),
         state.settled.len(),
-        state.prs.len() + state.prs_unread.len(),
         state.worktrees.len(),
         if state.unavailable.is_empty() {
             String::new()

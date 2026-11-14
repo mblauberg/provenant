@@ -45,7 +45,6 @@ fn limits() -> Limits {
         output_lines: 100,
         output_bytes: 16384,
         result_bytes: 3000,
-        lease_seconds: 300,
         peer_seconds: 30,
         graph_timeout_seconds: 14400,
         store_busy_timeout_ms: 30_000,

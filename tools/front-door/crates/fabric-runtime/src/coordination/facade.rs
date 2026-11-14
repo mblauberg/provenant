@@ -1099,7 +1099,6 @@ pub(super) fn safe_input_field(field: &str) -> Option<String> {
         "targets",
         "max_bytes",
         "wait_seconds",
-        "lease_seconds",
         "operation_id",
         "artifacts",
         "artifact",

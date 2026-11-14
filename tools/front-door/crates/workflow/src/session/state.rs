@@ -1,4 +1,4 @@
-//! Lane, pull request and worktree state that Claude hooks report and save
+//! Lane, custody and worktree state that Claude hooks report and save
 //! beside a session checkpoint. Rendering is pure: callers collect the facts.
 //! The saved state is derived data in a file only hooks write. It grants no
 //! authority, and no autosave ever opens the chair's checkpoint for writing.
@@ -6,10 +6,8 @@
 const AUTO_SAVED: &str = "Auto-saved: ";
 /// Most lines one section shows before it summarises the rest.
 const SECTION_LINES: usize = 8;
-/// Longest single field taken from a lane, PR or worktree record.
+/// Longest single field taken from a lane, custody or worktree record.
 const FIELD_LIMIT: usize = 160;
-/// Most PR numbers taken from the chair's own checkpoint text.
-pub const PR_REF_LIMIT: usize = 16;
 pub const DIGEST_LIMIT: usize = 3 * 1024;
 pub const BLOCK_LIMIT: usize = 6 * 1024;
 /// Longest next-page command shown as a runnable command.
@@ -153,19 +151,6 @@ impl LaneLine {
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrLine {
-    pub number: u64,
-    pub state: String,
-    pub summary: String,
-}
-/// A named PR whose status could not be read, and the command that reads it
-/// from the same store the collector used (or a plain note when none is safe).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrUnread {
-    pub number: u64,
-    pub command: String,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeLine {
     pub path: String,
     pub branch: String,
@@ -196,9 +181,6 @@ pub struct SessionState {
     /// Records in the selected page not inspected before the deadline.
     pub active_skipped: usize,
     pub settled_skipped: usize,
-    pub prs: Vec<PrLine>,
-    /// PR numbers the chair named whose status could not be read.
-    pub prs_unread: Vec<PrUnread>,
     pub worktrees: Vec<WorktreeLine>,
     /// Linked worktrees the inventory could not inspect before its deadline.
     pub worktrees_skipped: usize,
@@ -305,58 +287,6 @@ impl SessionState {
         settled.more = failures.len().saturating_sub(SECTION_LINES);
         if !self.settled.is_empty() || self.settled_more.is_some() {
             sections.push(settled);
-        }
-        if !self.prs.is_empty() || !self.prs_unread.is_empty() {
-            let mut lines: Vec<String> = self
-                .prs
-                .iter()
-                .filter(|pr| pr.state.eq_ignore_ascii_case("open"))
-                .map(|pr| format!("#{} {}", pr.number, clean(&pr.summary, FIELD_LIMIT)))
-                .collect();
-            let merged = self
-                .prs
-                .iter()
-                .filter(|pr| pr.state.eq_ignore_ascii_case("merged"))
-                .count();
-            let closed = self
-                .prs
-                .iter()
-                .filter(|pr| pr.state.eq_ignore_ascii_case("closed"))
-                .count();
-            if merged + closed > 0 {
-                lines.push(format!("{merged} merged, {closed} closed"));
-            }
-            lines.extend(
-                self.prs
-                    .iter()
-                    .filter(|pr| {
-                        !["open", "merged", "closed"]
-                            .iter()
-                            .any(|s| pr.state.eq_ignore_ascii_case(s))
-                    })
-                    .map(|pr| format!("#{} status unavailable", pr.number)),
-            );
-            lines.extend(self.prs_unread.iter().take(PR_REF_LIMIT).map(|pr| {
-                // Same rule as a lane paging command: code only if it
-                // survives rendering byte for byte.
-                let how = if !pr.command.starts_with("provenant ") {
-                    clean(&pr.command, NEXT_PAGE_LIMIT)
-                } else if clean(&pr.command, NEXT_PAGE_LIMIT) == pr.command {
-                    format!("run `{}`", pr.command)
-                } else {
-                    format!(
-                        "the command is too long or unsafe to show; run provenant pr status {} with this hook's --state-dir",
-                        pr.number
-                    )
-                };
-                format!("#{} status unavailable; {how}", pr.number)
-            }));
-            sections.push(Section {
-                title: "Pull requests in custody".into(),
-                lines,
-                more: 0,
-                partial: None,
-            });
         }
         if worktrees
             && !self
@@ -562,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn settled_successes_and_merged_prs_are_compact() {
+    fn settled_successes_are_compact() {
         let state = SessionState {
             settled: (0..20)
                 .map(|n| LaneLine {
@@ -574,22 +504,13 @@ mod tests {
                     ..lane("failure")
                 }))
                 .collect(),
-            prs: (1..=10)
-                .map(|number| PrLine {
-                    number,
-                    state: "MERGED".into(),
-                    summary: "irrelevant".into(),
-                })
-                .collect(),
             ..Default::default()
         };
         let digest = state.digest(DIGEST_LIMIT);
         assert!(digest.len() < 2048, "{}", digest.len());
-        assert!(digest.contains("10 merged, 0 closed"));
         assert!(digest.contains("succeeded: 20"));
         assert!(digest.contains("failure failed"));
         assert!(!digest.contains("success-"));
-        assert!(!digest.contains("#1 "));
     }
 
     #[test]

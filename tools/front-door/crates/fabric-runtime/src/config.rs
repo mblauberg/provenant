@@ -641,7 +641,6 @@ pub struct Limits {
     pub output_lines: u64,
     pub output_bytes: u64,
     pub result_bytes: u64,
-    pub lease_seconds: u64,
     pub peer_seconds: u64,
     #[serde(default = "default_graph_timeout_seconds")]
     pub graph_timeout_seconds: u64,
@@ -764,7 +763,6 @@ impl DomainConfig for FabricConfig {
             ("output_lines", l.output_lines, 500),
             ("output_bytes", l.output_bytes, 65536),
             ("result_bytes", l.result_bytes, 1048576),
-            ("lease_seconds", l.lease_seconds, 3600),
             ("peer_seconds", l.peer_seconds, 30),
         ] {
             if value == 0 || value > cap {
@@ -1168,7 +1166,6 @@ mod tests {
                 output_lines: 500,
                 output_bytes: 65536,
                 result_bytes: 1048576,
-                lease_seconds: 3600,
                 peer_seconds: 30,
                 graph_timeout_seconds: 14400,
                 store_busy_timeout_ms: 30_000,
@@ -1535,14 +1532,6 @@ mod tests {
                 "graph.budget.per_node.wall_time_seconds",
                 "rejected value: 0",
                 true,
-                "range",
-            ),
-            // Configuration may only lower a protocol cap.
-            (
-                "schema_version = 1\n[domains.fabric.limits]\nlease_seconds = 3601\n",
-                "limits.lease_seconds",
-                "3601",
-                false,
                 "range",
             ),
         ] {

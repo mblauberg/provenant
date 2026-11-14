@@ -199,7 +199,7 @@ fn domain_config_accepts_typed_peers_and_only_lower_limits() -> Result {
         "schema_version=1\n[domains.fabric.peers.workshop]\nhost='00000000000000000000000000000001'\ndestination='user@workshop'\n",
     )?;
     call(&rig, &["fabric", "identity"], 0)?;
-    for bad in ["lease_seconds=3601", "page_rows=0"] {
+    for bad in ["page_rows=0"] {
         std::fs::write(
             rig.state.join("config.toml"),
             format!("schema_version=1\n[domains.fabric.limits]\n{bad}\n"),

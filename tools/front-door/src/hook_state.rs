@@ -817,29 +817,6 @@ esac
                 "{note}"
             );
         }
-        // The unread PR hint carries the same state directory.
-        assert_eq!(
-            commands(None).command("pr status 9"),
-            "provenant pr status 9"
-        );
-        assert_eq!(
-            commands(Some(Path::new("rel/state"))).command("pr status 9"),
-            "provenant --state-dir '/work/rel/state' pr status 9"
-        );
-        let unread = SessionState {
-            prs_unread: vec![provenant_workflow::session::PrUnread {
-                number: 9,
-                command: commands(Some(Path::new("rel/state"))).command("pr status 9"),
-            }],
-            ..Default::default()
-        };
-        let shown = unread.digest(provenant_workflow::session::DIGEST_LIMIT);
-        assert!(
-            shown.contains(
-                "#9 status unavailable; run `provenant --state-dir '/work/rel/state' pr status 9`"
-            ),
-            "{shown}"
-        );
         let state = SessionState {
             settled: lanes,
             settled_more: Some(command),

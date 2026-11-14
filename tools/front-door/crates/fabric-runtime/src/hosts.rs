@@ -1184,7 +1184,6 @@ mod tests {
                 output_lines: 500,
                 output_bytes: 65536,
                 result_bytes: 1048576,
-                lease_seconds: 3600,
                 peer_seconds: 30,
                 graph_timeout_seconds: 14400,
                 store_busy_timeout_ms: 30_000,
