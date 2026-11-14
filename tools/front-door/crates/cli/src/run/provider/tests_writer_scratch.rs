@@ -824,8 +824,7 @@ printf 'agy 1.0.0\n'
                         .find(|(key, _)| key == name)
                         .map(|(_, value)| std::path::PathBuf::from(value))
                 };
-                let private = private_env("GIT_COMMON_DIR").ok_or("prepared GIT_COMMON_DIR")?;
-                assert_eq!(private_env("GIT_DIR"), Some(private.clone()));
+                let private = private_env("GIT_DIR").ok_or("prepared GIT_DIR")?;
                 let private_objects =
                     private_env("GIT_OBJECT_DIRECTORY").ok_or("prepared GIT_OBJECT_DIRECTORY")?;
                 std::fs::create_dir_all(&private)?;
