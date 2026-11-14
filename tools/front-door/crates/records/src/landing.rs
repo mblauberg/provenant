@@ -2,6 +2,33 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Member identities remain numbers even when Serde buffers an internally tagged
+/// enum. JSON object keys would turn them into strings before the value is read.
+mod member_map {
+    use super::*;
+
+    pub fn serialize<S: serde::Serializer, T: Serialize>(
+        members: &BTreeMap<u64, T>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        members.iter().collect::<Vec<_>>().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<u64, T>, D::Error> {
+        let mut members = BTreeMap::new();
+        for (pr, value) in Vec::<(u64, T)>::deserialize(deserializer)? {
+            if members.insert(pr, value).is_some() {
+                return Err(serde::de::Error::custom(
+                    "duplicate landing member identity",
+                ));
+            }
+        }
+        Ok(members)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ReviewProof {
@@ -679,6 +706,7 @@ pub struct MergeEvidence {
     pub candidate_commit: Option<String>,
     pub candidate_tree: Option<String>,
     pub target_base: Option<String>,
+    #[serde(with = "member_map")]
     pub member_commits: BTreeMap<u64, String>,
     pub members: Vec<MemberEvidence>,
 }
@@ -759,6 +787,7 @@ pub struct LandingChanged {
     pub generation: u64,
     pub revision: u64,
     pub operation: Option<OperationRef>,
+    #[serde(with = "member_map")]
     pub outcomes: BTreeMap<u64, MemberOutcome>,
     pub evidence: Option<MergeEvidence>,
     pub deduplication_key: String,
@@ -797,7 +826,9 @@ pub struct LandingRecord {
     pub revision: u64,
     pub resolved_plan: ResolvedPlan,
     pub gate_definition: GateDefinition,
+    #[serde(with = "member_map")]
     pub outcomes: BTreeMap<u64, MemberOutcome>,
+    #[serde(with = "member_map")]
     pub progress: BTreeMap<u64, MemberProgress>,
     pub operation: Option<OperationRef>,
     pub submission: Option<Submission>,
