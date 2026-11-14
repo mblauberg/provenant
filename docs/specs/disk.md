@@ -30,7 +30,7 @@ keeps the bytes measured so far. Hard links count once.
 ## Figures are observations, not promises
 
 No figure promises bytes recoverable by deletion, a fallback measurement says
-so in `method`, and the report is a sequence of observations, not a snapshot.
+so, and the report is a sequence of observations, not a snapshot.
 - Why: users decide deletions from these numbers.
 - Test: `crates/os/src/disk.rs::unavailable_private_size_selects_allocated_fallback`
 
@@ -43,18 +43,5 @@ deletion authority: GC revalidates its own conditions.
 - Test: `crates/confinement/src/disk.rs::lane_inventory_refuses_incomplete_measurements`;
   `::lane_classification_reuses_gc_owner_and_reason`
 
-## Collection keeps evidence and needs fresh proof
-
-GC removes a worktree, or declared idle output inside one, only under held
-writer custody with a fresh complete census; unknown writer evidence keeps it
-unless the project opts into `merged-clean` foreign collection. Log retention
-expires bulky captures only after every sibling attempt is terminal and keeps
-the tail, results, exit evidence and digests. Low-disk collection is bounded and
-never fetches or deletes worktrees.
-- Why: rebuildable output should be reclaimable without ending a worktree, while
-  sealed evidence and possible writers stay protected.
-- Test: `crates/confinement/src/worktrees/lifecycle_tests/gc_safety.rs::gc_idle_output_requires_ignored_idle_and_free_writer`;
-  `::gc_foreign_merged_clean_is_opt_in_immediate_and_requires_complete_census`;
-  `crates/run/src/retention.rs::gc_logs_keep_tail_and_evidence_and_obey_age_custody_and_preview`;
-  `crates/cli/src/run/tests/writer_disk.rs::writer_rechecks_once_after_collection_and_reports_reclaimed_bytes`
-- Owner: `crates/confinement/src/worktrees/gc.rs`, `crates/run/src/retention.rs`
+Collection belongs to [worktrees](supervisor.md#worktrees) and
+[state retention](state.md#retention-keeps-evidence).
