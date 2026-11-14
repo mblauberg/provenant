@@ -279,6 +279,7 @@ impl PreviewReporter {
                 self.uncertain_agents.remove(agent);
             }
             Err(error) => {
+                self.stopped_agents.remove(agent);
                 self.uncertain_agents.insert(agent);
                 return Err(error);
             }

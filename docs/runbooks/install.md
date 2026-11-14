@@ -82,14 +82,15 @@ schema-1 `ingest/` and `ingest-cursors.json` move to
 `usage-history/format-1-ingest-cursors.json`. These telemetry archives are made
 only with receipt none or 1 and positively identified old state; receipt 2
 leaves live telemetry untouched even when old agents recreate stores. Format 2
-has no format-1 telemetry reader. Admission
-leases are dropped with the run stores. Read-only tmp
-directories and partial removal can be retried safely. Dropped symlinks,
+has no format-1 telemetry reader. Only positively identified format-1
+admission leases are dropped. Read-only tmp directories and partial removal can
+be retried safely. Dropped symlinks,
 including lock-named links, are unlinked with an identity check; their targets
 are never followed. A symlink or non-directory at a provider-history source or
-archive ancestor, or an existing archive destination, refuses during
-preflight, before shutdown or moves. The usage ledger source and archive
-ancestors must also be directories, and its archive destination must be absent.
+archive ancestor, or an existing destination with its source still present,
+refuses during preflight, before shutdown or moves. An already moved archive
+with no remaining source stays intact on retry. The usage ledger source and
+archive ancestors must also be directories, and its archive destination must be absent.
 
 Classify every store separately. Without a receipt, only shipped 1.x headers
 (or the retired work index) identify old state; other non-fresh headers refuse.
@@ -100,8 +101,8 @@ only shipped 1.x versions are reset; known format-2 stores and their payloads
 stay untouched, while unknown headers refuse. One old store never authorises
 removal of its siblings or live telemetry. A store symlink is left alone.
 An empty main file or a complete version-zero header with page count 0 or 1
-supplies no evidence. A short non-empty main file refuses even with WAL/shared-memory companions:
-its incomplete header cannot identify the format.
+supplies no evidence. A short non-empty main file refuses even with
+WAL/shared-memory companions: its incomplete header cannot identify the format.
 Other unknown non-empty or unreadable headers refuse and require repair or
 restoration before retrying. See the
 [state format contract](../specs/state.md#a-format-break-needs-acknowledgement)

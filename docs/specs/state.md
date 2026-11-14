@@ -175,9 +175,11 @@ Before removing any dropped tree, provider archives from its actual
 `attempts/<id>/provider-history` layout (including run-keyed and child stores)
 are moved to `provider-history/format-1/<relative-attempt-path>/provider-history`
 with identity checks and no replacement. A symlink or non-directory at a source
-history or archive ancestor, or any existing archive destination, refuses
-at preflight before shutdown or moves. Only with receipt none or 1 and
-positively identified format-1 state, telemetry is archived without replacement: `usage-ledger/` to `usage-history/format-1/`,
+history or archive ancestor, or an existing destination whose source is still
+present, refuses at preflight before shutdown or moves. An already moved valid
+archive with no remaining source stays intact on retry. Only with receipt none
+or 1 and positively identified format-1 state, telemetry is archived without
+replacement: `usage-ledger/` to `usage-history/format-1/`,
 schema-1 `ingest/` to `usage-history/format-1-ingest/`, and `ingest-cursors.json`
 to `usage-history/format-1-ingest-cursors.json`. Format 2 has no reader for any of
 these format-1 records. Unsafe source types or archive ancestors and existing

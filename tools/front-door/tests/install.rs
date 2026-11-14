@@ -3241,7 +3241,7 @@ fn check_receipt_header_decisions(receipt: Option<u64>) -> Result {
         }
         let path = rig.state.join(store);
         fs::create_dir_all(path.parent().ok_or("store parent")?)?;
-        for version in [0, old, intermediate, current, current + 1] {
+        for version in [0, old, intermediate, current - 1, current, current + 1] {
             old_sqlite_header(&path, version)?;
             let before = snapshot(&rig.state)?;
             let output = reset_install(&rig, &stage, &["--upgrade-preflight"])?;
@@ -3250,7 +3250,7 @@ fn check_receipt_header_decisions(receipt: Option<u64>) -> Result {
                 Some(1) => None,
                 _ if version == old => Some(6),
                 _ if version == 0 => Some(0),
-                Some(2) if version >= current => Some(0),
+                Some(2) if version > old => Some(0),
                 _ => None,
             };
             if let Some(expected) = expected {
@@ -3394,7 +3394,7 @@ fn reset_selects_only_identified_stores_and_their_payloads() -> Result {
     for (path, bytes) in before.iter().filter(|(path, _)| {
         ["run.sqlite3", "fabric", "attempts", "children/live"]
             .iter()
-            .any(|prefix| path.starts_with(prefix))
+            .any(|prefix| path.starts_with(rig.state.join(prefix)))
     }) {
         assert_eq!(after.get(path), Some(bytes), "{}", path.display());
     }
@@ -3718,6 +3718,18 @@ fn reset_archive_collision_refuses_before_writes_and_is_rerunnable() -> Result {
         "existing archive"
     );
     assert!(!rig.state.join("run.sqlite3").exists());
+    // Interrupted after the move, before payload deletion: the source is gone
+    // and a valid archive is present. Retrying must preserve that archive.
+    old_sqlite_header(&rig.state.join("run.sqlite3"), 10)?;
+    fs::create_dir_all(rig.state.join("attempts/a1/tmp"))?;
+    fs::write(rig.state.join("attempts/a1/tmp/leftover"), "old payload")?;
+    let retried = reset_install(&rig, &stage, &["--reset-state"])?;
+    assert_eq!(code(&retried), 0, "{retried:?}");
+    assert!(!rig.state.join("attempts/a1").exists());
+    assert_eq!(
+        fs::read_to_string(archive.join("transcript.jsonl"))?,
+        "original transcript"
+    );
     Ok(())
 }
 

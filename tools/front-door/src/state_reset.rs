@@ -375,21 +375,23 @@ pub(crate) fn plan(state: &Path, receipt_format: Option<u64>) -> io::Result<Opti
 fn check_provider_history(root: &Directory, found: &[(PathBuf, Directory)]) -> io::Result<()> {
     check_archive_ancestors(root, Path::new("provider-history/format-1"))?;
     for (path, attempt) in found {
-        if metadata(attempt, OsStr::new("provider-history"))?
-            .is_some_and(|value| value.kind != FileKind::Directory)
-        {
+        let source = metadata(attempt, OsStr::new("provider-history"))?;
+        if source.is_some_and(|value| value.kind != FileKind::Directory) {
             return Err(io::Error::other(format!(
                 "{} is not a directory; move it aside or restore the provider history before retrying reset",
                 path.join("provider-history").display()
             )));
         }
-        // Even an empty attempt must not hide an ambiguous archive destination.
-        check_archive_destination(
-            root,
-            &Path::new("provider-history/format-1")
-                .join(path)
-                .join("provider-history"),
-        )?;
+        let destination = Path::new("provider-history/format-1")
+            .join(path)
+            .join("provider-history");
+        if source.is_some() {
+            check_archive_destination(root, &destination)?;
+        } else {
+            // An earlier reset may have moved this archive before failing to
+            // delete the payload. Keep it, but still reject malformed paths.
+            check_archive_ancestors(root, &destination)?;
+        }
     }
     Ok(())
 }
