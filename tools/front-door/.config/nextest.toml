@@ -23,13 +23,6 @@ slow-timeout = { period = "10s", terminate-after = 9 }
 filter = 'package(=provenant) & binary(=graph_provider) & test(=graph_writer_restarts_fresh)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-# Four concurrent first launches, then four waits, scheduled beside the
-# twelve-launch admission test. Locally it takes 5-8s at the green and current
-# heads alike; on a loaded macOS runner it took 20-25s and then crossed 30s.
-[[profile.ci.overrides]]
-filter = 'package(=provenant) & binary(=graph_provider) & test(=simultaneous_first_launches_pass_cutover_guard)'
-slow-timeout = { period = "30s", terminate-after = 2 }
-
 [profile.ci.junit]
 path = "junit.xml"
 
@@ -93,6 +86,16 @@ not (
 
 [test-groups]
 serial-process = { max-threads = 1 }
+launch-contention = { max-threads = 1 }
+
+# Each of these fixtures races several real launches on one host registry
+# lock. Run beside each other they contend for that lock and the machine and
+# cross their own time limits, so they run one at a time; every other test
+# still runs in parallel with them. Default-profile overrides also apply to
+# the ci and lane profiles.
+[[profile.default.overrides]]
+filter = 'package(=provenant) & binary(=graph_provider) & (test(=simultaneous_first_launches_pass_cutover_guard) | test(=simultaneous_writer_launches_create_attempts))'
+test-group = "launch-contention"
 
 [[profile.default.overrides]]
 filter = 'package(=provenant) & binary(=graph_provider) & test(=graph_writer_restarts_fresh)'
