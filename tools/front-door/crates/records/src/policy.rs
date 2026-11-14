@@ -21,6 +21,8 @@ pub enum Strength {
 }
 
 impl Strength {
+    pub const ALL: [Self; 3] = [Self::Refuse, Self::Warn, Self::Off];
+
     pub const fn behaviour(self) -> &'static str {
         match self {
             Self::Refuse => "refuse the violated predicate",
@@ -81,7 +83,7 @@ impl Rule {
     }
 
     pub fn strengths(&self) -> Vec<Strength> {
-        [Strength::Refuse, Strength::Warn, Strength::Off]
+        Strength::ALL
             .into_iter()
             .filter(|strength| self.supports(*strength))
             .collect()
@@ -296,7 +298,7 @@ mod tests {
     fn generated_guidance_tracks_every_supported_strength() {
         for rule in table() {
             let behaviour = rule.behaviour();
-            for strength in [Strength::Refuse, Strength::Warn, Strength::Off] {
+            for strength in Strength::ALL {
                 assert_eq!(
                     behaviour.contains(&format!("{}:", strength_name(strength))),
                     rule.supports(strength),

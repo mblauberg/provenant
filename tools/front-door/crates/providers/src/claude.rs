@@ -98,7 +98,12 @@ pub const REGISTRATION: crate::Registration = crate::Registration {
     },
 };
 
-crate::adapter!(Claude, "claude", prepare);
+crate::adapter!(
+    Claude,
+    "claude",
+    prepare;
+    crate::quota_live::claude::session_identity
+);
 const MODEL_ON_WIRE: bool = true;
 
 /// The default config directory's keychain service. A non-default

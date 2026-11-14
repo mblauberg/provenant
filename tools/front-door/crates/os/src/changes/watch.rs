@@ -3,7 +3,7 @@ use std::{
     io::{self, ErrorKind, Write},
     os::unix::net::UnixStream,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::Duration,
 };
 use thiserror::Error;
@@ -22,10 +22,10 @@ pub enum WaitOutcome { Changed, TimedOut, Woken }
 
 /// A clonable cancellation signal that interrupts a blocking event wait.
 #[derive(Clone)]
-pub struct WakeHandle(Arc<Mutex<UnixStream>>);
+pub struct WakeHandle(Arc<UnixStream>);
 impl WakeHandle {
     pub fn wake(&self) -> io::Result<()> {
-        let mut stream = self.0.lock().map_err(|_| io::Error::other("event wake lock poisoned"))?;
+        let mut stream = self.0.as_ref();
         match stream.write_all(&[1]) {
             Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(()),
             result => result,
@@ -44,7 +44,7 @@ impl Watcher {
         writer.set_nonblocking(true).map_err(WatchError::Io)?;
         let native = crate::sys::changes::Watcher::subscribe(paths, reader)
             .map_err(|error| if error.kind() == io::ErrorKind::Unsupported { WatchError::Unsupported } else { WatchError::Io(error) })?;
-        Ok(Self { native, wake: WakeHandle(Arc::new(Mutex::new(writer))) })
+        Ok(Self { native, wake: WakeHandle(Arc::new(writer)) })
     }
     pub fn wake_handle(&self) -> WakeHandle { self.wake.clone() }
     pub fn wait(&mut self, timeout: Duration) -> Result<WaitOutcome, WatchError> {
@@ -67,7 +67,7 @@ mod tests {
             .map_err(|error| io::Error::other(error.to_string()))?;
         std::fs::write(&second, b"created\n")?;
         assert_eq!(watcher.wait(Duration::from_secs(2))?, WaitOutcome::Changed);
-        std::fs::write(&second, b"appended\n")?;
+        std::fs::OpenOptions::new().append(true).open(&second)?.write_all(b"appended\n")?;
         assert_eq!(watcher.wait(Duration::from_secs(2))?, WaitOutcome::Changed);
         Ok(())
     }

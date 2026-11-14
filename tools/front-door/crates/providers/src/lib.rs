@@ -116,7 +116,7 @@ pub fn scheduling_policies(
 
 // Shared mechanics; each adapter supplies its own `prepare` builder.
 macro_rules! adapter {
-    ($ty:ty, $id:literal, $prepare:path $(, $diagnostic:path)?) => {
+    ($ty:ty, $id:literal, $prepare:path $(, $diagnostic:path)? $(; $session_identity:path)?) => {
         impl crate::Adapter for $ty {
             $(fn failure_diagnostic(&self, stderr: &[u8]) -> Option<String> {
                 $diagnostic(stderr)
@@ -135,6 +135,13 @@ macro_rules! adapter {
                     crate::AccountDetection::Unknown
                 })
             }
+            $(fn session_identity(
+                &self,
+                live: &crate::quota_live::LiveQuota,
+                directory: &std::path::Path,
+            ) -> Result<provenant_records::AccountIdentity, crate::ProviderError> {
+                $session_identity(live, directory)
+            })?
             fn prepare(
                 &self,
                 input: crate::PrepareInput<'_>,

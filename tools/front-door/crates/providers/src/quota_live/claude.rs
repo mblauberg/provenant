@@ -57,6 +57,11 @@ struct AuthStatus {
     fingerprint: String,
     login_expires: Option<i64>,
 }
+fn session_account_identity(status: &AuthStatus) -> provenant_records::AccountIdentity {
+    // Claude exposes a verified account fingerprint but no native login epoch.
+    // Keep the frozen epoch field Unknown instead of treating expiry as an epoch.
+    provenant_records::AccountIdentity::provider_observation("claude", &status.fingerprint)
+}
 fn login_expiry(value: &Value) -> Option<i64> {
     if let Some(seconds) = value.as_i64() {
         return Some(if seconds > 100_000_000_000 {
@@ -112,6 +117,14 @@ fn auth_status(result: Result<ExecOutcome, ProbeFailure>) -> Result<AuthStatus, 
         fingerprint,
         login_expires: state.get("loginExpiresAt").and_then(login_expiry),
     })
+}
+
+pub(crate) fn session_identity(
+    live: &LiveQuota,
+    directory: &Path,
+) -> Result<provenant_records::AccountIdentity, crate::ProviderError> {
+    live.session_identity(directory)
+        .map_err(|_| crate::ProviderError::UnknownIdentity)
 }
 
 fn parse_credentials(raw: &[u8]) -> Result<Value, ProbeFailure> {
@@ -193,12 +206,11 @@ impl LiveQuota {
     fn claude_selector<'a>(&self, dir: &'a Path) -> Option<(&'static str, &'a Path)> {
         (dir != self.home.join(".claude")).then_some(("CLAUDE_CONFIG_DIR", dir))
     }
-    fn claude_identity(
+    fn claude_auth_status(
         &self,
         dir: &Path,
-        expected: &str,
         deadline: i64,
-    ) -> Result<Identity, ProbeFailure> {
+    ) -> Result<AuthStatus, ProbeFailure> {
         let status = auth_status(self.command(
             "claude",
             &["auth", "status", "--json"],
@@ -207,14 +219,35 @@ impl LiveQuota {
             deadline,
             10,
         ));
-        let status = match status {
+        match status {
             Err(ProbeFailure::Auth) => {
                 *self.signed_in.borrow_mut() = Some(false);
                 *self.refresh_pending.borrow_mut() = false;
-                return Err(ProbeFailure::Auth);
+                Err(ProbeFailure::Auth)
             }
-            other => other?,
-        };
+            other => other,
+        }
+    }
+    fn session_identity(
+        &self,
+        dir: &Path,
+    ) -> Result<provenant_records::AccountIdentity, ProbeFailure> {
+        // Keep both provider observations within the SessionStart time budget.
+        let deadline = self.now().saturating_add(3);
+        let initial = self.claude_auth_status(dir, deadline)?;
+        let confirmed = self.claude_auth_status(dir, deadline)?;
+        if initial.fingerprint != confirmed.fingerprint {
+            return Err(ProbeFailure::Network);
+        }
+        Ok(session_account_identity(&confirmed))
+    }
+    fn claude_identity(
+        &self,
+        dir: &Path,
+        expected: &str,
+        deadline: i64,
+    ) -> Result<Identity, ProbeFailure> {
+        let status = self.claude_auth_status(dir, deadline)?;
         let fingerprint = status.fingerprint;
         // Verify the registered identity before opening its credential. A
         // directory can have been signed in as another account since the last
@@ -225,22 +258,7 @@ impl LiveQuota {
         let credential = optional_probe(self.claude_token(dir, deadline))?;
         let (token, expires) = credential.map_or((None, None), |(t, e)| (Some(t), Some(e)));
         // Every selected directory can rotate while a tick is in flight.
-        let confirmed = auth_status(self.command(
-            "claude",
-            &["auth", "status", "--json"],
-            self.claude_selector(dir),
-            None,
-            deadline,
-            10,
-        ));
-        let confirmed = match confirmed {
-            Err(ProbeFailure::Auth) => {
-                *self.signed_in.borrow_mut() = Some(false);
-                *self.refresh_pending.borrow_mut() = false;
-                return Err(ProbeFailure::Auth);
-            }
-            other => other?,
-        };
+        let confirmed = self.claude_auth_status(dir, deadline)?;
         if confirmed.fingerprint != fingerprint {
             return Err(ProbeFailure::Network);
         }
@@ -804,6 +822,24 @@ mod tests {
             false,
         );
         assert_eq!(result, Err(ProbeFailure::ProbeDirectory));
+    }
+
+    #[test]
+    fn usage_identity_uses_verified_account_without_inventing_an_epoch() {
+        use super::*;
+
+        let identity = session_account_identity(&AuthStatus {
+            fingerprint: "0123456789abcdef".into(),
+            login_expires: Some(1_800_000_000),
+        });
+
+        assert_eq!(
+            identity,
+            provenant_records::AccountIdentity::provider_observation(
+                "claude",
+                "0123456789abcdef",
+            )
+        );
     }
 
     #[test]

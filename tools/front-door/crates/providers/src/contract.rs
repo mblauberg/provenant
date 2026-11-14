@@ -475,6 +475,15 @@ pub trait Adapter: Sync {
         None
     }
     fn id(&self) -> &'static str;
+    /// Verify the account identity for one provider session. The directory selects
+    /// provider auth state; it is never used as identity evidence.
+    fn session_identity(
+        &self,
+        _live: &crate::quota_live::LiveQuota,
+        _directory: &std::path::Path,
+    ) -> Result<provenant_records::AccountIdentity, ProviderError> {
+        Err(ProviderError::UnknownIdentity)
+    }
     fn account(&self, state: &StreamState) -> Result<AccountDetection, ProviderError>;
     fn prepare(&self, input: PrepareInput<'_>) -> Result<LaunchSpec, ProviderError>;
     fn stream(&self, continuation: Option<&Continuation>) -> Result<StreamState, ProviderError>;

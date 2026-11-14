@@ -294,6 +294,12 @@ fn session_identities_split_usage_when_a_config_directory_rotates() -> Result {
         },
     )?;
     assert_eq!(report.added, 2);
+    for account in ["claude/account-a", "claude/account-b"] {
+        assert_eq!(
+            report.accounts.get(account).map(|count| count.added),
+            Some(1)
+        );
+    }
     let rows = read_rows(&f.roots, &RowFilter::default())?;
     assert_eq!(rows.len(), 2);
     let row_for = |session: &str| rows.iter().find(|row| row.session == session).unwrap();

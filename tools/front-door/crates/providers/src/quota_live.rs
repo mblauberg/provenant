@@ -556,6 +556,87 @@ mod tests {
     }
 
     #[test]
+    fn provider_adapter_resolves_rotation_for_an_unregistered_session_directory() {
+        struct SessionIdentityProbe(
+            std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>,
+        );
+        impl Executor for SessionIdentityProbe {
+            fn execute(
+                &self,
+                _: ExecOptions<'_>,
+            ) -> Result<ExecOutcome, ExecError> {
+                let bytes = self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .ok_or(ExecError::Busy)?;
+                Ok(ExecOutcome {
+                    termination: Termination::Exit(0),
+                    stdout: provenant_os::exec::CapturedStream {
+                        bytes,
+                        ..Default::default()
+                    },
+                    stderr: Default::default(),
+                    timed_out: false,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let state = temp.path().join("state");
+        let directory = home.join("unregistered-config");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let status = |email: &str| {
+            format!(r#"{{"loggedIn":true,"email":"{email}","loginExpiresAt":1800000000}}"#)
+                .into_bytes()
+        };
+        let mut live = quota(&home, state);
+        live.executor = Some(Box::new(SessionIdentityProbe(std::sync::Mutex::new(
+            std::collections::VecDeque::from([
+                status("first@example.test"),
+                status("first@example.test"),
+                status("second@example.test"),
+                status("second@example.test"),
+            ]),
+        ))));
+        let adapter = crate::REGISTRY
+            .iter()
+            .find(|registration| registration.adapter.id() == "claude")
+            .unwrap();
+
+        let first = adapter
+            .adapter
+            .session_identity(&live, &directory)
+            .unwrap();
+        let second = adapter
+            .adapter
+            .session_identity(&live, &directory)
+            .unwrap();
+
+        assert_eq!(
+            first,
+            provenant_records::AccountIdentity::provider_observation(
+                "claude",
+                &crate::identity::fingerprint("first@example.test").unwrap(),
+            )
+        );
+        assert_eq!(
+            second,
+            provenant_records::AccountIdentity::provider_observation(
+                "claude",
+                &crate::identity::fingerprint("second@example.test").unwrap(),
+            )
+        );
+    }
+
+    #[test]
     fn command_names_probe_directory_setup_failures() {
         let home = tempfile::tempdir().unwrap();
         let quota = quota(home.path(), home.path().join("missing"));
