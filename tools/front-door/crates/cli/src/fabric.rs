@@ -458,8 +458,17 @@ fn execute(
             );
             loop {
                 let mut observation = input.clone();
-                let seconds =
-                    (budget.remaining(clock.mono_now()).as_micros() / 1_000_000).clamp(1, 55);
+                let seconds = if matches!(
+                    &input,
+                    Mutation::Events(EventsInput::Read {
+                        wait_seconds: Some(0),
+                        ..
+                    })
+                ) {
+                    0
+                } else {
+                    (budget.remaining(clock.mono_now()).as_micros() / 1_000_000).clamp(1, 55)
+                };
                 if let Mutation::Events(EventsInput::Read {
                     wait_seconds: Some(wait_seconds),
                     ..

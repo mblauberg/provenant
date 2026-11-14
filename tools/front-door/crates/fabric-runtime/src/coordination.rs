@@ -525,28 +525,41 @@ impl CoordinationApi for LocalCoordination<'_> {
     ) -> Result<EventsResult, CoordinationError> {
         input.validate_input(WaitTransport::Cli)?;
         if let Err(error) = self.ensure_active(budget, cancel) {
-            return match (&error, &input) {
-                (
-                    CoordinationError::Timeout,
-                    EventsInput::Read {
-                        after,
-                        wait_seconds: Some(_),
-                        ..
-                    },
-                ) => Ok(EventsResult::Read {
-                    extra: Default::default(),
-                    page: Page {
+            let nonblocking_read = budget.is_nonblocking()
+                && matches!(
+                    (&error, &input),
+                    (
+                        CoordinationError::Timeout,
+                        EventsInput::Read {
+                            wait_seconds: Some(0),
+                            ..
+                        }
+                    )
+                );
+            if !nonblocking_read {
+                return match (&error, &input) {
+                    (
+                        CoordinationError::Timeout,
+                        EventsInput::Read {
+                            after,
+                            wait_seconds: Some(_),
+                            ..
+                        },
+                    ) => Ok(EventsResult::Read {
                         extra: Default::default(),
-                        items: Vec::new(),
-                        truncated: false,
-                    },
-                    cursor: after.unwrap_or(0),
-                    timed_out: true,
-                    unknown_hosts: Vec::new(),
-                    run_events_pending: false,
-                }),
-                _ => Err(error),
-            };
+                        page: Page {
+                            extra: Default::default(),
+                            items: Vec::new(),
+                            truncated: false,
+                        },
+                        cursor: after.unwrap_or(0),
+                        timed_out: true,
+                        unknown_hosts: Vec::new(),
+                        run_events_pending: false,
+                    }),
+                    _ => Err(error),
+                };
+            }
         }
         let request = self.request(cancel);
         match input {
@@ -1209,6 +1222,20 @@ mod tests {
             })
         ));
         assert_eq!(*clock.0.lock().unwrap(), 1_000_000);
+        let EventsResult::Noted { seq, .. } = service
+            .events(
+                EventsInput::Note {
+                    extra: Default::default(),
+                    note: "zero wait observation".into(),
+                    dedup_key: None,
+                },
+                budget(),
+                &cancel,
+            )
+            .expect("append event")
+        else {
+            panic!("event note");
+        };
         let expired = budget();
         *clock.0.lock().unwrap() = 7_000_000;
         assert!(matches!(
@@ -1227,6 +1254,47 @@ mod tests {
                 ..
             })
         ));
+        let EventsResult::Read {
+            page,
+            cursor: observed,
+            timed_out: false,
+            ..
+        } = service
+            .events(
+                EventsInput::Read {
+                    extra: Default::default(),
+                    after: Some(cursor),
+                    limit: 100,
+                    wait_seconds: Some(0),
+                },
+                WaitBudget::nonblocking(clock.mono_now()),
+                &cancel,
+            )
+            .expect("nonblocking observation")
+        else {
+            panic!("zero wait must observe once");
+        };
+        assert_eq!(page.items.last().map(|event| event.seq), Some(seq));
+        assert_eq!(observed, seq);
+        let before = clock.mono_now();
+        assert!(matches!(
+            service.events(
+                EventsInput::Read {
+                    extra: Default::default(),
+                    after: Some(seq),
+                    limit: 100,
+                    wait_seconds: Some(0),
+                },
+                WaitBudget::nonblocking(before),
+                &cancel
+            ),
+            Ok(EventsResult::Read {
+                page: Page { items, .. },
+                timed_out: true,
+                ..
+            }) if items.is_empty()
+        ));
+        assert_eq!(clock.mono_now(), before);
     }
 
     #[test]

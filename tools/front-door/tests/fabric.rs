@@ -158,6 +158,14 @@ fn ownership_and_expired_fences_are_refused() -> Result {
     }
     // A real bounded observation consumes the one-second lease; no test sleeps.
     let cursor = call(&rig, &["fabric", "events", "read"], 0)?["data"]["cursor"].to_string();
+    let immediate = call(
+        &rig,
+        &[
+            "fabric", "events", "read", "--after", &cursor, "--wait", "0",
+        ],
+        0,
+    )?;
+    assert_eq!(immediate["data"]["timed_out"], true);
     call(
         &rig,
         &[
@@ -182,7 +190,6 @@ fn malformed_operations_and_waits_fail_before_state_creation() -> Result {
             "bad/id",
         ],
         vec!["fabric", "events", "read", "--wait", "14401"],
-        vec!["fabric", "events", "read", "--wait", "0"],
     ] {
         assert_eq!(call(&rig, &args, 2)?["status"], "invalid");
         assert!(!rig.state.exists());
