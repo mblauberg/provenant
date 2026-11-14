@@ -163,6 +163,7 @@ fn prepare(
         tool_requirements,
         git_wrapper: Default::default(),
         policy: input.policy.clone(),
+        credential_roots: input.credential_roots.clone(),
         profile: ProviderProfile {
             spec: profile,
             observations: Default::default(),

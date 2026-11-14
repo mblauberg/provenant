@@ -991,6 +991,7 @@ pub(super) fn read_only_plan_protecting(
         extensions: ExtensionPolicy::Deny,
         agy_state: None,
         permissions: PlanPermissions {
+            credential_roots: provenant_core::CredentialRoots::for_home(Path::new(root)),
             policy: None,
             read_only: None,
             mode: AccessMode::ReadOnly,
@@ -1092,6 +1093,7 @@ fn claude_network_on_enables_web_tools_and_codex_toolchain_without_writer_grants
             let plan = fixture_network_plan(access, None, network);
             let launch = claude::Claude.prepare(PrepareInput {
                 home: &home,
+                credential_roots: provenant_core::CredentialRoots::for_home(&home),
                 ..fixture_input(&claude_route, &plan, &prompt, repo, Some(&token))
             })?;
             if access == Access::ReadOnly {
@@ -1175,6 +1177,7 @@ fn claude_network_on_enables_web_tools_and_codex_toolchain_without_writer_grants
             let codex_plan = fixture_network_plan(access, Some("login"), network);
             let codex = codex::Codex.prepare(PrepareInput {
                 home: &home,
+                credential_roots: provenant_core::CredentialRoots::for_home(&home),
                 ..fixture_input(&codex_route, &codex_plan, &prompt, repo, None)
             })?;
             for key in [
@@ -1250,6 +1253,7 @@ fn claude_network_on_without_complete_rust_keeps_public_system_tools()
         let plan = fixture_network_plan(Access::ReadOnly, None, NetworkAccess::Open);
         let launch = claude::Claude.prepare(PrepareInput {
             home: &home,
+            credential_roots: provenant_core::CredentialRoots::for_home(&home),
             ..fixture_input(
                 &route,
                 &plan,
@@ -1325,6 +1329,7 @@ fn rust_less_hosts_keep_repository_execution_in_the_rendered_profile()
             (adapter == "claude").then_some(&token),
         );
         input.home = &home;
+        input.credential_roots = provenant_core::CredentialRoots::for_home(&home);
         input.provenant.git = &git_executable;
         let launch = match adapter {
             "claude" => claude::Claude.prepare(input)?,

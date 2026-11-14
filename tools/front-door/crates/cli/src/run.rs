@@ -4,7 +4,10 @@
 use crate::{Output, Part, PricesRefresh, Reconcile, Stats, Switch, Target, Trace, limits};
 #[cfg(test)]
 use provenant_core::ActorId;
-use provenant_core::{AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, WallTime};
+use provenant_core::{
+    AttemptId, CancelToken, Clock, CredentialRoots, CredentialScope, DeliveryId, OperationId,
+    Roots, WallTime,
+};
 use provenant_fabric_runtime::hosts::plain_text;
 use provenant_os::clock::SystemClock;
 use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
@@ -282,6 +285,129 @@ pub struct Registry<'a> {
     pub cancel: Option<&'a CancelToken>,
     pub repo_facts: provenant_confinement::worktrees::RepoFacts,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceAdmissionMode {
+    /// A pinned source must be the project checkout or a registered linked worktree.
+    Registered,
+    /// The caller selected a live directory, which may not be a registered checkout.
+    Live,
+    /// Explain-only target that may not have been materialised yet.
+    Proposed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceWarning {
+    pub path: PathBuf,
+    pub source: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceAdmission {
+    pub path: PathBuf,
+    pub warnings: Vec<SourceWarning>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceAdmissionError {
+    pub code: &'static str,
+    pub reason: String,
+}
+
+impl std::fmt::Display for SourceAdmissionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for SourceAdmissionError {}
+
+/// The same source-root decision used by preparation and graph explanation.
+/// Pinned roots are verified against the selected project's Git registration;
+/// live roots retain their selected location. Both modes use declared paths
+/// for credential and state boundaries.
+pub fn admit_source_root(
+    cwd: &Path,
+    state: &Path,
+    source: &Path,
+    credentials: &CredentialRoots,
+    mode: SourceAdmissionMode,
+) -> Result<SourceAdmission, SourceAdmissionError> {
+    const CODE: &str = "CONFINEMENT_SOURCE_CWD_AUTHORITY";
+    let refuse = |reason: &str| SourceAdmissionError {
+        code: CODE,
+        reason: reason.to_owned(),
+    };
+    let check_credentials = |path: &Path| {
+        credentials
+            .refusal(path, CredentialScope::Subtree, true)
+            .map_or(Ok(()), |root| {
+                Err(refuse(&format!(
+                    "graph source checkout overlaps declared credential root {} (source: {})",
+                    root.path.display(),
+                    root.source,
+                )))
+            })
+    };
+    check_credentials(source)?;
+    let candidate = provenant_confinement::permissions::resolve_boundary_path(source)
+        .map_err(|_| refuse("graph source checkout is not an allowed read root"))?;
+    check_credentials(&candidate)?;
+    if !run::access_root_allowed(&candidate, state, true) {
+        return Err(refuse("graph source checkout is not an allowed read root"));
+    }
+    let path = match mode {
+        SourceAdmissionMode::Live => {
+            if !std::fs::metadata(&candidate).is_ok_and(|metadata| metadata.is_dir()) {
+                return Err(refuse("graph source checkout is not an existing directory"));
+            }
+            candidate
+        }
+        SourceAdmissionMode::Proposed => candidate,
+        SourceAdmissionMode::Registered => {
+            let verified = run::resolve_reader_source(state, cwd, &candidate).map_err(|_| {
+                refuse("graph source checkout is no longer registered with the project")
+            })?;
+            verified
+        }
+    };
+    check_credentials(&path)?;
+    if !run::access_root_allowed(&path, state, true) {
+        return Err(refuse("graph source checkout is not an allowed read root"));
+    }
+    let mut warnings = Vec::new();
+    for ancestor in path.ancestors() {
+        if let Some(name) = ancestor.file_name().and_then(std::ffi::OsStr::to_str)
+            && provenant_core::PROJECT_AGENT_CONFIG_DIRECTORIES.contains(&name)
+        {
+            warnings.push(SourceWarning {
+                path: ancestor.to_owned(),
+                source: format!("project-local agent configuration ({name})"),
+            });
+        }
+    }
+    // A source root can contain an agent directory without the candidate
+    // itself being below it; that overlap is advisory and keeps its declaration.
+    for name in provenant_core::PROJECT_AGENT_CONFIG_DIRECTORIES {
+        let config = path.join(name);
+        if std::fs::symlink_metadata(&config).is_ok() {
+            warnings.push(SourceWarning {
+                path: config,
+                source: format!("project-local agent configuration ({name})"),
+            });
+        }
+    }
+    warnings.sort_by(|left, right| left.path.cmp(&right.path));
+    warnings.dedup_by(|left, right| left.path == right.path);
+    Ok(SourceAdmission { path, warnings })
+}
+
+/// Resolve the full declared credential table for a launch edge, including
+/// account registrations and host environment overrides.
+pub fn declared_credentials(registry: &Registry<'_>) -> Result<CredentialRoots, String> {
+    provider::declared_credentials(registry)
+}
+
 impl Registry<'_> {
     fn prepare_with_wait(
         &self,

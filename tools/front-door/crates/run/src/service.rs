@@ -878,6 +878,7 @@ impl From<&RunError> for ErrorKind {
             RunError::Confinement(
                 provenant_confinement::permissions::PermissionError::CredentialRoot
                 | provenant_confinement::permissions::PermissionError::CredentialRootAt { .. }
+                | provenant_confinement::permissions::PermissionError::CredentialStore { .. }
                 | provenant_confinement::permissions::PermissionError::CredentialGrant { .. },
             ) => Self::CredentialRoot,
             RunError::Confinement(_) => Self::Confinement,

@@ -1117,7 +1117,7 @@ pub(super) fn remove_tree_when_before_delete(
     };
     before_delete(&locked.verified, &canonical, archive.as_ref())?;
     // A cache that cannot be derived must not block removal; warn and skip it.
-    let cargo_cache = crate::permissions::worktree_cargo_cache(context.home, &locked.verified)
+    let cargo_cache = crate::permissions::worktree_cargo_cache_path(context.home, &locked.verified)
         .map_err(|error| warn_cache_removal(&error))
         .ok();
     let verified_path = locked.verified.path().to_path_buf();
@@ -1154,7 +1154,7 @@ pub(super) fn remove_tree_when_before_delete(
     Ok(RemovedTree {
         archive,
         info,
-        lane_cache: cargo_cache.map(|cache| cache.path),
+        lane_cache: cargo_cache,
         _writer: writer,
         repository: repository_guard,
     })

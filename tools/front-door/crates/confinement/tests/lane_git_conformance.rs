@@ -311,8 +311,9 @@ fn lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only()
     )?;
     let linked = verify_worktree(&verified, &lane)?;
     let selected = GitRefName::branch("lane/test")?;
-    let authority = WorktreeWriteAuthority::for_worktree(&linked, &selected, &home)?;
-    prepare_writer_directories(&linked, &selected, &authority, &home)?;
+    let credentials = provenant_core::CredentialRoots::for_home(&home);
+    let authority = WorktreeWriteAuthority::for_worktree(&linked, &selected, &home, &credentials)?;
+    prepare_writer_directories(&linked, &selected, &authority, &home, &credentials)?;
     let grant = |path: PathBuf| PathGrant {
         path,
         scope: PathScope::Subtree,
@@ -347,6 +348,7 @@ fn lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only()
         observations: Default::default(),
     };
     let plan = PlanPermissions {
+        credential_roots: provenant_core::CredentialRoots::for_home(&home),
         policy: Some(
             provenant_confinement::run_config::RunConfig::default().policy_for_launch(
                 &root.join("state"),
@@ -994,6 +996,9 @@ fn read_only_lane_fetches_into_private_git_with_host_metadata_denied() -> Result
         extensions: ExtensionPolicy::Deny,
         agy_state: None,
         permissions: PlanPermissions {
+            credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+                "/fixture/home",
+            )),
             policy: Some(
                 provenant_confinement::run_config::RunConfig::default().policy_for_launch(
                     &state,

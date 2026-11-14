@@ -154,6 +154,7 @@ pub(super) fn prepare_command(
         isolated,
         task.access.source_live,
     )?;
+    let credential_roots = plan.permissions().credential_roots.clone();
     if isolated {
         observed_head = Some(source_head(task)?);
         worktree_gitdir = Some(cwd.join(".git"));
@@ -198,6 +199,7 @@ pub(super) fn prepare_command(
     let prompt = Prompt::new(String::new());
     let mut spec = adapter
         .prepare(PrepareInput {
+            credential_roots: credential_roots.clone(),
             images: &[],
             policy: &launch_policy,
             route: &route,
@@ -259,6 +261,7 @@ pub(super) fn prepare_command(
         super::project_paths::Context {
             cwd: &cwd,
             home: &home,
+            credential_roots: &credential_roots,
             common_git: common_git_path.as_deref(),
             state_root: roots.state.as_path(),
             worktree_gitdir: worktree_gitdir.as_deref(),
@@ -308,9 +311,11 @@ pub(super) fn prepare_command(
     let warnings: Vec<String> = spec
         .omitted_discovery
         .iter()
-        .map(|entry| super::preparation::omission_warning(entry, &home))
+        .map(|entry| super::preparation::omission_warning(entry, &home, spec.credential_roots()))
         .collect();
-    let applied_access = spec.applied_access().receipt(&home);
+    let applied_access = spec
+        .applied_access()
+        .receipt(&home, spec.credential_roots());
     let tool_closure = serde_json::Value::Array(
         spec.prepared_tools()
             .iter()

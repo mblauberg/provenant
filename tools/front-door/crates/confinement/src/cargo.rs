@@ -26,7 +26,6 @@ pub const TRACKING_FILES: &[&str] = &[
     ".global-cache-journal",
 ];
 pub const CONFIG_FILES: &[&str] = &["config", "config.toml"];
-pub const CREDENTIAL_FILES: &[&str] = &["credentials", "credentials.toml"];
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct CargoHome {
@@ -79,10 +78,12 @@ impl CargoHome {
     }
 
     pub fn credentials(&self) -> impl Iterator<Item = PathGrant> + '_ {
-        CREDENTIAL_FILES.iter().map(move |name| PathGrant {
-            path: self.path.join(name),
-            scope: PathScope::Exact,
-        })
+        provenant_core::CARGO_CREDENTIAL_FILES
+            .iter()
+            .map(move |name| PathGrant {
+                path: self.path.join(name),
+                scope: PathScope::Exact,
+            })
     }
 
     pub fn config(&self) -> impl Iterator<Item = PathGrant> + '_ {

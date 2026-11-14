@@ -187,6 +187,11 @@ attempt and is materialised as an attempt-owned tree, so later edits cannot
 change what a reviewer sees; a missing subject fails closed. A `head` source
 pins the newest commit of a writer's continuation chain. The runtime never
 resets or creates a worktree to satisfy a binding.
+Registered linked worktrees are verified at their real paths wherever they
+live, including `.claude/worktrees` and locations outside the project.
+Declared credential stores still refuse every overlapping source or grant;
+project-local agent configuration only warns. Explanation and launch
+preparation share the same source admission decision.
 - Why: scouts share read access while review and repair keep one immutable subject.
 - Test: `crates/fabric-runtime/src/graph/land_tests.rs::a_head_source_reviews_the_newest_continuation_and_lands_it`
 

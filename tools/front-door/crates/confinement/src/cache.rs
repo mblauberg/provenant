@@ -176,35 +176,32 @@ pub(crate) fn preview_worktree_cargo_cache(
     home: &Path,
     worktree: &crate::repo::VerifiedWorktree,
 ) -> Result<Option<CacheGcEntry>, PermissionError> {
-    let grant = crate::permissions::worktree_cargo_cache(home, worktree)?;
+    let path = crate::permissions::worktree_cargo_cache_path(home, worktree)?;
     let cache_root = home.join("Library/Caches/provenant-lane-cargo");
     let Some(root) = open_cache_root(&cache_root)? else {
         return Ok(None);
     };
-    let name = grant
-        .path
-        .file_name()
-        .ok_or(PermissionError::AnchorMismatch)?;
+    let name = path.file_name().ok_or(PermissionError::AnchorMismatch)?;
     let directory = match root.open_verified_directory(name) {
         Ok(directory) => directory,
         Err(error) if error.is_not_found() => return Ok(None),
-        Err(error) => return Err(cache_fs_error("open private cache", &grant.path)(error)),
+        Err(error) => return Err(cache_fs_error("open private cache", &path)(error)),
     };
     verify_cache_metadata(
         &directory
             .metadata()
-            .map_err(cache_fs_error("stat private cache", &grant.path))?,
+            .map_err(cache_fs_error("stat private cache", &path))?,
     )?;
-    let Some(owner) = read_cache_owner(&directory, &grant.path)? else {
+    let Some(owner) = read_cache_owner(&directory, &path)? else {
         return Ok(None);
     };
     let identity = worktree.identity();
     if owner.path != worktree.path() || owner.identity != (identity.device, identity.inode) {
         return Err(PermissionError::AnchorMismatch);
     }
-    let (bytes, _) = measure_cache(&directory, &grant.path, 0, &mut MeasureBudget::new(true))?;
+    let (bytes, _) = measure_cache(&directory, &path, 0, &mut MeasureBudget::new(true))?;
     Ok(Some(CacheGcEntry {
-        path: grant.path,
+        path,
         bytes,
         reason: CacheGcReason::Orphaned,
     }))

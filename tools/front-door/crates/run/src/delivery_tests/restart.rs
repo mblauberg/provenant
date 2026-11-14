@@ -729,9 +729,13 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
             };
             let writer = crate::prepare_writer(&self.writer, &self.state, self.project)
                 .map_err(|error| crate::fixture_refusal(error.to_string()))?;
-            let authority =
-                WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch, &self.home)
-                    .map_err(|error| crate::fixture_refusal(error.to_string()))?;
+            let authority = WorktreeWriteAuthority::for_worktree(
+                &writer.worktree,
+                &writer.branch,
+                &self.home,
+                &provenant_core::CredentialRoots::for_home(&self.home),
+            )
+            .map_err(|error| crate::fixture_refusal(error.to_string()))?;
             let grant = |path: std::path::PathBuf| PathGrant {
                 path,
                 scope: PathScope::Subtree,
@@ -743,6 +747,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                     extensions: provenant_confinement::ExtensionPolicy::Deny,
                     agy_state: None,
                     permissions: PlanPermissions {
+                        credential_roots: provenant_core::CredentialRoots::for_home(&self.home),
                         policy: None,
                         read_only: None,
                         mode: AccessMode::WorktreeWrite(Box::new(authority)),

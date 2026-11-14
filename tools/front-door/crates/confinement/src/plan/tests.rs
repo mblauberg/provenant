@@ -17,6 +17,9 @@ fn request(root: &Path) -> PlanRequest {
     PlanRequest {
         scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
         permissions: PlanPermissions {
+            credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+                "/fixture/home",
+            )),
             policy: None,
             read_only: None,
             mode: AccessMode::ReadOnly,
@@ -38,20 +41,30 @@ fn request(root: &Path) -> PlanRequest {
 }
 
 #[test]
-fn required_credential_grant_refusal_names_path_and_guard() {
+fn required_credential_grant_refusal_names_the_declared_source() {
     let temp = fixture();
     let root = fs::canonicalize(temp.path()).unwrap();
-    let refused = root.join(".gemini/skills");
+    let credential_home = root.join("credential-home");
+    fs::create_dir(&credential_home).unwrap();
+    let credentials = provenant_core::CredentialRoots::for_home(&credential_home);
+    let declaration = credentials
+        .entries()
+        .iter()
+        .find(|entry| entry.path == credential_home.join(".gemini"))
+        .expect("Gemini home is declared");
+    let refused = declaration.path.join("skills");
+    let declaration_source = declaration.source.clone();
     fs::create_dir_all(&refused).unwrap();
     let mut input = request(&root);
     input.agy_state = None;
+    input.permissions.credential_roots = credentials;
     input.permissions.read_roots = vec![PathGrant {
         path: refused.clone(),
         scope: PathScope::Subtree,
     }];
     let message = ConfinedPlan::new(input).err().unwrap().to_string();
     assert!(message.contains(".gemini/skills"), "{message}");
-    assert!(message.contains("credential root"), "{message}");
+    assert!(message.contains(&declaration_source), "{message}");
 }
 
 #[test]
@@ -78,9 +91,13 @@ fn private_state_cannot_expose_credentials_or_alias_the_source() {
 fn write_roots_stay_clear_of_credentials_and_private_roots() {
     let temp = fixture();
     let root = fs::canonicalize(temp.path()).unwrap();
+    let credential_home = root.join("credential-home");
+    fs::create_dir(&credential_home).unwrap();
+    let credentials = provenant_core::CredentialRoots::for_home(&credential_home);
     let with_write = |path: std::path::PathBuf| {
         let mut input = request(&root);
         input.agy_state = None;
+        input.permissions.credential_roots = credentials.clone();
         input.permissions.write_roots = vec![PathGrant {
             path,
             scope: PathScope::Subtree,
@@ -88,19 +105,19 @@ fn write_roots_stay_clear_of_credentials_and_private_roots() {
         ConfinedPlan::new(input)
     };
     assert!(with_write(root.join("repo/.agent-run")).is_ok());
-    for refused in [
-        root.join("scratch/locks"),
-        root.join("provider-state"),
-        root.join(".ssh"),
-        root.join("Archives/git-preservation"),
-        std::path::PathBuf::from("/Users/alice"),
-    ] {
+    for credential in credentials.entries() {
         assert!(
-            with_write(refused.clone()).is_err(),
+            with_write(credential.path.clone()).is_err(),
             "{}",
-            refused.display()
+            credential.path.display()
         );
     }
+    for refused in [root.join("scratch/locks"), root.join("provider-state")] {
+        assert!(with_write(refused).is_err());
+    }
+    assert!(with_write(credential_home.clone()).is_err());
+    assert!(with_write(credential_home.parent().unwrap().to_owned()).is_err());
+    assert!(with_write(std::path::PathBuf::from("/Users/alice")).is_err());
 }
 
 fn fixture() -> tempfile::TempDir {

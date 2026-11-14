@@ -225,6 +225,7 @@ mod tests {
             extensions: ExtensionPolicy::Deny,
             agy_state: None,
             permissions: PlanPermissions {
+                credential_roots: roots.credential_roots().clone(),
                 policy: None,
                 read_only: None,
                 mode: AccessMode::ReadOnly,

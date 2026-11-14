@@ -206,7 +206,7 @@ fn prepare(
     crate::launch::filter_optional_grants(
         &mut optional_reads,
         0,
-        input.home,
+        &input.credential_roots,
         input.policy,
         crate::launch::OmissionSource::Toolchain,
         &mut omitted_discovery,
@@ -264,6 +264,7 @@ fn prepare(
         tool_requirements: Default::default(),
         git_wrapper: Default::default(),
         policy: input.policy.clone(),
+        credential_roots: input.credential_roots.clone(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],

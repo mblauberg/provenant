@@ -32,7 +32,7 @@ pub fn writer_fixture_plan(
             cwd,
             home,
             state,
-            credential_roots: &[],
+            credential_roots: &provenant_core::CredentialRoots::default(),
             github_roots: &[],
             protected_worktrees,
             scratch: &scratch,

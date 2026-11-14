@@ -18,6 +18,9 @@ is refused, whether it contains that location or lies inside it. Ordinary
 checkout/workspace directories and the retired agent-harness location warn
 with their source and proceed. OS binding captures existing Git markers and
 linked-worktree metadata; installed release directories imply no Git boundary.
+Credential boundaries use the same concrete, sourced declarations as lane
+grant validation; a credential directory name elsewhere in a path establishes
+no boundary.
 The same declaration and decision apply before
 and after alias binding. Existing workspace `.agent-run` stores are captured
 as other-state boundaries; that name alone establishes no boundary.

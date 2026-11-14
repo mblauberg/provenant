@@ -9,6 +9,7 @@ fn opencode_writer_uses_host_cargo_home_and_private_build_outputs()
     let prepare = |home: &Path, plan: &_| {
         opencode::OpenCode.prepare(PrepareInput {
             home,
+            credential_roots: provenant_core::CredentialRoots::for_home(home),
             ..fixture_input(&route, plan, &prompt, Path::new("/fixture/repo"), None)
         })
     };

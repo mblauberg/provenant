@@ -21,11 +21,13 @@ fn cargo_source_setting_controls_host_binding_grants_and_offline_mode() -> Resul
         ))?;
         assert_declared_cargo_access(&spec);
         // Source writes are on by default, so Cargo is online wherever the network is.
-        let offline = !provenant_confinement::cargo::DEFAULT_SOURCE_WRITES
-            || network != NetworkAccess::Open;
+        let offline =
+            !provenant_confinement::cargo::DEFAULT_SOURCE_WRITES || network != NetworkAccess::Open;
         assert!(
-            spec.env.iter().any(|(key, value)| key == "CARGO_NET_OFFLINE"
-                && value == offline.to_string().as_str()),
+            spec.env
+                .iter()
+                .any(|(key, value)| key == "CARGO_NET_OFFLINE"
+                    && value == offline.to_string().as_str()),
             "{network:?}"
         );
     }
@@ -40,8 +42,13 @@ fn cargo_source_setting_controls_host_binding_grants_and_offline_mode() -> Resul
     assert_eq!(receipt["source"], "host CARGO_HOME");
     assert_eq!(receipt["source_writes_source"], "compiled default");
     assert_declared_cargo_access(&spec);
-    assert!(spec.env.iter().any(|(key, value)| key == "CARGO_NET_OFFLINE"
-        && value == (!provenant_confinement::cargo::DEFAULT_SOURCE_WRITES).to_string().as_str()));
+    assert!(spec.env.iter().any(|(key, value)| {
+        key == "CARGO_NET_OFFLINE"
+            && value
+                == (!provenant_confinement::cargo::DEFAULT_SOURCE_WRITES)
+                    .to_string()
+                    .as_str()
+    }));
 
     for (network, offline) in [
         (NetworkAccess::Provider, true),
@@ -278,6 +285,7 @@ fn codex_opt_out_skill_scan_succeeds_under_confinement() -> Result<(), Box<dyn s
     let repo = root.join("repo");
     let mut input = fixture_input(&route, &plan, &prompt, &repo, None);
     input.home = &host;
+    input.credential_roots = provenant_core::CredentialRoots::for_home(&host);
     let launch = crate::codex::Codex.prepare(input)?;
     let profile = render(plan.permissions(), &launch.profile, &host)?;
     let home = &launch.env.iter().find(|(key, _)| key == "HOME").unwrap().1;

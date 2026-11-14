@@ -147,15 +147,36 @@ Lane profiles start open and deny the boundaries
 
 ### Plans refuse unsafe roots
 
-Confinement refuses traversal, symlinked state or lock leaves, credential roots
-and grants enclosing them, broad home or tmp grants and Git-internal roots;
-credential directories are denied after every grant. Unsupported confinement
-fails `ConfinementUnavailable` and never widens access. An optional root that
-resolves into a credential root is omitted with a warning.
+Confinement refuses traversal, symlinked state or lock leaves, declared
+credential roots and grants enclosing them, broad home or tmp grants and
+Git-internal roots. Credential declarations name concrete resolved paths and
+their source: built-in secret stores, provider configuration and data stores,
+every registered account's stores and the resolved Cargo home's credential
+files. The core root table owns these declarations; state-root selection and
+lane grant validation consume it. File declarations retain exact scope.
+Credential directories are denied after every grant. The standalone Codex
+release package read exception is relative to its declared Codex home; it
+confers no writes and never exempts another overlapping credential declaration.
+
+A component named `.claude`, `.codex`, `.cursor` or `.gemini` does not establish
+a credential boundary. Project-local agent configuration overlaps warn with
+their source and proceed. A verified linked worktree is admitted at its real
+path, including beneath project-local agent configuration or outside the
+project, unless it overlaps a declared credential store. Git markers, common
+directories and private worktree Git directories keep their hard hold.
+`run --explain` and launch preparation use one source admission decision and
+report its refusal code and reason or sourced warnings.
+
+Unsupported confinement fails `ConfinementUnavailable` and never widens
+access. An optional root that resolves into a declared credential root is
+omitted with a warning.
 - Why: one broad grant silently voids the boundary.
-- Test: `crates/confinement/src/permissions/tests/validation.rs::broad_home_tmp_and_credential_roots_are_refused`;
-  `::directory_discovery_keeps_literal_scope_and_refuses_symlinks`
-- Owner: `crates/confinement/src/permissions.rs`
+- Test: `crates/confinement/src/permissions/tests/validation.rs::every_declared_credential_root_protects_grants_and_enclosing_paths`;
+  `crates/cli/src/run/provider/tests_retained_state_and_workspace.rs::source_cwd_matches_declared_admission_for_registered_worktree_locations`;
+  `src/fabric/interface.rs::explanation_and_preparation_share_worktree_admission`;
+  `crates/confinement/src/permissions/tests/validation.rs::directory_discovery_keeps_literal_scope_and_refuses_symlinks`
+- Owner: `crates/core/src/roots.rs`, `crates/confinement/src/permissions.rs`,
+  `crates/cli/src/run/provider/confinement.rs`
 
 ### Shared Git metadata is read-only
 

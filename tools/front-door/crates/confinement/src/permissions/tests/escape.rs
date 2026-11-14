@@ -46,17 +46,11 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     )?;
     assert_eq!(added.termination, Termination::Exit(0));
     let linked = verify_worktree(&fixture.repo, &worktree_path)?;
-    let authority = WorktreeWriteAuthority::for_worktree(
-        &linked,
-        &selected_ref,
-        &provenant_os::fs::canonicalize(&fixture.home)?,
-    )?;
-    prepare_writer_directories(
-        &linked,
-        &selected_ref,
-        &authority,
-        &provenant_os::fs::canonicalize(&fixture.home)?,
-    )?;
+    let home = provenant_os::fs::canonicalize(&fixture.home)?;
+    let credentials = provenant_core::CredentialRoots::for_home(&home);
+    let authority =
+        WorktreeWriteAuthority::for_worktree(&linked, &selected_ref, &home, &credentials)?;
+    prepare_writer_directories(&linked, &selected_ref, &authority, &home, &credentials)?;
     let scratch = state.join("attempts/a/tmp/candidate-0");
     std::fs::create_dir_all(&scratch)?;
     #[cfg(unix)]
@@ -250,6 +244,9 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         }
     }
     let plan = PlanPermissions {
+        credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+            "/fixture/home",
+        )),
         policy: Some(
             crate::run_config::RunConfig::default().policy_for_launch(&state, mandatory.clone()),
         ),
@@ -395,6 +392,9 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     assert!(sbpl.lines().any(|line| line == "(allow process-exec)"));
     // A read-only lane over the same grants, for the agent socket probe.
     let read_only_plan = PlanPermissions {
+        credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+            "/fixture/home",
+        )),
         mode: AccessMode::ReadOnly,
         ..plan.clone()
     };
@@ -458,6 +458,9 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     let mut socket_profiles = Vec::new();
     for writer in [false, true] {
         let open_plan = PlanPermissions {
+            credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+                "/fixture/home",
+            )),
             network: NetworkAccess::Open,
             mode: if writer {
                 plan.mode.clone()
@@ -669,6 +672,9 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         }
     }))?;
     let host_plan = PlanPermissions {
+        credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+            "/fixture/home",
+        )),
         policy: Some(host_config.policy_for_launch(&state, mandatory.clone())),
         ..plan.clone()
     };
@@ -717,6 +723,9 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
             in_place_writes: vec![selected_grant],
         }];
         let selected_plan = PlanPermissions {
+            credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+                "/fixture/home",
+            )),
             selected_authentication: Some("fixture-selected".into()),
             ..plan.clone()
         };
@@ -782,6 +791,9 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     }
     for writer in [false, true] {
         let open_plan = PlanPermissions {
+            credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+                "/fixture/home",
+            )),
             mode: if writer {
                 plan.mode.clone()
             } else {
@@ -800,6 +812,9 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
             (NetworkAccess::Open, true, false),
         ] {
             let gh_plan = PlanPermissions {
+                credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+                    "/fixture/home",
+                )),
                 network,
                 ..open_plan.clone()
             };

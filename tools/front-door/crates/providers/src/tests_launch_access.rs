@@ -81,6 +81,9 @@ pub(super) fn fixture_input<'a>(
         continuation: None,
         grant_digest: "fixture",
         policy: fixture_policy(),
+        credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+            "/fixture/home",
+        )),
         executable,
         home: std::path::Path::new("/fixture/home"),
         user: std::ffi::OsStr::new("fixture"),

@@ -86,11 +86,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         ..provenant_core::RootInputs::new(home.clone(), project.clone())
     }
     .resolve(&provenant_os::fs::SystemPathResolver)?;
-    let utility = UtilityRuntime::new(
-        &git,
-        &git_home,
-        roots.state.as_path(),
-    )?;
+    let utility = UtilityRuntime::new(&git, &git_home, roots.state.as_path())?;
     let cancel = CancelToken::new();
     let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
     let repo = utility.open_repo(&executor, &project, budget, &cancel)?;
@@ -802,7 +798,13 @@ printf 'agy 1.0.0\n'
             if let (Some((worktree, branch)), AccessMode::WorktreeWrite(authority)) =
                 (writer, &confinement.plan.permissions().mode)
             {
-                prepare_writer_directories(worktree, branch, authority, &home)?;
+                prepare_writer_directories(
+                    worktree,
+                    branch,
+                    authority,
+                    &home,
+                    &confinement.plan.permissions().credential_roots,
+                )?;
             }
             let directories =
                 required_anchors(confinement.plan.permissions(), &confinement.profile, writer)
@@ -1108,6 +1110,7 @@ printf 'agy 1.0.0\n'
     let mut codex = provenant_providers::Adapter::prepare(
         &provenant_providers::codex::Codex,
         provenant_providers::PrepareInput {
+            credential_roots: confinement.plan.permissions().credential_roots.clone(),
             images: &images,
             policy: &launch_policy,
             command: None,
@@ -1378,7 +1381,11 @@ printf 'agy 1.0.0\n'
         (writer, &confinement.plan.permissions().mode)
     {
         provenant_confinement::permissions::prepare_writer_directories(
-            worktree, branch, authority, &home,
+            worktree,
+            branch,
+            authority,
+            &home,
+            &confinement.plan.permissions().credential_roots,
         )?;
     }
     // Run the real canonical-anchor check on every host-config read. The
@@ -1879,7 +1886,7 @@ printf 'agy 1.0.0\n'
             cwd: &project,
             home: &home,
             state: Path::new("/fixture-host-state"),
-            credential_roots: &[],
+            credential_roots: &provenant_core::CredentialRoots::default(),
             github_roots: &[],
             protected_worktrees: &[],
             scratch: &paths.scratch,
@@ -1998,7 +2005,7 @@ fn host_writer_roots_inside_other_checkouts(
                 cwd: if writer.is_some() { &worktree } else { primary },
                 home,
                 state: Path::new("/fixture-host-state"),
-                credential_roots: &[],
+                credential_roots: &provenant_core::CredentialRoots::default(),
                 github_roots: &[],
                 protected_worktrees: &protected,
                 scratch: &paths.scratch,

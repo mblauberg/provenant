@@ -771,6 +771,7 @@ fn lanes_read_git_global_ignore_and_attributes_only_when_present()
         let plan = fixture_access_plan(access, Some("login"), false);
         let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
         input.home = home;
+        input.credential_roots = provenant_core::CredentialRoots::for_home(home);
         let launch = crate::codex::Codex.prepare(input)?;
         Ok(launch
             .profile
@@ -950,7 +951,9 @@ fn shared_provider_package_prefix_falls_back_to_exact_executable() -> Result<(),
                 }),
                 "{adapter}: {prefix}"
             );
-            let receipt = spec.applied_access().receipt(Path::new("/fixture/home"));
+            let receipt = spec
+                .applied_access()
+                .receipt(Path::new("/fixture/home"), &spec.credential_roots);
             assert!(
                 receipt["omitted_grants"]
                     .as_array()

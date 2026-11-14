@@ -118,7 +118,12 @@ pub fn resolve_writer(state: &Path, cwd: &Path, path: &Path) -> Result<WriterReq
 /// Resolve a read-only graph source in the selected Git project. Unlike writer
 /// authority, a reader may use the primary checkout or a detached worktree.
 pub fn resolve_reader_source(state: &Path, cwd: &Path, path: &Path) -> Result<PathBuf> {
-    let utility = runtime(state)?;
+    // Source admission also serves `run --explain`: verification must not
+    // allocate product state or a writer Git home.
+    let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+    let utility = UtilityRuntime::read_only(&git, state)
+        .map_err(error("initialise source Git runtime", None))?
+        .with_lane_roots(provenant_confinement::utility::lane_state_roots(state));
     let executor =
         SystemExecutor::new(1).map_err(error("initialise source system executor", None))?;
     let selected = utility
@@ -1072,7 +1077,7 @@ impl LaunchConfinement {
             writer,
             &self.state_root,
             &self.home,
-            Some(authority),
+            Some((authority, &self.plan.permissions().credential_roots)),
             cancel,
         )
     }
@@ -1172,8 +1177,14 @@ impl LaunchConfinement {
         if let (Some(writer), AccessMode::WorktreeWrite(authority)) =
             (&self.writer, &self.plan.permissions().mode)
         {
-            prepare_writer_directories(&writer.worktree, &writer.branch, authority, &self.home)
-                .map_err(RunError::Confinement)?;
+            prepare_writer_directories(
+                &writer.worktree,
+                &writer.branch,
+                authority,
+                &self.home,
+                &self.plan.permissions().credential_roots,
+            )
+            .map_err(RunError::Confinement)?;
         }
         Ok(())
     }
@@ -1215,7 +1226,10 @@ fn prepare_writer_git(
     writer: &mut WriterLaunch,
     state: &Path,
     home: &Path,
-    authority: Option<&provenant_confinement::permissions::WorktreeWriteAuthority>,
+    authority: Option<(
+        &provenant_confinement::permissions::WorktreeWriteAuthority,
+        &provenant_core::CredentialRoots,
+    )>,
     cancel: &CancelToken,
 ) -> Result<()> {
     use provenant_core::{Clock, WaitBudget};
@@ -1266,9 +1280,15 @@ fn prepare_writer_git(
     }
     writer.worktree = refreshed;
     verify_writer_git_paths(writer.worktree.repo().common_git_dir(), &writer.branch)?;
-    if let Some(authority) = authority {
-        prepare_writer_directories(&writer.worktree, &writer.branch, authority, home)
-            .map_err(RunError::Confinement)?;
+    if let Some((authority, credentials)) = authority {
+        prepare_writer_directories(
+            &writer.worktree,
+            &writer.branch,
+            authority,
+            home,
+            credentials,
+        )
+        .map_err(RunError::Confinement)?;
     }
     let repo = writer.worktree.repo();
     repo.revalidate()

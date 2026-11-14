@@ -36,11 +36,7 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         ..provenant_core::RootInputs::new(home.clone(), project.clone())
     }
     .resolve(&provenant_os::fs::SystemPathResolver)?;
-    let utility = UtilityRuntime::new(
-        &git,
-        &git_home,
-        roots.state.as_path(),
-    )?;
+    let utility = UtilityRuntime::new(&git, &git_home, roots.state.as_path())?;
     let cancel = CancelToken::new();
     let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
     let repo = utility.open_repo(&executor, &project, budget, &cancel)?;
@@ -129,8 +125,11 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         account: None,
         authority_digest: Digest::from_bytes([23; 32]),
         writer: Some(run::WriterRequest {
-            extra: [("custody_project".into(), serde_json::json!(binding.project_id()))]
-                .into(),
+            extra: [(
+                "custody_project".into(),
+                serde_json::json!(binding.project_id()),
+            )]
+            .into(),
             project: project.clone(),
             worktree: worktree.clone(),
         }),
@@ -147,7 +146,8 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         &Default::default(),
     )?;
     let policy = provenant_records::policy::Policy::default();
-    let context = writer_source_context(&writer, &task, &git, &policy)?.ok_or("retained paths missing")?;
+    let context =
+        writer_source_context(&writer, &task, &git, &policy)?.ok_or("retained paths missing")?;
     assert!(context.contains("uncommitted_leftover.txt"), "{context}");
     assert_eq!(
         std::fs::read_to_string(worktree.join("uncommitted_leftover.txt"))?,
@@ -378,6 +378,7 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
     let request = PlanRequest {
         scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
         permissions: PlanPermissions {
+            credential_roots: provenant_core::CredentialRoots::for_home(&roots.home),
             policy: None,
             read_only: None,
             mode: AccessMode::ReadOnly,
@@ -676,7 +677,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
                     cwd: &cwd,
                     home: &home,
                     state: Path::new("/fixture-host-state"),
-                    credential_roots: &[],
+                    credential_roots: &provenant_core::CredentialRoots::default(),
                     github_roots: &[],
                     protected_worktrees: &[],
                     scratch: &scratch,
@@ -700,6 +701,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
                 home.join(".codex"),
             )?;
             let launch = Codex.prepare(PrepareInput {
+                credential_roots: plan.permissions().credential_roots.clone(),
                 images: &[],
                 policy: &launch_policy,
                 command: None,

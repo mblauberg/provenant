@@ -1,5 +1,9 @@
 use super::*;
 
+fn fixture_credentials() -> provenant_core::CredentialRoots {
+    provenant_core::CredentialRoots::for_home(Path::new("/fixture/host-home"))
+}
+
 #[test]
 fn lane_access_canonicalises_attachment_files() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -18,7 +22,7 @@ fn lane_access_canonicalises_attachment_files() -> Result<(), Box<dyn std::error
     let granted = lane_access(
         &access,
         &temp.path().join("state"),
-        Path::new("/fixture/home"),
+        &provenant_core::CredentialRoots::for_home(Path::new("/fixture/home")),
     )
     .map_err(|fail| fail.message)?;
     assert_eq!(granted.attachments, vec![std::fs::canonicalize(image)?]);
@@ -58,7 +62,7 @@ fn lane_access_refuses_a_root_enclosing_an_injected_nonconventional_home()
                     if read { vec![] } else { vec![root.clone()] },
                 ),
                 &state,
-                &home,
+                &provenant_core::CredentialRoots::for_home(&home),
             )
             .unwrap_err();
             assert!(fail.message.contains(flag), "{}", fail.message);
@@ -72,7 +76,7 @@ fn lane_access_refuses_a_root_enclosing_an_injected_nonconventional_home()
     let granted = lane_access(
         &access(vec![project.clone()], vec![project.clone()]),
         &state,
-        &home,
+        &provenant_core::CredentialRoots::for_home(&home),
     )
     .map_err(|fail| fail.message)?;
     assert_eq!(granted.read_roots, vec![project.clone()]);
@@ -82,15 +86,17 @@ fn lane_access_refuses_a_root_enclosing_an_injected_nonconventional_home()
 #[test]
 fn lane_access_allows_codex_standalone_read_roots() -> Result<(), Box<dyn std::error::Error>> {
     // The rule is lexical, so check it without the filesystem first.
+    let home = Path::new("/Users/alice");
+    let credentials = provenant_core::CredentialRoots::for_home(home);
     let shape = Path::new(
         "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin/bin",
     );
     assert!(
-        !provenant_confinement::refuses_lane_root(shape, true, None),
+        !provenant_confinement::refuses_lane_root(shape, true, &credentials),
         "reads pass entry"
     );
     assert!(
-        provenant_confinement::refuses_lane_root(shape, false, None),
+        provenant_confinement::refuses_lane_root(shape, false, &credentials),
         "writes stay strict"
     );
     // Against a machine's real home: build a temp release and walk it
@@ -109,6 +115,7 @@ fn lane_access_allows_codex_standalone_read_roots() -> Result<(), Box<dyn std::e
     let release = std::fs::canonicalize(temp.path())?;
     let state = tempfile::tempdir()?;
     let state = std::fs::canonicalize(state.path())?;
+    let credentials = provenant_core::CredentialRoots::for_home(Path::new(&home));
     let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
         attach: Vec::new(),
         mode: Some(Mode::ReadOnly),
@@ -122,23 +129,18 @@ fn lane_access_allows_codex_standalone_read_roots() -> Result<(), Box<dyn std::e
     let granted = lane_access(
         &access(vec![release.clone()], vec![]),
         &state.join("grants"),
-        Path::new(&home),
+        &credentials,
     )
     .map_err(|fail| fail.message)?;
     assert_eq!(granted.read_roots, vec![release.clone()]);
     let fail = lane_access(
         &access(vec![], vec![release.clone()]),
         &state.join("writes"),
-        Path::new(&home),
+        &credentials,
     )
     .unwrap_err();
-    assert_eq!(
-        fail.message,
-        format!(
-            "--write-root {} is or encloses a credential root",
-            release.display()
-        )
-    );
+    assert!(fail.message.contains("--write-root"));
+    assert!(fail.message.contains("source:"));
     Ok(())
 }
 /// Entry agrees with compile: a read root in a Codex standalone release
@@ -148,45 +150,38 @@ fn lane_access_allows_codex_standalone_read_roots() -> Result<(), Box<dyn std::e
 fn entry_root_table_matches_confinement() {
     let standalone =
         "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin";
-    let home = Path::new("/fixture/host-home");
-    for (path, read_allowed, write_allowed) in [
-        ("/Users/alice/.ssh", false, false),
-        ("/Users/alice/.config", false, false),
-        (standalone, true, false),
-        ("/Users/alice/project", true, true),
-    ] {
-        for (flag, allowed) in [
-            ("--read-root", read_allowed),
-            ("--write-root", write_allowed),
-        ] {
-            let refused = refused_root(flag, Path::new(path), Path::new(path), home);
-            assert_eq!(refused.is_none(), allowed, "{flag} {path}");
+    let home = Path::new("/Users/alice");
+    let credentials = provenant_core::CredentialRoots::for_home(home);
+    for root in credentials.entries() {
+        for (flag, allowed) in [("--read-root", false), ("--write-root", false)] {
+            let refused = refused_root(flag, &root.path, &root.path, &credentials);
+            assert_eq!(refused.is_none(), allowed, "{flag} {}", root.path.display());
             if let Some(AccessError::CredentialRoot {
                 flag: named,
                 path: named_path,
+                root: declared,
+                declaration_source,
             }) = refused
             {
                 assert_eq!(named, flag);
-                assert_eq!(named_path, Path::new(path));
+                assert_eq!(named_path, root.path);
+                assert_eq!(declared, root.path);
+                assert_eq!(declaration_source, root.source);
             }
         }
     }
-    // A host home outside /Users and /home is refused at entry, so entry
-    // and compile agree without this test depending on the host's HOME.
-    let home = Path::new("/srv/team/alice");
-    for (path, read_allowed, write_allowed) in [
-        ("/srv/team", false, false),
-        ("/srv/team/alice", false, false),
-        ("/srv/team/alice/.config", false, false),
-        ("/srv/team/alice/project", true, true),
-    ] {
-        for (flag, allowed) in [
-            ("--read-root", read_allowed),
-            ("--write-root", write_allowed),
-        ] {
-            let refused = refused_root(flag, Path::new(path), Path::new(path), home);
-            assert_eq!(refused.is_none(), allowed, "{flag} {path}");
-        }
+    for flag in ["--read-root", "--write-root"] {
+        assert!(refused_root(flag, home, home, &credentials).is_some());
+    }
+    let standalone = Path::new(standalone);
+    assert!(refused_root("--read-root", standalone, standalone, &credentials).is_none());
+    assert!(refused_root("--write-root", standalone, standalone, &credentials).is_some());
+    for name in [".claude", ".codex", ".cursor", ".gemini"] {
+        let local = Path::new("/project").join(name);
+        assert!(
+            refused_root("--read-root", &local, &local, &credentials).is_none(),
+            "project-local {name} is configuration, not a declared credential store"
+        );
     }
 }
 #[test]
@@ -210,7 +205,7 @@ fn lane_access_maps_network_capability_and_roots() -> Result<(), Box<dyn std::er
         lane_access(
             &access(mode, switch, capability, Vec::new()),
             &state,
-            Path::new("/fixture/host-home"),
+            &fixture_credentials(),
         )
         .map(|access| access.network)
         .map_err(|fail| fail.message)
@@ -222,7 +217,7 @@ fn lane_access_maps_network_capability_and_roots() -> Result<(), Box<dyn std::er
             let declared = lane_access_checked(
                 &access(mode, None, &capability, Vec::new()),
                 &state,
-                Path::new("/fixture/host-home"),
+                &fixture_credentials(),
             )?;
             assert_eq!(declared.database_ipc, expected);
         }
@@ -242,13 +237,13 @@ fn lane_access_maps_network_capability_and_roots() -> Result<(), Box<dyn std::er
     let unknown = lane_access_checked(
         &access(Mode::ReadOnly, None, &["rust"], Vec::new()),
         &state,
-        Path::new("/fixture/host-home"),
+        &fixture_credentials(),
     )?;
     assert!(!unknown.database_ipc);
     let granted = lane_access(
         &access(Mode::WorktreeWrite, None, &[], vec![project.clone()]),
         &state,
-        Path::new("/fixture/host-home"),
+        &fixture_credentials(),
     )
     .map_err(|fail| fail.message)?;
     assert_eq!(
@@ -265,7 +260,7 @@ fn lane_access_maps_network_capability_and_roots() -> Result<(), Box<dyn std::er
             lane_access(
                 &access(Mode::WorktreeWrite, None, &[], vec![refused]),
                 &state,
-                Path::new("/fixture/host-home"),
+                &fixture_credentials(),
             )
             .is_err()
         );
@@ -297,7 +292,7 @@ fn lane_access_refuses_write_root_overlapping_the_worktree()
             lane_access_checked(
                 &access(Vec::new(), vec![overlapping]),
                 &state,
-                Path::new("/fixture/host-home"),
+                &fixture_credentials(),
             ),
             Err(AccessError::WorktreeOverlap(path)) if path == expected
         ));
@@ -307,7 +302,7 @@ fn lane_access_refuses_write_root_overlapping_the_worktree()
         lane_access(
             &access(vec![worktree.clone()], vec![inside]),
             &state,
-            Path::new("/fixture/host-home"),
+            &fixture_credentials(),
         )
         .is_ok()
     );
@@ -336,7 +331,7 @@ fn lane_access_reads_installed_release_skills_only() -> Result<(), Box<dyn std::
     let granted = lane_access(
         &access(vec![skills.clone()], Vec::new()),
         &state,
-        Path::new("/fixture/host-home"),
+        &fixture_credentials(),
     )
     .map_err(|fail| fail.message)?;
     assert_eq!(
@@ -347,7 +342,7 @@ fn lane_access_reads_installed_release_skills_only() -> Result<(), Box<dyn std::
         lane_access(
             &access(vec![release.clone()], Vec::new()),
             &state,
-            Path::new("/fixture/host-home"),
+            &fixture_credentials(),
         )
         .is_ok()
     );
@@ -358,7 +353,7 @@ fn lane_access_reads_installed_release_skills_only() -> Result<(), Box<dyn std::
             lane_access_checked(
                 &access(vec![root], Vec::new()),
                 &state,
-                Path::new("/fixture/host-home"),
+                &fixture_credentials(),
             ),
             Err(AccessError::StateOverlap { .. })
         ));
@@ -370,7 +365,7 @@ fn lane_access_reads_installed_release_skills_only() -> Result<(), Box<dyn std::
         access(Vec::new(), vec![skills.clone()]),
     ] {
         assert!(matches!(
-            lane_access_checked(&refused, &state, Path::new("/fixture/host-home"),),
+            lane_access_checked(&refused, &state, &fixture_credentials(),),
             Err(AccessError::StateOverlap { .. })
         ));
     }

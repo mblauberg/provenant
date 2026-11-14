@@ -35,6 +35,7 @@ impl StagedUserSkills {
 
 struct Capture<'a> {
     home: &'a Path,
+    credential_roots: &'a provenant_core::CredentialRoots,
     root: &'a Path,
     source: &'a Path,
     budget: u64,
@@ -101,7 +102,11 @@ impl Capture<'_> {
             }
             let child_path = current.join(&name);
             if !child_path.starts_with(self.source)
-                && provenant_confinement::refuses_lane_root(&child_path, true, Some(self.home))
+                && provenant_confinement::refuses_lane_root(
+                    &child_path,
+                    true,
+                    self.credential_roots,
+                )
             {
                 self.warn(&path, "credential_root");
                 continue;
@@ -156,7 +161,7 @@ impl Capture<'_> {
             return;
         };
         if !target.starts_with(self.source)
-            && provenant_confinement::refuses_lane_root(&target, true, Some(self.home))
+            && provenant_confinement::refuses_lane_root(&target, true, self.credential_roots)
         {
             self.warn(relative, "credential_root");
             return;
@@ -241,6 +246,7 @@ pub(crate) fn capture(
     source: &Path,
     destination: &Path,
     home: &Path,
+    credential_roots: &provenant_core::CredentialRoots,
     max_bytes: u64,
 ) -> StagedUserSkills {
     let skipped = |reason| StagedUserSkills {
@@ -257,7 +263,8 @@ pub(crate) fn capture(
             StagedUserSkills::default()
         };
     };
-    if canonical != source && provenant_confinement::refuses_lane_root(&canonical, true, Some(home))
+    if canonical != source
+        && provenant_confinement::refuses_lane_root(&canonical, true, credential_roots)
     {
         return skipped("credential_root");
     }
@@ -269,6 +276,7 @@ pub(crate) fn capture(
     }
     let mut capture = Capture {
         home,
+        credential_roots,
         root: destination,
         source: &canonical,
         budget: max_bytes,
@@ -317,7 +325,8 @@ mod tests {
         symlink(&secret, source.join("credential"))?;
         symlink(&source, external.join("cycle"))?;
         let destination = home.join("attempt/skills");
-        let staged = capture(&source, &destination, &home, 1024);
+        let roots = provenant_core::CredentialRoots::for_home(&home);
+        let staged = capture(&source, &destination, &home, &roots, 1024);
         assert_eq!(staged.file_count, 4);
         for (path, expected) in [
             ("internal", b"local".as_slice()),
@@ -362,7 +371,8 @@ mod tests {
         let source = temp.path().join("skills");
         std::fs::create_dir_all(&source)?;
         std::fs::write(source.join("large"), b"12345")?;
-        let staged = capture(&source, &temp.path().join("staged"), temp.path(), 4);
+        let roots = provenant_core::CredentialRoots::for_home(temp.path());
+        let staged = capture(&source, &temp.path().join("staged"), temp.path(), &roots, 4);
         assert_eq!(staged.file_count, 0);
         assert!(
             staged
@@ -397,7 +407,8 @@ mod tests {
         std::fs::write(credential_root.join("secret"), b"sentinel")?;
         let source = home.join("skills");
         symlink(&credential_root, &source)?;
-        let staged = capture(&source, &home.join("stage"), &home, 1024);
+        let roots = provenant_core::CredentialRoots::for_home(&home);
+        let staged = capture(&source, &home.join("stage"), &home, &roots, 1024);
         assert!(staged.root.is_none());
         assert_eq!(staged.file_count, 0);
         assert!(
@@ -426,8 +437,10 @@ mod tests {
             std::fs::rename(&target, home.join("old-resource")).unwrap();
             symlink(&secret, &target).unwrap();
         };
+        let credential_roots = provenant_core::CredentialRoots::for_home(&home);
         let mut capture = Capture {
             home: &home,
+            credential_roots: &credential_roots,
             root: &destination,
             source: &source,
             budget: 1024,

@@ -271,20 +271,27 @@ fn compile_sbpl_inner(
     )? {
         report_policy_message(warning);
     }
-    validate_profile_spec_with_home(&profile.spec, anchors.home, usize::MAX)?;
+    validate_profile_spec_with_home(
+        &profile.spec,
+        anchors.home,
+        &plan.credential_roots,
+        usize::MAX,
+    )?;
     for grant in &plan.read_roots {
-        validate_read_exec_grant(grant)
+        validate_read_exec_grant(grant, &plan.credential_roots)
             .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
     }
     for grant in &plan.protected_roots {
-        validate_noncredential_grant(grant)
+        validate_noncredential_grant(grant, &plan.credential_roots)
             .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
     }
     let worktree_grants = match &plan.mode {
         AccessMode::ReadOnly => None,
-        AccessMode::WorktreeWrite(authority) => {
-            Some(verify_worktree_authority(authority, anchors)?)
-        }
+        AccessMode::WorktreeWrite(authority) => Some(verify_worktree_authority(
+            authority,
+            anchors,
+            &plan.credential_roots,
+        )?),
     };
     if let Some(read_only) = &plan.read_only {
         if !matches!(plan.mode, AccessMode::ReadOnly) {
@@ -292,7 +299,7 @@ fn compile_sbpl_inner(
         }
         read_only.revalidate().map_err(compile_authority_error)?;
         for grant in &read_only.writes {
-            validate_noncredential_grant(grant)
+            validate_noncredential_grant(grant, &plan.credential_roots)
                 .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
             if plan
                 .protected_roots
@@ -336,20 +343,6 @@ fn compile_sbpl_inner(
         .iter()
         .chain(&profile.spec.tool_writes)
         .collect();
-    // The path checks above know only conventional homes; the host's own home
-    // is broad and its nested credential roots stay hidden wherever it lives.
-    if let Some(grant) = all_reads()
-        .chain(shared_writes.iter().copied())
-        .chain(&profile.spec.tool_exec_roots)
-        .chain(&profile.spec.state_writes)
-        .find(|grant| encloses_home_credentials(grant, anchors.home))
-    {
-        return Err(if diagnostic {
-            PermissionError::credential_root_at(&grant.path, Some(anchors.home))
-        } else {
-            PermissionError::CredentialRoot
-        });
-    }
     for grant in read_grants {
         anchors
             .verify_read_held(grant)
@@ -386,7 +379,7 @@ fn compile_sbpl_inner(
     if plan.scratch.scope != PathScope::Subtree {
         return Err(PermissionError::InvalidPath(plan.scratch.path.clone()));
     }
-    validate_noncredential_grant(&plan.scratch)
+    validate_noncredential_grant(&plan.scratch, &plan.credential_roots)
         .map_err(|error| error.with_credential_path(&plan.scratch.path, Some(anchors.home)))?;
     anchors
         .verify_grant_held(&plan.scratch)
@@ -431,7 +424,7 @@ fn compile_sbpl_inner(
     }
     verify_private_scratch(&plan.scratch, &scratch_exclusions, anchors)?;
     if let Some(state) = &plan.private_state {
-        validate_noncredential_grant(state)
+        validate_noncredential_grant(state, &plan.credential_roots)
             .map_err(|error| error.with_credential_path(&state.path, Some(anchors.home)))?;
         if state.overlaps(&plan.scratch) {
             return Err(PermissionError::ProtectedOverlap);
@@ -491,7 +484,7 @@ fn compile_sbpl_inner(
     // SBPL grants pathnames, so rebind them to their held identities after
     // rendering, immediately before returning the launch profile.
     if let AccessMode::WorktreeWrite(authority) = &plan.mode {
-        verify_worktree_authority(authority, anchors)?;
+        verify_worktree_authority(authority, anchors, &plan.credential_roots)?;
     }
     verify_private_scratch(&plan.scratch, &scratch_exclusions, anchors)?;
     if let Some(state) = &plan.private_state {
@@ -681,7 +674,7 @@ pub(super) fn verify_shared_writes(
     anchors: &Anchors<'_>,
 ) -> Result<(), PermissionError> {
     for grant in writes {
-        validate_noncredential_grant(grant)
+        validate_noncredential_grant(grant, &plan.credential_roots)
             .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
         if plan
             .secret_roots
@@ -1241,7 +1234,8 @@ fn push_boundaries(
         .chain(&profile.spec.tool_exec_roots)
         .filter(|_| !profile.spec.deny_credential_access)
         .filter(|grant| {
-            is_codex_standalone_package(&grant.path) && validate_read_exec_grant(grant).is_ok()
+            is_codex_standalone_package(&grant.path, &plan.credential_roots)
+                && validate_read_exec_grant(grant, &plan.credential_roots).is_ok()
         })
         .cloned()
         .collect();

@@ -15,7 +15,23 @@ use std::path::{Component, Path, PathBuf};
 pub fn worktree_cargo_cache(
     home: &Path,
     worktree: &VerifiedWorktree,
+    credentials: &provenant_core::CredentialRoots,
 ) -> Result<PathGrant, PermissionError> {
+    let grant = PathGrant {
+        path: worktree_cargo_cache_path(home, worktree)?,
+        scope: PathScope::Subtree,
+    };
+    validate_noncredential_grant(&grant, credentials)?;
+    Ok(grant)
+}
+
+/// Derive the identity-bound cache path used by a verified worktree.
+/// Callers that expose it as a permission grant must use
+/// [`worktree_cargo_cache`] so declared credentials are checked.
+pub fn worktree_cargo_cache_path(
+    home: &Path,
+    worktree: &VerifiedWorktree,
+) -> Result<PathBuf, PermissionError> {
     validate_absolute(home)?;
     worktree.repo().revalidate()?;
     let mut digest = Sha256::new();
@@ -34,13 +50,7 @@ pub fn worktree_cargo_cache(
         digest.update(identity.inode.to_le_bytes());
     }
     let name = provenant_core::hex(&digest.finalize());
-    let grant = PathGrant {
-        path: home.join("Library/Caches/provenant-lane-cargo").join(name),
-        scope: PathScope::Subtree,
-    };
-    validate_noncredential_grant(&grant)
-        .map_err(|error| error.with_credential_path(&grant.path, Some(home)))?;
-    Ok(grant)
+    Ok(home.join("Library/Caches/provenant-lane-cargo").join(name))
 }
 
 /// Prepare only derived writer directories outside the child sandbox. This
@@ -52,14 +62,15 @@ pub fn prepare_writer_directories(
     selected_ref: &GitRefName,
     authority: &WorktreeWriteAuthority,
     home: &Path,
+    credentials: &provenant_core::CredentialRoots,
 ) -> Result<(), PermissionError> {
     worktree.repo().revalidate()?;
     let grants = WorktreeWriteGrants::derive(worktree, selected_ref);
     if grants.digest(&authority.cargo_cache) != authority.git_grants_digest {
         return Err(PermissionError::GitWriteAuthorityMissing);
     }
-    grants.validate()?;
-    validate_writer_cache(authority, worktree, home)?;
+    grants.validate(credentials)?;
+    validate_writer_cache(authority, worktree, home, credentials)?;
     let paths: BTreeSet<_> = grants
         .iter()
         .chain([&authority.cargo_cache])
@@ -120,8 +131,9 @@ pub(super) fn validate_writer_cache(
     authority: &WorktreeWriteAuthority,
     worktree: &VerifiedWorktree,
     home: &Path,
+    credentials: &provenant_core::CredentialRoots,
 ) -> Result<(), PermissionError> {
-    if authority.cargo_cache != worktree_cargo_cache(home, worktree)? {
+    if authority.cargo_cache != worktree_cargo_cache(home, worktree, credentials)? {
         return Err(PermissionError::GitWriteAuthorityMissing);
     }
     Ok(())
@@ -181,11 +193,12 @@ impl WorktreeWriteGrants {
         digest.finalize().into()
     }
 
-    pub(super) fn validate(&self) -> Result<(), PermissionError> {
-        self.worktree.validate()?;
-        for grant in self.iter().skip(1) {
-            validate_noncredential_grant(grant)
-                .map_err(|error| error.with_credential_path(&grant.path, None))?;
+    pub(super) fn validate(
+        &self,
+        credentials: &provenant_core::CredentialRoots,
+    ) -> Result<(), PermissionError> {
+        for grant in self.iter() {
+            validate_noncredential_grant(grant, credentials)?;
         }
         Ok(())
     }

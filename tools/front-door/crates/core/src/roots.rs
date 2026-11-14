@@ -22,6 +22,9 @@ pub const DEFAULT_STATE_SUFFIX: &str = default_state_suffix!();
 /// The 1.x default state root. 2.0 never writes it: install copies owner
 /// configuration out of it once, and no state root may lie inside it.
 pub const LEGACY_V1_STATE_SUFFIX: &str = ".local/share/provenant/v1";
+pub const CARGO_CREDENTIAL_FILES: &[&str] = &["credentials", "credentials.toml"];
+pub const CODEX_ACCOUNT_DIRECTORY: (&str, &str) = ("CODEX_HOME", ".codex");
+pub const PROJECT_AGENT_CONFIG_DIRECTORIES: &[&str] = &[".claude", ".codex", ".cursor", ".gemini"];
 
 /// The home whose default state root is `state`, when it is one.
 pub fn default_state_home(state: &Path) -> Option<&Path> {
@@ -57,9 +60,12 @@ pub struct RootInputs {
     /// captured by the OS edge. Release assets need not be a checkout.
     pub git_metadata: Vec<PathBuf>,
     pub old_roots: Vec<PathBuf>,
+    /// Credential stores declared by the host/provider/account registry.
+    pub credential_roots: CredentialRoots,
 }
 impl RootInputs {
     pub fn new(home: PathBuf, checkout: PathBuf) -> Self {
+        let credential_roots = CredentialRoots::for_home(&home);
         Self {
             state_dir: None,
             environment_state_dir: None,
@@ -68,13 +74,26 @@ impl RootInputs {
             workspaces: Vec::new(),
             git_metadata: Vec::new(),
             old_roots: Vec::new(),
+            credential_roots,
         }
     }
     /// Resolve captured inputs without filesystem discovery. Production OS
     /// binding supplies existing Git metadata before entering this pure core.
     pub fn resolve(&self, resolver: &impl PathResolver) -> Result<Roots, RootError> {
-        StateRoot::resolve(self, resolver).map(|state| Roots {
+        let state = StateRoot::resolve(self, resolver)?;
+        let mut credential_roots = CredentialRoots::default();
+        for root in self.credential_roots.entries() {
+            let path = resolver
+                .resolve_existing_ancestor(&root.path)
+                .map_err(|source| RootError::Resolution {
+                    path: root.path.clone(),
+                    source,
+                })?;
+            credential_roots.add(path, root.scope, root.source.clone(), root.kind.clone());
+        }
+        Ok(Roots {
             state,
+            credential_roots,
             inputs: self.clone(),
         })
     }
@@ -91,7 +110,7 @@ pub enum RootError {
         path: PathBuf,
         protected: PathBuf,
         boundary: RootBoundary,
-        policy_source: &'static str,
+        policy_source: String,
     },
     #[error("cannot bind root input: {path}")]
     Resolution {
@@ -111,7 +130,7 @@ pub struct StateRoot {
 pub struct RootWarning {
     pub path: PathBuf,
     pub protected: PathBuf,
-    pub source: &'static str,
+    pub source: String,
 }
 impl RootWarning {
     pub fn message(&self) -> String {
@@ -126,9 +145,14 @@ impl RootWarning {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Roots {
     pub state: StateRoot,
+    credential_roots: CredentialRoots,
     inputs: RootInputs,
 }
 impl Roots {
+    pub fn credential_roots(&self) -> &CredentialRoots {
+        &self.credential_roots
+    }
+
     /// Rebind only the state candidate against the captured root context. No
     /// environment is re-read and no workspace or old-root boundary is lost.
     pub fn with_state_dir(
@@ -219,11 +243,205 @@ pub enum RootBoundary {
     DataIntegrity,
 }
 
+/// The reach of one declared credential store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialScope {
+    Subtree,
+    Exact,
+}
+
+/// How a credential path entered the host's declared table.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialKind {
+    Store,
+    /// The default Codex home is the only store with a read-only standalone
+    /// package exception.
+    CodexHome,
+}
+
+/// One concrete, sourced credential path. Names elsewhere in a path have no
+/// credential meaning.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CredentialRoot {
+    pub path: PathBuf,
+    pub scope: CredentialScope,
+    pub source: String,
+    pub kind: CredentialKind,
+}
+
+/// The single declared set of credential stores used by root admission and
+/// confinement. Host declarations extend this table with provider and account
+/// paths after resolving their configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CredentialRoots {
+    entries: Vec<CredentialRoot>,
+}
+
+impl CredentialRoots {
+    pub fn for_home(home: &Path) -> Self {
+        use CredentialKind::{CodexHome, Store};
+        use CredentialScope::{Exact, Subtree};
+
+        let mut roots = Self::default();
+        for name in [".ssh", ".aws", ".azure", ".gnupg", ".kube", ".secrets"] {
+            roots.add(home.join(name), Subtree, "built-in secret store", Store);
+        }
+        roots.add(
+            home.join(".claude"),
+            Subtree,
+            "provider declaration: claude default home",
+            Store,
+        );
+        roots.add(
+            home.join(".claude.json"),
+            Exact,
+            "provider declaration: claude credentials file",
+            Store,
+        );
+        roots.add(
+            home.join(CODEX_ACCOUNT_DIRECTORY.1),
+            Subtree,
+            "provider declaration: codex default home",
+            CodexHome,
+        );
+        roots.add(
+            home.join(".cursor"),
+            Subtree,
+            "provider declaration: cursor default home",
+            Store,
+        );
+        roots.add(
+            home.join(".gemini"),
+            Subtree,
+            "provider declaration: gemini default home",
+            Store,
+        );
+        roots.add(
+            home.join(".agents"),
+            Subtree,
+            "built-in agent credential home",
+            Store,
+        );
+        for (relative, source) in [
+            (".config/cursor", "provider declaration: cursor config"),
+            (".config/opencode", "provider declaration: opencode config"),
+            (
+                ".local/share/opencode",
+                "provider declaration: opencode data",
+            ),
+            (".config/gh", "built-in GitHub CLI credentials"),
+            (".config/gcloud", "built-in Google Cloud credentials"),
+            ("Library/Keychains", "built-in platform keychain"),
+            (
+                "Library/Application Support/GitHub CLI",
+                "built-in GitHub CLI support files",
+            ),
+            (
+                "Archives/git-preservation",
+                "built-in Git preservation archive",
+            ),
+            ("Monero", "built-in Monero credentials"),
+        ] {
+            roots.add(home.join(relative), Subtree, source, Store);
+        }
+        for &name in CARGO_CREDENTIAL_FILES {
+            roots.add(
+                home.join(".cargo").join(name),
+                Exact,
+                "built-in Cargo credential file",
+                Store,
+            );
+        }
+        roots
+    }
+
+    pub fn add(
+        &mut self,
+        path: impl Into<PathBuf>,
+        scope: CredentialScope,
+        source: impl Into<String>,
+        kind: CredentialKind,
+    ) {
+        let path = path.into();
+        if self
+            .entries
+            .iter()
+            .any(|entry| entry.path == path && entry.scope == scope)
+        {
+            return;
+        }
+        self.entries.push(CredentialRoot {
+            path,
+            scope,
+            source: source.into(),
+            kind,
+        });
+    }
+
+    pub fn add_entry(&mut self, root: CredentialRoot) {
+        self.add(root.path, root.scope, root.source, root.kind);
+    }
+
+    pub fn entries(&self) -> &[CredentialRoot] {
+        &self.entries
+    }
+
+    /// Any overlap with a declared store is refused, including a grant which
+    /// encloses that store. Exact entries protect the file and its enclosing
+    /// grants; subtree entries also protect descendants.
+    pub fn refuses(&self, path: &Path, scope: CredentialScope, read: bool) -> bool {
+        self.refusal(path, scope, read).is_some()
+    }
+
+    pub fn refusal(
+        &self,
+        path: &Path,
+        scope: CredentialScope,
+        read: bool,
+    ) -> Option<&CredentialRoot> {
+        self.entries.iter().find(|root| {
+            if read
+                && root.kind == CredentialKind::CodexHome
+                && codex_standalone_path(path, &root.path)
+            {
+                return false;
+            }
+            root.path == path
+                || (scope == CredentialScope::Subtree && root.path.starts_with(path))
+                || (root.scope == CredentialScope::Subtree && path.starts_with(&root.path))
+        })
+    }
+
+    pub fn is_codex_standalone_package(&self, path: &Path) -> bool {
+        self.entries.iter().any(|root| {
+            root.kind == CredentialKind::CodexHome && codex_standalone_path(path, &root.path)
+        })
+    }
+
+    pub fn overlaps(&self, path: &Path) -> bool {
+        self.refuses(path, CredentialScope::Subtree, false)
+    }
+}
+
+fn codex_standalone_path(path: &Path, codex_home: &Path) -> bool {
+    let Some(relative) = path.strip_prefix(codex_home).ok() else {
+        return false;
+    };
+    let components: Vec<_> = relative.components().collect();
+    components.len() >= 4
+        && components[0].as_os_str() == "packages"
+        && components[1].as_os_str() == "standalone"
+        && components[2].as_os_str() == "releases"
+        && !components[3].as_os_str().is_empty()
+}
+
 #[derive(Debug, Clone)]
 struct ProtectedRoot {
     path: PathBuf,
     boundary: Option<RootBoundary>,
-    source: &'static str,
+    source: String,
 }
 
 /// The sole declaration of protected locations and the boundary each owns.
@@ -233,43 +451,58 @@ fn protected_roots(inputs: &RootInputs) -> Vec<ProtectedRoot> {
         ProtectedRoot {
             path: inputs.checkout.clone(),
             boundary: None,
-            source: "root inputs: checkout",
-        },
-        ProtectedRoot {
-            path: inputs.home.join(".agents"),
-            boundary: Some(Credentials),
-            source: "built-in credential root",
+            source: "root inputs: checkout".into(),
         },
         ProtectedRoot {
             path: inputs.home.join(".local/state/agent-harness"),
             boundary: None,
-            source: "built-in retired agent-harness location",
+            source: "built-in retired agent-harness location".into(),
         },
         ProtectedRoot {
             path: inputs.home.join(".local/state/provenant"),
             boundary: Some(DataIntegrity),
-            source: "built-in previous state root",
+            source: "built-in previous state root".into(),
         },
         ProtectedRoot {
             path: inputs.home.join(LEGACY_V1_STATE_SUFFIX),
             boundary: Some(DataIntegrity),
-            source: "built-in 1.x state root",
+            source: "built-in 1.x state root".into(),
         },
     ];
+    roots.extend(
+        PROJECT_AGENT_CONFIG_DIRECTORIES
+            .iter()
+            .map(|name| ProtectedRoot {
+                path: inputs.checkout.join(name),
+                boundary: None,
+                source: format!("project-local agent configuration: {name}"),
+            }),
+    );
+    roots.extend(
+        inputs
+            .credential_roots
+            .entries()
+            .iter()
+            .map(|entry| ProtectedRoot {
+                path: entry.path.clone(),
+                boundary: Some(Credentials),
+                source: entry.source.clone(),
+            }),
+    );
     roots.extend(inputs.workspaces.iter().map(|path| ProtectedRoot {
         path: path.clone(),
         boundary: None,
-        source: "root inputs: workspace",
+        source: "root inputs: workspace".into(),
     }));
     roots.extend(inputs.git_metadata.iter().map(|path| ProtectedRoot {
         path: path.clone(),
         boundary: Some(GitIsolation),
-        source: "root inputs: existing Git metadata",
+        source: "root inputs: existing Git metadata".into(),
     }));
     roots.extend(inputs.old_roots.iter().map(|path| ProtectedRoot {
         path: path.clone(),
         boundary: Some(DataIntegrity),
-        source: "root inputs: old state root",
+        source: "root inputs: old state root".into(),
     }));
     roots
 }
@@ -287,13 +520,13 @@ fn classify(candidate: &Path, protected: &[ProtectedRoot]) -> Result<Vec<RootWar
                 path: candidate.into(),
                 protected: root.path.clone(),
                 boundary,
-                policy_source: root.source,
+                policy_source: root.source.clone(),
             });
         }
         warnings.push(RootWarning {
             path: candidate.into(),
             protected: root.path.clone(),
-            source: root.source,
+            source: root.source.clone(),
         });
     }
     Ok(warnings)
@@ -398,6 +631,18 @@ mod tests {
             input.state_dir = Some(allowed.into());
             assert!(input.resolve(&Resolver).is_ok());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn project_local_agent_configuration_warns_with_its_source() -> Result<(), RootError> {
+        let mut input = RootInputs::new("/fixture/home".into(), "/fixture/project".into());
+        input.state_dir = Some("/fixture/project/.claude/worktrees/lane/state".into());
+        let roots = input.resolve(&Resolver)?;
+        assert!(roots.state.warnings().iter().any(|warning| {
+            warning.protected == Path::new("/fixture/project/.claude")
+                && warning.source == "project-local agent configuration: .claude"
+        }));
         Ok(())
     }
 

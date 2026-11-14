@@ -2,7 +2,7 @@
 //! paths, and the repository paths a writer may change without forcing review.
 use crate::permissions::{
     Availability, HostPolicySettings, LanePolicy, MandatoryRoots, NetworkAccess, OptionalPolicy,
-    PathGrant, PathScope, is_credential_root,
+    PathGrant, PathScope,
 };
 use crate::review_exempt::{MAX_PATTERNS, ReviewExempt, valid_pattern};
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
@@ -611,7 +611,6 @@ fn valid_writer_write(path: &Path) -> bool {
         }
         .validate()
         .is_ok()
-        && !is_credential_root(path)
 }
 fn valid_patterns(field: &str, patterns: &[String], errors: &mut Vec<SectionError>) {
     if patterns.len() > MAX_PATTERNS {

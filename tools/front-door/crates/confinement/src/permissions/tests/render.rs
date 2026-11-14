@@ -102,7 +102,12 @@ fn expanded_authentication_family_grants_only_selected_credentials() -> Result<(
             in_place_writes: vec![],
         });
     }
-    validate_profile_spec_with_home(&profile.spec, Path::new("/fixture/home"), 128)?;
+    validate_profile_spec_with_home(
+        &profile.spec,
+        Path::new("/fixture/home"),
+        &provenant_core::CredentialRoots::for_home(Path::new("/fixture/home")),
+        128,
+    )?;
     let grants = GrantSet::build(&plan, &profile, Path::new("/fixture/home"), None)?;
     for auth in &profile.spec.authentication {
         for root in &auth.roots {
@@ -325,6 +330,9 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
         PlanRequest {
             scope: WorkScope::Project(binding.project_id()),
             permissions: PlanPermissions {
+                credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+                    "/fixture/home",
+                )),
                 policy: Some(lane_policy),
                 read_only: None,
                 mode: AccessMode::ReadOnly,
@@ -653,6 +661,9 @@ fn sbpl_process_and_pty_authority_is_ambient_without_catalogue_grants() {
         observations: BTreeMap::new(),
     };
     let plan = PlanPermissions {
+        credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+            "/fixture/home",
+        )),
         policy: None,
         read_only: None,
         private_state: None,
@@ -726,6 +737,9 @@ fn network_levels_shared_writes_and_hard_denies_render_in_order() {
         observations: BTreeMap::new(),
     };
     let mut plan = PlanPermissions {
+        credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+            "/fixture/home",
+        )),
         policy: None,
         read_only: None,
         private_state: None,
@@ -932,7 +946,12 @@ fn invalid_provider_endpoints_are_omitted_from_sbpl() -> Result<(), PermissionEr
             port: 0,
         },
     ];
-    validate_profile_spec_with_home(&profile.spec, Path::new("/fixture/home"), 128)?;
+    validate_profile_spec_with_home(
+        &profile.spec,
+        Path::new("/fixture/home"),
+        &provenant_core::CredentialRoots::for_home(Path::new("/fixture/home")),
+        128,
+    )?;
     let grants = GrantSet::build(&plan, &profile, Path::new("/fixture/home"), None)?;
     let source = render(&grants)?;
     let policy = provenant_records::policy::Policy::default();
@@ -990,7 +1009,12 @@ fn invalid_discovery_reads_are_omitted_before_anchoring_and_rendering()
             scope: PathScope::Subtree,
         },
     ];
-    validate_profile_spec_with_home(&profile.spec, Path::new("/fixture/home"), 128)?;
+    validate_profile_spec_with_home(
+        &profile.spec,
+        Path::new("/fixture/home"),
+        &provenant_core::CredentialRoots::for_home(Path::new("/fixture/home")),
+        128,
+    )?;
     let anchors = required_anchors(&plan, &profile, None);
     assert!(!anchors.contains(Path::new("/fixture/home/.config/gh")));
     assert!(!anchors.contains(invalid_native.parent().expect("fixture parent")));

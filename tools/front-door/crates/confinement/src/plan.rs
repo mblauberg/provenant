@@ -162,9 +162,10 @@ fn plan_boundary_error(code: &str, error: PlanError) -> PlanError {
 fn plan_permission_error(error: PermissionError) -> PlanError {
     use PermissionError as E;
     let code = match &error {
-        E::CredentialRoot | E::CredentialRootAt { .. } | E::CredentialGrant { .. } => {
-            Some("PLAN_CONFINEDPLAN_NEW_CREDENTIALS")
-        }
+        E::CredentialRoot
+        | E::CredentialRootAt { .. }
+        | E::CredentialGrant { .. }
+        | E::CredentialStore { .. } => Some("PLAN_CONFINEDPLAN_NEW_CREDENTIALS"),
         E::InvalidPath(_) | E::BroadRoot | E::NonUtf8Path => {
             Some("PLAN_CONFINEDPLAN_NEW_AUTHORITY_2")
         }
@@ -219,7 +220,8 @@ impl ConfinedPlan {
                         let code = match &error {
                             PermissionError::CredentialRoot
                             | PermissionError::CredentialRootAt { .. }
-                            | PermissionError::CredentialGrant { .. } => {
+                            | PermissionError::CredentialGrant { .. }
+                            | PermissionError::CredentialStore { .. } => {
                                 "PLAN_CONFINEDPLAN_NEW_CREDENTIALS"
                             }
                             PermissionError::InvalidPath(_)
@@ -230,9 +232,9 @@ impl ConfinedPlan {
                         plan_boundary_error(code, error.into())
                     })?;
             }
-            crate::permissions::validate_noncredential_grant(grant).map_err(|error| {
-                plan_permission_error(error.with_credential_path(&grant.path, None))
-            })?;
+            crate::permissions::validate_noncredential_grant(grant, &p.credential_roots).map_err(
+                |error| plan_permission_error(error.with_credential_path(&grant.path, None)),
+            )?;
             if p.secret_roots.iter().any(|root| grant.overlaps(root)) {
                 return Err(plan_boundary_error(
                     "PLAN_CONFINEDPLAN_NEW_CREDENTIALS",
@@ -252,14 +254,14 @@ impl ConfinedPlan {
             }
         }
         for grant in &p.read_roots {
-            crate::permissions::validate_read_exec_grant(grant).map_err(|error| {
-                plan_permission_error(error.with_credential_path(&grant.path, None))
-            })?;
+            crate::permissions::validate_read_exec_grant(grant, &p.credential_roots).map_err(
+                |error| plan_permission_error(error.with_credential_path(&grant.path, None)),
+            )?;
         }
         for grant in &p.protected_roots {
-            crate::permissions::validate_noncredential_grant(grant).map_err(|error| {
-                plan_permission_error(error.with_credential_path(&grant.path, None))
-            })?;
+            crate::permissions::validate_noncredential_grant(grant, &p.credential_roots).map_err(
+                |error| plan_permission_error(error.with_credential_path(&grant.path, None)),
+            )?;
         }
         for secret in &p.secret_roots {
             secret.validate().map_err(plan_permission_error)?;
@@ -275,9 +277,10 @@ impl ConfinedPlan {
             }
         }
         for private in std::iter::once(&p.scratch).chain(&p.private_state) {
-            crate::permissions::validate_noncredential_grant(private).map_err(|error| {
-                plan_permission_error(error.with_credential_path(&private.path, None))
-            })?;
+            crate::permissions::validate_noncredential_grant(private, &p.credential_roots)
+                .map_err(|error| {
+                    plan_permission_error(error.with_credential_path(&private.path, None))
+                })?;
             if private.scope != PathScope::Subtree
                 || p.read_roots
                     .iter()

@@ -1629,6 +1629,7 @@ mod tests {
         );
         input.provenant.git = &git;
         input.home = &home;
+        input.credential_roots = provenant_core::CredentialRoots::for_home(&home);
         let mut spec = registration.adapter.prepare(input)?;
         spec.configure_publishing(&scratch, &git, &gh, &home, &Default::default())?;
         for step in &spec.setup {
@@ -1756,6 +1757,7 @@ mod tests {
         );
         empty_input.provenant.git = &git;
         empty_input.home = &home;
+        empty_input.credential_roots = provenant_core::CredentialRoots::for_home(&home);
         let empty_spec = registration.adapter.prepare(empty_input)?;
         let generated = empty_spec
             .setup
@@ -1825,6 +1827,7 @@ mod tests {
             );
             bad_input.provenant.git = &git;
             bad_input.home = &home;
+            bad_input.credential_roots = provenant_core::CredentialRoots::for_home(&home);
             assert!(matches!(
                 registration.adapter.prepare(bad_input),
                 Err(ProviderError::InvalidPath)
@@ -2361,6 +2364,7 @@ mod tests {
             tool_requirements: Default::default(),
             git_wrapper: Default::default(),
             policy: Policy::default(),
+            credential_roots: provenant_core::CredentialRoots::for_home(Path::new("/fixture/home")),
             profile: provenant_confinement::permissions::ProviderProfile {
                 spec: ProviderProfileSpec::default(),
                 observations: Default::default(),

@@ -3,6 +3,7 @@
 use super::*;
 #[cfg(target_os = "macos")]
 use crate::repo::VerifiedWorktree;
+use provenant_core::{CredentialRoots, CredentialScope};
 #[cfg(target_os = "macos")]
 use provenant_os::fs::{Directory, FileKind};
 #[cfg(any(target_os = "macos", test))]
@@ -29,8 +30,9 @@ fn boundary_error<E: std::fmt::Display>(code: &str, error: E) -> E {
 pub(super) fn verify_worktree_authority(
     authority: &WorktreeWriteAuthority,
     anchors: &Anchors<'_>,
+    credentials: &CredentialRoots,
 ) -> Result<WorktreeWriteGrants, PermissionError> {
-    verify_worktree_authority_inner(authority, anchors).map_err(|error| {
+    verify_worktree_authority_inner(authority, anchors, credentials).map_err(|error| {
         boundary_error("VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION", error)
     })
 }
@@ -39,6 +41,7 @@ pub(super) fn verify_worktree_authority(
 fn verify_worktree_authority_inner(
     authority: &WorktreeWriteAuthority,
     anchors: &Anchors<'_>,
+    credentials: &CredentialRoots,
 ) -> Result<WorktreeWriteGrants, PermissionError> {
     let (verified, selected_ref) = anchors
         .worktree
@@ -48,8 +51,8 @@ fn verify_worktree_authority_inner(
         return Err(PermissionError::GitWriteAuthorityMissing);
     }
     let grants = WorktreeWriteGrants::derive(verified, selected_ref);
-    grants.validate()?;
-    validate_writer_cache(authority, verified, anchors.home)?;
+    grants.validate(credentials)?;
+    validate_writer_cache(authority, verified, anchors.home, credentials)?;
     if authority.common_git_dir() != grants.common_git_dir.path.as_path() {
         return Err(PermissionError::GitWriteAuthorityMissing);
     }
@@ -186,31 +189,37 @@ pub(super) fn verify_selected_head(
 }
 
 #[cfg(test)]
-pub(super) fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionError> {
-    validate_profile_spec_impl(spec, None, MAX_PATH_GRANTS)
+pub(super) fn validate_profile_spec(
+    spec: &ProviderProfileSpec,
+    credentials: &CredentialRoots,
+) -> Result<(), PermissionError> {
+    validate_profile_spec_impl(spec, None, credentials, MAX_PATH_GRANTS)
 }
 
 #[cfg(any(target_os = "macos", test))]
 pub(super) fn validate_profile_spec_with_home(
     spec: &ProviderProfileSpec,
     home: &Path,
+    credentials: &CredentialRoots,
     grant_limit: usize,
 ) -> Result<(), PermissionError> {
-    validate_profile_spec_impl(spec, Some(home), grant_limit)
+    validate_profile_spec_impl(spec, Some(home), credentials, grant_limit)
 }
 
 #[cfg(any(target_os = "macos", test))]
 fn validate_profile_spec_impl(
     spec: &ProviderProfileSpec,
     home: Option<&Path>,
+    credentials: &CredentialRoots,
     grant_limit: usize,
 ) -> Result<(), PermissionError> {
-    validate_profile_spec_inner(spec, home, grant_limit).map_err(|error| {
+    validate_profile_spec_inner(spec, home, credentials, grant_limit).map_err(|error| {
         use PermissionError as E;
         let code = match &error {
             E::CredentialRoot
             | E::CredentialRootAt { .. }
             | E::CredentialGrant { .. }
+            | E::CredentialStore { .. }
             | E::InvalidFixture => Some("VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_CREDENTIALS"),
             E::ProcessPolicyMissing => Some("VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_AUTHORITY"),
             E::InvalidPath(_) | E::BroadRoot | E::NonUtf8Path => {
@@ -232,6 +241,7 @@ fn validate_profile_spec_impl(
 fn validate_profile_spec_inner(
     spec: &ProviderProfileSpec,
     home: Option<&Path>,
+    credentials: &CredentialRoots,
     grant_limit: usize,
 ) -> Result<(), PermissionError> {
     for (family, count, limit) in [
@@ -281,7 +291,7 @@ fn validate_profile_spec_inner(
         return Err(PermissionError::ProcessPolicyMissing);
     }
     for executable in &spec.process_executables {
-        validate_read_exec_grant(executable).map_err(|error| {
+        validate_read_exec_grant(executable, credentials).map_err(|error| {
             if home.is_some() {
                 error.with_credential_path(&executable.path, home)
             } else {
@@ -293,7 +303,7 @@ fn validate_profile_spec_inner(
         }
     }
     if let Some(socket) = &spec.fabric_socket {
-        validate_noncredential_grant(socket).map_err(|error| {
+        validate_noncredential_grant(socket, credentials).map_err(|error| {
             if home.is_some() {
                 error.with_credential_path(&socket.path, home)
             } else {
@@ -305,7 +315,7 @@ fn validate_profile_spec_inner(
         }
     }
     for grant in &spec.runtime_reads {
-        validate_read_exec_grant(grant).map_err(|error| {
+        validate_read_exec_grant(grant, credentials).map_err(|error| {
             if home.is_some() {
                 error.with_credential_path(&grant.path, home)
             } else {
@@ -367,7 +377,7 @@ fn validate_profile_spec_inner(
         }
     }
     for grant in &spec.continuation_reads {
-        validate_noncredential_grant(grant).map_err(|error| {
+        validate_noncredential_grant(grant, credentials).map_err(|error| {
             if home.is_some() {
                 error.with_credential_path(&grant.path, home)
             } else {
@@ -376,7 +386,7 @@ fn validate_profile_spec_inner(
         })?;
     }
     for root in &spec.tool_exec_roots {
-        validate_read_exec_grant(root).map_err(|error| {
+        validate_read_exec_grant(root, credentials).map_err(|error| {
             if home.is_some() {
                 error.with_credential_path(&root.path, home)
             } else {
@@ -396,14 +406,18 @@ fn validate_profile_spec_inner(
             .any(|root| grant.overlaps(root))
         {
             return Err(if home.is_some() {
-                PermissionError::credential_root_at(&grant.path, home)
+                PermissionError::credential_root_at(
+                    &grant.path,
+                    home,
+                    "provider profile authentication declaration",
+                )
             } else {
                 PermissionError::CredentialRoot
             });
         }
     }
     for grant in &spec.tool_writes {
-        validate_noncredential_grant(grant).map_err(|error| {
+        validate_noncredential_grant(grant, credentials).map_err(|error| {
             if home.is_some() {
                 error.with_credential_path(&grant.path, home)
             } else {
@@ -433,27 +447,25 @@ pub(super) fn valid_discovery_read(grant: &PathGrant) -> bool {
         )
 }
 
-pub(crate) fn validate_noncredential_grant(grant: &PathGrant) -> Result<(), PermissionError> {
+pub(crate) fn validate_noncredential_grant(
+    grant: &PathGrant,
+    credentials: &CredentialRoots,
+) -> Result<(), PermissionError> {
     grant.validate()?;
-    if refuses_credential_grant(grant, false) {
-        return Err(PermissionError::CredentialRoot);
+    if let Some(root) = refuses_credential_grant(grant, false, credentials) {
+        return Err(PermissionError::credential_store(&grant.path, root));
     }
     Ok(())
 }
 
-/// Whether a lane root at `path` must be refused because it is credential
-/// named or encloses a nested credential root. Read and exec roots allow the
-/// Codex standalone package, which is credential named but holds no
-/// credentials. `home` is the host's canonical home, wherever it lives; a root
-/// that holds it or its nested credential roots is refused too. Entry checks
-/// and the compiler share this predicate so they cannot drift.
-pub fn refuses_lane_root(path: &Path, read: bool, home: Option<&Path>) -> bool {
+/// Whether a lane root overlaps a concrete credential store in the shared
+/// declaration table.
+pub fn refuses_lane_root(path: &Path, read: bool, credentials: &CredentialRoots) -> bool {
     let grant = PathGrant {
         path: path.to_owned(),
         scope: PathScope::Subtree,
     };
-    let refused = refuses_credential_grant(&grant, read)
-        || home.is_some_and(|home| encloses_home_credentials(&grant, home));
+    let refused = refuses_credential_grant(&grant, read, credentials).is_some();
     if refused {
         let detail = format!("lane root exposes credential material: {}", path.display());
         // Preserve the existing bool API while driving the immutable rule
@@ -472,58 +484,31 @@ pub fn refuses_lane_root(path: &Path, read: bool, home: Option<&Path>) -> bool {
 
 /// The grant-level form of [`refuses_lane_root`], honouring an exact grant's
 /// narrower reach.
-pub(super) fn refuses_credential_grant(grant: &PathGrant, read: bool) -> bool {
-    if read && is_codex_standalone_package(&grant.path) && !encloses_credential_root(grant) {
-        return false;
-    }
-    is_credential_root(&grant.path) || encloses_credential_root(grant)
-}
-
-/// A subtree of `/Users/<name>` or `/home/<name>` that holds a nested
-/// credential root (`~/.config`, `~/Library`, `~/Archives`) would expose it.
-/// The home itself is a broad root; [`refuses_lane_root`] and `compile_sbpl`
-/// repeat this check against the host's actual home, wherever it lives.
-pub(super) fn encloses_credential_root(grant: &PathGrant) -> bool {
-    grant.scope == PathScope::Subtree && encloses_credential_root_path(&grant.path)
-}
-
-pub(super) fn encloses_credential_root_path(path: &Path) -> bool {
-    let mut normal = path.components().filter_map(|component| match component {
-        Component::Normal(value) => Some(value),
-        _ => None,
-    });
-    match (normal.next(), normal.next()) {
-        (Some(root), Some(user)) if root == "Users" || root == "home" => {
-            encloses_home_credentials_path(path, &Path::new("/").join(root).join(user))
-        }
-        _ => false,
-    }
-}
-
-/// A subtree that holds `home` itself or one of its nested credential roots.
-pub(super) fn encloses_home_credentials(grant: &PathGrant, home: &Path) -> bool {
-    grant.scope == PathScope::Subtree && encloses_home_credentials_path(&grant.path, home)
-}
-
-pub(super) fn encloses_home_credentials_path(path: &Path, home: &Path) -> bool {
-    home.starts_with(path)
-        || [
-            ".config",
-            "Library",
-            "Library/Application Support",
-            "Archives",
-        ]
-        .iter()
-        .any(|nested| path == home.join(nested))
+pub(super) fn refuses_credential_grant(
+    grant: &PathGrant,
+    read: bool,
+    credentials: &CredentialRoots,
+) -> Option<&provenant_core::CredentialRoot> {
+    credentials.refusal(
+        &grant.path,
+        match grant.scope {
+            PathScope::Exact => CredentialScope::Exact,
+            PathScope::Subtree => CredentialScope::Subtree,
+        },
+        read,
+    )
 }
 
 /// Validates a grant that confers only read and exec. It is the one place the
 /// Codex standalone package exception applies: writes, scratch, protected
 /// roots and private state keep the strict credential-root check.
-pub(crate) fn validate_read_exec_grant(grant: &PathGrant) -> Result<(), PermissionError> {
+pub(crate) fn validate_read_exec_grant(
+    grant: &PathGrant,
+    credentials: &CredentialRoots,
+) -> Result<(), PermissionError> {
     grant.validate()?;
-    if refuses_credential_grant(grant, true) {
-        return Err(PermissionError::CredentialRoot);
+    if let Some(root) = refuses_credential_grant(grant, true, credentials) {
+        return Err(PermissionError::credential_store(&grant.path, root));
     }
     Ok(())
 }
@@ -533,33 +518,8 @@ pub(crate) fn validate_read_exec_grant(grant: &PathGrant) -> Result<(), Permissi
 /// `~/.codex`, `packages`, `standalone`, `releases` nor any sibling (auth,
 /// config, sessions, state, logs) matches, and nothing credential-named may
 /// appear below the release directory.
-pub fn is_codex_standalone_package(path: &Path) -> bool {
-    let normal: Vec<&OsStr> = path
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(value) => Some(value),
-            _ => None,
-        })
-        .collect();
-    let [
-        root,
-        _user,
-        codex,
-        packages,
-        standalone,
-        releases,
-        _release,
-        below @ ..,
-    ] = normal.as_slice()
-    else {
-        return false;
-    };
-    (*root == OsStr::new("Users") || *root == OsStr::new("home"))
-        && *codex == OsStr::new(".codex")
-        && *packages == OsStr::new("packages")
-        && *standalone == OsStr::new("standalone")
-        && *releases == OsStr::new("releases")
-        && !is_credential_root(&below.iter().collect::<PathBuf>())
+pub fn is_codex_standalone_package(path: &Path, credentials: &CredentialRoots) -> bool {
+    credentials.is_codex_standalone_package(path)
 }
 
 /// Whether a path can be encoded losslessly in the sandbox profile language.
@@ -617,53 +577,6 @@ pub(super) fn is_broad_root(path: &Path) -> bool {
         || (first == "var"
             && (normal.len() == 1
                 || (normal.len() == 2 && normal.get(1).is_some_and(|value| *value == "tmp"))))
-}
-
-pub(super) const CREDENTIAL_DIRECTORIES: &[&str] = &[
-    ".ssh", ".aws", ".azure", ".gnupg", ".kube", ".secrets", ".codex", ".claude", ".cursor",
-    ".gemini", "Monero",
-];
-pub(super) const NESTED_CREDENTIAL_DIRECTORIES: &[&str] = &[
-    ".config/gh",
-    ".config/gcloud",
-    "Library/Keychains",
-    "Archives/git-preservation",
-    "Library/Application Support/GitHub CLI",
-];
-
-// Additional provider stores can contain credentials alongside their state.
-// Keep these command-only denials out of model profile validation.
-pub(super) const PROVIDER_CREDENTIAL_DIRECTORIES: &[&str] = &[
-    ".config/cursor",
-    ".config/opencode",
-    ".local/share/opencode",
-];
-
-/// Whether a path lies within a known credential store.
-pub fn is_credential_root(path: &Path) -> bool {
-    let components: Vec<&OsStr> = path
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(value) => Some(value),
-            _ => None,
-        })
-        .collect();
-    if components.iter().any(|component| {
-        CREDENTIAL_DIRECTORIES
-            .iter()
-            .any(|name| *component == OsStr::new(name))
-    }) {
-        return true;
-    }
-    NESTED_CREDENTIAL_DIRECTORIES.iter().any(|relative| {
-        let parts: Vec<_> = Path::new(relative)
-            .components()
-            .map(|part| part.as_os_str())
-            .collect();
-        components
-            .windows(parts.len())
-            .any(|window| window == parts)
-    })
 }
 
 pub(super) fn path_overlaps(left: &Path, right: &Path) -> bool {
