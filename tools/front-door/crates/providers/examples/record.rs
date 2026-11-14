@@ -1020,7 +1020,7 @@ fn main() -> Result<()> {
     let accounts: provenant_providers::accounts::Settings =
         provenant_config::read_domain(host_roots.state.as_path(), "accounts")?;
     let mut credentials = host_credential_roots(|name| std::env::var_os(name));
-    credentials.extend(accounts.entries.iter().flat_map(|(_, entry)| {
+    credentials.extend(accounts.entries.values().flat_map(|entry| {
         std::iter::once(&entry.directory)
             .chain(&entry.directories)
             .filter(|path| path.as_path() != home)
@@ -1038,7 +1038,7 @@ fn main() -> Result<()> {
         ".claude-pro"
     });
     credentials.push(CredentialRoot {
-        path: directory,
+        path: directory.clone(),
         scope: CredentialScope::Subtree,
         source: "provider declaration: recorder account".into(),
         kind: CredentialKind::Store,
