@@ -993,9 +993,9 @@ pub(super) fn resolve_dispatch_excluding_family(
                         .and_then(|selection| selection.redraws.last_mut())
                     {
                         let cause = match &error {
-                            EdgeError::Quota(provenant_quota::QuotaError::Refused(
-                                "allowance exhausted",
-                            )) => provenant_records::RouteExclusionReason::Exhausted,
+                            EdgeError::Quota(provenant_quota::QuotaError::AllowanceExhausted) => {
+                                provenant_records::RouteExclusionReason::Exhausted
+                            }
                             EdgeError::Quota(provenant_quota::QuotaError::Refused(
                                 "uncalibrated partial coverage",
                             )) => provenant_records::RouteExclusionReason::UnknownPartialHeadroom,
@@ -1112,16 +1112,14 @@ pub(crate) fn check_dispatch_candidate(
     roots: &Roots,
     route: &provenant_records::ResolvedRoute,
     registry: &[provenant_providers::Registration],
-) -> Result<(), String> {
-    let catalogue = Catalogue::bundled().map_err(|e| e.to_string())?;
-    let model =
-        ModelId::parse(&format!("{}/{}", route.adapter, route.model)).map_err(|e| e.to_string())?;
-    let resolved_config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-        .map_err(|e| e.to_string())?;
+) -> Result<(), EdgeError> {
+    let catalogue = Catalogue::bundled()?;
+    let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
+    let resolved_config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?;
     let domains = resolved_config.domains;
     let pools = catalogue.admission_pools(&model);
     let now = SystemClock::new().unix_seconds();
-    let records = crate::quota::read_cache(roots).map_err(|e| e.to_string())?;
+    let records = crate::quota::read_cache(roots)?;
     let (records, policies) = account_evidence(&domains.quota, records, now, registry);
     provenant_quota::Admission {
         policies: &policies,
@@ -1129,8 +1127,8 @@ pub(crate) fn check_dispatch_candidate(
         records: &records,
         pools: &pools,
     }
-    .check(route)
-    .map_err(|e| e.to_string())
+    .check(route)?;
+    Ok(())
 }
 
 /// Check a review slot against the same pool and account policy used by dispatch.

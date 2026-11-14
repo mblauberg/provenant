@@ -698,9 +698,9 @@ fn refresh_account(
     };
     check()?;
     let mut token = token.map_err(|error| match error {
-        ProviderError::CredentialExpired
-        | ProviderError::CredentialNotFound
-        | ProviderError::CredentialUnavailable => ProviderError::RefreshDeferred,
+        ProviderError::CredentialExpired | ProviderError::CredentialUnavailable => {
+            ProviderError::RefreshDeferred
+        }
         other => other,
     })?;
     token.account = Some((account.key().into(), account.directory().to_owned()));

@@ -690,7 +690,7 @@
         assert!(preview.provider_refusals.iter().any(|reason| reason.contains(&spent) && reason.contains("scoped provider refusal")), "{:?}", preview.provider_refusals);
         // A refusal written after resolution still stops the launch.
         let error = super::check_dispatch_candidate(&roots, &drawn, super::REGISTRY).unwrap_err();
-        assert!(error.contains("scoped provider refusal"), "{error}");
+        assert!(matches!(error, super::EdgeError::Quota(provenant_quota::QuotaError::Refused(_))));
         let redrawn = resolve(None)?;
         assert!(super::check_dispatch_candidate(&roots, &redrawn, super::REGISTRY).is_ok());
         assert_eq!(redrawn.model, "gpt-6-luna");

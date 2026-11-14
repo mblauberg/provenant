@@ -303,7 +303,7 @@ impl Admission<'_> {
                 self.now_unix_seconds,
             ) == PartialHeadroom::Exhausted
             {
-                return Err(QuotaError::Refused("allowance exhausted"));
+                return Err(QuotaError::AllowanceExhausted);
             }
         }
         Ok(())
@@ -721,12 +721,12 @@ mod admission_tests {
         partial[0].snapshot.as_mut().unwrap().status = QuotaStatus::Unknown;
         assert!(matches!(
             check(&partial, 1100),
-            Err(QuotaError::Refused("allowance exhausted"))
+            Err(QuotaError::AllowanceExhausted)
         ));
         partial[0].snapshot.as_mut().unwrap().windows[0].resets_unix_seconds = Some(1099);
         assert!(matches!(
             check(&partial, 1100),
-            Err(QuotaError::Refused("allowance exhausted"))
+            Err(QuotaError::AllowanceExhausted)
         ));
         settings.calibration.get_mut("go").unwrap().five_hour = Some(100);
         let mut exhausted = raw.clone();
@@ -734,7 +734,7 @@ mod admission_tests {
         exhausted[0].snapshot.as_mut().unwrap().windows[0].resets_unix_seconds = Some(999);
         assert!(matches!(
             check(&exhausted, 1000),
-            Err(QuotaError::Refused("allowance exhausted"))
+            Err(QuotaError::AllowanceExhausted)
         ));
     }
 
@@ -868,7 +868,7 @@ mod admission_tests {
                 pools: &["pool-a".into()],
             }
             .check(&route()),
-            Err(QuotaError::Refused("allowance exhausted"))
+            Err(QuotaError::AllowanceExhausted)
         ));
     }
     #[test]

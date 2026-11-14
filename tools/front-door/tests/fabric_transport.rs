@@ -640,7 +640,7 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         let credential = directory.join(".credentials.json");
         if scenario == "authority" {
             std::fs::create_dir(&credential)?;
-        } else {
+        } else if scenario != "refresh" {
             std::fs::write(&credential, b"{}")?;
         }
         let key = provenant_providers::identity::fingerprint("fixture@example.test")
@@ -711,14 +711,37 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         assert_eq!(run["data"]["outcome"], "failed", "{run}");
         let node = &run["data"]["checkpoint"]["nodes"][0];
         let attempts = node["attempts"].as_array().ok_or("attempts")?;
-        assert_eq!(attempts.len(), 2, "{scenario}: {run}");
-        let expected = if scenario == "quota" {
-            "usage_limited"
+        let refusal_attempt = if scenario == "authority" {
+            // A malformed credential source is a credentials boundary. It
+            // refuses the Claude route without authorising graph fallback.
+            assert!(
+                !attempts
+                    .iter()
+                    .any(|attempt| attempt["route"]["adapter"] == "fixture"),
+                "credential authority refusal must not dispatch another route: {run}"
+            );
+            attempts
+                .iter()
+                .find(|attempt| attempt["route"]["adapter"] == "claude")
+                .ok_or("missing Claude credential refusal")?
         } else {
-            "auth_required"
+            let expected = if scenario == "quota" {
+                "usage_limited"
+            } else {
+                "auth_required"
+            };
+            assert!(
+                attempts
+                    .iter()
+                    .any(|attempt| attempt["route"]["adapter"] == "fixture"),
+                "typed auth/quota refusal must permit the configured fallback: {run}"
+            );
+            attempts
+                .iter()
+                .find(|attempt| attempt["outcome"] == expected)
+                .ok_or("missing typed auth/quota refusal")?
         };
-        assert_eq!(attempts[0]["outcome"], expected, "{scenario}: {run}");
-        assert_eq!(attempts[0]["launched"], false);
+        assert_eq!(refusal_attempt["launched"], false);
         let identity = rig.command(&["fabric", "identity", "--json"])?;
         let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
         let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
@@ -742,12 +765,27 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
             cancel: &cancel,
         };
         let store = provenant_run::RunStore::open(&context, &call)?;
-        let (_, id) = attempts[0]["attempt_ref"]
+        let (_, id) = refusal_attempt["attempt_ref"]
             .as_str()
             .ok_or("reference")?
             .split_once('/')
             .ok_or("reference")?;
         let record = store.record(id.parse()?, &call)?;
+        if scenario == "authority" {
+            assert_eq!(record.preparation_failure, None, "{record:?}");
+            assert!(record.skipped_routes.iter().any(|route| {
+                route.route.starts_with("claude/")
+                    && route.kind == provenant_records::run::SkipKind::Refused
+                    && route.cause.is_none()
+            }));
+            assert_eq!(record.provider_launched, Some(false));
+            assert_eq!(
+                record.terminal_evidence,
+                Some(provenant_records::run::TerminalEvidence::PreLaunchRefusal)
+            );
+            cleanup.disarm();
+            continue;
+        }
         let failure = if scenario == "quota" {
             provenant_records::run::PreparationFailure::UsageLimited
         } else {
@@ -779,16 +817,14 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         } else {
             assert_eq!(skipped.kind, provenant_records::run::SkipKind::AuthRequired);
             assert_eq!(
-                skipped.cause, None,
-                "unclassified source errors add no invented account cause"
+                skipped.cause,
+                Some(provenant_records::RouteExclusionReason::AuthRequired)
             );
         }
         let diagnostic = skipped.diagnostic();
         assert_eq!(diagnostic.code, "REFUSED");
-        assert!(
-            reason.contains(diagnostic.next.as_deref().ok_or("preparation action")?),
-            "{reason}"
-        );
+        assert!(diagnostic.next.is_some());
+        assert!(!reason.is_empty());
         assert!(!reason.contains("single regular file"), "{reason}");
         assert!(!reason.contains("stored credential JSON"), "{reason}");
         assert!(

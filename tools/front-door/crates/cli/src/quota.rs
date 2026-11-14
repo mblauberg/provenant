@@ -2463,7 +2463,9 @@ pub fn run(
                 | EdgeError::Quota(
                     QuotaError::Invalid(_) | QuotaError::Record(_) | QuotaError::NumberOutOfRange,
                 ) => Outcome::Invalid,
-                EdgeError::Quota(QuotaError::Refused(_) | QuotaError::Disabled) => Outcome::Refused,
+                EdgeError::Quota(
+                    QuotaError::AllowanceExhausted | QuotaError::Refused(_) | QuotaError::Disabled,
+                ) => Outcome::Refused,
                 EdgeError::Fs(FsError::Cancelled { .. }) => Outcome::Cancelled,
                 _ => Outcome::Error,
             };

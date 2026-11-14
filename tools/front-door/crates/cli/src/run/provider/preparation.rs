@@ -3239,13 +3239,16 @@ pub(super) fn prepare_candidates(
             // Admission refuses an account whose allowance is spent. Another
             // account may still serve the same model, so move on to it once per
             // account, never past a pinned one.
-            let spent = error.contains("allowance exhausted");
+            let spent = matches!(
+                &error,
+                crate::route::EdgeError::Quota(provenant_quota::QuotaError::AllowanceExhausted)
+            );
             let refused_key = route
                 .account_key
                 .clone()
                 .filter(|_| spent && selected.is_none());
             let Some(key) = refused_key else {
-                reasons.push(skip(&label, SkipKind::Unavailable, error));
+                reasons.push(skip(&label, SkipKind::Unavailable, error.to_string()));
                 continue;
             };
             let name = entries
@@ -5053,11 +5056,11 @@ mod candidate_walk_regressions {
         );
         assert!(!reasons[0].detail.contains("private detail"));
         let error = crate::route::DispatchError::from(crate::route::EdgeError::Quota(
-            provenant_quota::QuotaError::Refused("allowance exhausted"),
+            provenant_quota::QuotaError::AllowanceExhausted,
         ));
         let refusal = redraw_candidates(Err(error), &mut reasons, &mut rejected).unwrap_err();
         assert!(
-            matches!(refusal, PrepareError::RouteResolution { error: crate::route::DispatchError::Edge(error), checks } if matches!(*error, crate::route::EdgeError::Quota(provenant_quota::QuotaError::Refused(_))) && checks.len() == 1)
+            matches!(refusal, PrepareError::RouteResolution { error: crate::route::DispatchError::Edge(error), checks } if matches!(*error, crate::route::EdgeError::Quota(provenant_quota::QuotaError::AllowanceExhausted)) && checks.iter().any(|check| check.route == "cursor/spent" && check.cause == Some(provenant_records::RouteExclusionReason::Exhausted)))
         );
         Ok(())
     }
