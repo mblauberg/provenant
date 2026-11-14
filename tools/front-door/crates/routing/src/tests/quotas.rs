@@ -439,6 +439,7 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
         expires_unix_seconds: observation.expires_unix_seconds,
     };
     raw.snapshot.details = Some(QuotaDetails {
+        plan: Some("go".into()),
         source: Some("local-ledger".into()),
         coverage: Some("partial".into()),
         ..QuotaDetails::default()

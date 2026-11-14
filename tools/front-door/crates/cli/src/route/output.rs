@@ -233,11 +233,11 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
             "capability policy={} source={}\n",
             policy["policy"], policy["source"]
         ));
-        if let Some(excluded) = policy["excluded"].as_array() {
+        if let Some(excluded) = policy["below_minimum"].as_array() {
             for member in excluded {
                 text.push_str(&format!(
-                    "  {}: capability {} below {}\n",
-                    member["model"], member["capability"], member["minimum"]
+                    "  {}: capability {} below {} ({})\n",
+                    member["model"], member["capability"], member["minimum"], member["disposition"]
                 ));
             }
         }

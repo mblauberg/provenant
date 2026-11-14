@@ -254,11 +254,14 @@ fn catalogue_tiers_enforce_declared_capability_eligibility()
                     .as_str()
                     .is_some_and(|s| s.contains(tier))
             );
-            let excluded: BTreeSet<_> = decision["excluded"]
+            let excluded: BTreeSet<_> = decision["below_minimum"]
                 .as_array()
                 .ok_or("excluded")?
                 .iter()
-                .map(|row| row["model"].as_str().ok_or("model"))
+                .map(|row| {
+                    assert_eq!(row["disposition"], "excluded");
+                    row["model"].as_str().ok_or("model")
+                })
                 .collect::<Result<_, _>>()?;
             for member in &catalogue.pools[tier] {
                 let capability = catalogue.model(&member.model).ok_or("member")?.capability;
@@ -375,11 +378,11 @@ fn capability_overrides_change_eligibility_and_empty_floor_warns()
             .is_some_and(|s| !s.is_empty())
     );
     assert!(
-        receipt.extra["capability_policy"]["excluded"]
+        receipt.extra["capability_policy"]["below_minimum"]
             .as_array()
             .ok_or("exclusions")?
             .iter()
-            .any(|row| row["model"] == weakest.model.as_str())
+            .any(|row| row["model"] == weakest.model.as_str() && row["disposition"] == "waived")
     );
     Ok(())
 }

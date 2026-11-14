@@ -39,16 +39,24 @@ impl CapabilityPolicy {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct CapabilityExclusion {
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CapabilityDisposition {
+    Excluded,
+    Waived,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CapabilityAssessment {
     pub model: String,
     pub capability: Capability,
     pub minimum: Capability,
+    pub disposition: CapabilityDisposition,
 }
 #[derive(Debug, Serialize)]
 pub(crate) struct CapabilityDecision {
     pub policy: CapabilityPolicy,
     pub source: String,
-    pub excluded: Vec<CapabilityExclusion>,
+    pub below_minimum: Vec<CapabilityAssessment>,
     pub relaxed: bool,
     pub warning: Option<String>,
 }

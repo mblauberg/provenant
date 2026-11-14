@@ -2954,15 +2954,12 @@ fn classify_with_capability_policy(
                     .unwrap_or("config")
             ),
         )
+    } else if let Some(policy) = context.catalogue.capability_policy.get(name) {
+        (*policy, format!("catalogue:capability_policy.{name}"))
     } else {
         (
-            context
-                .catalogue
-                .capability_policy
-                .get(name)
-                .copied()
-                .unwrap_or_default(),
-            format!("catalogue:capability_policy.{name}"),
+            CapabilityPolicy::Disabled,
+            "default:capability_policy.disabled".into(),
         )
     };
     let mut classified = classify_pool(
@@ -2974,24 +2971,6 @@ fn classify_with_capability_policy(
         avoid_cooling,
         policy.minimum(),
     )?;
-    let exclusions = members
-        .iter()
-        .filter_map(|member| {
-            let capability = context
-                .catalogue
-                .model(&member.model)
-                .map(|m| m.capability)
-                .unwrap_or_default();
-            policy
-                .minimum()
-                .filter(|minimum| capability < *minimum)
-                .map(|minimum| crate::quality::CapabilityExclusion {
-                    model: member.model.as_str().into(),
-                    capability,
-                    minimum,
-                })
-        })
-        .collect();
     let relaxed = matches!(policy, CapabilityPolicy::Minimum { fallback: CapabilityFallback::WarnRelax, .. })
         && classified.routes.iter().all(Option::is_none)
         // Cooling is advisory: retry the qualified set before relaxing its floor.
@@ -3008,10 +2987,33 @@ fn classify_with_capability_policy(
             None,
         )?;
     }
+    let below_minimum = members
+        .iter()
+        .filter_map(|member| {
+            let capability = context
+                .catalogue
+                .model(&member.model)
+                .map(|m| m.capability)
+                .unwrap_or_default();
+            policy
+                .minimum()
+                .filter(|minimum| capability < *minimum)
+                .map(|minimum| crate::quality::CapabilityAssessment {
+                    model: member.model.as_str().into(),
+                    capability,
+                    minimum,
+                    disposition: if relaxed {
+                        crate::quality::CapabilityDisposition::Waived
+                    } else {
+                        crate::quality::CapabilityDisposition::Excluded
+                    },
+                })
+        })
+        .collect();
     classified.capability_policy = Some(crate::quality::CapabilityDecision {
         policy,
         source,
-        excluded: exclusions,
+        below_minimum,
         relaxed,
         warning: relaxed.then(|| {
             format!(

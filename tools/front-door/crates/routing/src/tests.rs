@@ -104,6 +104,14 @@ fn reason(route: &ResolvedRoute) -> Option<&RouteExclusionReason> {
         _ => None,
     }
 }
+/// Fixtures derive account plan metadata from the adapter's namespace declaration.
+fn fixture_plan(model: &ModelId) -> Option<String> {
+    provenant_records::AdapterSpec::get(model.adapter())?
+        .account_model_plans
+        .iter()
+        .find(|plan| model.model().starts_with(plan.model_prefix))
+        .map(|plan| plan.plan.into())
+}
 fn quota(
     model: &str,
     account: &str,
@@ -112,13 +120,15 @@ fn quota(
     observed: i64,
     expires: i64,
 ) -> Result<QuotaObservation, RoutingError> {
+    let model = ModelId::parse(model)?;
+    let plan = fixture_plan(&model);
     Ok(QuotaObservation {
-        model: ModelId::parse(model)?,
+        model: model.clone(),
         expires_unix_seconds: expires,
         snapshot: provenant_quota::QuotaSnapshot {
             schema_version: 1,
             account: provenant_quota::AccountScope {
-                adapter: "codex".into(),
+                adapter: model.adapter().into(),
                 account_key: account.into(),
                 label: "test".into(),
             },
@@ -127,7 +137,10 @@ fn quota(
             observed_unix_seconds: observed,
             source_ref: "fixture".into(),
             authority_ref: None,
-            details: None,
+            details: plan.map(|plan| provenant_quota::QuotaDetails {
+                plan: Some(plan),
+                ..Default::default()
+            }),
             windows: vec![],
         },
     })
@@ -173,6 +186,7 @@ fn profile_preview_with_status(
     let mut record = availability();
     record.adapter = id.adapter().into();
     record.account_key = Some(account.into());
+    record.plan = fixture_plan(&id);
     let records = [record];
     let access = [AccessContext {
         adapter: id.adapter(),

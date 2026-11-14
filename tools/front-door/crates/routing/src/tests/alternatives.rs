@@ -799,6 +799,7 @@ fn rolling_window_limits_go_despite_monthly_headroom() -> Result<(), Box<dyn std
     let mut observation = quota(model, "go", QuotaStatus::Available, 1, 80, 120)?;
     observation.snapshot.account.adapter = "opencode".into();
     observation.snapshot.details = Some(provenant_quota::QuotaDetails {
+        plan: Some("go".into()),
         source: Some("fixture-authoritative".into()),
         coverage: Some("complete".into()),
         ..provenant_quota::QuotaDetails::default()

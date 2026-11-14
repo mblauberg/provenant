@@ -128,7 +128,7 @@ mod tests {
         settings
     }
 
-    fn ledger(account: &str) -> AccountRecord {
+    fn ledger(account: &str, plan: &str) -> AccountRecord {
         let scope = crate::AccountScope {
             adapter: "opencode".into(),
             account_key: account.into(),
@@ -152,7 +152,10 @@ mod tests {
                     resets_unix_seconds: None,
                 })
                 .collect(),
-            details: None,
+            details: Some(crate::QuotaDetails {
+                plan: Some(plan.into()),
+                ..Default::default()
+            }),
         });
         record
     }
@@ -161,7 +164,7 @@ mod tests {
     fn calibration_takes_maximum_and_expires_even_with_cached_ledger() {
         let settings = settings("2026-11-04T00:00:00Z");
         let expiry = settings.calibration["go"].expiry();
-        let raw = vec![ledger("go"), ledger("zen")];
+        let raw = vec![ledger("go", "go"), ledger("zen", "zen")];
         let mut active = raw.clone();
         settings.apply_calibration(&mut active, expiry - 1);
         let snapshot = active[0].snapshot.as_ref().unwrap();
@@ -205,7 +208,7 @@ mod tests {
         settings.calibration.get_mut("go").unwrap().five_hour = Some(101);
         assert!(!settings.validate().is_empty());
         settings.calibration.get_mut("go").unwrap().five_hour = Some(100);
-        let mut records = vec![ledger("go")];
+        let mut records = vec![ledger("go", "go")];
         settings.apply_calibration(&mut records, 1);
         let snapshot = records[0].snapshot.as_ref().unwrap();
         assert_eq!(snapshot.status, QuotaStatus::Available);
@@ -227,7 +230,7 @@ mod tests {
     #[test]
     fn calibration_accepts_unique_label_but_not_ambiguous_label() {
         let settings = settings("2026-11-04T00:00:00Z");
-        let mut first = ledger("opencode-go");
+        let mut first = ledger("opencode-go", "go");
         first.account.label = "go".into();
         first.snapshot.as_mut().unwrap().account.label = "go".into();
         let mut unique = vec![first.clone()];
@@ -236,7 +239,7 @@ mod tests {
             unique[0].snapshot.as_ref().unwrap().windows[0].used_basis_points,
             4300
         );
-        let mut second = ledger("other");
+        let mut second = ledger("other", "go");
         second.account.label = "go".into();
         second.snapshot.as_mut().unwrap().account.label = "go".into();
         let mut ambiguous = vec![first, second];
