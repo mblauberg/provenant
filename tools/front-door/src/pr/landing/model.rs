@@ -8,11 +8,25 @@ pub struct EligiblePr {
     pub number: u64,
     pub head: String,
     pub approval: String,
-    pub approval_evidence: Option<ApprovalEvidence>,
+    pub approval_evidence: Vec<ApprovalEvidence>,
     pub base_branch: String,
     /// Set when the chair landed the pull request without a covering review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted: Option<Accepted>,
+}
+impl EligiblePr {
+    /// Keep every observed approval; source priority and arrival order do not
+    /// overwrite evidence already attached to the pinned head.
+    pub fn extend_approval_evidence(
+        &mut self,
+        evidence: impl IntoIterator<Item = ApprovalEvidence>,
+    ) {
+        for proof in evidence {
+            if !self.approval_evidence.contains(&proof) {
+                self.approval_evidence.push(proof);
+            }
+        }
+    }
 }
 /// The source and execution/reviewer that approved the pinned head.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +74,7 @@ pub struct GateEvidence {
 pub enum PublishMode {
     FastForward,
     RestOrdered,
+    Command,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishDecision {

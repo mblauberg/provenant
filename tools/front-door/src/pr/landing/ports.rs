@@ -164,6 +164,14 @@ pub enum MergeTree {
     Conflict,
 }
 pub trait Repo {
+    /// Execute the repository publisher with the durable pending intent on stdin.
+    fn publish_command(
+        &mut self,
+        _command: &provenant_records::landing::RepositoryCommand,
+        _attempt: &PendingAttempt,
+    ) -> Result<PublishResult, LandingError> {
+        Err(LandingError::Unimplemented("repository command publisher"))
+    }
     fn project_path(&self) -> Option<&std::path::Path> {
         None
     }

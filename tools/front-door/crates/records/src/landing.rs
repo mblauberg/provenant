@@ -280,6 +280,32 @@ pub struct CapabilityDecision {
     pub selected: CapabilityPath,
 }
 
+/// The execution port selected by the strategy declaration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Execution {
+    Builtin,
+    Command,
+    Unavailable,
+}
+
+/// Repository publisher. The full pending intent is supplied as JSON on stdin.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryCommand {
+    pub argv: Vec<String>,
+    pub unknown_exit_code: i64,
+    pub timeout_seconds: u64,
+}
+impl RepositoryCommand {
+    pub fn valid(&self) -> bool {
+        !self.argv.is_empty()
+            && !self.argv[0].is_empty()
+            && self.unknown_exit_code > 0
+            && self.unknown_exit_code <= 255
+            && self.timeout_seconds > 0
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct StrategyDeclaration {
     pub strategy: Strategy,
@@ -288,11 +314,11 @@ pub struct StrategyDeclaration {
     /// Optional native features; each has an observer implementation.
     pub requirements: &'static [ForgeCapability],
     pub resolver: fn(Plan, &Compose, &Capabilities) -> Plan,
-    pub executable: bool,
+    pub execution: Execution,
 }
 
 macro_rules! declare_strategies {
-    ($( $variant:ident => ($name:literal, $plan:expr, $requirements:expr, $resolver:ident, $executable:literal); )+) => {
+    ($( $variant:ident => ($name:literal, $plan:expr, $requirements:expr, $resolver:ident, $execution:ident); )+) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
         #[serde(rename_all = "snake_case")]
         pub enum Strategy { $( #[serde(rename = $name)] $variant, )+ }
@@ -306,18 +332,19 @@ macro_rules! declare_strategies {
                 defaults: $plan,
                 requirements: $requirements,
                 resolver: $resolver,
-                executable: $executable,
+                execution: Execution::$execution,
             }),+
         ];
     }
 }
 
 declare_strategies! {
-    Direct => ("direct", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Single, schedule: Schedule::Immediate, publication: Publication::ExactCandidate, completion: Completion::Event }, &[], resolve_preset, true);
-    Batch => ("batch", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Batch, schedule: Schedule::Immediate, publication: Publication::ExactCandidate, completion: Completion::Event }, &[], resolve_preset, true);
-    Stack => ("stack", Plan { dependencies: Dependencies::Stack, candidate: CandidateKind::Batch, schedule: Schedule::Ordered, publication: Publication::ExactCandidate, completion: Completion::Event }, &[ForgeCapability::Restack], resolve_preset, false);
-    Queue => ("queue", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Single, schedule: Schedule::Ordered, publication: Publication::ExactCandidate, completion: Completion::Event }, &[ForgeCapability::MergeQueue], resolve_queue, false);
-    Async => ("async", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Single, schedule: Schedule::Immediate, publication: Publication::ExactCandidate, completion: Completion::Event }, &[ForgeCapability::AutoMerge, ForgeCapability::AsyncMerge], resolve_preset, false);
+    Direct => ("direct", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Single, schedule: Schedule::Immediate, publication: Publication::ExactCandidate, completion: Completion::Event }, &[], resolve_preset, Builtin);
+    Batch => ("batch", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Batch, schedule: Schedule::Immediate, publication: Publication::ExactCandidate, completion: Completion::Event }, &[], resolve_preset, Builtin);
+    Stack => ("stack", Plan { dependencies: Dependencies::Stack, candidate: CandidateKind::Batch, schedule: Schedule::Ordered, publication: Publication::ExactCandidate, completion: Completion::Event }, &[ForgeCapability::Restack], resolve_preset, Unavailable);
+    Queue => ("queue", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Single, schedule: Schedule::Ordered, publication: Publication::ExactCandidate, completion: Completion::Event }, &[ForgeCapability::MergeQueue], resolve_queue, Unavailable);
+    Async => ("async", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Single, schedule: Schedule::Immediate, publication: Publication::ExactCandidate, completion: Completion::Event }, &[ForgeCapability::AutoMerge, ForgeCapability::AsyncMerge], resolve_preset, Unavailable);
+    Command => ("command", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Batch, schedule: Schedule::Immediate, publication: Publication::ExactCandidate, completion: Completion::Event }, &[], resolve_preset, Command);
 }
 
 impl Default for Strategy {
@@ -389,7 +416,7 @@ impl Strategy {
     }
 
     pub fn ensure_executable(self, plan: &Plan) -> Result<(), Unavailable> {
-        let supported = self.declaration().executable
+        let supported = (self.declaration().execution != Execution::Unavailable)
             && plan.dependencies == Dependencies::Independent
             && plan.schedule == Schedule::Immediate
             && plan.publication == Publication::ExactCandidate;
@@ -400,10 +427,10 @@ impl Strategy {
                 requested: self,
                 alternatives: STRATEGY_DECLARATIONS
                     .iter()
-                    .filter(|entry| entry.executable)
+                    .filter(|entry| entry.execution != Execution::Unavailable)
                     .map(|entry| entry.strategy)
                     .collect(),
-                note: if self.declaration().executable {
+                note: if self.declaration().execution != Execution::Unavailable {
                     "This composition is not implemented yet; execution follows in 2.1.".into()
                 } else {
                     "Execution is planned for 2.1; this strategy has been resolved without switching it.".into()

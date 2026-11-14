@@ -205,11 +205,24 @@ fn follow_with(
 
     // Approvals must still stand at the approved head after publication,
     // proved against the target the candidate was built on.
-    for pr in receipt.pull_requests.clone() {
-        let standing = matches!(
-            approvals.at(repo, &receipt.base).decide(forge, pr.number, &pr.head, "")?,
-            Decision::Approved(approved) if approved.reference == pr.approval
-        );
+    for (index, pr) in receipt.pull_requests.clone().into_iter().enumerate() {
+        let standing = match approvals
+            .at(repo, &receipt.base)
+            .decide(forge, pr.number, &pr.head, "")?
+        {
+            Decision::Approved(approved) => {
+                receipt.pull_requests[index].extend_approval_evidence(approved.evidence.clone());
+                if let Some(step) = receipt
+                    .candidate_steps
+                    .iter_mut()
+                    .find(|step| step.pr.number == pr.number)
+                {
+                    step.pr.extend_approval_evidence(approved.evidence);
+                }
+                true
+            }
+            Decision::Refused(_) => false,
+        };
         if !standing {
             let message = format!(
                 "approval {} for pull request {} is no longer present at {}",
@@ -450,7 +463,7 @@ mod tests {
                 number: n,
                 head: format!("h{n}"),
                 approval: format!("a{n}"),
-                approval_evidence: None,
+                approval_evidence: Vec::new(),
                 accepted: None,
                 base_branch: "main".into(),
             };

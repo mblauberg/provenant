@@ -43,6 +43,8 @@ pub const DEFAULT_LAND_POLL_SECONDS: u64 = 30;
 pub struct LandSettings {
     pub poll_seconds: u64,
     pub strategy: Strategy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<provenant_records::landing::RepositoryCommand>,
     pub compose: Compose,
     pub branches: Vec<LandBranch>,
     pub batch_size: u64,
@@ -71,6 +73,8 @@ pub struct LandOverride {
     pub poll_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strategy: Option<Strategy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<provenant_records::landing::RepositoryCommand>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compose: Option<Compose>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -298,6 +302,7 @@ impl Default for LandSettings {
         Self {
             poll_seconds: DEFAULT_LAND_POLL_SECONDS,
             strategy: Strategy::default(),
+            command: None,
             compose: Compose::default(),
             branches: Vec::new(),
             batch_size: 8,
@@ -350,6 +355,13 @@ impl DomainConfig for PrSettings {
             }
         };
         let land = &self.land;
+        check(
+            land.command
+                .as_ref()
+                .is_some_and(|command| !command.valid()),
+            "land.command",
+            "invalid_command",
+        );
         check(
             land.post_merge.timeout_seconds == 0,
             "land.post_merge.timeout_seconds",
@@ -489,6 +501,9 @@ timeout_seconds = 60
 .with_fields(&[
     FieldMetadata::int("land.poll_seconds", 1, i64::MAX),
     FieldMetadata::enumeration("land.strategy", STRATEGY_CHOICES),
+    FieldMetadata::new("land.command.argv", "array"),
+    FieldMetadata::int("land.command.unknown_exit_code", 1, 255),
+    FieldMetadata::int("land.command.timeout_seconds", 1, i64::MAX),
     FieldMetadata::new("land.compose", "table"),
     FieldMetadata::new("land.branches", "array"),
     FieldMetadata::new("land.compose.dependencies", "string"),

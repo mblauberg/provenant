@@ -26,13 +26,12 @@ use super::{
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub use provenant_records::landing::{
-    Authority, LandMember, LandRequest, LandingId, LandingRecord, MemberOutcome, PolicyChoice,
-    ReviewProof,
+use provenant_records::landing::{
+    Authority, LandMember, LandRequest, LandingId, LandingRecord, MemberOutcome, ReviewProof,
 };
 use provenant_records::landing::{
     CandidateKind, CleanupDebt, CleanupDebtItem, Dependencies, LandingChanged, LandingContext,
-    MemberProgress, MergeEvidence, Observation, OutboxEntry, PublicationGuarantee, Submission,
+    MemberProgress, Observation, OutboxEntry, PublicationGuarantee, Submission,
 };
 
 /// The landing port every publisher uses.
@@ -263,6 +262,22 @@ fn selection_changed(request: &LandRequest, record: &LandingRecord) -> bool {
             .tier
             .as_ref()
             .is_some_and(|tier| Some(tier) != record.request.policy.tier.as_ref())
+}
+
+/// Called only while holding the publication lock. Allocation and settlement
+/// share that lock, so identity, generation and revision remain fenced through dispatch.
+pub(super) fn fence(state: &Path, context: &LandingContext) -> Result<(), LandingError> {
+    let current = latest_record(state, context.id.request, None)?
+        .ok_or_else(|| LandingError::Failed("landing publication record is missing".into()))?;
+    if current.id != context.id
+        || current.generation != context.generation
+        || current.revision != context.expected_revision
+    {
+        return Err(LandingError::Pending(
+            "landing generation or snapshot was superseded; resubmit".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Reuse the existing nonblocking publication exclusion only for local allocation.
@@ -732,15 +747,16 @@ impl LandingOwner for Owner<'_> {
                     reason: unavailable.note.clone(),
                 };
             }
-            record.unavailable = Some(unavailable);
+            record.unavailable = Some(unavailable.clone());
             record.warnings.extend(capability_warning);
             record.revision += 1;
             if !self.shadow {
                 write_record(self.state, &record)?;
             }
-            return Err(LandingError::Unimplemented(
-                "strategy execution lands in 2.1; inspect the resolved landing record for alternatives",
-            ));
+            return Err(LandingError::Unavailable {
+                id,
+                reason: Box::new(unavailable),
+            });
         }
         if !request.dependency_edges.is_empty()
             && record.resolved_plan.plan.dependencies == Dependencies::Independent
@@ -900,7 +916,9 @@ impl LandingOwner for Owner<'_> {
                     }
                 }
                 let guarantee = match receipt.publish.mode {
-                    super::model::PublishMode::FastForward => PublicationGuarantee::ExactCandidate,
+                    super::model::PublishMode::FastForward | super::model::PublishMode::Command => {
+                        PublicationGuarantee::ExactCandidate
+                    }
                     super::model::PublishMode::RestOrdered => PublicationGuarantee::OrderedMembers,
                 };
                 if record.publication_guarantee != PublicationGuarantee::OrderedMembers {
@@ -998,6 +1016,7 @@ mod tests {
     use crate::pr::landing::model::GateResult;
     use crate::pr::landing::policy::LandPolicy;
     use provenant_cli::domains::{ApprovalSource, ApprovalTier, LandOverride, LandSettings};
+    use provenant_records::landing::PolicyChoice;
 
     #[derive(Default)]
     struct ScopedFakeReviews {
@@ -1107,6 +1126,74 @@ mod tests {
                 review_proof: ReviewProof::Policy,
             })
             .collect()
+    }
+
+    #[test]
+    fn superseded_generation_or_revision_never_reaches_publication()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for new_generation in [false, true] {
+            let mut world = world(1)?;
+            let (_, snapshot) = submit(
+                &mut world,
+                LandRequest {
+                    members: members(&[1]),
+                    authority: Authority::Observe,
+                    ..Default::default()
+                },
+            )?;
+            let context = LandingContext {
+                id: snapshot.id.clone(),
+                generation: snapshot.generation,
+                request: snapshot.request.clone(),
+                plan: snapshot.resolved_plan.clone(),
+                operation: snapshot.operation.clone(),
+                expected_revision: snapshot.revision,
+            };
+            {
+                let _lock = receipt::lock(world.state.path())?;
+                fence(world.state.path(), &context)?;
+                let mut newer = snapshot.clone();
+                if new_generation {
+                    newer.generation += 1;
+                    newer.request.generation = newer.generation;
+                    newer.request.parent = Some(snapshot.id.clone());
+                    newer.id = LandingId::of(
+                        &newer.repository,
+                        &newer.target,
+                        &newer.request,
+                        &newer.resolved_plan.digest,
+                    )?;
+                } else {
+                    newer.revision += 1;
+                }
+                write_record(world.state.path(), &newer)?;
+            }
+            let mut policy = world.policy.clone();
+            policy.landing = Some(context);
+            let result = driver::run(
+                &mut world.forge,
+                &mut world.repo,
+                &mut world.gate,
+                &mut world.alarms,
+                driver::Request {
+                    numbers: &[1],
+                    target: &snapshot.target,
+                    settings: &world.settings,
+                    policy: &policy,
+                    gate: &world.definition,
+                    shadow: false,
+                    state: world.state.path(),
+                    approvals: Approvals::forge(),
+                    pins: &BTreeMap::new(),
+                },
+            );
+            assert!(
+                matches!(result, Err(LandingError::RunFailed { cause, .. }) if matches!(*cause, LandingError::Pending(_)))
+            );
+            assert!(world.forge.merges.is_empty() && world.repo.push_attempts.is_empty());
+            assert!(world.gate.polls.is_empty());
+        }
+        Ok(())
     }
 
     #[test]

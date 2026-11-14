@@ -25,7 +25,16 @@ fn valid_for_retry(
     repo: &mut dyn Repo,
     approvals: Approvals<'_>,
     attempt: &PendingAttempt,
+    state: &std::path::Path,
 ) -> bool {
+    if let Some(context) = &attempt.policy.landing
+        && super::owner::fence(state, context).is_err()
+    {
+        return false;
+    }
+    if attempt.publish.mode == PublishMode::Command {
+        return false;
+    }
     let candidate = &attempt.candidate;
     publish::revalidate(forge, &mut approvals.at(repo, &candidate.base), candidate)
         .is_ok_and(|excluded| excluded.is_empty())
@@ -419,7 +428,7 @@ pub(crate) fn recover_pending_with(
         }
         .map_err(|_| unknown())?;
         let settings = attempt.policy.settings().map_err(|_| unknown())?;
-        let can_retry = !shadow && valid_for_retry(forge, repo, approvals, &attempt);
+        let can_retry = !shadow && valid_for_retry(forge, repo, approvals, &attempt, state);
         // The original publication has had its settle window once the marker
         // is that old; a younger one is observed now and never waited on.
         let settled = !shadow
@@ -555,7 +564,8 @@ pub(crate) fn recover_pending_with(
                                 }
                                 continue;
                             }
-                            let retry = if valid_for_retry(forge, repo, approvals, &attempt) {
+                            let retry = if valid_for_retry(forge, repo, approvals, &attempt, state)
+                            {
                                 publish::merge_member(
                                     forge,
                                     step.pr.number,
