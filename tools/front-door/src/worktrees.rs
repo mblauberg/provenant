@@ -415,25 +415,18 @@ fn gc_retention_bytes(data: &GcData) -> Vec<provenant_config::RetentionBytes> {
     RETENTION_CLASSES
         .iter()
         .map(|class| {
-            let measured = match class.class {
-                RetentionKind::LaneCargoCaches => Some(data.report.bytes_freed),
-                RetentionKind::TargetSeeds if !data.report.dry_run => Some(data.target_seeds.bytes),
-                RetentionKind::BuildDirectories if !data.report.dry_run => Some(data.build_dirs.bytes),
-                RetentionKind::PayloadCap => Some(data.provider_state.payload.reclaimed_bytes),
-                RetentionKind::AttemptScratch => Some(
-                    data.provider_state
-                        .attempt_tmp
-                        .iter()
-                        .map(|item| item.bytes)
-                        .fold(0, u64::saturating_add),
-                ),
-                _ => None,
+            let observation = match class.class {
+                RetentionKind::LaneCargoCaches => ByteObservation::Measured { bytes: data.report.bytes_freed },
+                RetentionKind::TargetSeeds if !data.report.dry_run => ByteObservation::Measured { bytes: data.target_seeds.bytes },
+                RetentionKind::BuildDirectories if !data.report.dry_run => ByteObservation::Measured { bytes: data.build_dirs.bytes },
+                RetentionKind::PayloadCap => ByteObservation::Measured { bytes: data.provider_state.payload.reclaimed_bytes },
+                RetentionKind::ProviderState => ByteObservation::Partial { bytes: data.provider_state.attempt_logs.iter().map(|item| item.bytes).fold(0, u64::saturating_add) },
+                RetentionKind::AttemptScratch => ByteObservation::Partial { bytes: data.provider_state.attempt_tmp.iter().map(|item| item.bytes).fold(0, u64::saturating_add) },
+                _ => ByteObservation::Unknown,
             };
             provenant_config::RetentionBytes {
                 class: class.class,
-                observation: measured
-                    .map(|bytes| ByteObservation::Measured { bytes })
-                    .unwrap_or(ByteObservation::Unknown),
+                observation,
             }
         })
         .collect()
@@ -787,6 +780,15 @@ enum GcOutput<'a> {
         notice: &'a Option<String>,
     },
 }
+fn append_gc_subpass_removals(
+    report: &mut worktrees::WorktreeGcReport,
+    removals: Vec<RemovalRecord>,
+) {
+    if !report.dry_run {
+        report.removals.extend(removals);
+    }
+}
+
 fn append_gc_removal_records(
     report: &mut worktrees::WorktreeGcReport,
     project: provenant_core::ProjectId,
@@ -1264,10 +1266,10 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             |context, cancel| {
                 // When the fetch fails, there is no origin, or the sweep is a
                 // pressure sweep, upstream is None: the path-based pass below
-                // cannot grant removal authority, and settled lane collection
-                // falls back to the owner's base (the same rule settlement
-                // uses, granting no new authority). Output pruning still has
-                // its independent terminal-state proof.
+                // cannot grant removal authority. Settled lane collection
+                // requires an exact delivered or integration ref for its
+                // removal evidence. Output pruning still has its independent
+                // terminal-state proof.
                 let (upstream, upstream_error) = if command.pressure || command.dry_run {
                     (None, None)
                 } else {
@@ -1278,16 +1280,15 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 };
                 // Settled lanes whose settlement-time collection missed keep a
                 // receipt that is not final. Collect them through the same
-                // owner-bound proof before the path-based pass below, landing
-                // against the fetched default branch or falling back to the
-                // owner's base when upstream is None.
-                let collected = if command.apply && !command.dry_run {
+                // owner-bound proof before the path-based pass below. The
+                // subpass requires an exact integration ref for reportable removal.
+                let unsettled = if command.apply && !command.dry_run {
                     crate::fabric::gc_cleanup::collect_unsettled(
                         &roots,
                         &home,
                         &project.path,
                         project.binding.project_id(),
-                        upstream.as_ref().map(|(_, oid)| *oid),
+                        upstream.clone(),
                         workers,
                     )
                     .unwrap_or_else(|error| {
@@ -1297,15 +1298,15 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                             "warning: settled lane collection failed for {}: {error}",
                             project.path.display()
                         );
-                        Vec::new()
+                        crate::fabric::gc_cleanup::UnsettledCollection::default()
                     })
                 } else {
-                    Vec::new()
+                    crate::fabric::gc_cleanup::UnsettledCollection::default()
                 };
                 let lanes: Vec<_> = project
                     .lanes
                     .iter()
-                    .filter(|lane| !collected.contains(&lane.path))
+                    .filter(|lane| !unsettled.removed.contains(&lane.path))
                     .cloned()
                     .collect();
                 // Fetch can take a while, so begin the single sweep snapshot
@@ -1376,6 +1377,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     cancel,
                 )?;
                 report.upstream_error = upstream_error;
+                append_gc_subpass_removals(&mut report, unsettled.removals);
                 // Only proven landed refs with unchanged ledger tips may go.
                 if !command.pressure {
                     let sweep = crate::lane_cleanup::Sweep::new(command.dry_run || !command.apply);
@@ -1960,6 +1962,9 @@ mod gc_preview_tests {
         data.target_seeds.bytes = 23;
         data.build_dirs.bytes = 29;
         data.provider_state.payload.reclaimed_bytes = 31;
+        data.provider_state.attempt_logs.push(provenant_run::AttemptLogRemoval {
+            path: "/state/attempt/a/log".into(), bytes: 43, tail_bytes: 7,
+        });
         data.provider_state.attempt_tmp.extend([
             provenant_run::AttemptTmpRemoval {
                 path: "/state/attempt/a".into(),
@@ -2000,7 +2005,11 @@ mod gc_preview_tests {
         );
         assert_eq!(
             observation(RetentionKind::AttemptScratch),
-            ByteObservation::Measured { bytes: 78 }
+            ByteObservation::Partial { bytes: 78 }
+        );
+        assert_eq!(
+            observation(RetentionKind::ProviderState),
+            ByteObservation::Partial { bytes: 43 }
         );
         assert_eq!(
             observation(RetentionKind::GraphCheckpoints),
@@ -2231,5 +2240,45 @@ mod gc_preview_tests {
         assert!(result.is_err());
         assert!(!state.exists());
         Ok(())
+    }
+}
+
+
+#[cfg(test)]
+mod gc_subpass_removal_tests {
+    use super::*;
+
+    #[test]
+    fn actual_gc_lifts_unsettled_branch_removal_and_preview_keeps_none() {
+        let project = provenant_core::ProjectId::from_bytes([8; 16]);
+        let tip = GitOid::parse(&"a1".repeat(20)).unwrap();
+        let evidence = LandedEvidence {
+            predicate: LandingPredicate::Landed,
+            source: LandingSource::IntegrationTarget {
+                reference: "refs/remotes/origin/main".into(),
+                commit: GitOid::parse(&"b2".repeat(20)).unwrap(),
+            },
+        };
+        let record = RemovalRecord {
+            project,
+            subject: Subject::new(SubjectKind::Branch, "refs/heads/topic"),
+            tip,
+            outcome: provenant_records::custody::RemovalOutcome::Removed { evidence },
+        };
+
+        let mut applied = worktrees::WorktreeGcReport::default();
+        append_gc_subpass_removals(&mut applied, vec![record.clone()]);
+        assert_eq!(applied.removals, vec![record.clone()]);
+        let mut data = GcData::default();
+        data.worktree_cleanup.push(applied);
+        let output = serde_json::to_value(gc_result_data(&data, false)).unwrap();
+        assert_eq!(output["removal_records"][0], serde_json::to_value(&record).unwrap());
+
+        let mut preview = worktrees::WorktreeGcReport {
+            dry_run: true,
+            ..Default::default()
+        };
+        append_gc_subpass_removals(&mut preview, vec![record]);
+        assert!(preview.removals.is_empty());
     }
 }

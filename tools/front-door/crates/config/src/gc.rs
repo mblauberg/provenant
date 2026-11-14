@@ -30,10 +30,12 @@ pub enum RetentionEligibility {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ByteObservation {
     Measured { bytes: u64 },
+    /// Observed bytes cover only part of the class or are best-effort.
+    Partial { bytes: u64 },
     Unknown,
 }
 
-/// A GC byte total. Unknown is explicit when an owner has no measurement.
+/// A GC byte observation with explicit completeness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetentionBytes {
     pub class: RetentionKind,
@@ -727,10 +729,11 @@ mod tests {
         for class in retention_schedule(RetentionTrigger::Gc) {
             assert!(retention_schedule(RetentionTrigger::FullGc).any(|entry| entry.class == class.class));
         }
-        let unknown = ByteObservation::Unknown;
-        let encoded = serde_json::to_vec(&unknown).unwrap();
-        let decoded: ByteObservation = serde_json::from_slice(&encoded).unwrap();
-        assert_eq!(decoded, unknown);
+        for observation in [ByteObservation::Measured { bytes: 17 }, ByteObservation::Partial { bytes: 19 }, ByteObservation::Unknown] {
+            let encoded = serde_json::to_vec(&observation).unwrap();
+            let decoded: ByteObservation = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(decoded, observation);
+        }
     }
 
     #[test]

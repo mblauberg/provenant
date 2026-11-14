@@ -91,7 +91,7 @@ GC retains evidence and unimported Git work; it expires resumable provider state
 only after archiving history. It skips busy items, protects active reservations
 and continuations, and uses identity-checked deletion without following links.
 Usage retention belongs to [telemetry](telemetry.md#the-usage-ledger-outlives-the-run-store).
-Each retention class declares its owner, trigger, eligibility and settings; GC reports measured bytes per class and names unavailable measurements.
+Each retention class declares its owner, trigger, eligibility and settings; GC reports bytes per class with complete, partial or unavailable measurements.
 Removal records preserve subject, tip, subsumed or landed predicate and evidence source; shallow history, conflicted merge trees, offline forge and rewritten default branches remain typed kept outcomes.
 - Why: freeing space must not destroy evidence or a session in use.
 - Test: `crates/run/src/retention.rs::gc_spares_nonterminal_attempts_and_contention_and_reservations`;
