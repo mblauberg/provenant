@@ -19,6 +19,7 @@
 //! `max_concurrent_builds` observes occupancy across the host. Busy slots warn
 //! and proceed immediately; Cargo owns its own build-lock queue.
 use provenant_os::build_slots::BuildSlots;
+use provenant_records::diagnostic::SettingSource;
 use provenant_supervisor::census::{ProcessObservation, ProcessObserver, SystemProcessObserver};
 use std::{
     ffi::{OsStr, OsString},
@@ -346,50 +347,78 @@ fn check_disk(env: &[(OsString, OsString)]) -> Result<(), String> {
             .find(|(key, _)| key == OsStr::new(name))
             .and_then(|(_, value)| value.to_str())
     };
-    let (Some(floor), Some(rule)) = (
-        value("PROVENANT_BUILD_DISK_FLOOR"),
-        value("PROVENANT_BUILD_DISK_RULE"),
-    ) else {
+    let values = (
+        value("PROVENANT_BUILD_DISK_FREE_FLOOR"),
+        value("PROVENANT_BUILD_DISK_FREE_SOURCE"),
+        value("PROVENANT_BUILD_DISK_CRITICAL_FLOOR"),
+        value("PROVENANT_BUILD_DISK_CRITICAL_SOURCE"),
+    );
+    let (Some(free_floor), Some(free_source), Some(critical_floor), Some(critical_source)) = values
+    else {
+        if values == (None, None, None, None) {
+            return Ok(());
+        }
+        say(
+            "build disk floors are incomplete; the critical floor could not be resolved, so the build may proceed without the disk gate",
+        );
         return Ok(());
     };
-    let observed = (|| {
-        let floor = floor.parse::<u64>().map_err(|error| error.to_string())?;
-        let rule: provenant_records::policy::EffectiveRule =
-            serde_json::from_str(rule).map_err(|error| error.to_string())?;
-        if rule.rule.code != "BUILD_DISK" {
-            return Err(format!("unexpected disk rule {}", rule.rule.code));
-        }
-        let target = value("CARGO_TARGET_DIR").map_or_else(|| Path::new("."), Path::new);
-        let mut root = target;
-        while !root.exists() {
-            root = root.parent().unwrap_or(Path::new("."));
-        }
-        let free = provenant_os::fs::available_bytes_at(root).map_err(|error| error.to_string())?;
-        let facts = provenant_records::policy::Facts {
-            violated: free < floor,
-            detail: format!("free={free} bytes, gc.free_floor={floor} bytes"),
+    let thresholds = (|| {
+        let free_floor = free_floor
+            .parse::<u64>()
+            .map_err(|error| error.to_string())?;
+        let critical_floor = critical_floor
+            .parse::<u64>()
+            .map_err(|error| error.to_string())?;
+        let source = |value: &str| match value {
+            "host configuration" => Some(SettingSource::Configuration),
+            "shipped default" => Some(SettingSource::ShippedDefault),
+            _ => None,
         };
-        let effect =
-            provenant_records::policy::Policy { rules: vec![rule] }.check("BUILD_DISK", facts);
-        Ok::<_, String>(effect)
+        let free_source = source(free_source).ok_or("unknown free-floor source")?;
+        let critical_source = source(critical_source).ok_or("unknown critical-floor source")?;
+        Ok::<_, String>((free_floor, free_source, critical_floor, critical_source))
     })();
-    use provenant_records::policy::Effect;
-    match observed {
-        Ok(Effect::Refuse(diagnostic)) => Err(diagnostic
-            .detail
-            .unwrap_or_else(|| "BUILD_DISK refused a new build".into())),
-        Ok(Effect::Warn(message)) => {
-            say(&format!("{message}; building"));
-            Ok(())
-        }
-        Ok(_) => Ok(()),
+    let (free_floor, free_source, critical_floor, critical_source) = match thresholds {
+        Ok(thresholds) => thresholds,
         Err(error) => {
             say(&format!(
-                "disk policy observation failed: {error}; building"
+                "build disk floors are invalid ({error}); the critical floor could not be resolved, so the build may proceed without the disk gate"
             ));
-            Ok(())
+            return Ok(());
         }
+    };
+    let target = value("CARGO_TARGET_DIR").map_or_else(|| Path::new("."), Path::new);
+    let mut root = target;
+    while !root.exists() {
+        root = root.parent().unwrap_or(Path::new("."));
     }
+    let free = match provenant_os::fs::available_bytes_at(root) {
+        Ok(free) => free,
+        Err(error) => {
+            say(&format!(
+                "build disk observation unavailable ({error}); gc.free_floor={free_floor} bytes from {}, gc.critical_floor={critical_floor} bytes from {}; the build may proceed without the disk gate",
+                free_source.description(),
+                critical_source.description(),
+            ));
+            return Ok(());
+        }
+    };
+    if free < critical_floor {
+        return Err(format!(
+            "free disk space is {free} bytes, below gc.critical_floor={critical_floor} bytes from {} (gc.free_floor={free_floor} bytes from {}); refusing to start a new build",
+            critical_source.description(),
+            free_source.description(),
+        ));
+    }
+    if free < free_floor {
+        say(&format!(
+            "free disk space is {free} bytes, below gc.free_floor={free_floor} bytes from {} (gc.critical_floor={critical_floor} bytes from {}); starting the build",
+            free_source.description(),
+            critical_source.description(),
+        ));
+    }
+    Ok(())
 }
 
 /// The lane's own stderr is the only place a wait shows; a closed stream is

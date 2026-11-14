@@ -1162,11 +1162,11 @@ printf 'agy 1.0.0\n'
             .iter()
             .any(|root| root.path.ends_with("slot-0.lock"))
     );
-    // An unrepresentable shim input warns and leaves the prepared lane intact.
+    // An unrepresentable shim input warns and leaves preparation intact without new grants.
     let env_before = codex.env.clone();
     let profile_before = codex.profile.spec.clone();
     let setup_count = codex.setup.len();
-    let refused_coordination_reads = configure_build_slots(
+    let skipped_coordination_reads = configure_build_slots(
         &mut codex,
         &provenant_config::LaneBuildSettings::default(),
         &home,
@@ -1175,7 +1175,7 @@ printf 'agy 1.0.0\n'
         &state,
         &std::collections::BTreeMap::new(),
     );
-    assert!(refused_coordination_reads.is_empty());
+    assert!(skipped_coordination_reads.is_empty());
     assert_eq!(codex.env, env_before);
     assert_eq!(codex.profile.spec, profile_before);
     assert_eq!(codex.setup.len(), setup_count);

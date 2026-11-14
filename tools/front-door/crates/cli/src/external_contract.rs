@@ -140,10 +140,16 @@ pub fn external_contract() -> ExternalContract {
                 name: "PROVENANT_LOCAL_CARGO".into(),
             },
             ExternalInterface::LaneEnvironment {
-                name: "PROVENANT_BUILD_DISK_FLOOR".into(),
+                name: "PROVENANT_BUILD_DISK_FREE_FLOOR".into(),
             },
             ExternalInterface::LaneEnvironment {
-                name: "PROVENANT_BUILD_DISK_RULE".into(),
+                name: "PROVENANT_BUILD_DISK_FREE_SOURCE".into(),
+            },
+            ExternalInterface::LaneEnvironment {
+                name: "PROVENANT_BUILD_DISK_CRITICAL_FLOOR".into(),
+            },
+            ExternalInterface::LaneEnvironment {
+                name: "PROVENANT_BUILD_DISK_CRITICAL_SOURCE".into(),
             },
             ExternalInterface::JsonOutput {
                 command: "commands emitting command-result JSON".into(),

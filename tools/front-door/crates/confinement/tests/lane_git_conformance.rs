@@ -974,8 +974,9 @@ fn read_only_lane_fetches_into_private_git_with_host_metadata_denied() -> Result
         &cancel,
     )?;
     let mut inputs = RootInputs::new(home.clone(), lane.clone());
-    inputs.state_dir = Some(root.join("state"));
-    fs::create_dir_all(root.join("state"))?;
+    let state = root.join("state");
+    provenant_os::fixture::private_state_dir(&state)?;
+    inputs.state_dir = Some(state.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     let binding = provenant_config::bind_project(
         &roots,
@@ -993,12 +994,8 @@ fn read_only_lane_fetches_into_private_git_with_host_metadata_denied() -> Result
         permissions: PlanPermissions {
             policy: Some(
                 provenant_confinement::run_config::RunConfig::default().policy_for_launch(
-                    &root.join("state"),
-                    provenant_confinement::permissions::MandatoryRoots::new(
-                        &home,
-                        &root.join("state"),
-                        &lane,
-                    )?,
+                    &state,
+                    provenant_confinement::permissions::MandatoryRoots::new(&home, &state, &lane)?,
                 ),
             ),
             read_only: None,

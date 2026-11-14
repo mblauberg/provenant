@@ -318,22 +318,40 @@ fn busy_slot_never_blocks_a_build() -> Result {
 }
 
 #[test]
-fn disk_policy_applies_before_starting_a_new_build() -> Result {
-    use provenant_records::policy::{Policy, Source, Strength};
-    for strength in [Strength::Warn, Strength::Refuse, Strength::Off] {
-        let rig = Rig::new()?;
-        rig.provision(1)?;
-        let mut rule = Policy::default().rule("BUILD_DISK").clone();
-        rule.rule.strength = strength;
-        rule.source = Source::Host;
-        let mut child = rig
-            .command(1, &["build"])
-            .env("PROVENANT_BUILD_DISK_FLOOR", u64::MAX.to_string())
-            .env("PROVENANT_BUILD_DISK_RULE", serde_json::to_string(&rule)?)
-            .spawn()?;
-        let completed = finish(&mut child, Duration::from_secs(10))?;
-        assert_eq!(completed, strength != Strength::Refuse);
-        assert_eq!(rig.started("start"), strength != Strength::Refuse);
-    }
+fn critical_disk_floor_stops_builds_while_free_floor_only_warns() -> Result {
+    let critical = Rig::new()?;
+    critical.provision(1)?;
+    let mut blocked = critical
+        .command(1, &["build"])
+        .env("PROVENANT_BUILD_DISK_FREE_FLOOR", u64::MAX.to_string())
+        .env("PROVENANT_BUILD_DISK_FREE_SOURCE", "host configuration")
+        .env("PROVENANT_BUILD_DISK_CRITICAL_FLOOR", u64::MAX.to_string())
+        .env("PROVENANT_BUILD_DISK_CRITICAL_SOURCE", "shipped default")
+        .spawn()?;
+    assert!(!finish(&mut blocked, Duration::from_secs(10))?);
+    assert!(!critical.started("start"));
+    let critical_message = stderr_of(&mut blocked)?;
+    assert!(critical_message.contains("critical"));
+    assert!(critical_message.contains("gc.free_floor"));
+    assert!(critical_message.contains("gc.critical_floor"));
+    assert!(critical_message.contains("host configuration"));
+    assert!(critical_message.contains("shipped default"));
+
+    let warning = Rig::new()?;
+    warning.provision(1)?;
+    let mut allowed = warning
+        .command(1, &["build"])
+        .env("PROVENANT_BUILD_DISK_FREE_FLOOR", u64::MAX.to_string())
+        .env("PROVENANT_BUILD_DISK_FREE_SOURCE", "host configuration")
+        .env("PROVENANT_BUILD_DISK_CRITICAL_FLOOR", "0")
+        .env("PROVENANT_BUILD_DISK_CRITICAL_SOURCE", "shipped default")
+        .spawn()?;
+    assert!(finish(&mut allowed, Duration::from_secs(10))?);
+    assert!(warning.started("start"));
+    let warning_message = stderr_of(&mut allowed)?;
+    assert!(warning_message.contains("gc.free_floor"));
+    assert!(warning_message.contains("gc.critical_floor"));
+    assert!(warning_message.contains("host configuration"));
+    assert!(warning_message.contains("shipped default"));
     Ok(())
 }
