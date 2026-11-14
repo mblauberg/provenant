@@ -32,6 +32,7 @@ import json
 import os
 import sys
 root = sys.argv[1]
+assert os.getcwd() == os.path.join(root, "tools/front-door"), "Cargo metadata must run at its workspace manifest"
 packages = []
 for name, deps in (("leaf", []), ("app", ["leaf"])):
     packages.append({
