@@ -84,7 +84,7 @@ The lint fails on a subset and warns on the rest; this list is the standard.
 
 - Internal markers (`TODO`, `TBD`, `TBC`, `FIXME`, `drafting note`,
   `agent note`, `AI-generated`) and any internal path or id, including in HTML
-  comments: `.work/`, `docs/audits/`, scratch or absolute repo paths, task ids.
+  comments: `.work/`, `<repository>/docs/audits/`, scratch or absolute repo paths, task ids.
 - US dates and US legalese (`COMES NOW`, `wherefore`, `herein`, `heretofore`,
   `aforementioned`, `Honorable Court`, `esq.`).
 - Process language in filing text (`agent summary`, `review set`, `render check`,

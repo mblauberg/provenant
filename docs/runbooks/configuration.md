@@ -2,7 +2,7 @@
 Owner: provenant-config
 Anchor: [`config/harness-knobs.json`](../../config/harness-knobs.json); [`LaneBuildSettings`](../../tools/front-door/crates/config/src/gc.rs)
 
-Settings live in the selected state root's `config.toml`; `provenant config
+Settings live in the selected state root's `<state>/config.toml`; `provenant config
 schema [--all]` lists every key with its table, default, bounds and effect,
 `config show` the effective values and sources, `config check` every warning
 with its file and key. This page covers only what those cannot: safety rules
@@ -95,7 +95,7 @@ Lefthook sends standard input to only one command configured with `use_stdin`.
 Keep any other checks in the manager's hook.
 
 The optional local gate runs after the push checks in the selected project
-checkout. Configure it in the host `config.toml`:
+checkout. Configure it in the host `<state>/config.toml`:
 
 ```toml
 [domains.pr.land.local_gate]
@@ -113,7 +113,7 @@ can override these keys under `[domains.pr.land.projects."ID".local_gate]`.
 ## Worktree setup
 
 Project setup uses the existing project-ID overrides in the selected state
-root's `config.toml`, rather than a repository overlay for `[knobs]`. Find the
+root's `<state>/config.toml`, rather than a repository overlay for `[knobs]`. Find the
 project ID with `provenant fabric identity`, then declare shell commands:
 
 ```toml
@@ -202,7 +202,7 @@ What holds in each mode:
   the shared Git directory, other worktrees and the primary checkout; an
   unsandboxed writer is trusted not to bypass its Git shim or write there.
 - **Host state.** An unsandboxed lane can also write the state directory,
-  including `config.toml` (`sandboxed_routes`, `[knobs]`) and run records, so
+  including `<state>/config.toml` (`sandboxed_routes`, `[knobs]`) and run records, so
   every floor above holds only as far as the unsandboxed routes are trusted.
 - **Process tree.** Sandboxed lanes are walked by their sandbox mark,
   unsandboxed lanes by ancestry, so heavy-lock accounting covers both.

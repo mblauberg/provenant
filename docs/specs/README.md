@@ -20,7 +20,7 @@ resolves every citation and warns when a page passes 2,000 words.
 
 The binary is the reference: `provenant help --all` for commands and
 `provenant config schema` for config keys. `scripts/generate-reference` renders
-them as Markdown under the untracked `docs/reference/`.
+them as Markdown under the untracked `<repository>/docs/reference/`.
 
 ## Area specs
 

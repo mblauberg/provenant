@@ -54,7 +54,7 @@ cross-tracker routes, not a second current-work owner.
   read the collated preview (`scripts/collate-release-notes`) end to end, merge
   entries on one topic, align tense and terms, and write `_intro.md` last.
   To release, run `scripts/collate-release-notes vX.Y.Z`, which writes
-  `docs/release-notes/vX.Y.Z.md` and deletes the fragments but `_intro.md`;
+  `docs/release-notes/<version>.md` and deletes the fragments but `_intro.md`;
   add the released version to the index and reset `_intro.md` for the next
   release.
 
@@ -86,7 +86,7 @@ A live session retains the prior constitution until restart.
 Documentation claims sit in three tiers, and the third is deliberate:
 
 1. **Code-checked.** Runtime schema and migration structure is owned by code
-   and tests. Relative Markdown links in `docs/` and each `SKILL.md` are
+   and tests. Relative Markdown links in `docs/` and each SKILL.md are
    machine-checked. `scripts/check-doc-truth` requires every runbook and spec
    `Anchor:` to resolve to a source file and compares the delivery
    table with the code it projects. It fails on a `provenant` command or flag
@@ -125,7 +125,7 @@ Harness asset checks enforce the machine-checkable subset.
    identity derives from the working directory.
 5. `GLOBAL-AGENTS.md` is the sole ambient skill resolver and names neither an
    installed root nor an instance skill directory. A named skill loads its
-   `SKILL.md` and is binding, while provider-native discovery may implement
+   SKILL.md and is binding, while provider-native discovery may implement
    resolution.
 6. Ambient files carry no dates. Git records revision provenance.
 7. `orchestrate` remains one skill. Skill changes use targeted,
@@ -149,7 +149,7 @@ Harness asset checks enforce the machine-checkable subset.
    only where two skills would genuinely both take the same request, and keep
    all descriptions together under 250 words. Keep the complete canonical catalogue at or below 8,000
    characters, targeting 7,600 for wrapper and version headroom.
-6. Keep `SKILL.md` roughly 500 words or less. Move depth into narrowly named
+6. Keep SKILL.md roughly 500 words or less. Move depth into narrowly named
    references loaded only when needed and deterministic behaviour into scripts.
 7. A contract test is mandatory only where the change
    introduces or alters an invariant a script, validator or CI gate evaluates at
@@ -275,7 +275,7 @@ git diff --check
 
 Generated contract reference is not tracked. Read `provenant help --all`,
 `provenant config schema` and `--json` output; `scripts/generate-reference`
-renders the same sources into the ignored `docs/reference/`, and CI runs it
+renders the same sources into the ignored `<repository>/docs/reference/`, and CI runs it
 (`--strict`) to prove they still render and uploads the result as an artefact.
 
 The harness check requires Python 3 and PyYAML (`python3 -m pip install PyYAML==6.0.2`). It scans repository assets, not installed skill roots. Run `scripts/test-check-harness` to exercise its fixture tests.

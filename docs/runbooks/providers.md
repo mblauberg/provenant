@@ -68,7 +68,7 @@ directory itself:
 provenant accounts register --adapter agy --directory ~ LABEL
 ```
 
-An isolated account fails closed: if its `Library/Keychains/login.keychain-db`
+An isolated account fails closed: if its `$HOME/Library/Keychains/login.keychain-db`
 is missing, a symlink, hard-linked or the same inode as your own, registration,
 launch and quota fail naming the path (`KEYCHAIN_UNAVAILABLE` in `provenant quota`
 and `provenant hosts doctor`). A launch also skips the route on a changed Google

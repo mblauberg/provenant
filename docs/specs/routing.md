@@ -30,7 +30,7 @@ training treatment is excluded.
 ## Repository confidentiality at launch
 
 A repository may declare confidentiality or protected file/directory prefixes
-in `.provenant/config.toml` under `[launch_policy]`. With no declaration,
+in `<repository>/.provenant/config.toml` under `[launch_policy]`. With no declaration,
 ordinary routing is unchanged. The host classifies declared file inputs,
 including the original brief file, explicit read roots and attachments, brief
 path references and the observed Git diff before selecting a local or peer
@@ -209,7 +209,7 @@ environment. The sandbox never refreshes or writes a keychain; a lane that
 holds a registered long-lived lane token is never rotated by the host.
 - Why: misattribution spends or exposes the wrong account, and one login renewal
   must not end every live lane on it.
-- Test: `crates/providers/src/quota_live/claude.rs::fixed_directory_rejects_changed_account_fingerprint`;
+- Test: `crates/providers/src/quota_live/claude.rs::current_registration_requires_its_matching_account_fingerprint`;
   `crates/routing/src/tests/availability.rs::account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks`;
   `crates/providers/src/tests_account_identity.rs::claude_lane_prefers_the_registered_lane_token_and_never_rotates_the_login`.
   No test asserts tokens are absent from argv and child environments (gap).

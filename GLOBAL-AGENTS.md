@@ -1,7 +1,7 @@
 # Global agent instructions
 
 These rules apply in every project and harness. A named skill binds: load its
-`SKILL.md`.
+its SKILL.md.
 
 - **Objective.** Optimise quality per hour of the user's attention. Verify your
   work, then report the result first and what was and was not verified.

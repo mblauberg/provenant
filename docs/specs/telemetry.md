@@ -80,7 +80,6 @@ Historical context is never filled from the current release or instructions.
 - Test: `tests/chair.rs::chair_on_an_unregistered_config_directory_is_recorded_as_unattributed`;
   `crates/telemetry/src/ingest/tests.rs::rerun_adds_nothing_and_accounts_stay_distinct`;
   `::enrichment_preserves_existing_token_buckets_and_excludes_text`;
-  `::a_single_file_store_over_the_old_cap_is_split_on_first_open`;
   `crates/telemetry/src/tests.rs::lane_context_fixture_joins_existing_chair_and_graph`
 
 ## Offline post-merge outcomes and suggestions

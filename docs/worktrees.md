@@ -1,6 +1,6 @@
 # Shared worktree policy
 Owner: confinement worktree lifecycle and supervisor custody
-Anchor: [`lifecycle.rs`](../tools/front-door/crates/confinement/src/worktrees/lifecycle.rs), [`custody.rs#Recovery`](../tools/front-door/crates/supervisor/src/custody.rs)
+Anchor: [`lifecycle.rs`](../tools/front-door/crates/confinement/src/worktrees/lifecycle.rs), [custody.rs#Recovery](../tools/front-door/crates/supervisor/src/custody.rs)
 
 The [constitution](../GLOBAL-AGENTS.md) pre-authorises implementation branches and
 linked worktrees. Each worktree has one writer. Worktrees isolate changes;
@@ -114,7 +114,7 @@ reservation. A free lock alone does not prove that the result was imported.
 Reconcile can recover a durable exit or prove loss after a reboot using recorded
 boot and directory bindings; an unchanged boot is not absence evidence.
 
-Host recovery uses [`custody.rs#Recovery`](../tools/front-door/crates/supervisor/src/custody.rs)
+Host recovery uses [custody.rs#Recovery](../tools/front-door/crates/supervisor/src/custody.rs)
 under authority for that reservation, holding writer exclusion throughout.
 Automatic withdrawal is limited to proved unlaunched preparation. A handed-off
 writer needs terminal publication and verified settlement, or an expressly

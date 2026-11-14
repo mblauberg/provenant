@@ -1,7 +1,7 @@
 # Human inbox
 
 Owner: `crates/fabric-runtime`, `crates/cli`
-Anchor: [`tests/inbox.rs`](../../tools/front-door/tests/inbox.rs), [`inbox/tests.rs`](../../tools/front-door/crates/fabric-runtime/src/inbox/tests.rs)
+Anchor: [`tests/inbox.rs`](../../tools/front-door/tests/inbox.rs), [inbox/tests.rs](../../tools/front-door/crates/fabric-runtime/src/inbox/tests.rs)
 
 How a chair asks the owner for a decision and consumes the answer. Only a chair
 or human-controlled session can post, answer, close or acknowledge; worker lanes

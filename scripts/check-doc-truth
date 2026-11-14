@@ -475,7 +475,7 @@ COMMAND_GUIDE_GLOBS = (
 GLOBAL_SWITCHES = {"--json", "--full", "--help", "--version", "-h", "-V"}
 GLOBAL_VALUES = {"--project", "--state-dir"}
 # The one source of removed spellings is the CLI's own REMOVED table.
-REMOVED_SOURCE = "tools/front-door/crates/cli/src/lib.rs"
+REMOVED_SOURCE = "tools/front-door/crates/config/src/removed.rs"
 
 
 def removed_table(source):

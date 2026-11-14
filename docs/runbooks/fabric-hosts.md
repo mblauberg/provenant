@@ -1,6 +1,6 @@
 # Fabric hosts
 Owner: provenant-fabric-runtime
-Anchor: [`hosts.rs`](../../tools/front-door/crates/fabric-runtime/src/hosts.rs); [`peer_agent.rs`](../../tools/front-door/crates/fabric-runtime/src/peer_agent.rs)
+Anchor: [hosts.rs](../../tools/front-door/crates/fabric-runtime/src/hosts.rs); [`peer_agent.rs`](../../tools/front-door/crates/fabric-runtime/src/peer_agent.rs)
 
 Setup for a second host. Fabric uses bounded SSH calls and host-owned state;
 each host keeps its own provider sign-ins. The peer model and boundaries are in
@@ -11,7 +11,7 @@ the [Fabric spec](../specs/fabric.md#peer-hosts); running work is
 
 Install the same release on both hosts, reachable by non-interactive SSH, and
 run `provenant fabric identity` on each to get its host ID. In each host's
-state-root `config.toml` (`--state-dir` or `PROVENANT_STATE_DIR`; check with
+state-root `<state>/config.toml` (`--state-dir` or `PROVENANT_STATE_DIR`; check with
 `provenant config show`) name the other:
 
 ```toml
@@ -56,7 +56,7 @@ the agent is not listening, `fabric peer` handles the call itself.
   or `--state-dir` skips the agent.
 - `hosts doctor` shows the `peer agent` line as `running`, `stopped` (plist
   present, socket not answering), `not_installed` or `unsupported`. Failed
-  requests are logged in `peer-agent/agent.log`.
+  requests are logged in `<state>/peer-agent/agent.log`.
 - A lost reply to a mutation is `LAUNCH_UNKNOWN`: keep the operation ID and
   reconcile before submitting replacement work. The transport never falls back
   to local placement.

@@ -112,7 +112,6 @@ settles, when admission finds the disk below the floor, and in `provenant gc`.
 - Test: `crates/run/src/build_dir_gc.rs::a_held_lock_prevents_deletion_whichever_of_the_three_is_held`;
   `crates/run/src/build_dir_gc.rs::least_recently_used_goes_first_and_the_cap_stops_collection`;
   `crates/run/src/build_dir_gc.rs::the_free_space_floor_is_honoured_and_no_more_is_removed`;
-  `crates/run/src/dispatch_writer_tests.rs::admission_below_the_floor_reclaims_build_output_and_then_admits`;
   `crates/cli/src/run/provider/mod.rs::cargo_profile_tests`
 - Owner: `crates/run/src/build_dir_gc.rs`, `crates/cli/src/run/provider/mod.rs`
 
@@ -665,7 +664,7 @@ Initial failures are sealed with the intent and created transactionally as
 receipts; subsequent failures update only receipts. Reconciliation discovers
 applicable pending and retryable effects even after temporary-data cleanup and
 restart. Intended manifest bytes are sealed separately as
-`quarantine/manifest-intended.json`; a conflict stays visible and its evidence
+`<attempt>/quarantine/manifest-intended.json`; a conflict stays visible and its evidence
 is never overwritten. Recovery seals or confirms the manifest only when it
 matches that intended disposition. Delivery reuses the completed receipt or
 start marker. A start without a known result remains uncertain and is never
@@ -717,7 +716,7 @@ hooks and provider control roots can never be listed. Run reads no provider
 transcript except Codex's post-exit identity projection. Sandboxed Codex
 projects the exact stream thread from its candidate-local rollout. Native
 Codex uses the launch-time home selector in the bounded
-`provider-state/codex-observation-candidate-N.json` record, outside the
+`<attempt>/provider-state/codex-observation-candidate-N.json` record, outside the
 lane-writable candidate subtree. Settlement reads that same home and
 requires the same exact thread, including after recovery. A read-only lane (no
 `writer`) whose complete, validated, non-empty answer is present settles
@@ -1395,7 +1394,7 @@ state in place. The scrubbed stores are Codex `sessions` and
 `archived_sessions` `.jsonl` rollouts, Codex `history.jsonl` and
 `session_index.jsonl`, Claude `claude-config/projects` (`.jsonl` transcripts
 plus the `.txt` and `.json` tool-result files Claude keeps beside them), and
-Claude `claude-config/history.jsonl` and `session_index.jsonl`. The scrub accepts
+Claude `<candidate>/claude-config/history.jsonl` and `session_index.jsonl`. The scrub accepts
 at most 64 `candidate-N` directories, descends at most eight levels, and lists
 at most 100,000 entries per directory. A file is rewritten only when a shape
 matches; a clean file is read but never copied, staged or synced. Links, hard

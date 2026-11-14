@@ -62,10 +62,10 @@ refuses any state root inside it. The first install at the default root, while
 that root is absent or empty and a 1.x root exists, stops the 1.x launch agents
 and then copies the owner configuration and nothing else:
 
-- `config.toml`: accounts, routing, presets, Fabric peers, lanes and the shared
+- `<state>/config.toml`: accounts, routing, presets, Fabric peers, lanes and the shared
   settings source.
 - `host-id`: this host's Fabric identity, which its peers name.
-- `install/receipt.json`: the recorded targets, binary directory and hooks, so
+- `<state>/install/receipt.json`: the recorded targets, binary directory and hooks, so
   the install replaces the 1.x links instead of refusing them as foreign.
 
 Run records, stores, ledgers, quota and usage history, worktree records and

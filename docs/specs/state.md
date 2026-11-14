@@ -89,7 +89,7 @@ results, captures, exit evidence and digests; resume then fails
 reservations and pending continuations, deletes through identity-checked
 tombstones, never follows links and writes nothing on a dry run
 ([ADR 0031](../adr/0031-retain-provider-history-and-expire-resume-state.md)).
-The `RetentionClass` table in `config/gc.rs` records each class's owner,
+The `RetentionClass` table in `tools/front-door/crates/config/src/gc.rs` records each class's owner,
 custody proof, effective age keys and trigger. One scheduler routes regular
 and full GC to lane caches, staging, provider state/history, chair logs, target seeds and
 build-directory adapters. Admission uses the same table to trigger build-directory
@@ -130,8 +130,8 @@ The default state root is `~/.local/share/provenant/v2`
 spelling. 2.0 never writes, moves or deletes the 1.x root and refuses any state
 root inside it, so no 2.0 code opens a 1.x store. The first install at the
 default root, while that root is absent or empty and a 1.x root exists, stops
-every 1.x launch agent by label, then copies `config.toml`, `host-id` and
-`install/receipt.json` (regular files only, modes kept) into a staged directory
+every 1.x launch agent by label, then copies `<v1-state>/config.toml`, `host-id` and
+`<v1-state>/install/receipt.json` (regular files only, modes kept) into a staged directory
 renamed into place. A failed stop copies nothing; a non-empty root and any
 other explicit root are never seeded. The copied receipt's links stay owned, so
 the install replaces them. A dry run reports the copy and writes nothing.
@@ -149,8 +149,8 @@ is `FORMAT_ONE_VERSIONS`:
 | Store | Released 1.x current versions |
 | --- | --- |
 | `run.sqlite3` | 3, 4, 6, 7, 8, 9, 10 |
-| `fabric/fabric.sqlite3` | 7, 13, 15 |
-| `fabric/host.sqlite3` (introduced in v1.3.0) | 13, 15 |
+| `<v1-state>/fabric/fabric.sqlite3` | 7, 13, 15 |
+| `<v1-state>/fabric/host.sqlite3` (introduced in v1.3.0) | 13, 15 |
 | `admission.sqlite3` | 1, 2, 5, 6 |
 | `pr-contributions.sqlite3` (introduced in v1.3.0) | 4 |
 

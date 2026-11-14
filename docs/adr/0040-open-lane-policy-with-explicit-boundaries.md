@@ -54,7 +54,7 @@ an enforcing denial, not malformed configuration.
 
 ### Mandatory root inventory
 
-[`policy.rs#MandatoryRoots`](../../tools/front-door/crates/confinement/src/permissions/policy.rs)
+[policy.rs#MandatoryRoots](../../tools/front-door/crates/confinement/src/permissions/policy.rs)
 and its credential registries own the concrete inventory. Do not duplicate that
 path list in policy prose. The host adds registered identities, relocated
 credential stores, canonical aliases, selected endpoints, state roots, host Git
@@ -156,7 +156,7 @@ which puts a system Git ahead of the lane's Git wrapper, and a writer's ordinary
 secrets. A lane keeps the `PATH` of the environment that launched it.
 
 A lane's Fabric relay runs inside its sandbox and reads the state directory's
-`config.toml`, `host-id`, `projects` and Fabric database directly, so the lane's
+`<state>/config.toml`, `host-id`, `projects` and Fabric database directly, so the lane's
 other commands can read them too, . Nested Fabric and nested
 launches need these reads. Serving them through the Fabric socket would close this
 gap and let those files become inaccessible.

@@ -1,12 +1,12 @@
 # Routing and templates
 Owner: provenant-routing
-Anchor: [`resolve.rs`](../../tools/front-door/crates/routing/src/resolve.rs); [ADR 0039](../adr/0039-graph-of-templates.md#interface)
+Anchor: [resolve.rs](../../tools/front-door/crates/routing/src/resolve.rs); [ADR 0039](../adr/0039-graph-of-templates.md#interface)
 
 How to choose and steer routes, pace accounts and shape review panels. The
 bundled catalogue (`tools/front-door/crates/routing/assets/catalogue.toml`) owns
 default pool membership, weights and effort controls; the
 [routing spec](../specs/routing.md) owns the rules. Everything below is
-overridable in the selected state's `config.toml`.
+overridable in the selected state's `<state>/config.toml`.
 
 ## Inspect and choose
 
