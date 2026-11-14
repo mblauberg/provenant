@@ -2,6 +2,7 @@
 
 use crate::permissions::{PermissionError, validate_absolute};
 use crate::worktrees::Occupancy;
+use provenant_config::RetentionIssue;
 use provenant_os::fs::{Directory, FileKind, FsError, LockGuard, PayloadTree};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -77,7 +78,7 @@ pub struct CacheGcReport {
     /// Caches kept because ownership or writer state prevents removal.
     pub kept: Vec<CacheGcEntry>,
     pub bytes_freed: u64,
-    pub errors: Vec<CacheGcIssue>,
+    pub errors: Vec<RetentionIssue>,
     /// Preview measurements stopped at the shared entry or time bound.
     pub bytes_estimated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -89,14 +90,6 @@ pub struct CacheGcReport {
     /// Dry-run free space predictions include estimated reclaimable bytes.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub free_bytes_estimated: bool,
-}
-
-/// A failed operation, including its canonical cache root and OS cause.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct CacheGcIssue {
-    pub path: PathBuf,
-    pub operation: String,
-    pub cause: String,
 }
 
 /// A failed sweep still reports completed removals and bytes already freed.
@@ -144,7 +137,10 @@ pub fn prune_orphaned_worktree_cargo_caches(home: &Path) -> Result<usize, CacheG
 /// Remove only the cache derived from a worktree before its removal. The caller
 /// holds that worktree's writer lock until this returns. Other orphaned caches
 /// and interrupted GC tombstones are left for `provenant gc`.
-pub(crate) fn prune_worktree_cargo_cache(home: &Path, cache: &Path) -> Result<(), PermissionError> {
+pub(crate) fn prune_worktree_cargo_cache(
+    home: &Path,
+    cache: &Path,
+) -> Result<u64, PermissionError> {
     validate_absolute(home)?;
     let cache_root = home.join("Library/Caches/provenant-lane-cargo");
     if cache.parent() != Some(cache_root.as_path()) {
@@ -157,18 +153,61 @@ pub(crate) fn prune_worktree_cargo_cache(home: &Path, cache: &Path) -> Result<()
         return Err(PermissionError::InvalidPath(cache.to_owned()));
     }
     let Some(root) = open_cache_root(&cache_root)? else {
-        return Ok(());
+        return Ok(0);
     };
+    let mut report = CacheGcReport::default();
     prune_worktree_cache(
         &root,
         &cache_root,
         name,
         &CacheGcPolicy::default(),
-        &mut CacheGcReport::default(),
+        &mut report,
         &mut |path| Err(missing_custody(path)),
         false,
         &mut MeasureBudget::new(false),
-    )
+    )?;
+    Ok(report.bytes_freed)
+}
+
+/// Observe the private cache which an eligible worktree removal will orphan.
+/// The caller holds worktree custody; the same allocated-tree measure is used
+/// after removal. Shared Cargo download links are never followed.
+pub(crate) fn preview_worktree_cargo_cache(
+    home: &Path,
+    worktree: &crate::repo::VerifiedWorktree,
+) -> Result<Option<CacheGcEntry>, PermissionError> {
+    let grant = crate::permissions::worktree_cargo_cache(home, worktree)?;
+    let cache_root = home.join("Library/Caches/provenant-lane-cargo");
+    let Some(root) = open_cache_root(&cache_root)? else {
+        return Ok(None);
+    };
+    let name = grant
+        .path
+        .file_name()
+        .ok_or(PermissionError::AnchorMismatch)?;
+    let directory = match root.open_verified_directory(name) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(cache_fs_error("open private cache", &grant.path)(error)),
+    };
+    verify_cache_metadata(
+        &directory
+            .metadata()
+            .map_err(cache_fs_error("stat private cache", &grant.path))?,
+    )?;
+    let Some(owner) = read_cache_owner(&directory, &grant.path)? else {
+        return Ok(None);
+    };
+    let identity = worktree.identity();
+    if owner.path != worktree.path() || owner.identity != (identity.device, identity.inode) {
+        return Err(PermissionError::AnchorMismatch);
+    }
+    let (bytes, _) = measure_cache(&directory, &grant.path, 0, &mut MeasureBudget::new(true))?;
+    Ok(Some(CacheGcEntry {
+        path: grant.path,
+        bytes,
+        reason: CacheGcReason::Orphaned,
+    }))
 }
 
 /// Sweep the lane cache root: orphaned caches always, idle ones when the policy
@@ -369,7 +408,7 @@ fn gc_caches_with_free_space(
                     } => (root.join(path), (*operation).to_owned(), source.to_string()),
                     error => (root, "collect cache class".into(), error.to_string()),
                 };
-                report.errors.push(CacheGcIssue {
+                report.errors.push(RetentionIssue {
                     path,
                     operation,
                     cause,
@@ -563,7 +602,7 @@ fn sweep_cache_root(
                 error.to_string(),
             ),
         };
-        report.errors.push(CacheGcIssue {
+        report.errors.push(RetentionIssue {
             path,
             operation,
             cause,

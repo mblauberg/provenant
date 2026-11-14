@@ -219,6 +219,7 @@ fn landed_check_uses_ancestry_and_refuses_rewritten_or_missing_commits()
     let test = TestContext::new(&fixture)?;
     let context = test.context();
     let graph = RepoGraph {
+        repo: context.repo,
         context: &context,
         cancel: &cancel(),
     };

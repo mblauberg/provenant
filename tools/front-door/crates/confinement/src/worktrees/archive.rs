@@ -1,5 +1,6 @@
 //! Recoverable explicit discard and its retention owner. No link is followed.
 use super::*;
+use provenant_config::RetentionIssue;
 use provenant_os::fs::{FileHandle, FileKind, PayloadTree, PublishMode, temporary_name};
 use std::io::{Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -17,19 +18,13 @@ pub struct ArchiveInfo {
     pub path: PathBuf,
     pub tip: GitOid,
 }
-#[derive(Debug, Serialize)]
-pub struct ArchiveIssue {
-    pub path: PathBuf,
-    pub operation: String,
-    pub cause: String,
-}
 #[derive(Debug, Default, Serialize)]
 pub struct ArchiveReport {
     pub removed: Vec<PathBuf>,
     pub would_remove: Vec<PathBuf>,
     pub busy: Vec<PathBuf>,
     pub bytes: u64,
-    pub errors: Vec<ArchiveIssue>,
+    pub errors: Vec<RetentionIssue>,
 }
 
 fn failure(operation: &'static str, path: &Path, cause: impl std::fmt::Display) -> ArchiveError {
@@ -207,20 +202,28 @@ pub(super) fn capture(
     })();
     if let Err(error) = capture {
         drop(stage_lease);
-        if let Ok(reference) = GitRefName::new(format!(
+        let released = if let Ok(reference) = GitRefName::new(format!(
             "refs/provenant/discard-archives/{}",
             nonce.to_string_lossy()
         )) {
-            let _ = execute_mutation(
-                context,
-                GitMutation::DeleteRef {
-                    name: reference,
-                    expected_old_oid: tip,
-                },
-                cancel,
-            );
-        }
-        if let Ok(metadata) = root.metadata_at(&stage_name, false) {
+            let cleanup = CancelToken::new();
+            match super::ref_tip(context, &reference, &cleanup) {
+                Ok(None) => true,
+                Ok(Some(actual)) if actual == tip => execute_mutation(
+                    context,
+                    GitMutation::DeleteRef {
+                        name: reference,
+                        expected_old_oid: tip,
+                    },
+                    &cleanup,
+                )
+                .is_ok(),
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if released && let Ok(metadata) = root.metadata_at(&stage_name, false) {
             if let Ok(tree) = PayloadTree::claim(&root, &stage_name, &metadata) {
                 if super::gc::dispose_archive_tree(&tree).is_ok() {
                     let _ = root.rmdir(&stage_name);
@@ -350,7 +353,7 @@ pub fn collect_archives(
     let project_path = match project_state.current_path() {
         Ok(path) => path,
         Err(error) => {
-            report.errors.push(ArchiveIssue {
+            report.errors.push(RetentionIssue {
                 path: PathBuf::from("<held project-state directory>"),
                 operation: "resolve archive root".into(),
                 cause: error.to_string(),
@@ -363,7 +366,7 @@ pub fn collect_archives(
         Ok(root) => root,
         Err(error) if error.is_not_found() => return report,
         Err(error) => {
-            report.errors.push(ArchiveIssue {
+            report.errors.push(RetentionIssue {
                 path: root_path.clone(),
                 operation: "open archives".into(),
                 cause: error.to_string(),
@@ -417,7 +420,7 @@ pub fn collect_archives(
                         .and_then(|s| GitRefName::new(s).ok());
                     let tip = intent["tip"].as_str().and_then(|s| GitOid::parse(s).ok());
                     let (Some(reference), Some(tip)) = (reference, tip) else {
-                        report.errors.push(ArchiveIssue {
+                        report.errors.push(RetentionIssue {
                             path: path.clone(),
                             operation: "read archive ref".into(),
                             cause: "unreadable archive ref identity".into(),
@@ -436,7 +439,7 @@ pub fn collect_archives(
                                 },
                                 &cancel,
                             ) {
-                                report.errors.push(ArchiveIssue {
+                                report.errors.push(RetentionIssue {
                                     path: path.clone(),
                                     operation: "release archive ref".into(),
                                     cause: error.to_string(),
@@ -445,7 +448,7 @@ pub fn collect_archives(
                             }
                         }
                         result => {
-                            report.errors.push(ArchiveIssue {
+                            report.errors.push(RetentionIssue {
                                 path: path.clone(),
                                 operation: "release archive ref".into(),
                                 cause: format!(
@@ -490,7 +493,7 @@ pub fn collect_archives(
         Ok(())
     })();
     if let Err(error) = collect {
-        report.errors.push(ArchiveIssue {
+        report.errors.push(RetentionIssue {
             path: root_path.clone(),
             operation: "collect archives".into(),
             cause: error.to_string(),

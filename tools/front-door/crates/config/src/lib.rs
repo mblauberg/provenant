@@ -15,9 +15,9 @@ mod schema;
 pub use gc::{
     ByteObservation, ForeignWorktrees, GcSettings, LaneBuildSettings, MemoryPressureThreshold,
     PROJECT_WRITER_LANES_CEILING, ProjectGcSettings, RETENTION_CLASSES, RemoteBranches,
-    RetentionBytes, RetentionClass, RetentionEligibility, RetentionKind, RetentionMeasurement,
-    RetentionTrigger, STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings, WRITER_LANES_CEILING,
-    deserialize_auto, parse_cache_size, retention_schedule,
+    RetentionBytes, RetentionClass, RetentionEligibility, RetentionIssue, RetentionKind,
+    RetentionMeasurement, RetentionTrigger, STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings,
+    WRITER_LANES_CEILING, deserialize_auto, parse_cache_size, retention_schedule,
 };
 pub use github_policy::{
     DEFAULT_GH_BUDGET, GH_INVOCATIONS_FILE, GithubPolicy, label_events_trigger_ci,

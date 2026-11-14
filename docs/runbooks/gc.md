@@ -44,8 +44,10 @@ previews and records that preview for the repository incarnation. Configure
 path/ref patterns, and `integration_branches` for integration-ref patterns.
 Idle clean worktrees with no PR, or a closed unmerged PR at exactly the current
 tip, retire without deleting their branch. Unknown custody, run, forge or census
-feeds keep the affected item. Initialised submodules retain their independent
-Git custody and working data.
+feeds keep the affected item. Initialised submodules are checked recursively. Removal requires clean working
+data and a retained head in a scoped Git store that survives deletion; detached
+unpushed heads, stores inside removed metadata and unknown child custody keep
+the parent worktree.
 
 Remote pruning defaults to pushed or held refs in the ref ledger; set
 `remote_branches = 'never'` to disable it. `remote_min_tip_age_days` defaults to

@@ -178,7 +178,16 @@ pub fn landing_in_repo(
     chain: &[IntegrationEdge],
     cancel: &CancelToken,
 ) -> Result<Landing, WorktreeError> {
-    landed::landed(&RepoGraph { context, cancel }, tip, root, chain)
+    landed::landed(
+        &RepoGraph {
+            context,
+            repo: context.repo,
+            cancel,
+        },
+        tip,
+        root,
+        chain,
+    )
 }
 
 /// Whether the local object store holds `commit`, so a deleted ref that
@@ -188,7 +197,13 @@ pub fn has_commit(
     commit: GitOid,
     cancel: &CancelToken,
 ) -> Result<bool, WorktreeError> {
-    Ok(RepoGraph { context, cancel }.parents(commit)?.is_some())
+    Ok(RepoGraph {
+        context,
+        repo: context.repo,
+        cancel,
+    }
+    .parents(commit)?
+    .is_some())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

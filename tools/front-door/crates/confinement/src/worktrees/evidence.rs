@@ -25,7 +25,21 @@ pub fn removal_evidence(
     references: &[EvidenceRef],
     cancel: &CancelToken,
 ) -> Result<RemovalEvidence, WorktreeError> {
-    let graph = RepoGraph { context, cancel };
+    removal_evidence_in(context, context.repo, head, references, cancel)
+}
+
+pub(super) fn removal_evidence_in(
+    context: &WorktreeContext<'_>,
+    repo: &VerifiedRepo,
+    head: GitOid,
+    references: &[EvidenceRef],
+    cancel: &CancelToken,
+) -> Result<RemovalEvidence, WorktreeError> {
+    let graph = RepoGraph {
+        context,
+        repo,
+        cancel,
+    };
     if graph.parents(head)?.is_none() {
         return Ok(RemovalEvidence::Unknown(RemovalUncertainty::MissingCommit));
     }
@@ -60,7 +74,7 @@ pub fn removal_evidence(
             }
             let base = run_git(
                 context,
-                context.repo,
+                repo,
                 GitRead::MergeBase {
                     left: target.commit,
                     right: head,
@@ -68,7 +82,7 @@ pub fn removal_evidence(
                 cancel,
             )?;
             if exit_code(&base)? != 0 {
-                let shallow = run_git(context, context.repo, GitRead::IsShallow, cancel)?;
+                let shallow = run_git(context, repo, GitRead::IsShallow, cancel)?;
                 if exit_code(&shallow)? != 0 {
                     return Err(WorktreeError::InvalidOutput);
                 }
@@ -81,7 +95,7 @@ pub fn removal_evidence(
             }
             let tree = run_git(
                 context,
-                context.repo,
+                repo,
                 GitRead::ResolveCommitTree { oid: target.commit },
                 cancel,
             )?;
@@ -91,7 +105,7 @@ pub fn removal_evidence(
             }
             let merged = run_git(
                 context,
-                context.repo,
+                repo,
                 GitRead::MergeTree {
                     target: target.commit,
                     head,

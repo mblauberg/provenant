@@ -1,7 +1,7 @@
 //! Repository-scoped linked-worktree lifecycle and merged-ref pruning.
 
 mod archive;
-pub use archive::{ArchiveError, ArchiveInfo, ArchiveIssue, ArchiveReport, collect_archives};
+pub use archive::{ArchiveError, ArchiveInfo, ArchiveReport, collect_archives};
 mod census;
 mod context;
 mod custody;
@@ -31,7 +31,7 @@ pub use doctor::{WorktreeDiagnosis, WorktreeDiagnosisState, doctor};
 pub use gc::{
     CandidateReport, CollectionMode, ForgeObservation, OutputEntry, RetirementAction,
     RetirementOwner, WorktreeGcPolicy, WorktreeGcReport, acknowledge_foreign_preview,
-    branch_candidate, collect, collect_lazy, first_foreign_pass,
+    branch_candidate, collect, first_foreign_pass,
 };
 pub use inventory::*;
 pub use landed::{
@@ -183,6 +183,8 @@ impl From<provenant_config::ConfigError> for WorktreeError {
 
 #[derive(Debug, Error)]
 pub enum WorktreeError {
+    #[error(transparent)]
+    RetirementProjection(#[from] provenant_records::custody::RetirementProjectionError),
     #[error(transparent)]
     Archive(#[from] ArchiveError),
     #[error("worktree census configuration refused: {0}")]

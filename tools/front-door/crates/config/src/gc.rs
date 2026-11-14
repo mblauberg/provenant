@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
 
 /// Retention policy routing. Owners alone interpret eligibility and remove bytes.
@@ -38,6 +38,14 @@ pub enum ByteObservation {
         bytes: u64,
     },
     Unknown,
+}
+
+/// A retention operation which could not observe or remove its named path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetentionIssue {
+    pub path: PathBuf,
+    pub operation: String,
+    pub cause: String,
 }
 
 /// A GC byte observation with explicit completeness.
@@ -108,6 +116,14 @@ macro_rules! retention_classes {
 }
 
 retention_classes! {
+    CargoDownloads => {
+        owner: "Cargo package-cache",
+        measure: AllocatedTree,
+        eligibility: Declared,
+        detail: "shared content-addressed downloads; Cargo owns locking and eviction, never a per-worktree removal",
+        settings: [],
+        triggers: NEVER
+    },
     LaneCargoCaches => {
         owner: "confinement/cache",
         measure: AllocatedTree,
@@ -166,7 +182,7 @@ retention_classes! {
     },
     GitWorktrees => {
         owner: "confinement/worktrees + custody/retirement",
-        measure: OwnerDefined,
+        measure: AllocatedTree,
         eligibility: Declared,
         detail: "free custody and census; clean Git; subsumed tip or idle retirement",
         settings: ["gc.idle_days"],

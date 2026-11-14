@@ -1,5 +1,6 @@
 //! The GC worktree selection, shared by merged removal and declared output.
 use super::*;
+use provenant_config::RetentionIssue;
 use provenant_os::fs::{FileKind, PayloadTree, entry_names, temporary_name};
 use provenant_records::custody::{
     RemovalOutcome, RemovalRecord, RemovalUncertainty, Subject, SubjectKind,
@@ -172,10 +173,14 @@ pub struct WorktreeGcReport {
     pub removals: Vec<RemovalRecord>,
     pub candidates: Vec<CandidateReport>,
     pub first_foreign_preview: bool,
+    pub bytes: u64,
+    pub caches: Vec<crate::cache::CacheGcEntry>,
+    pub byte_errors: Vec<RetentionIssue>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct OutputEntry {
+    pub bytes: u64,
     pub path: PathBuf,
     pub removed: bool,
     pub reason: String,
@@ -219,18 +224,69 @@ pub fn collect(
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
 ) -> Result<WorktreeGcReport, WorktreeError> {
-    collect_impl(context, lanes, policy, cancel, false)
+    collect_impl(context, lanes, policy, cancel)
 }
 
 /// Collect against [`list_for_gc`], checking candidate cleanliness under
 /// writer exclusion before using it to authorise cleanup.
-pub fn collect_lazy(
-    context: &WorktreeContext<'_>,
-    lanes: &[WorktreeInfo],
-    policy: &WorktreeGcPolicy<'_>,
-    cancel: &CancelToken,
-) -> Result<WorktreeGcReport, WorktreeError> {
-    collect_impl(context, lanes, policy, cancel, true)
+
+fn allocated_tree(directory: &Directory, depth: usize) -> Result<u64, FsError> {
+    if depth >= 64 {
+        return Err(FsError::EntryLimit { limit: 64 });
+    }
+    let mut bytes = directory.metadata()?.allocated;
+    for name in entry_names(directory, 100_000)? {
+        let metadata = directory.metadata_at(&name, false)?;
+        bytes = bytes.saturating_add(if metadata.kind == FileKind::Directory {
+            allocated_tree(&directory.open_verified_directory(&name)?, depth + 1)?
+        } else {
+            metadata.allocated
+        });
+    }
+    Ok(bytes)
+}
+
+fn observed_entry_time(root: &Directory, path: &Path) -> Result<Option<i128>, FsError> {
+    let mut directory = root.try_clone()?;
+    let components: Vec<_> = path.components().collect();
+    let Some((last, parents)) = components.split_last() else {
+        return Ok(None);
+    };
+    for component in parents {
+        match directory.open_verified_directory(component.as_os_str()) {
+            Ok(child) => directory = child,
+            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    }
+    match directory.metadata_at(last.as_os_str(), false) {
+        Ok(metadata) => Ok(Some(metadata.modified_ns)),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn latest_git_activity(
+    repo: &VerifiedRepo,
+    branch: &GitRefName,
+    committed: i128,
+) -> Result<i128, FsError> {
+    let mut newest = committed;
+    for name in ["HEAD", "index"] {
+        if let Some(time) = observed_entry_time(repo.private_dir(), Path::new(name))? {
+            newest = newest.max(time);
+        }
+    }
+    for path in [
+        PathBuf::from(branch.as_str()),
+        Path::new("logs").join(branch.as_str()),
+        PathBuf::from("packed-refs"),
+    ] {
+        if let Some(time) = observed_entry_time(repo.common_dir(), &path)? {
+            newest = newest.max(time);
+        }
+    }
+    Ok(newest)
 }
 
 fn foreign_preview_marker(context: &WorktreeContext<'_>) -> String {
@@ -268,7 +324,6 @@ fn collect_impl(
     lanes: &[WorktreeInfo],
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
-    _lazy_cleanliness: bool,
 ) -> Result<WorktreeGcReport, WorktreeError> {
     validate_binding(context)?;
     let entries = context.facts.fresh_inventory(context, cancel)?;
@@ -400,6 +455,17 @@ fn collect_impl(
             }
             let locked = lock_worktree(context, entry, cancel, dry)?;
             census_free(context, &lane.path)?;
+            let tree_bytes = match allocated_tree(locked.verified.repo().root_dir(), 0) {
+                Ok(bytes) => Some(bytes),
+                Err(error) => {
+                    report.byte_errors.push(RetentionIssue {
+                        path: lane.path.clone(),
+                        operation: "measure worktree allocated bytes".into(),
+                        cause: error.to_string(),
+                    });
+                    None
+                }
+            };
             let effective = WorktreeGcPolicy {
                 dry_run: dry,
                 ..*policy
@@ -413,6 +479,7 @@ fn collect_impl(
             } else {
                 &mut report.idle_output
             };
+            let output_start = output.len();
             walk_output(
                 locked.verified.repo().root_dir(),
                 &lane.path,
@@ -425,6 +492,22 @@ fn collect_impl(
                 &preview_walk,
             )?;
 
+            let output_bytes = output[output_start..]
+                .iter()
+                .filter(|entry| entry.removed || entry.reason == "would_remove")
+                .map(|entry| entry.bytes)
+                .fold(0_u64, u64::saturating_add);
+            let output_errors = output[output_start..]
+                .iter()
+                .filter(|entry| !entry.removed && entry.reason != "would_remove")
+                .map(|entry| RetentionIssue {
+                    path: entry.path.clone(),
+                    operation: "remove declared output".into(),
+                    cause: entry.reason.clone(),
+                })
+                .collect::<Vec<_>>();
+            report.byte_errors.extend(output_errors);
+            report.bytes = report.bytes.saturating_add(output_bytes);
             if policy.mode == CollectionMode::Outputs {
                 row.detail = Some("output retention only".into());
                 return Ok(());
@@ -444,12 +527,11 @@ fn collect_impl(
             )?;
             for target in &mut refs {
                 let full = target.reference.as_str();
-                let branch = full.strip_prefix("refs/heads/").or_else(|| {
-                    full.strip_prefix("refs/remotes/")
-                        .and_then(|s| s.split_once('/').map(|(_, name)| name))
-                });
                 if bases.iter().any(|(name, base)| {
-                    branch == Some(name.as_str())
+                    let names_base = full.strip_prefix("refs/heads/") == Some(name.as_str())
+                        || (full.starts_with("refs/remotes/")
+                            && full.ends_with(&format!("/{name}")));
+                    names_base
                         && (*base == target.commit
                             || is_ancestor(context, *base, target.commit, cancel).unwrap_or(false))
                 }) {
@@ -525,13 +607,18 @@ fn collect_impl(
                     if exit_code(&age)? != 0 {
                         return Err(WorktreeError::InvalidOutput);
                     }
-                    let timestamp: i128 = std::str::from_utf8(trim_ascii(&age.stdout.bytes))
+                    let timestamp: i64 = std::str::from_utf8(trim_ascii(&age.stdout.bytes))
                         .map_err(|_| WorktreeError::InvalidOutput)?
                         .parse()
                         .map_err(|_| WorktreeError::InvalidOutput)?;
                     let newest =
                         preview_walk.newest(locked.verified.repo().root_dir(), 0, false)?;
-                    if timestamp * 1_000_000_000 >= policy.written_before_ns
+                    let git_activity = latest_git_activity(
+                        locked.verified.repo(),
+                        branch.as_ref().ok_or(WorktreeError::InvalidRequest)?,
+                        i128::from(timestamp) * 1_000_000_000,
+                    )?;
+                    if git_activity >= policy.written_before_ns
                         || newest >= policy.written_before_ns
                     {
                         row.detail = Some("not subsumed; recent work retained".into());
@@ -553,6 +640,21 @@ fn collect_impl(
                     cancel,
                 )?;
             }
+            let planned_cache = if dry {
+                match crate::cache::preview_worktree_cargo_cache(context.home, &locked.verified) {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        report.byte_errors.push(RetentionIssue {
+                            path: lane.path.clone(),
+                            operation: "measure private cache".into(),
+                            cause: error.to_string(),
+                        });
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             drop(locked);
             let eligible = || -> Result<(), WorktreeError> {
                 if let RetirementAction::Subsumed(evidence) = &action {
@@ -602,10 +704,21 @@ fn collect_impl(
                 }
                 removed.repository = None;
                 if let Some(cache) = removed.lane_cache.as_deref() {
-                    if let Err(error) =
-                        crate::cache::prune_worktree_cargo_cache(context.home, cache)
-                    {
-                        warn_cache_removal(&error);
+                    match crate::cache::prune_worktree_cargo_cache(context.home, cache) {
+                        Ok(bytes) => {
+                            if bytes > 0 {
+                                report.caches.push(crate::cache::CacheGcEntry {
+                                    path: cache.to_owned(),
+                                    bytes,
+                                    reason: crate::cache::CacheGcReason::Orphaned,
+                                });
+                            }
+                        }
+                        Err(error) => report.byte_errors.push(RetentionIssue {
+                            path: cache.to_owned(),
+                            operation: "remove worktree private cache".into(),
+                            cause: error.to_string(),
+                        }),
                     }
                 }
                 if let Some(owner) = policy.retirement {
@@ -618,6 +731,9 @@ fn collect_impl(
                     )?);
                 }
             } else {
+                if let Some(cache) = planned_cache {
+                    report.caches.push(cache);
+                }
                 report.worktrees.removed.push(lane.clone());
                 if matches!(&action, RetirementAction::Subsumed(_)) {
                     if let Some(branch) = &branch {
@@ -627,6 +743,11 @@ fn collect_impl(
                             .push(branch.short_name().into());
                     }
                 }
+            }
+            if let Some(bytes) = tree_bytes {
+                report.bytes = report
+                    .bytes
+                    .saturating_add(bytes.saturating_sub(output_bytes));
             }
             row.action = if dry { "would_remove" } else { "removed" };
             match action {
@@ -942,14 +1063,14 @@ fn walk_output(
         {
             continue;
         }
-        let mut prune = || -> Result<bool, FsError> {
+        let mut prune = || -> Result<Option<u64>, FsError> {
             let meta = directory.metadata_at(&name, false)?;
             if meta.kind != FileKind::Directory {
-                return Ok(false);
+                return Ok(None);
             }
             let child = directory.open_verified_directory(&name)?;
             if contains_repository(&child)? {
-                return Ok(false);
+                return Ok(None);
             }
             let contains_layout_root = layout_roots.iter().any(|root| root.starts_with(&path));
             if !contains_layout_root
@@ -963,8 +1084,9 @@ fn walk_output(
                     .ancestors()
                     .any(|ancestor| protected.ignored.contains(ancestor))
             {
+                let bytes = allocated_tree(&child, 0)?;
                 prune_output(directory, &name, policy, preview_walk)?;
-                Ok(true)
+                Ok(Some(bytes))
             } else {
                 walk_output(
                     &child,
@@ -977,11 +1099,12 @@ fn walk_output(
                     depth + 1,
                     preview_walk,
                 )?;
-                Ok(false)
+                Ok(None)
             }
         };
         match prune() {
-            Ok(true) => report.push(OutputEntry {
+            Ok(Some(bytes)) => report.push(OutputEntry {
+                bytes,
                 path: root.join(path),
                 removed: !policy.dry_run,
                 reason: if policy.dry_run {
@@ -991,8 +1114,9 @@ fn walk_output(
                 }
                 .into(),
             }),
-            Ok(false) => {}
+            Ok(None) => {}
             Err(error) => report.push(OutputEntry {
+                bytes: 0,
                 path: root.join(path),
                 removed: false,
                 reason: error.to_string(),

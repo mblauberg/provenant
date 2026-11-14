@@ -15,7 +15,7 @@ fn gc_lazy_inventory_still_refuses_a_dirty_candidate() -> Result<(), Box<dyn Err
     )?;
     fs::write(lane.path.join("untracked"), "keep")?;
     let lanes = list_for_gc(&context, &cancel())?;
-    let report = collect_lazy(
+    let report = collect(
         &context,
         &lanes,
         &WorktreeGcPolicy {
@@ -92,7 +92,7 @@ fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dy
             if scope == lane.path && evidence.contains("worktree verification failed:")
     ));
     let lanes = list_for_gc(&context, &cancel())?;
-    let report = collect_lazy(
+    let report = collect(
         &context,
         &lanes,
         &WorktreeGcPolicy {
@@ -144,7 +144,7 @@ fn gc_lazy_candidate_never_runs_nested_git_filters() -> Result<(), Box<dyn Error
     assert_raw_git_runs_poison_filter(&fixture, &poison)?;
     poison.arm()?;
     let lanes = list_for_gc(&context, &cancel())?;
-    let report = collect_lazy(
+    let report = collect(
         &context,
         &lanes,
         &WorktreeGcPolicy {

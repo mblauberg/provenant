@@ -1125,6 +1125,7 @@ pub(super) fn remove_tree_when(
     if !fenced {
         return Err(WorktreeError::UnknownWriter);
     }
+    let (_submodule_guards, submodules) = hold_submodules(context, locked.verified.repo(), cancel)?;
     let cleanliness = worktree_cleanliness_at(context, locked.verified.repo(), cancel)?;
     let discard = matches!(repository, Repository::Discard);
     match &cleanliness {
@@ -1166,7 +1167,7 @@ pub(super) fn remove_tree_when(
     let verified_path = locked.verified.path().to_path_buf();
     execute_mutation(
         context,
-        if discard {
+        if discard || !submodules.is_empty() {
             GitMutation::DiscardWorktree {
                 path: verified_path,
             }

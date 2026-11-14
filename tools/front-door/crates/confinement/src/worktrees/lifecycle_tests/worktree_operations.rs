@@ -878,6 +878,13 @@ fn retention_proofs_distinguish_preservation_completion_and_new_work() -> Result
 #[test]
 fn first_foreign_pass_previews_then_subsumed_detached_tree_can_go() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
+    fs::create_dir_all(fixture.root.join("nested/deeper"))?;
+    fs::write(
+        fixture.root.join("nested/deeper/payload"),
+        vec![42_u8; 32768],
+    )?;
+    fixture.run(&["add", "nested"])?;
+    fixture.run(&["commit", "-m", "nested allocation fixture"])?;
     let owner = TestContext::new(&fixture)?;
     let context = owner.context();
     let id = context.repo.common_identity();
@@ -913,6 +920,9 @@ fn first_foreign_pass_previews_then_subsumed_detached_tree_can_go() -> Result<()
     assert!(first.first_foreign_preview && first.dry_run && path.exists());
     let second = collect(&context, &list(&context, &cancel())?, &policy, &cancel())?;
     assert!(!second.first_foreign_preview && !second.dry_run && !path.exists());
+    assert!(first.byte_errors.is_empty() && second.byte_errors.is_empty());
+    assert!(first.bytes > 0);
+    assert_eq!(first.bytes, second.bytes);
     Ok(())
 }
 
@@ -1104,6 +1114,123 @@ fn cleanup_respects_nested_roots_aliases_and_harness_locks() -> Result<(), Box<d
         let _ = collect(&context, &lanes, &policy, &cancel())?;
         assert!(path.is_dir());
         assert!(branch_exists(&fixture, "outer"));
+    }
+    Ok(())
+}
+
+#[test]
+fn submodule_cleanup_requires_clean_retained_heads_and_surviving_git_stores()
+-> Result<(), Box<dyn Error>> {
+    for case in [
+        "retained",
+        "detached_unpushed",
+        "dirty",
+        "store_inside_tree",
+    ] {
+        let fixture = Fixture::new()?;
+        let owner = TestContext::new(&fixture)?;
+        let context = owner.context();
+        let lane = create(
+            &context,
+            WorktreeCreate {
+                branch: "submodule-proof".into(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        let child = lane.path.join("sub");
+        fs::create_dir(&child)?;
+        let store = if case == "store_inside_tree" {
+            child.join(".git")
+        } else {
+            context
+                .repo
+                .common_git_dir()
+                .join("retained-submodule-fixture")
+        };
+        if case == "store_inside_tree" {
+            fixture.run(&["-C", child.to_str().ok_or("path")?, "init", "-b", "main"])?;
+        } else {
+            fixture.run(&[
+                "-C",
+                child.to_str().ok_or("path")?,
+                "init",
+                "-b",
+                "main",
+                "--separate-git-dir",
+                store.to_str().ok_or("path")?,
+            ])?;
+        }
+        fs::write(child.join("file"), b"retained submodule")?;
+        fixture.run(&["-C", child.to_str().ok_or("path")?, "add", "file"])?;
+        fixture.run(&[
+            "-C",
+            child.to_str().ok_or("path")?,
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "user.name=fixture",
+            "commit",
+            "-m",
+            "submodule",
+        ])?;
+        let head = fixture.run(&["-C", child.to_str().ok_or("path")?, "rev-parse", "HEAD"])?;
+        let head = std::str::from_utf8(&head.stdout.bytes)?.trim();
+        run_in_worktree(
+            &fixture,
+            &lane.path,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{head},sub"),
+            ],
+        )?;
+        run_in_worktree(&fixture, &lane.path, &["commit", "-m", "gitlink"])?;
+        fixture.run(&["merge", "--no-ff", "-m", "integrated", "submodule-proof"])?;
+        if case == "detached_unpushed" {
+            fixture.run(&["-C", child.to_str().ok_or("path")?, "checkout", "--detach"])?;
+            fs::write(child.join("file"), b"unreferenced new work")?;
+            fixture.run(&["-C", child.to_str().ok_or("path")?, "add", "file"])?;
+            fixture.run(&[
+                "-C",
+                child.to_str().ok_or("path")?,
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "user.name=fixture",
+                "commit",
+                "-m",
+                "unpushed detached work",
+            ])?;
+        }
+        if case == "dirty" {
+            fs::write(child.join("note"), b"untracked data")?;
+        }
+        let policy = WorktreeGcPolicy {
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream: None,
+            upstream_reference: None,
+            terminal: &|_| true,
+            no_live_lanes: &|_| true,
+            regenerable: &[],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: false,
+            include_foreign: true,
+            retirement: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
+        };
+        let _ = collect(
+            &context,
+            &list_for_gc(&context, &cancel())?,
+            &policy,
+            &cancel(),
+        )?;
+        assert_eq!(lane.path.exists(), case != "retained");
+        assert!(store.is_dir());
     }
     Ok(())
 }

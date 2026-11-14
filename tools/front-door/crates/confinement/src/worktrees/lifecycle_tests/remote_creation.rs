@@ -1013,7 +1013,7 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
     context.executor = &git;
     let lanes = list_for_gc(&context, &cancel())?;
     assert_eq!(lanes.len(), 100);
-    let report = collect_lazy(
+    let report = collect(
         &context,
         &lanes,
         &WorktreeGcPolicy {
@@ -1039,7 +1039,7 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
     assert_eq!(git.calls.load(Ordering::SeqCst), 1);
     assert_eq!(git.listings.load(Ordering::SeqCst), 1);
     let lanes = list_for_gc(&context, &cancel())?;
-    collect_lazy(
+    collect(
         &context,
         &lanes,
         &WorktreeGcPolicy {

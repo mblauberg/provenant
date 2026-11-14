@@ -51,23 +51,227 @@ fn check_writer_terminal_with_expected_merge(
     Ok(())
 }
 
-/// A gitlink only runs a nested clean filter when its checkout exists. An
-/// uninitialised gitlink has no `.git` marker, so status cannot follow it into
-/// lane-controlled configuration and the tree can be reported as it is.
-pub(super) fn initialised_gitlink(root: &Path, path: &[u8]) -> Result<bool, WorktreeError> {
-    let relative = Path::new(OsStr::from_bytes(path));
-    if relative.is_absolute()
-        || relative
-            .components()
-            .any(|part| !matches!(part, std::path::Component::Normal(_)))
-    {
+#[derive(Clone, Debug, Serialize)]
+pub struct SubmoduleEvidence {
+    pub common_git_dir: PathBuf,
+    pub private_git_dir: PathBuf,
+    pub path: PathBuf,
+    pub head: GitOid,
+    pub evidence: provenant_records::custody::LandedEvidence,
+}
+
+/// Only stores under this project's common Git directory are in cleanup scope.
+/// Their refs/objects survive removal of a linked checkout. Every initialized
+/// child must be clean and independently retained; detached unpushed heads keep.
+pub fn submodule_evidence(
+    context: &WorktreeContext<'_>,
+    repo: &VerifiedRepo,
+    cancel: &CancelToken,
+) -> Result<Vec<SubmoduleEvidence>, WorktreeError> {
+    let mut evidence = Vec::new();
+    inspect_submodules(
+        context,
+        repo,
+        repo.root_path(),
+        repo.private_git_dir(),
+        0,
+        false,
+        &mut Vec::new(),
+        &mut evidence,
+        cancel,
+    )?;
+    Ok(evidence)
+}
+
+pub(super) fn hold_submodules(
+    context: &WorktreeContext<'_>,
+    repo: &VerifiedRepo,
+    cancel: &CancelToken,
+) -> Result<(Vec<LockGuard>, Vec<SubmoduleEvidence>), WorktreeError> {
+    let mut guards = Vec::new();
+    let mut evidence = Vec::new();
+    inspect_submodules(
+        context,
+        repo,
+        repo.root_path(),
+        repo.private_git_dir(),
+        0,
+        true,
+        &mut guards,
+        &mut evidence,
+        cancel,
+    )?;
+    Ok((guards, evidence))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn inspect_submodules(
+    context: &WorktreeContext<'_>,
+    repo: &VerifiedRepo,
+    removed_root: &Path,
+    removed_admin: &Path,
+    depth: usize,
+    hold: bool,
+    guards: &mut Vec<LockGuard>,
+    evidence: &mut Vec<SubmoduleEvidence>,
+    cancel: &CancelToken,
+) -> Result<(), WorktreeError> {
+    if depth >= 32 {
+        return Err(WorktreeError::UnknownWriter);
+    }
+    let index = run_git(
+        context,
+        repo,
+        GitRead::IndexEntries { paths: Vec::new() },
+        cancel,
+    )?;
+    if exit_code(&index)? != 0 {
         return Err(WorktreeError::InvalidOutput);
     }
-    match std::fs::symlink_metadata(root.join(relative).join(".git")) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(_) => Err(WorktreeError::UnknownWriter),
+    for entry in
+        parse_index_entries(&index.stdout.bytes).map_err(|_| WorktreeError::InvalidOutput)?
+    {
+        let entry = entry.map_err(|_| WorktreeError::InvalidOutput)?;
+        if entry.mode != 0o160000 {
+            continue;
+        }
+        let relative = Path::new(OsStr::from_bytes(entry.path));
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        let path = repo.root_path().join(relative);
+        let unknown = |detail: &str| WorktreeError::UnknownOccupancy {
+            path: path.clone(),
+            detail: detail.into(),
+        };
+        let mut directory = repo.root_dir().try_clone()?;
+        let mut absent = false;
+        for component in relative.components() {
+            match directory.open_verified_directory(component.as_os_str()) {
+                Ok(child) => directory = child,
+                Err(error) if error.is_not_found() => {
+                    absent = true;
+                    break;
+                }
+                Err(_) => {
+                    return Err(unknown(
+                        "submodule path cannot be observed without following links",
+                    ));
+                }
+            }
+        }
+        if absent {
+            continue;
+        }
+        match directory.metadata_at(OsStr::new(".git"), false) {
+            Err(error) if error.is_not_found() => {
+                // Git ignores submodule contents in parent status. An uninitialised
+                // directory with manually placed files must therefore be kept.
+                if directory.entries()?.next().is_some() {
+                    return Err(unknown("uninitialised submodule contains untracked data"));
+                }
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
+        }
+        let child = context.utility.open_read_repo(
+            context.executor,
+            directory.current_path()?,
+            context.utility_budget,
+            cancel,
+        )?;
+        let child = &child.0;
+        if child.common_git_dir().starts_with(removed_root)
+            || child.private_git_dir().starts_with(removed_root)
+            || child.common_git_dir().starts_with(removed_admin)
+            || child.private_git_dir().starts_with(removed_admin)
+            || !child
+                .common_git_dir()
+                .starts_with(context.repo.common_git_dir())
+        {
+            return Err(unknown(
+                "submodule Git custody is outside the current project's retained store",
+            ));
+        }
+        if hold {
+            let guard = lock_repository(
+                child.common_dir(),
+                LockMode::Shared,
+                WaitBudget::nonblocking(context.clock.mono_now()),
+                cancel,
+                context.clock,
+            )
+            .map_err(|error| match error {
+                FsError::LockTimeout { .. } => WorktreeError::LockBusy,
+                error => error.into(),
+            })?;
+            guards.push(guard);
+        }
+        check_writer_terminal(child)?;
+        inspect_submodules(
+            context,
+            child,
+            removed_root,
+            removed_admin,
+            depth + 1,
+            hold,
+            guards,
+            evidence,
+            cancel,
+        )?;
+        let status = run_git(context, child, GitRead::StatusIncludingIgnored, cancel)?;
+        if exit_code(&status)? != 0 {
+            return Err(unknown("submodule status is unavailable"));
+        }
+        let status =
+            parse_porcelain_v2_z(&status.stdout.bytes).map_err(|_| WorktreeError::InvalidOutput)?;
+        if !status.is_empty() {
+            return Err(unknown(
+                "submodule has dirty, untracked or ignored working data",
+            ));
+        }
+        let head = run_git(context, child, GitRead::RevParseHead, cancel)?;
+        if exit_code(&head)? != 0 {
+            return Err(unknown("submodule HEAD is unavailable"));
+        }
+        let head = parse_oid(trim_ascii(&head.stdout.bytes))?;
+        let mut references = BTreeMap::new();
+        for read in [GitRead::BranchTips, GitRead::RemoteBranchTips] {
+            let refs = run_git(context, child, read, cancel)?;
+            if exit_code(&refs)? != 0 {
+                return Err(unknown("submodule retained refs are unavailable"));
+            }
+            references.extend(parse_branch_tips(&refs.stdout.bytes)?);
+        }
+        let references: Vec<_> = references
+            .into_iter()
+            .map(|(reference, commit)| EvidenceRef {
+                reference,
+                commit,
+                integration: false,
+            })
+            .collect();
+        match super::evidence::removal_evidence_in(context, child, head, &references, cancel)? {
+            RemovalEvidence::Proven(proof) => evidence.push(SubmoduleEvidence {
+                common_git_dir: child.common_git_dir().to_owned(),
+                private_git_dir: child.private_git_dir().to_owned(),
+                path: path.clone(),
+                head,
+                evidence: proof,
+            }),
+            _ => {
+                return Err(unknown(
+                    "submodule HEAD is not independently subsumed by a retained ref",
+                ));
+            }
+        }
     }
+    Ok(())
 }
 
 const DIRTY_PATHS_LISTED: usize = 12;
@@ -136,23 +340,7 @@ pub(super) fn worktree_cleanliness_at(
         }
         Err(error) => return Err(error),
     }
-    let index = run_git(
-        context,
-        repo,
-        GitRead::IndexEntries { paths: Vec::new() },
-        cancel,
-    )?;
-    if exit_code(&index)? != 0 {
-        return Ok(WorktreeCleanliness::Unknown);
-    }
-    for entry in
-        parse_index_entries(&index.stdout.bytes).map_err(|_| WorktreeError::InvalidOutput)?
-    {
-        let entry = entry.map_err(|_| WorktreeError::InvalidOutput)?;
-        if entry.mode == 0o160000 && initialised_gitlink(repo.root_path(), entry.path)? {
-            return Err(WorktreeError::UnknownOccupancy { path: repo.root_path().join(OsStr::from_bytes(entry.path)), detail: "submodule has independent Git custody; its commits and working data are retained".into() });
-        }
-    }
+    submodule_evidence(context, repo, cancel)?;
     let outcome = run_git(context, repo, GitRead::StatusIncludingIgnored, cancel)?;
     if exit_code(&outcome)? != 0 {
         return Ok(WorktreeCleanliness::Unknown);

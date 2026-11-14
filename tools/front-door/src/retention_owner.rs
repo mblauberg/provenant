@@ -67,6 +67,20 @@ impl<'a> Owner<'a> {
         &self,
         context: &WorktreeContext<'_>,
     ) -> Result<Vec<RemovalRecord>, WorktreeError> {
+        self.recover_selected(context, None)
+    }
+    pub(crate) fn recover_id(
+        &self,
+        context: &WorktreeContext<'_>,
+        id: &str,
+    ) -> Result<Vec<RemovalRecord>, WorktreeError> {
+        self.recover_selected(context, Some(id))
+    }
+    fn recover_selected(
+        &self,
+        context: &WorktreeContext<'_>,
+        selected: Option<&str>,
+    ) -> Result<Vec<RemovalRecord>, WorktreeError> {
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let call = Request {
@@ -99,6 +113,9 @@ impl<'a> Owner<'a> {
                 Some(_) => return Err(WorktreeError::InvalidOutput),
                 None => break,
             }
+        }
+        if let Some(id) = selected {
+            ids.retain(|candidate| candidate == id);
         }
         let mut removals = Vec::new();
         if ids.is_empty() {
@@ -168,17 +185,14 @@ impl<'a> Owner<'a> {
                     path: lane.path.clone(),
                     detail,
                 })?;
-            let action = if record.decision.action
-                == provenant_records::landing::RetirementAction::Preserve
-            {
-                RetirementAction::Idle
-            } else {
-                RetirementAction::Subsumed(
-                    serde_json::from_str(&record.decision.reason)
-                        .map_err(|_| WorktreeError::InvalidOutput)?,
-                )
+            let action = match retirement_evidence(&record)? {
+                Some(evidence) => RetirementAction::Subsumed(evidence),
+                None => RetirementAction::Idle,
             };
-            if let (Some(reference), RetirementAction::Subsumed(evidence)) = (&reference, &action) {
+            if record.decision.action == provenant_records::landing::RetirementAction::Discard
+                && let (Some(reference), RetirementAction::Subsumed(evidence)) =
+                    (&reference, &action)
+            {
                 if let Some(actual) = worktrees::ref_tip(context, reference, &cancel)? {
                     let refs =
                         worktrees::retained_refs(context, Some(reference), None, &[], &cancel)?;
@@ -376,6 +390,13 @@ impl RetirementOwner for Owner<'_> {
                     .iter()
                     .any(|s| *s == record.subject || record.links.contains(s))
                 {
+                    if matches!(record.holder, Holder::Chair { .. })
+                        && record
+                            .holder
+                            .belongs_to(&provenant_cli::fabric::current_chair(&context))
+                    {
+                        continue;
+                    }
                     match crate::custody::presence(
                         record,
                         self.roots,
@@ -472,6 +493,14 @@ impl RetirementOwner for Owner<'_> {
         // This function is the sole replaceable S2 persistence seam. Reports
         // and custody point to this frozen RetirementRecord; no second record.
         let project = context.binding.project_id();
+        if !completed {
+            self.custody(lane)
+                .map_err(|detail| WorktreeError::UnknownOccupancy {
+                    path: lane.path.clone(),
+                    detail,
+                })?;
+        }
+
         let ledger = worktrees::RefLedger::for_context(context)?;
         let now = context
             .clock
@@ -562,7 +591,10 @@ impl RetirementOwner for Owner<'_> {
         let decision_reason = match action {
             RetirementAction::Idle => "idle clean worktree; preserve branch".to_owned(),
             RetirementAction::Subsumed(evidence) => {
-                serde_json::to_string(evidence).map_err(|_| WorktreeError::InvalidOutput)?
+                format!(
+                    "tip proved {:?}; remove eligible output",
+                    evidence.predicate
+                )
             }
         };
         let mut record = current.unwrap_or_else(|| RetirementRecord {
@@ -598,12 +630,18 @@ impl RetirementOwner for Owner<'_> {
         let reason = match action {
             RetirementAction::Idle => "idle clean worktree; preserve branch".to_owned(),
             RetirementAction::Subsumed(evidence) => {
-                serde_json::to_string(evidence).map_err(|_| WorktreeError::InvalidOutput)?
+                format!(
+                    "tip proved {:?}; remove eligible output",
+                    evidence.predicate
+                )
             }
         };
-        let stored_action = match action {
-            RetirementAction::Idle => provenant_records::landing::RetirementAction::Preserve,
-            RetirementAction::Subsumed(_) => provenant_records::landing::RetirementAction::Discard,
+        let preserve_ref = matches!(action, RetirementAction::Idle)
+            || matches!(action, RetirementAction::Subsumed(LandedEvidence { source: LandingSource::RetainedRef { reference, .. }, .. }) if lane.branch.as_ref() == Some(reference));
+        let stored_action = if preserve_ref {
+            provenant_records::landing::RetirementAction::Preserve
+        } else {
+            provenant_records::landing::RetirementAction::Discard
         };
         if record.decision.reason != reason || record.decision.action != stored_action {
             record.decision.reason = reason;
@@ -643,6 +681,11 @@ impl RetirementOwner for Owner<'_> {
                     Ok(None) => RetirementStepState::Completed {
                         detail: Some("exact-tip branch removed".into()),
                     },
+                    Ok(Some(tip)) if tip == lane.head && preserve_ref => {
+                        RetirementStepState::Completed {
+                            detail: Some("branch preserved".into()),
+                        }
+                    }
                     Ok(Some(tip)) if tip == lane.head => RetirementStepState::Pending,
                     Ok(Some(_)) => RetirementStepState::Refused {
                         reason: "branch tip changed; new work retained".into(),
@@ -655,6 +698,38 @@ impl RetirementOwner for Owner<'_> {
                 record.outcomes.retain(|s| s.step != step);
                 record.outcomes.push(RetirementStepOutcome { step, state });
             }
+        }
+        if !completed && !lane.primary {
+            let tree = provenant_confinement::verify_worktree(context.repo, &lane.path)?;
+            for submodule in
+                worktrees::submodule_evidence(context, tree.repo(), &CancelToken::new())?
+            {
+                let step = format!("submodule-proof:{}", submodule.path.display());
+                record.outcomes.retain(|s| s.step != step);
+                record.outcomes.push(RetirementStepOutcome {
+                    step,
+                    state: RetirementStepState::Completed {
+                        detail: Some(
+                            serde_json::to_string(&submodule)
+                                .map_err(|_| WorktreeError::InvalidOutput)?,
+                        ),
+                    },
+                });
+            }
+        }
+        record
+            .outcomes
+            .retain(|step| step.step != RETIREMENT_EVIDENCE_STEP);
+        if let RetirementAction::Subsumed(evidence) = action {
+            record.outcomes.push(RetirementStepOutcome {
+                step: RETIREMENT_EVIDENCE_STEP.into(),
+                state: RetirementStepState::Completed {
+                    detail: Some(
+                        serde_json::to_string(evidence)
+                            .map_err(|_| WorktreeError::InvalidOutput)?,
+                    ),
+                },
+            });
         }
         let bytes = serde_json::to_vec(&record).map_err(|_| WorktreeError::InvalidOutput)?;
         directory
@@ -774,37 +849,12 @@ impl RetirementOwner for Owner<'_> {
         {
             return Err(WorktreeError::IdentityChanged);
         }
-        if record.decision.action == provenant_records::landing::RetirementAction::Preserve {
-            return Ok(None);
-        }
-        let step = format!(
-            "{}:{}",
-            if subject.kind == SubjectKind::Branch {
-                "branch"
-            } else {
-                "worktree"
-            },
-            subject.id
-        );
-        if !record
-            .outcomes
-            .iter()
-            .any(|s| s.step == step && matches!(s.state, RetirementStepState::Completed { .. }))
-        {
-            return Ok(None);
-        }
-        let evidence: LandedEvidence = serde_json::from_str(&record.decision.reason)
-            .map_err(|_| WorktreeError::InvalidOutput)?;
-        let tip = record
-            .expected_tip
-            .parse()
-            .map_err(|_| WorktreeError::InvalidOutput)?;
-        Ok(Some(RemovalRecord {
-            project: context.binding.project_id(),
+        provenant_records::custody::retirement_removal(
+            context.binding.project_id(),
+            &record,
             subject,
-            tip,
-            outcome: RemovalOutcome::Removed { evidence },
-        }))
+        )
+        .map_err(WorktreeError::from)
     }
 }
 
