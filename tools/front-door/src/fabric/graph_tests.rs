@@ -310,7 +310,6 @@ mod graph_writer_admission_tests {
             cwd: rig.project.clone(),
             assets: rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &Free,
         };
         let cancel = CancelToken::new();
@@ -536,7 +535,7 @@ mod graph_writer_admission_tests {
             context: Context::open(roots.clone(), &rig.home, &rig.project)?,
             project_attribution: false, clock: SystemClock, backoff: ThreadPause,
             executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
-            assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &Free,
+            assets: rig.project.clone(), host_launch: None, workers: &Free,
         };
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
@@ -1430,7 +1429,6 @@ mod result_tests {
             cwd: rig.project.clone(),
             assets: rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &FreeWorkers,
         };
         let cancel = CancelToken::new();
@@ -1925,7 +1923,6 @@ mod result_tests {
             cwd: rig.project.clone(),
             assets: rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &FreeWorkers,
         };
         let cancel = CancelToken::new();
@@ -2078,7 +2075,6 @@ mod result_tests {
             cwd: rig.project.clone(),
             assets: rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &FreeWorkers,
         };
         let text = format!("full {} end-of-remote-result", "remote ".repeat(1400));
@@ -3027,7 +3023,7 @@ mod provisioned_writer_submission_tests {
                 backoff: ThreadPause,
                 executor: SystemExecutor::new(1)?,
                 home: rig.home.clone(), cwd: rig.project.clone(), assets: rig.project.clone(),
-                host_launch: None, mcp_project: None, workers: &Free,
+                host_launch: None, workers: &Free,
             };
             let cancel = CancelToken::new();
             let mut owner = BoundGraphOwner {
@@ -3110,7 +3106,6 @@ mod provisioned_writer_submission_tests {
             cwd: rig.project.clone(),
             assets: rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &Free,
         };
         let other = foreign

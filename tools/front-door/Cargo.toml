@@ -41,7 +41,6 @@ provenant-run = { path = "crates/run" }
 provenant-fabric-store = { path = "crates/fabric-store" }
 provenant-sqlite = { path = "crates/sqlite" }
 provenant-fabric-runtime = { path = "crates/fabric-runtime" }
-provenant-fabric-mcp = { path = "crates/fabric-mcp" }
 provenant-workflow = { path = "crates/workflow" }
 provenant-cli = { path = "crates/cli" }
 
@@ -80,7 +79,6 @@ jiff = { workspace = true }
 provenant-os = { workspace = true }
 provenant-quota = { workspace = true }
 provenant-telemetry = { workspace = true }
-provenant-fabric-mcp = { workspace = true }
 provenant-fabric-runtime = { workspace = true }
 provenant-fabric-store = { workspace = true }
 provenant-workflow = { workspace = true }

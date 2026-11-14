@@ -31,9 +31,6 @@ dropped whole.
 
 ## Settings with sharp edges
 
-- `fabric.mcp_server` is off by default: set it, then `provenant upgrade` (or
-  `install`) to write the entry. An edited `fabric` entry blocks the install
-  with a conflict; restore or remove it.
 - `lanes.publish = false` withholds the host `gh` login and Git credential
   helper from open-network lanes. If `gh auth token` fails, the lane starts
   without `GH_TOKEN` with a warning and `git push` fails with `could not read

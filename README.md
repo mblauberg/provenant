@@ -65,7 +65,7 @@ flowchart TB
 Each delegated task runs as a **lane**: one agent, one access mode, one record.
 **Fabric** is the shared message and task store that lets sessions, and other
 machines you configure, coordinate. The `provenant` CLI is a single Rust binary,
-and agents reach the same features through its MCP server.
+and agents reach the same features through its shell commands.
 
 ## Why Provenant
 
@@ -99,13 +99,13 @@ hand-written graph; `--explain` inspects it before launch.
 | **Subscription quota and API** | Drives each provider's own CLI with your existing sign-in, so lanes draw on the subscriptions you already have. Pay-per-token API models are available through OpenCode routes such as OpenRouter; OpenCode's own configuration holds the key, never Provenant. |
 | **Many accounts** | Register several accounts per provider. Dispatch resolves an account with headroom unless you pin one, and a quota refusal cools only the account that hit it. |
 | **Usage meter** | `provenant quota` and an optional macOS menu bar app show every account's windows, reset times, credits and staleness in one place. |
-| **Your harnesses** | One install wires Fabric MCP, skills and instructions into Claude Code, Codex, Cursor, Agy and OpenCode. Claude Code also gets managed hooks and automatic account switching. |
+| **Your harnesses** | One install wires skills and instructions into Claude Code, Codex, Cursor, Agy and OpenCode. Claude Code also gets managed hooks and automatic account switching. |
 | **Routing** | Named pools (`utility`, `junior`, `senior`, `principal`, `writing`, `design`) choose among models by weight, scaled by each provider's pacing. |
 | **Lane modes** | Each lane runs `read-only` or `worktree-write`. Lanes run unsandboxed by default and share host caches; `--sandbox` opts into a macOS Seatbelt sandbox profile, and `--no-sandbox` overrides route, network and parent floors. Writers get one registered worktree. |
 | **Host-side delivery** | The host verifies a writer's final commit, pushes it to the branch you name and can open a pull request. |
 | **Fabric** | Messages, claims and activity between sessions and agents, plus dispatch to configured peer hosts over SSH. |
 | **Records and history** | Every run, task and attempt is stored with its route, account, knobs and output. Lanes can be listed, read, resumed or cancelled later. |
-| **Telemetry** | Local cost and token reports, CLI and MCP usage counts, and timeline export for Perfetto, with no collector. |
+| **Telemetry** | Local cost and token reports, CLI usage counts, and timeline export for Perfetto, with no collector. |
 | **Skills** | 15 workflow skills (scope, deliver, code review, diagnose, orchestrate and more) plus 3 library skills for specific tools and stacks, installed into each harness. |
 
 ## Requirements
@@ -131,7 +131,7 @@ Claude account directories, and checks the installation. A rerun upgrades the
 recorded selection. Output summarises changes and targets, for example:
 
 ```text
-install: 86 changes (78 links, 4 hooks, 4 MCP); 2 targets
+install: 86 changes (78 links, 4 hooks); 2 targets
 ```
 
 Counts depend on the release and installed harnesses. Findings and manual
@@ -172,7 +172,7 @@ provenant run implement --brief-file BRIEF.md \
   --route senior --branch fix/example --base origin/main
 ```
 
-Inside a harness, agents do the same through Fabric MCP tools, so in practice
+Inside a harness, agents do the same through `provenant` shell commands, so in practice
 you ask your session to delegate and it dispatches for you. Run
 `provenant help <command>` for every flag.
 
@@ -256,7 +256,7 @@ involved. Usage counters never log arguments, prompts or results.
 | `provenant telemetry stats` | Tokens by run and attempt |
 | `provenant telemetry cost [TARGET]` | API-equivalent cost from the usage ledger, priced from [`config/telemetry-prices.toml`](config/telemetry-prices.toml) |
 | `provenant telemetry value` | Each account's usage against its plan price and quota readings, and cost per accepted outcome |
-| `provenant telemetry stats --usage` | How often each CLI verb and MCP tool is used, including installed ones never called |
+| `provenant telemetry stats --usage` | How often each CLI verb is used, including installed ones never called |
 | `provenant telemetry trace` | A timeline of attempts across hosts, for [Perfetto](https://ui.perfetto.dev) |
 | `provenant status` | Active and recent lanes; `--all` and `--json` show full records |
 | `provenant output <attempt>` | A lane's recorded output |
@@ -264,7 +264,7 @@ involved. Usage counters never log arguments, prompts or results.
 | `provenant workflow session` | Save, show or hand off a session checkpoint |
 
 Use these to tune your setup with evidence: shift route weights towards models
-whose lanes succeed, spot commands and MCP tools nobody calls, and see where
+whose lanes succeed, spot commands nobody calls, and see where
 quota actually goes. The `improve` skill helps turn what you
 find into process changes and repeatable evaluations.
 
@@ -275,7 +275,7 @@ find into process changes and repeatable evaluations.
 | [Architecture](docs/ARCHITECTURE.md) | Components, crate map, state root and lifecycle |
 | [`GLOBAL-AGENTS.md`](GLOBAL-AGENTS.md) | The standing rules every harness loads |
 | [Specifications](docs/specs/README.md) | Contracts for each subsystem |
-| [Install](docs/runbooks/install.md) | Build, package, install, uninstall and Fabric MCP |
+| [Install](docs/runbooks/install.md) | Build, package, install, uninstall and account sync |
 | [Configuration](docs/runbooks/configuration.md) | Profiles, knobs, quota display and account switching |
 | [Routing and templates](docs/runbooks/routing-and-templates.md) | Pools, pacing, model policy, review panels and templates |
 | [Providers](docs/runbooks/providers.md) | Launch notes for each provider |

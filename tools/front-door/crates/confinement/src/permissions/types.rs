@@ -308,7 +308,7 @@ pub struct ProviderProfileSpec {
     pub runtime_reads: Vec<PathGrant>,
     /// Exact attempt-bound host Fabric mutation endpoint.
     pub fabric_socket: Option<PathGrant>,
-    /// State files the lane's Fabric MCP server reads. Mutations use the socket.
+    /// State files the lane's nested Provenant commands read. Mutations use the socket.
     pub fabric_state_reads: Vec<PathGrant>,
     /// Literal directory discovery; never the contents of provider config.
     pub discovery_reads: Vec<PathGrant>,

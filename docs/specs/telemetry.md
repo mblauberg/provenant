@@ -100,7 +100,7 @@ never applied by the report.
 best-effort single appends, and never create a state root. An I/O error drops
 the event.
 - Why: counting demand must not leak work content or slow a command.
-- Test: `tests/usage.rs::cli_and_mcp_usage_records_exclude_arguments_prompts_and_results`;
+- Test: `tests/usage.rs::cli_usage_records_exclude_arguments_prompts_and_results`;
   `crates/telemetry/src/usage/tests.rs::recording_on_a_missing_root_creates_nothing`
 
 ## Quota display stays honest

@@ -615,13 +615,11 @@ fn output_install_noted(
 ) -> u8 {
     match result {
         Ok(outcome) => {
-            let (mut links, mut hooks, mut mcp) = (0, 0, 0);
+            let (mut links, mut hooks) = (0, 0);
             for action in &outcome.actions {
                 let selector = action.selector.to_ascii_lowercase();
                 if selector.contains("hook") {
                     hooks += 1;
-                } else if selector.contains("mcp") {
-                    mcp += 1;
                 } else if matches!(
                     action.before.as_ref().or(action.after.as_ref()),
                     Some(provenant_records::OwnedValue::Link { .. })
@@ -630,7 +628,7 @@ fn output_install_noted(
                 }
             }
             let mut human = format!(
-                "{notes}{command}: {} changes ({links} links, {hooks} hooks, {mcp} MCP); {} targets",
+                "{notes}{command}: {} changes ({links} links, {hooks} hooks); {} targets",
                 outcome.actions.len(),
                 summaries.len(),
             );
@@ -890,7 +888,7 @@ fn detected_batches(
                     Ok(HarnessTarget {
                         harness: record.harness,
                         skills_dir: record.skills_dir.to_path_buf()?,
-                        mcp_file: record.mcp_file.to_path_buf()?,
+                        config_file: record.config_file.to_path_buf()?,
                         hook_file: record
                             .hook_file
                             .map(|path| path.to_path_buf())
@@ -2209,7 +2207,7 @@ mod tests {
                     extra: Default::default(),
                     harness: Harness::Claude,
                     skills_dir: AbsolutePath::new(&dir.join("skills"))?,
-                    mcp_file: AbsolutePath::new(&dir.join("mcp.json"))?,
+                    config_file: AbsolutePath::new(&dir.join("settings.json"))?,
                     hook_file: None,
                     instruction: None,
                     hooks_relinquished: false,

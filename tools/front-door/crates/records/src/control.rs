@@ -156,7 +156,7 @@ pub struct ControlReceipt {
 }
 
 /// Stable refusal code for an unsupported control receipt. Every edge that
-/// reports one, CLI or MCP, uses this code and `ControlReceipt::refusal_message`.
+/// reports one, CLI or relay, uses this code and `ControlReceipt::refusal_message`.
 pub const CONTROL_UNSUPPORTED: &str = "control_unsupported";
 
 impl ControlReceipt {

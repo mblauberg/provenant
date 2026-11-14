@@ -477,12 +477,12 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
         );
     }
     assert!(read(json!({"op":"output","id":"another-graph/parent"})).is_err());
-    let relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+    let relay = provenant_fabric_runtime::relay::HostRelay::start_with_graph(
         provenant_providers::LaneRuntime::fabric_socket(caller),
         Default::default(),
         |_, _, _| Err(ServiceError::FabricOwnerUnavailable),
         move |arguments, cancel, within| {
-            let budget = provenant_fabric_mcp::lane::host_budget(&clock, within)?;
+            let budget = provenant_fabric_runtime::relay::host_budget(&clock, within)?;
             provenant_cli::fabric::graph_relay::serve_with_read(
                 &context,
                 &caller.to_string(),

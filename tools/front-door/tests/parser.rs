@@ -215,8 +215,6 @@ fn state_refuses_legacy_aliases_and_checks_select_the_caller_checkout() -> Resul
     assert_eq!(value["command"], "root");
     let hook = rig.command(&["hook", "claude", "pre-tool-use", "--json"])?;
     assert_eq!(code(&hook), 2);
-    let mcp = rig.command(&["fabric", "mcp", "--json"])?;
-    assert_eq!(code(&mcp), 2);
     rig.assert_legacy_unchanged()
 }
 
@@ -226,7 +224,6 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
     let leaves: Vec<Vec<&str>> = vec![
         vec!["root"],
         vec!["config", "show"],
-        vec!["fabric", "mcp"],
         vec!["install", "--source", "/fixture", "--harness", "claude"],
         vec!["uninstall", "--harness", "claude"],
         vec!["route", "list"],
@@ -279,7 +276,6 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
         }
         let out = rig.command(&leaf)?;
         let expected = match leaf.first().copied() {
-            Some("fabric") if leaf.get(1) == Some(&"mcp") => 0,
             Some("config") => 0,
             Some("install") => 1,
             Some("uninstall") => 0,
@@ -292,7 +288,7 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
             "{leaf:?}: {}",
             String::from_utf8_lossy(&out.stderr.bytes)
         );
-        if expected == 4 || leaf == ["fabric", "mcp"] {
+        if expected == 4 {
             assert!(out.stdout.bytes.is_empty());
         }
     }

@@ -178,12 +178,12 @@ fn history_records_changes_and_redacts_nothing_secret_looking() {
     let edited = patch(
         &roots,
         json!({"chair.switch_threshold": 70}),
-        &EditOptions::new("mcp"),
+        &EditOptions::new("cli"),
     )
     .unwrap();
     let entries = history(&roots, None, 10).unwrap();
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].channel, "mcp");
+    assert_eq!(entries[0].channel, "cli");
     assert_eq!(entries[0].after_revision, edited.after_revision);
     assert_eq!(entries[0].changes[0].path, "knobs.chair.switch_threshold");
     assert_eq!(entries[0].changes[0].after, Some(json!(70)));

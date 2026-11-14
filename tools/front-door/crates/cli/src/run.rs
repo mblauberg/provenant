@@ -152,7 +152,7 @@ pub struct Fail {
     pub status: Status,
     pub kind: ErrorKind,
     pub message: String,
-    /// Safe typed detail retained for the MCP edge, without raw source errors.
+    /// Safe typed detail retained for the command edge, without raw source errors.
     pub detail: Option<Box<provenant_fabric_runtime::coordination::facade::FacadeError>>,
     pub projection: Option<Box<provenant_records::diagnostic::Diagnostic>>,
 }

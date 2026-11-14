@@ -30,7 +30,7 @@ pub struct Context {
     pub config: FabricConfig,
     /// Origin captured with the effective graph configuration.
     pub graph_prompt_limit_source: provenant_fabric_runtime::graph::InputCapSource,
-    /// Captured once from the host-set MCP entry, never from tool arguments.
+    /// Captured once from the host-set lane environment, never from arguments.
     pub in_lane: bool,
     pub(super) executor: SystemExecutor,
     pub(super) home: PathBuf,

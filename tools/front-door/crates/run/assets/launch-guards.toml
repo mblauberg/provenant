@@ -510,11 +510,6 @@ boundary = "warning"
 reason = "Absent separate private state warns and uses the already-confined attempt scratch directory for Claude configuration."
 
 [[guard]]
-site = "providers/src/lane.rs#LaneRuntime::mcp"
-boundary = "warning"
-reason = "Unrepresentable Fabric MCP paths warn and omit that optional integration; Claude retains its isolated settings."
-
-[[guard]]
 site = "providers/src/lane.rs#LaneRuntime::claude"
 boundary = "authority"
 reason = "Claude's isolated settings must retain the Provenant pre-tool guard; an unrepresentable hook executable or state path cannot safely substitute inherited settings."

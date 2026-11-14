@@ -1265,7 +1265,7 @@ pub(super) fn setup_parent<'a>(
     Ok((directory, name))
 }
 
-// Existing shared ancestors need only read access in a confined MCP.
+// Existing shared ancestors need only read access in a confined lane.
 pub(super) fn setup_directory(
     parent: &Directory,
     name: &std::ffi::OsStr,

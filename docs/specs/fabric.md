@@ -1,9 +1,9 @@
 # Fabric
 
 Owner: `crates/fabric-store` (SQLite), `crates/fabric-runtime` (identity,
-coordination, peers, graphs, Git transport), `crates/fabric-mcp` (stdio MCP)
+coordination, lane relay, peers, graphs, Git transport)
 Anchor: `crates/fabric-store/src/tests.rs`, `crates/fabric-runtime/src/graph.rs`,
-`crates/fabric-mcp/src/stdio_tests.rs`
+`crates/fabric-runtime/src/relay/lane_tests.rs`
 
 Fabric is the daemonless coordination layer for one user's agents and hosts.
 It grants no authority to install, land or run a provider, and keeps no second
@@ -13,7 +13,6 @@ run status ([run](run.md)). ADRs
 [0026](../adr/0026-federate-fabric-across-own-hosts-over-ssh.md) and
 [0039](../adr/0039-graph-of-templates.md) record the decisions; the
 [peer host runbook](../runbooks/fabric-hosts.md) and `provenant help --all`
-and the MCP tool list
 own use, flags and limits. Paths are relative to `tools/front-door/`.
 
 ## Identity and store
@@ -35,8 +34,8 @@ attempt-bound socket, where the host, not the request, fixes the sender; CLI
 coordination mutations refuse inside lanes.
 - Why: a lane must not forge records that the host or another agent trusts.
 - Test: `crates/providers/src/seatbelt_snapshots.rs::fabric_profiles_only_read_database_and_allow_only_the_attempt_socket`;
-  `crates/fabric-mcp/src/coordination_tests.rs::lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal`
-- Owner: `crates/fabric-mcp/src/lane.rs`, `crates/fabric-store/src/db.rs`
+  `crates/fabric-runtime/src/relay/lane_tests.rs::lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal`
+- Owner: `crates/fabric-runtime/src/relay/host.rs`, `crates/fabric-store/src/db.rs`
 
 ### Private, versioned, atomic store
 
@@ -74,7 +73,7 @@ operation identifier participates in lookup.
 
 ## Human requests
 
-One service for CLI and MCP owns requests and immutable answers, binding
+One service for the CLI owns requests and immutable answers, binding
 project, host and actor from identity, never request JSON. An answer commits
 with its history, delivery intent and receipt in one transaction, and a
 competing answer cannot replace the winner. Claimed work stays unverified until
@@ -91,21 +90,21 @@ reported, never mirrored.
   `tests/fabric_transport.rs::remote_inbox_owner`
 - Owner: `crates/fabric-runtime/src/inbox.rs`, `crates/fabric-store/src/human_inbox.rs`
 
-## CLI and MCP surfaces
+## CLI and relay surfaces
 
-Tool input is a strict tagged enum with no coercion, validated before side
-effects. Output is lossless and paged within its byte budget, but committed
-mutation receipts always survive. A full stdio queue is a typed busy error, and
-cancellation suppresses the late reply without cancelling a launched run. CLI
-and MCP render one typed category per error. Settlement reactions (graph
-advance, chair notice, chair log) run once in effect; notices never instruct.
-- Why: a lenient parser turns a typo into another request, and a lost client
-  must never kill lanes.
-- Test: `crates/fabric-mcp/src/schema_tests.rs::generated_schema_values_match_strict_serde_for_every_operation_and_field`;
-  `crates/fabric-mcp/src/tools_tests.rs::result_limit_preserves_mutation_receipts_and_rejects_oversized_observations`;
-  `crates/fabric-mcp/src/stdio_tests.rs::cancellation_suppresses_late_observations_without_cancelling_runs`;
+Relay input is a strict tagged enum with no coercion, validated before side
+effects, and the relay carries coordination only. A queued relay caller must
+still be present with budget left before any effect, so a timed-out call cannot
+commit. The CLI and the relay render one typed category per error. Settlement
+reactions (graph advance, chair notice, chair log) run once in effect; notices
+never instruct. Every harness Provenant drives has a shell, so `provenant
+fabric` is the one agent surface and no second tool protocol exists.
+- Why: a lenient parser turns a typo into another request, and a lost lane must
+  never commit after its deadline.
+- Test: `crates/fabric-runtime/src/relay/host.rs::tests::disconnected_queued_caller_cannot_commit_after_admission`;
+  `::configured_frame_limits_reject_before_any_effect`;
   `crates/cli/src/fabric.rs::upgrade_and_peer_version_refusals_match_on_both_edges`
-- Owner: `crates/fabric-mcp/src/`, `crates/fabric-runtime/src/coordination/facade.rs`
+- Owner: `crates/fabric-runtime/src/relay/`, `crates/fabric-runtime/src/coordination/facade.rs`
 
 ## Bounded graphs and route fallback
 
@@ -254,8 +253,7 @@ Credentials, keys and keychains never cross hosts (no test:
 peer request types carry no credential fields), and peer changes need a
 chair-run smoke between two real hosts (review gate).
 - Why: remote guesses or a resent mutation could free a live lane or apply twice.
-- Test: `tests/fabric_transport.rs::run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates`;
-  `::peer_ingress_refuses_protocol_before_decoding_or_running_mutations`;
+- Test: `tests/fabric_transport.rs::peer_ingress_refuses_protocol_before_decoding_or_running_mutations`;
   `crates/fabric-runtime/src/hosts.rs::fixed_peer_transport_preserves_mutation_uncertainty_without_retry`;
   `crates/fabric-runtime/src/git_transport.rs::fetch_refuses_corrupt_missing_duplicate_and_malformed_objects`
 - Owner: `crates/fabric-runtime/src/hosts.rs`, `crates/fabric-runtime/src/git_transport.rs`

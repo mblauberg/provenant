@@ -162,7 +162,7 @@ pub const MAX_CLI_PROMPT_BYTES: usize = 1_048_576;
 pub const MAX_REFERENCE_BYTES: usize = 1_024;
 pub const MAX_ROUTE_BYTES: usize = 128;
 pub const MAX_ARTIFACT_PATH_BYTES: usize = 4_096;
-/// Leaves over 250 KiB for the MCP envelope under the 1 MiB frame cap after
+/// Leaves over 250 KiB for the relay envelope under the 1 MiB frame cap after
 /// worst-case sixfold JSON string escaping; base64 encoding stays below 2x.
 pub const MAX_FETCH_BYTES: u64 = 131_072;
 
@@ -448,11 +448,11 @@ impl ValidateInput for SubmitInput {
                     {
                         return Err(field(&format!("{path}.context")));
                     }
-                    // Peer dispatch uses the CLI launch limit; MCP retains its
-                    // smaller tool input bound.
+                    // Peer dispatch uses the CLI launch limit; the relay retains its
+                    // smaller frame bound.
                     let prompt_limit = match transport {
                         WaitTransport::Cli => MAX_CLI_PROMPT_BYTES,
-                        WaitTransport::Mcp => MAX_TEXT_BYTES,
+                        WaitTransport::Relay => MAX_TEXT_BYTES,
                     };
                     bounded_text(&task.prompt, &format!("{path}.prompt"), prompt_limit)?;
                     if let Some(title) = &task.title {
@@ -651,11 +651,11 @@ mod tests {
             }))
             .unwrap();
             assert!(input.validate_input(WaitTransport::Cli).is_ok());
-            let mcp = input.validate_input(WaitTransport::Mcp);
+            let relay = input.validate_input(WaitTransport::Relay);
             if bytes <= 65_536 {
-                assert!(mcp.is_ok());
+                assert!(relay.is_ok());
             } else {
-                let error = mcp.unwrap_err();
+                let error = relay.unwrap_err();
                 assert_eq!(error.path, "task.prompt");
                 let projection = error.diagnostic();
                 let detail = projection.detail.as_deref().unwrap();
@@ -862,7 +862,7 @@ mod tests {
         );
         let backoff = ThreadPause;
         let cancel = CancelToken::new();
-        let budget = provenant_core::WaitBudget::mcp(clock.mono_now(), 5).expect("budget");
+        let budget = provenant_core::WaitBudget::relay(clock.mono_now(), 5).expect("budget");
         let store = Store::open(
             &root,
             &Request {

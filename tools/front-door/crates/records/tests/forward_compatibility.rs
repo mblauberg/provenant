@@ -233,7 +233,7 @@ fn owned_entry() -> Value {
         "expected":{"kind":"file","digest":digest(),"mode":384}})
 }
 fn harness_target() -> Value {
-    json!({"harness":"codex","skills_dir":absolute_path(),"mcp_file":absolute_path()})
+    json!({"harness":"codex","skills_dir":absolute_path(),"config_file":absolute_path()})
 }
 fn install_receipt() -> Value {
     json!({"schema_version":1,"state_format_version":1,"source_digest":source_digest(),"manifest_digest":digest(),

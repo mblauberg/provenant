@@ -139,7 +139,6 @@ fn prepare(
     for image in input.images {
         argv.extend(["--image".into(), image.as_os_str().to_owned()]);
     }
-    input.provenant.codex(&mut argv)?;
     argv.push("-".into());
 
     // Codex runs helpers from its own package (code-mode host, bundled `rg`

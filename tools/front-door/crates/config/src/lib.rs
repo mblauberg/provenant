@@ -20,7 +20,6 @@ pub use gc::{
 pub use github_policy::GithubPolicy;
 mod harness;
 mod hooks;
-pub use harness::mcp_entry;
 pub use hooks::{CLAUDE_HOOKS, claude_lane_settings};
 mod inspection;
 mod knobs;

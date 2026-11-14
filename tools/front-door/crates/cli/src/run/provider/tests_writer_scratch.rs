@@ -1125,7 +1125,6 @@ printf 'agy 1.0.0\n'
                 depth: 1,
                 attempt: attempt_id,
                 assets: &assets,
-                fabric_mcp: true,
             },
         },
     )?;

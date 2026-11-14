@@ -151,7 +151,7 @@ A lane's environment pins its depth, parent attempt and state directory. Inside
 a lane Fabric refuses coordination mutations; graph submission and reads cross
 the attempt-bound host relay.
 - Why: a lane must not move claims or leases.
-- Test: `crates/providers/src/lane.rs::lane_mcp_entries_have_attempt_unique_agent_labels`
+- Test: `crates/providers/src/lane.rs::pinned_environments_have_attempt_unique_agent_labels`
 
 ### The host validates and launches children
 

@@ -30,7 +30,6 @@ fn receiver() -> TestResult<(crate::worktree_tests::support::TestRig, Factory)> 
         cwd: rig.project.clone(),
         assets: rig.project.clone(),
         host_launch: None,
-        mcp_project: None,
         workers: &FreeWorkers,
     };
     Ok((rig, factory))

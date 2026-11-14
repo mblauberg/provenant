@@ -97,7 +97,7 @@ pub(crate) type GraphRead = dyn Fn(
         serde_json::Value,
         &provenant_core::CancelToken,
         std::time::Duration,
-    ) -> Result<serde_json::Value, provenant_fabric_mcp::tools::ServiceError>
+    ) -> Result<serde_json::Value, provenant_fabric_runtime::relay::ServiceError>
     + Send
     + Sync;
 
@@ -109,7 +109,7 @@ pub struct HostHolder<'a> {
     graph_read: Option<Arc<GraphRead>>,
     stdout_frames: QuotaFrames,
     stderr_frames: QuotaFrames,
-    fabric_relay: Mutex<Option<provenant_fabric_mcp::lane::HostRelay>>,
+    fabric_relay: Mutex<Option<provenant_fabric_runtime::relay::HostRelay>>,
     fabric: OnceLock<BoundFabric>,
     settled: Mutex<Option<run::HolderContext>>,
 }
@@ -189,7 +189,8 @@ impl<'a> HostHolder<'a> {
             serde_json::Value,
             &provenant_core::CancelToken,
             std::time::Duration,
-        ) -> Result<serde_json::Value, provenant_fabric_mcp::tools::ServiceError>
+        )
+            -> Result<serde_json::Value, provenant_fabric_runtime::relay::ServiceError>
         + Send
         + Sync
         + 'static,

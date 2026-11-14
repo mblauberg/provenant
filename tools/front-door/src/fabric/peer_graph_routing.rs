@@ -211,7 +211,6 @@ fn graph_owner_fails_node_when_result_integrity_is_lost()
         cwd: fixture.rig.project.clone(),
         assets: fixture.rig.project.clone(),
         host_launch: None,
-        mcp_project: None,
         workers: &FreeWorkers,
     };
     let cancel = CancelToken::new();
@@ -501,7 +500,6 @@ fn exact_route_in_an_excluded_family_is_refused_before_launch()
         cwd: fixture.rig.project.clone(),
         assets: fixture.rig.project.clone(),
         host_launch: None,
-        mcp_project: None,
         workers: &FreeWorkers,
     };
     let cancel = CancelToken::new();
@@ -652,7 +650,7 @@ fn production_owner_panel_uses_distinct_families_and_synthesises()
         project_attribution: false, clock: SystemClock, backoff: ThreadPause,
         executor: SystemExecutor::new(1)?, home: fixture.rig.home.clone(),
         cwd: fixture.rig.project.clone(), assets: fixture.rig.project.clone(),
-        host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        host_launch: None, workers: &FreeWorkers,
     };
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 120)?;

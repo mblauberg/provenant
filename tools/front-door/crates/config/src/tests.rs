@@ -1897,10 +1897,6 @@ fn registered_knobs_have_production_readers() {
         if name == "lanes.isolation" {
             return source.contains(".effective_isolation()");
         }
-        // The Fabric MCP opt-in is read through a typed accessor.
-        if name == "fabric.mcp_server" {
-            return source.contains(".fabric_mcp_server()");
-        }
         [".get(", "get(", "knob(", ".knob_u64(", ".knob_is_set("]
             .iter()
             .any(|call| source.contains(&format!("{call}\"{name}\"")))

@@ -92,7 +92,6 @@ pub(super) fn fixture_input<'a>(
             depth: 1,
             attempt: provenant_core::AttemptId::from_bytes([7; 16]),
             assets: std::path::Path::new("/fixture/provenant"),
-            fabric_mcp: true,
         },
     }
 }
@@ -589,7 +588,8 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                             .as_path()
                     )
                 );
-                assert!(argv.iter().any(|arg| arg == "--mcp-config"));
+                assert!(argv.iter().any(|arg| arg == "--strict-mcp-config"));
+                assert!(!argv.iter().any(|arg| arg == "--mcp-config"));
                 assert!(argv.iter().any(|arg| arg == "--settings"));
                 assert!(!argv.iter().any(|arg| arg == "--safe-mode"));
                 assert!(spec.argv.windows(2).any(|args| {
@@ -632,7 +632,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                     .iter()
                     .position(|arg| arg == "--allowedTools")
                     .expect("allow-list");
-                assert_eq!(argv[allowed + 1], "Bash,Skill,mcp__fabric__*");
+                assert_eq!(argv[allowed + 1], "Bash,Skill");
                 assert!(spec.profile.spec.authentication.is_empty());
                 assert!(spec.profile.spec.deny_keychain_access);
                 for (key, value) in [

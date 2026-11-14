@@ -57,11 +57,10 @@ Each `unsafe` block documents its invariants and needs a second reviewer.
 
 Integers, never floats, and `serde_json`'s `arbitrary_precision` stays off.
 Digest bytes come from the canonical encoder, never map iteration order.
-Diagnostics go to bounded, redacted stderr, never MCP stdout or result bytes.
-- Why: float or map-order digests change identity, and protocol streams must
-  stay parseable.
-- Test: `crates/records/tests/contracts.rs::canonical_v1_rejects_float_values`;
-  `crates/fabric-mcp/src/stdio_tests.rs::oversize_frame_emits_a_diagnostic_and_broken_stdout_stops_writes`
+Diagnostics go to bounded, redacted stderr, never result bytes.
+- Why: float or map-order digests change identity, and diagnostics must not
+  corrupt result bytes.
+- Test: `crates/records/tests/contracts.rs::canonical_v1_rejects_float_values`
 - Owner: `crates/records/src/canonical.rs`
 
 ## Test isolation

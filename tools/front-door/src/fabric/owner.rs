@@ -4035,7 +4035,6 @@ mod journal_error_tests {
             cwd: rig.project.clone(),
             assets: rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &Free,
         };
         let cancel = CancelToken::new();
@@ -4255,7 +4254,6 @@ mod journal_error_tests {
             cwd: rig.project.clone(),
             assets: rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &provenant_confinement::worktrees::SystemWorkerObserver,
         };
         factory.context.config.graph.writer_launch_seconds = 12;
@@ -4334,7 +4332,6 @@ mod journal_error_tests {
             cwd: rig.project.clone(),
             assets: rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &provenant_confinement::worktrees::SystemWorkerObserver,
         };
         let cancel = CancelToken::new();

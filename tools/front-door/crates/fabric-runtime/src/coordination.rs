@@ -264,7 +264,7 @@ pub enum ClaimResult {
     },
 }
 
-/// Narrow seam consumed by MCP and implemented by the runtime composition.
+/// Narrow seam consumed by the relay host and implemented by the runtime composition.
 /// The service is worker-local because each `Store` owns one SQLite connection.
 pub trait CoordinationApi {
     fn mutate(
@@ -561,7 +561,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                     None => budget,
                 };
                 let read_request = self.request(cancel);
-                // fabric.md CLI and MCP surfaces: events use caller-held cursors.
+                // fabric.md CLI surface: events use caller-held cursors.
                 let start = after.unwrap_or(0);
                 let mut page = self
                     .store
@@ -815,7 +815,7 @@ mod tests {
             LocalCoordination::new(store, self.project, self.actor, &self.clock, &self.backoff)
         }
         fn budget(&self) -> WaitBudget {
-            WaitBudget::mcp(self.clock.mono_now(), 5).expect("test MCP budget")
+            WaitBudget::relay(self.clock.mono_now(), 5).expect("test relay budget")
         }
     }
 
@@ -1167,7 +1167,7 @@ mod tests {
         let fixture = Fixture::new();
         let clock = SimulatedClock(std::sync::Mutex::new(0));
         let cancel = CancelToken::new();
-        let budget = || WaitBudget::mcp(clock.mono_now(), 5).expect("budget");
+        let budget = || WaitBudget::relay(clock.mono_now(), 5).expect("budget");
         let service = LocalCoordination::open(
             &fixture.root,
             fixture.project,

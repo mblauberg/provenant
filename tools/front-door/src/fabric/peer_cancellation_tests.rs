@@ -155,7 +155,6 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
             cwd: origin_rig.project.clone(),
             assets: origin_rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &FreeWorkers,
         })
     };

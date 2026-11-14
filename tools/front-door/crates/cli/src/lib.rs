@@ -805,13 +805,8 @@ fn route_valid(route: &RouteRequest) -> Result<(), CliError> {
     Ok(())
 }
 fn validate(inv: &Invocation) -> Result<(), CliError> {
-    if inv.globals.json
-        && matches!(
-            inv.command,
-            Command::Hook(_) | Command::Internal(_) | Command::Fabric(Fabric::Mcp { .. })
-        )
-    {
-        return invalid("--json is invalid for hook/MCP/internal execution");
+    if inv.globals.json && matches!(inv.command, Command::Hook(_) | Command::Internal(_)) {
+        return invalid("--json is invalid for hook/internal execution");
     }
     match &inv.command {
         Command::Route(Route::Resolve(resolve)) => {

@@ -73,8 +73,6 @@ const LAYERS: &[(&str, &[&str])] = &[
             "routing",
         ],
     ),
-    // The relay validates its socket directory against the effective UID.
-    ("fabric-mcp", &["core", "records", "os", "fabric-runtime"]),
     // Chair logs use the lower-level SQLite helper for their durable receipt store.
     ("workflow", &["core", "records", "os", "sqlite"]),
     (
@@ -90,7 +88,6 @@ const LAYERS: &[(&str, &[&str])] = &[
             "routing",
             "run",
             "fabric-runtime",
-            "fabric-mcp",
             "fabric-store",
             "workflow",
             "os",
@@ -116,7 +113,6 @@ const LAYERS: &[(&str, &[&str])] = &[
             // The binary sets the process-wide store busy timeout at startup.
             "sqlite",
             "fabric-runtime",
-            "fabric-mcp",
             "workflow",
             "cli",
         ],
@@ -832,10 +828,8 @@ fn check_internal_dependencies(
             if internal == "os" && alias != "provenant-os" {
                 return Err("provenant-os must keep its name for source policy checks".into());
             }
-            let dev_exception = kind == "dev-dependencies"
-                && (internal == name
-                    || internal == "test-support"
-                    || (name == "fabric-mcp" && internal == "fabric-store"));
+            let dev_exception =
+                kind == "dev-dependencies" && (internal == name || internal == "test-support");
             let fixture_exception = internal == "test-support"
                 && kind == "dependencies"
                 && declared.get("optional").and_then(Item::as_bool) == Some(true)
@@ -957,11 +951,7 @@ fn routing_cannot_depend_on_run() -> Result<(), Box<dyn Error>> {
 #[test]
 fn internal_dev_exceptions_do_not_allow_production_edges() -> Result<(), Box<dyn Error>> {
     let workspace: DocumentMut = "".parse()?;
-    for (member, dependency) in [
-        ("os", "os"),
-        ("supervisor", "supervisor"),
-        ("fabric-mcp", "fabric-store"),
-    ] {
+    for (member, dependency) in [("os", "os"), ("supervisor", "supervisor")] {
         for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
             for scope in [String::new(), "target.'cfg(unix)'.".to_owned()] {
                 let manifest: DocumentMut = format!(

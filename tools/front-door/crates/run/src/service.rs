@@ -1,4 +1,4 @@
-//! One typed execution API for command and MCP edges.
+//! One typed execution API for the command edge.
 use crate::*;
 use provenant_core::{AttemptId, CancelToken, OperationId};
 use provenant_records::CanonicalV1;

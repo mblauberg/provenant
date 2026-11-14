@@ -192,13 +192,14 @@ pub const MAX_LANE_RUNTIME_SECONDS: u64 = 14_400;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitTransport {
     Cli,
-    Mcp,
+    /// The lane relay: bounded frames and short waits.
+    Relay,
 }
 impl WaitTransport {
     pub const fn maximum_seconds(self) -> u64 {
         match self {
             Self::Cli => MAX_LANE_RUNTIME_SECONDS,
-            Self::Mcp => 55,
+            Self::Relay => 55,
         }
     }
 }
@@ -256,11 +257,11 @@ impl WaitBudget {
             WaitTransport::Cli,
         )
     }
-    pub fn mcp(now: MonoTime, seconds: u64) -> Result<Self, TimeError> {
+    pub fn relay(now: MonoTime, seconds: u64) -> Result<Self, TimeError> {
         Self::new(
             now,
             DurationMicros::from_seconds(seconds)?,
-            WaitTransport::Mcp,
+            WaitTransport::Relay,
         )
     }
     /// Shorten a validated budget to an external deadline, including subsecond
@@ -383,7 +384,7 @@ mod tests {
     fn external_deadline_caps_subsecond_waits_without_reopening_a_probe() {
         let now = MonoTime::from_micros(1_000_000);
         let later = MonoTime::from_micros(1_250_000);
-        let budget = WaitBudget::mcp(now, 5).unwrap().cap_at(later);
+        let budget = WaitBudget::relay(now, 5).unwrap().cap_at(later);
         assert_eq!(budget.remaining(now).as_micros(), 250_000);
         assert_eq!(budget.remaining(later).as_micros(), 0);
         assert!(!budget.is_nonblocking());
@@ -470,13 +471,13 @@ mod tests {
             MAX_LANE_RUNTIME_SECONDS * 1_000_000
         );
         assert!(WaitBudget::cli(now, MAX_LANE_RUNTIME_SECONDS + 1).is_err());
-        assert!(WaitBudget::mcp(now, 55).is_ok());
-        assert!(WaitBudget::mcp(now, 56).is_err());
+        assert!(WaitBudget::relay(now, 55).is_ok());
+        assert!(WaitBudget::relay(now, 56).is_err());
         assert!(
             WaitBudget::new(
                 now,
                 DurationMicros::from_micros(55_000_001),
-                WaitTransport::Mcp
+                WaitTransport::Relay
             )
             .is_err()
         );
@@ -487,11 +488,11 @@ mod tests {
             WaitBudget::new(
                 now,
                 DurationMicros::from_micros(999_999),
-                WaitTransport::Mcp
+                WaitTransport::Relay
             )
             .is_err()
         );
-        let wait = WaitBudget::mcp(now, 1).unwrap();
+        let wait = WaitBudget::relay(now, 1).unwrap();
         assert!(wait.deadline().is_expired(MonoTime::from_micros(1_000_010)));
         assert_eq!(
             wait.remaining(MonoTime::from_micros(1_000_011)),

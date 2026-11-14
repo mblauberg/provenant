@@ -2022,7 +2022,6 @@ pub(super) fn prepare_candidates(
     let credential_roots = credential_roots(registry, &home, &settings)?;
     let github_roots = github_roots(registry);
     let protected_worktrees = protected_worktrees(registry, &source, &git)?;
-    let fabric_mcp = config.fabric_mcp_server();
     let host_writes = config.domains.run;
     let mut entries: Vec<_> = settings.entries.into_values().collect();
     let mut default_failures = std::collections::BTreeMap::new();
@@ -3212,7 +3211,6 @@ pub(super) fn prepare_candidates(
                     depth: paths.lane_depth,
                     attempt: paths.attempt_id,
                     assets,
-                    fabric_mcp,
                 },
             })
         };
@@ -4116,7 +4114,6 @@ mod user_skills_tests {
                             depth: 1,
                             attempt: AttemptId::from_bytes([7; 16]),
                             assets: &root,
-                            fabric_mcp: true,
                         },
                     };
                     let spec = provider.prepare(input)?;

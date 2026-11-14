@@ -91,7 +91,7 @@ warn when `reviewed_at` is stale.
 
 ## Usage counters
 
-`telemetry stats --usage` counts CLI verbs and Fabric MCP tools from
+`telemetry stats --usage` counts CLI verbs from
 `usage.jsonl` (5 MB rotation, two files kept, so a 30-day query on a busy host
 may cover less); arguments, prompts and results are never logged.
 `usage.project_attribution = true` adds the project hash, which reveals which

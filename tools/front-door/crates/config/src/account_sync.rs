@@ -20,7 +20,7 @@ enum Content {
 
 /// `missing_account_directory`, `unusable_account_directory` and
 /// `unsynced_account` for registrations that install has not reached, and `account_missing_entry` where a recorded
-/// target lacks a skill, MCP entry or hook that a sibling target of the same
+/// target lacks a skill or hook that a sibling target of the same
 /// harness owns. Entries that exist but differ are `owned_entry_drift`.
 pub(crate) fn findings(
     receipt: &InstallReceipt,
@@ -128,7 +128,7 @@ pub(crate) fn findings(
                     .as_ref()
                     .map(AbsolutePath::to_path_buf)
                     .transpose()?,
-                Content::Selector(_) => Some(target.mcp_file.to_path_buf()?),
+                Content::Selector(_) => Some(target.config_file.to_path_buf()?),
             };
             if let Some(path) = path {
                 finding("account_missing_entry", &path)?;

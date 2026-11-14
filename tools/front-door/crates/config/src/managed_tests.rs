@@ -46,9 +46,7 @@ impl Fixture {
         // environment mutation or access to real config/state.
         inputs.environment_state_dir = Some(base.join("state"));
         let roots = inputs.resolve(&Resolver).unwrap();
-        let mut targets = Targets::new(roots, &home, &[Harness::Codex]);
-        // Most fixtures exercise the opted-in registration.
-        targets.fabric_mcp = true;
+        let targets = Targets::new(roots, &home, &[Harness::Codex]);
         Self {
             _tmp: tmp,
             base,
@@ -366,7 +364,6 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
         .resolve(&Resolver)
         .unwrap();
     let mut targets = Targets::new(roots, &moved_home, &[Harness::Codex]);
-    targets.fabric_mcp = true;
     targets.peer_agent = Some(b"new home plist\n".to_vec());
     let plist = peer_agent_plist(targets.roots.state.as_path()).unwrap();
     let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
@@ -377,9 +374,9 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
             .iter()
             .filter(|finding| finding.rule == "relocated_stale_entry")
             .count(),
-        // The binary, skill, configuration, instruction and peer-agent
-        // entries plus the shared instructions link.
-        6
+        // The binary, skill, instruction and peer-agent entries plus the
+        // shared instructions link.
+        5
     );
     struct StopReporter(usize);
     impl InstallReporter for StopReporter {
@@ -419,7 +416,7 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
     let release = f.release();
     assert!(matches!(
         Snapshots::capture(&release, &targets),
-        Err(InstallError::Conflict(path)) if path == targets.harnesses[0].mcp_file
+        Err(InstallError::Conflict(path)) if path == targets.harnesses[0].config_file
     ));
     targets.adopt_existing = true;
     for path in [
@@ -576,14 +573,14 @@ fn direct_reinstall_after_home_rename_drops_old_targets() {
     .harnesses;
     // A mixed target must lose its outside-home selector ownership too when
     // its old-home skills destination is forgotten.
-    f.targets.harnesses[0].mcp_file = f.base.join("claude.json");
+    f.targets.harnesses[0].hook_file = Some(f.base.join("claude-settings.json"));
     f.targets.hooks = true;
     f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let ctx = context(&clock, &cancel);
     install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    let outside_config = fs::read(f.base.join("claude.json")).unwrap();
+    let outside_config = fs::read(f.base.join("claude-settings.json")).unwrap();
     let old_receipt = read_receipt(&f.targets).unwrap().unwrap();
     let moved_home = f.base.join("home-moved");
     fs::rename(&f.home, &moved_home).unwrap();
@@ -606,7 +603,7 @@ fn direct_reinstall_after_home_rename_drops_old_targets() {
             .all(|entry| !entry.path.to_path_buf().unwrap().starts_with(&f.home))
     );
     assert_eq!(
-        fs::read(f.base.join("claude.json")).unwrap(),
+        fs::read(f.base.join("claude-settings.json")).unwrap(),
         outside_config
     );
     let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
@@ -2957,7 +2954,7 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
     f.targets.harnesses[0].instruction = Some(codex_instruction.clone());
     f.targets.harnesses.push(HarnessTarget {
         harness: Harness::Claude,
-        mcp_file: f.home.join(".claude.json"),
+        config_file: f.home.join(".claude.json"),
         hook_file: Some(f.home.join(".claude/settings.json")),
         skills_dir: claude_skills.clone(),
         instruction: Some(claude_instruction.clone()),
@@ -3020,7 +3017,7 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
 
     changed.harnesses = vec![HarnessTarget {
         harness: Harness::Claude,
-        mcp_file: f.home.join(".claude.json"),
+        config_file: f.home.join(".claude.json"),
         hook_file: Some(f.home.join(".claude/settings.json")),
         skills_dir: custom.join("changed/claude/skills"),
         instruction: None,
@@ -3322,10 +3319,9 @@ fn install_refuses_a_binary_whose_version_identity_differs_from_manifest() {
 }
 
 #[test]
-fn harness_cutover_previews_mcp_and_dry_run_creates_nothing() {
+fn dry_run_install_creates_nothing() {
     let f = Fixture::new();
     let plan = f.plan();
-    assert!(plan.actions().iter().any(|a| a.selector == "config"));
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     install(
@@ -3341,45 +3337,6 @@ fn harness_cutover_previews_mcp_and_dry_run_creates_nothing() {
 }
 
 #[test]
-fn mcp_selector_ownership_preserves_user_edits_and_uninstalls_only_unchanged() {
-    let f = Fixture::new();
-    let config = f.home.join(".codex/config.toml");
-    fs::create_dir_all(config.parent().unwrap()).unwrap();
-    let foreign =
-        "# user comment\nmodel = 'user-model'\n[mcp_servers.other]\ncommand = 'foreign' # keep\n";
-    fs::write(&config, foreign).unwrap();
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let ctx = context(&clock, &cancel);
-    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    let text = fs::read_to_string(&config).unwrap();
-    assert!(text.starts_with("# user comment\nmodel = 'user-model'\n"));
-    assert!(text.contains("[mcp_servers.other]\ncommand = 'foreign' # keep\n"));
-    assert!(text.contains("--state-dir"));
-    let edited = text.replace("user-model", "changed-model");
-    fs::write(&config, &edited).unwrap();
-    assert!(
-        inspect_install(
-            &f.targets,
-            None,
-            "fixture-target",
-            &Smoke,
-            &CancelToken::new()
-        )
-        .unwrap()
-        .findings
-        .is_empty()
-    );
-    assert!(f.plan().actions().is_empty());
-    uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
-    let after = fs::read_to_string(&config).unwrap();
-    assert!(after.starts_with("# user comment\nmodel = 'changed-model'\n"));
-    assert!(after.contains("[mcp_servers.other]\ncommand = 'foreign' # keep\n"));
-    assert!(!after.contains("mcp_servers.fabric"));
-    assert!(f.targets.bin_dir.join("provenant").is_symlink());
-}
-
-#[test]
 fn hooks_on_and_symlinked_configs_refuse_before_any_write() {
     let mut f = Fixture::new();
     f.targets.hooks = true;
@@ -3391,11 +3348,11 @@ fn hooks_on_and_symlinked_configs_refuse_before_any_write() {
         "hook registration refused: no fixture-backed HookSpec is available"
     );
     assert!(!f.targets.roots.state.as_path().exists());
-    f.targets.hooks = false;
-    let config = f.home.join(".codex/config.toml");
+    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Opencode]);
+    let config = f.targets.harnesses[0].config_file.clone();
     fs::create_dir_all(config.parent().unwrap()).unwrap();
-    let regular = f.home.join("foreign.toml");
-    fs::write(&regular, "model='keep'\n").unwrap();
+    let regular = f.home.join("foreign.jsonc");
+    fs::write(&regular, "{\"theme\":\"keep\"}\n").unwrap();
     symlink(&regular, &config).unwrap();
     let err = Snapshots::capture(&release, &f.targets).unwrap_err();
     assert_eq!(
@@ -3405,26 +3362,10 @@ fn hooks_on_and_symlinked_configs_refuse_before_any_write() {
             config.display()
         )
     );
-    assert_eq!(fs::read_to_string(&regular).unwrap(), "model='keep'\n");
-    assert!(!f.targets.roots.state.as_path().exists());
-}
-
-#[test]
-fn mcp_conflict_does_not_adopt_foreign_env_or_create_state() {
-    let mut f = Fixture::new();
-    let config = f.home.join(".codex/config.toml");
-    fs::create_dir_all(config.parent().unwrap()).unwrap();
-    let foreign =
-        "[mcp_servers.fabric]\ncommand='foreign'\n[mcp_servers.fabric.env]\nTOKEN='do-not-copy'\n";
-    fs::write(&config, foreign).unwrap();
-    f.targets.adopt_existing = true;
-    let release = f.release();
-    let snapshots = Snapshots::capture(&release, &f.targets);
     assert_eq!(
-        snapshots.unwrap_err().to_string(),
-        format!("unmanaged destination conflicts: {}", config.display())
+        fs::read_to_string(&regular).unwrap(),
+        "{\"theme\":\"keep\"}\n"
     );
-    assert_eq!(fs::read_to_string(config).unwrap(), foreign);
     assert!(!f.targets.roots.state.as_path().exists());
 }
 
@@ -3442,7 +3383,6 @@ fn five_client_install_preserves_foreign_hooks_comments_and_reapplies() {
             Harness::Opencode,
         ],
     );
-    f.targets.fabric_mcp = true;
     for target in &f.targets.harnesses {
         fs::create_dir_all(&target.skills_dir).unwrap();
         symlink(
@@ -3481,7 +3421,10 @@ fn five_client_install_preserves_foreign_hooks_comments_and_reapplies() {
             fs::read_link(target.skills_dir.join("notes")).unwrap(),
             f.home.join("personal-skills/notes")
         );
-        assert!(target.mcp_file.is_file());
+        assert_eq!(
+            target.config_file.is_file(),
+            target.harness == Harness::Opencode
+        );
         if let Some(instruction) = &target.instruction {
             assert!(
                 fs::read_link(instruction)
@@ -3524,7 +3467,7 @@ fn duplicate_owned_instruction_values_refuse_before_writes() {
         release.manifest.source_digest,
     )
     .join("instructions/AGENTS.md");
-    let config = f.targets.harnesses[0].mcp_file.clone();
+    let config = f.targets.harnesses[0].config_file.clone();
     fs::create_dir_all(config.parent().unwrap()).unwrap();
     let bytes =
         serde_json::to_vec(&serde_json::json!({"instructions":[instruction,instruction]})).unwrap();
@@ -3537,31 +3480,6 @@ fn duplicate_owned_instruction_values_refuse_before_writes() {
     );
     assert_eq!(fs::read(config).unwrap(), bytes);
     assert!(!f.targets.roots.state.as_path().exists());
-}
-
-#[test]
-fn codex_inline_table_retains_foreign_values_and_comments() {
-    let mut f = Fixture::new();
-    f.targets.adopt_existing = true;
-    let config = f.home.join(".codex/config.toml");
-    fs::create_dir_all(config.parent().unwrap()).unwrap();
-    let before = "# keep top\nmcp_servers = { other = { command = 'foreign' }, fabric = { command = 'old', env = {} } } # keep tail\nmodel = 'user'\n";
-    fs::write(&config, before).unwrap();
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    install(
-        &f.plan(),
-        &context(&clock, &cancel),
-        &mut Reporter::default(),
-        &Smoke,
-        false,
-    )
-    .unwrap();
-    let after = fs::read_to_string(config).unwrap();
-    assert!(after.starts_with("# keep top\n"));
-    assert!(after.contains("other = { command = 'foreign' }"));
-    assert!(after.contains("# keep tail\nmodel = 'user'\n"));
-    assert!(f.plan().actions().is_empty());
 }
 
 #[test]
@@ -3584,7 +3502,7 @@ fn explicit_user_install_paths_win_over_harness_environment_even_when_default() 
         f.home.join(".codex/skills")
     );
     assert_eq!(
-        f.targets.harnesses[0].mcp_file,
+        f.targets.harnesses[0].config_file,
         f.home.join(".codex/config.toml")
     );
     let loaded = crate::load(&f.targets.roots, Some(config.as_bytes())).unwrap();
@@ -3592,14 +3510,17 @@ fn explicit_user_install_paths_win_over_harness_environment_even_when_default() 
 }
 
 #[test]
-fn claude_config_dir_moves_its_mcp_registration() {
+fn claude_config_dir_moves_its_config_file() {
     let mut f = Fixture::new();
     f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
-    assert_eq!(f.targets.harnesses[0].mcp_file, f.home.join(".claude.json"));
+    assert_eq!(
+        f.targets.harnesses[0].config_file,
+        f.home.join(".claude.json")
+    );
     let alternate = f.home.join(".claude-alt");
     f.targets.apply_environment(Some(&alternate), None).unwrap();
     assert_eq!(
-        f.targets.harnesses[0].mcp_file,
+        f.targets.harnesses[0].config_file,
         alternate.join(".claude.json")
     );
     assert_eq!(f.targets.harnesses[0].skills_dir, alternate.join("skills"));
@@ -3612,8 +3533,8 @@ fn claude_config_dir_moves_its_mcp_registration() {
         f.targets.harnesses[0].skills_dir
     );
     assert_eq!(
-        direct.harnesses[0].mcp_file,
-        f.targets.harnesses[0].mcp_file
+        direct.harnesses[0].config_file,
+        f.targets.harnesses[0].config_file
     );
     direct
         .apply_account_environment(Harness::Codex, Path::new("relative-unused"))
@@ -3630,18 +3551,15 @@ fn claude_config_dirs_accumulate_and_uninstall_removes_only_the_selected_dir() {
     let (roots, home) = (f.targets.roots.clone(), f.home.clone());
     let claude = |dir: Option<&Path>| {
         let mut targets = Targets::new(roots.clone(), &home, &[Harness::Claude]);
-        targets.fabric_mcp = true;
         targets.hooks = true;
         targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
         targets.apply_environment(dir, None).unwrap();
         targets
     };
     let (default, alternate) = (home.join(".claude"), home.join(".claude-pro"));
-    let (default_mcp, alternate_mcp) = (home.join(".claude.json"), alternate.join(".claude.json"));
-    let installed = |dir: &Path, mcp: &Path| {
+    let installed = |dir: &Path| {
         dir.join("skills/example").is_symlink()
             && dir.join("CLAUDE.md").is_symlink()
-            && fs::read_to_string(mcp).is_ok_and(|text| text.contains("\"fabric\""))
             && fs::read_to_string(dir.join("settings.json"))
                 .is_ok_and(|text| text.contains("pre-tool-use"))
     };
@@ -3666,8 +3584,8 @@ fn claude_config_dirs_accumulate_and_uninstall_removes_only_the_selected_dir() {
     };
     apply(claude(None));
     apply(claude(Some(&alternate)));
-    assert!(installed(&default, &default_mcp));
-    assert!(installed(&alternate, &alternate_mcp));
+    assert!(installed(&default));
+    assert!(installed(&alternate));
     let receipt = read_receipt(&claude(None)).unwrap().unwrap();
     assert_eq!(receipt.harnesses, vec![Harness::Claude]);
     assert_eq!(receipt.harness_targets.len(), 2);
@@ -3680,8 +3598,8 @@ fn claude_config_dirs_accumulate_and_uninstall_removes_only_the_selected_dir() {
         finding.rule == "owned_entry_drift" && finding.path.to_path_buf().unwrap() == link
     }));
     apply(claude(None));
-    assert!(installed(&default, &default_mcp));
-    assert!(installed(&alternate, &alternate_mcp));
+    assert!(installed(&default));
+    assert!(installed(&alternate));
 
     uninstall(
         &claude(Some(&alternate)),
@@ -3689,14 +3607,9 @@ fn claude_config_dirs_accumulate_and_uninstall_removes_only_the_selected_dir() {
         &mut Reporter::default(),
     )
     .unwrap();
-    assert!(installed(&default, &default_mcp));
+    assert!(installed(&default));
     assert!(fs::symlink_metadata(alternate.join("skills/example")).is_err());
     assert!(fs::symlink_metadata(alternate.join("CLAUDE.md")).is_err());
-    assert!(
-        !fs::read_to_string(&alternate_mcp)
-            .unwrap()
-            .contains("\"fabric\"")
-    );
     assert!(
         !fs::read_to_string(alternate.join("settings.json"))
             .unwrap()
@@ -3786,7 +3699,7 @@ fn protected_destination_is_refused_before_any_filesystem_read() {
     f.targets
         .protected_roots
         .push(alias.canonicalize().unwrap());
-    f.targets.harnesses[0].mcp_file = alias.join("config.toml");
+    f.targets.harnesses[0].config_file = alias.join("config.toml");
     assert_eq!(
         f.targets
             .resolve_destinations(&provenant_os::fs::SystemPathResolver)
@@ -3805,85 +3718,6 @@ fn protected_destination_is_refused_before_any_filesystem_read() {
         "private sentinel must not be read"
     );
     assert!(!f.targets.roots.state.as_path().exists());
-}
-
-#[test]
-fn mcp_registry_matches_recorded_client_config_contracts() {
-    let mut f = Fixture::new();
-    for (harness, fixture) in [
-        (
-            Harness::Claude,
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../tests/fixtures/contracts/claude-code-2.1.310/config.json"
-            )),
-        ),
-        (
-            Harness::Codex,
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../tests/fixtures/contracts/codex-cli-0.163.0/config.toml"
-            )),
-        ),
-        (
-            Harness::Agy,
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../tests/fixtures/contracts/agy-1.4.6/mcp_config.json"
-            )),
-        ),
-    ] {
-        f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[harness]);
-        f.targets.fabric_mcp = true;
-        let normalized = fixture
-            .replace(
-                "/FIXTURE_ROOT/bin/mcp-probe",
-                f.targets.bin_dir.join("provenant").to_str().unwrap(),
-            )
-            .replace(
-                "/FIXTURE_ROOT/state",
-                f.targets.roots.state.as_path().to_str().unwrap(),
-            );
-        let document: serde_json::Value = if harness == Harness::Codex {
-            toml_edit::de::from_str(&normalized).unwrap()
-        } else {
-            serde_json::from_str(&normalized).unwrap()
-        };
-        let mut expected = document[if harness == Harness::Codex {
-            "mcp_servers"
-        } else {
-            "mcpServers"
-        }]["fabric"]
-            .clone();
-        // Codex's recorded optional env is absent; an empty env has the same
-        // accepted wire meaning and is emitted explicitly by the registry.
-        if harness == Harness::Codex {
-            expected["env"] = serde_json::json!({});
-        }
-        let plan = f.plan();
-        let edit = plan
-            .actions()
-            .iter()
-            .flat_map(|a| &a.edits)
-            .find(|edit| edit.selector.ends_with("fabric"))
-            .unwrap();
-        assert_eq!(edit.after.as_ref(), Some(&expected));
-        if harness == Harness::Claude {
-            let recorded: serde_json::Value = serde_json::from_str(
-                &include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../../tests/fixtures/contracts/claude-code-2.1.310/stdio-argv.json"
-                ))
-                .replace(
-                    "/FIXTURE_ROOT/state",
-                    f.targets.roots.state.as_path().to_str().unwrap(),
-                ),
-            )
-            .unwrap();
-            assert_eq!(expected["args"], recorded);
-        }
-        assert!(!f.targets.roots.state.as_path().exists());
-    }
 }
 
 #[test]
@@ -3997,43 +3831,12 @@ fn uninstall_without_receipt_reports_nothing_installed() {
 }
 
 #[test]
-fn claude_large_harness_config_is_bounded_and_byte_preserved() {
-    let mut f = Fixture::new();
-    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
-    let path = f.home.join(".claude.json");
-    let payload = "x".repeat(2 * 1024 * 1024);
-    let before = format!("{{\"projects\":\"{payload}\"}}\n");
-    fs::write(&path, &before).unwrap();
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    install(
-        &f.plan(),
-        &context(&clock, &cancel),
-        &mut Reporter::default(),
-        &Smoke,
-        false,
-    )
-    .unwrap();
-    assert!(fs::read_to_string(&path).unwrap().contains(&payload));
-    assert!(f.plan().actions().is_empty());
-    uninstall(
-        &f.targets,
-        &context(&clock, &cancel),
-        &mut Reporter::default(),
-    )
-    .unwrap();
-    assert!(fs::read_to_string(&path).unwrap().contains(&payload));
-    fs::write(&path, " ".repeat(16 * 1024 * 1024 + 1)).unwrap();
-    assert!(Snapshots::capture(&f.release(), &f.targets).is_err());
-}
-
-#[test]
 fn opencode_reapply_drops_old_release_and_keeps_receipt_ownership() {
     let mut f = Fixture::new();
     f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Opencode]);
     fs::create_dir_all(f.source.join("instructions")).unwrap();
     fs::write(f.source.join("instructions/AGENTS.md"), b"instructions").unwrap();
-    let config = f.targets.harnesses[0].mcp_file.clone();
+    let config = f.targets.harnesses[0].config_file.clone();
     fs::create_dir_all(config.parent().unwrap()).unwrap();
     let a = f.release();
     let old = release_root(f.targets.roots.state.as_path(), a.manifest.source_digest)
@@ -4203,14 +4006,12 @@ impl InstallReporter for Racing {
 }
 fn claude_fixture() -> Fixture {
     let mut f = Fixture::new();
-    f.targets.harnesses.push(HarnessTarget {
-        harness: Harness::Claude,
-        mcp_file: f.home.join(".claude.json"),
-        hook_file: None,
-        skills_dir: f.home.join("claude/skills"),
-        instruction: None,
-    });
-    fs::write(f.home.join(".claude.json"), b"{}").unwrap();
+    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
+    f.targets.hooks = true;
+    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    let settings = f.home.join(".claude/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(settings, b"{}").unwrap();
     f
 }
 #[test]
@@ -4219,7 +4020,7 @@ fn live_harness_json_rewrite_between_preview_and_apply_is_retried() {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let mut reporter = Racing {
-        path: f.home.join(".claude.json"),
+        path: f.home.join(".claude/settings.json"),
         rewrites: 2,
         previews: 0,
     };
@@ -4233,9 +4034,9 @@ fn live_harness_json_rewrite_between_preview_and_apply_is_retried() {
     )
     .unwrap();
     assert_eq!(reporter.previews, 3);
-    let merged = fs::read_to_string(f.home.join(".claude.json")).unwrap();
+    let merged = fs::read_to_string(f.home.join(".claude/settings.json")).unwrap();
     assert!(merged.contains("startups"), "{merged}");
-    assert!(merged.contains("mcpServers"), "{merged}");
+    assert!(merged.contains("pre-tool-use"), "{merged}");
 }
 #[test]
 fn json_rewrite_retries_are_bounded_and_other_drift_still_refuses() {
@@ -4243,7 +4044,7 @@ fn json_rewrite_retries_are_bounded_and_other_drift_still_refuses() {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let mut reporter = Racing {
-        path: f.home.join(".claude.json"),
+        path: f.home.join(".claude/settings.json"),
         rewrites: 10,
         previews: 0,
     };
@@ -4551,100 +4352,9 @@ fn apply(f: &Fixture) {
 }
 
 #[test]
-fn default_install_writes_no_fabric_entry_and_creates_no_config() {
-    let mut f = Fixture::new();
-    f.targets.fabric_mcp = false;
+fn install_leaves_codex_config_alone() {
+    let f = Fixture::new();
     apply(&f);
     assert!(!f.home.join(".codex/config.toml").exists());
     assert!(f.link().is_symlink());
-}
-
-fn codex_config(path: &Path) -> toml_edit::DocumentMut {
-    fs::read_to_string(path).unwrap().parse().unwrap()
-}
-
-fn has_fabric(path: &Path) -> bool {
-    codex_config(path)
-        .get("mcp_servers")
-        .and_then(|servers| servers.get("fabric"))
-        .is_some()
-}
-
-#[test]
-fn opted_in_install_writes_the_fabric_entry() {
-    let f = Fixture::new();
-    apply(&f);
-    let config = f.home.join(".codex/config.toml");
-    let doc = codex_config(&config);
-    assert_eq!(
-        doc["mcp_servers"]["fabric"]["args"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|a| a.as_str())
-            .skip_while(|a| *a != "fabric")
-            .collect::<Vec<_>>(),
-        ["fabric", "mcp", "--client", "codex"]
-    );
-}
-
-#[test]
-fn opting_out_removes_an_unchanged_owned_entry_and_keeps_foreign_ones() {
-    let mut f = Fixture::new();
-    let config = f.home.join(".codex/config.toml");
-    fs::create_dir_all(config.parent().unwrap()).unwrap();
-    fs::write(&config, "# mine\n[mcp_servers.other]\ncommand = 'keep'\n").unwrap();
-    apply(&f);
-    assert!(has_fabric(&config));
-    f.targets.fabric_mcp = false;
-    apply(&f);
-    let off = fs::read_to_string(&config).unwrap();
-    assert!(off.contains("# mine"), "{off}");
-    assert!(!has_fabric(&config), "{off}");
-    assert_eq!(
-        codex_config(&config)["mcp_servers"]["other"]["command"].as_str(),
-        Some("keep")
-    );
-    assert!(f.plan().actions().is_empty());
-    // Turning it back on restores the entry.
-    f.targets.fabric_mcp = true;
-    apply(&f);
-    assert!(has_fabric(&config));
-}
-
-fn edit_fabric_entry(config: &Path) -> String {
-    let mut doc = codex_config(config);
-    doc["mcp_servers"]["fabric"]["startup_timeout_sec"] = toml_edit::value(5);
-    let edited = doc.to_string();
-    fs::write(config, &edited).unwrap();
-    edited
-}
-
-#[test]
-fn opting_out_keeps_an_edited_owned_entry() {
-    let mut f = Fixture::new();
-    apply(&f);
-    let config = f.home.join(".codex/config.toml");
-    let edited = edit_fabric_entry(&config);
-    f.targets.fabric_mcp = false;
-    apply(&f);
-    assert_eq!(fs::read_to_string(&config).unwrap(), edited);
-}
-
-#[test]
-fn opting_back_in_over_an_edited_entry_is_a_conflict() {
-    let mut f = Fixture::new();
-    apply(&f);
-    let config = f.home.join(".codex/config.toml");
-    let edited = edit_fabric_entry(&config);
-    f.targets.fabric_mcp = false;
-    apply(&f);
-    f.targets.fabric_mcp = true;
-    // The edited entry is not the recorded one, so re-enabling does not
-    // overwrite it: the user removes or restores it first.
-    assert!(matches!(
-        Snapshots::capture(&f.release(), &f.targets),
-        Err(InstallError::Conflict(path)) if path == f.targets.harnesses[0].mcp_file
-    ));
-    assert_eq!(fs::read_to_string(&config).unwrap(), edited);
 }

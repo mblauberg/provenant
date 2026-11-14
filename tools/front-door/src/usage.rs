@@ -37,20 +37,11 @@ pub fn project_id(resolved: &Resolved) -> Option<ProjectId> {
         .map(|binding| binding.project_id())
 }
 
-/// Every installed CLI verb and MCP tool, so unused units report zero calls.
+/// Every installed CLI verb, so unused units report zero calls.
 fn inventory() -> Vec<(String, String)> {
     provenant_cli::usage_verbs()
         .into_iter()
         .map(|verb| (EVENT_KINDS[0].into(), verb))
-        .chain(
-            provenant_fabric_mcp::tools::catalogue()
-                .iter()
-                .filter_map(|tool| {
-                    tool["name"]
-                        .as_str()
-                        .map(|name| (EVENT_KINDS[1].into(), name.into()))
-                }),
-        )
         .collect()
 }
 

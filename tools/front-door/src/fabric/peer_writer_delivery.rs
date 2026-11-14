@@ -458,7 +458,7 @@ fn typed_run_errors_keep_their_codes() {
             provenant_run::RunError::ProviderStateExpired,
             "provider_state_expired",
         ),
-        // The CLI and MCP share one categorisation.
+        // The CLI and relay share one categorisation.
         (
             provenant_run::RunError::Validation("input"),
             "invalid_input",

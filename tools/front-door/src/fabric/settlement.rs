@@ -231,7 +231,6 @@ fn advance_attempt_graph(
         cwd: execution.directory,
         assets: settled.roots.checkout.clone(),
         host_launch: Some(host),
-        mcp_project: None,
         workers,
     };
     let mut owner = BoundGraphOwner {

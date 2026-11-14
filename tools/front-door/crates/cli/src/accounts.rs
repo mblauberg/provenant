@@ -52,7 +52,7 @@ pub enum Accounts {
     ///
     /// Reapplies the installed release to each registered account directory and
     /// to every recorded install target. What is synced: the managed hooks, the
-    /// managed skills, the Fabric MCP entry, and the allow-listed keys of the
+    /// managed skills and the allow-listed keys of the
     /// shared Claude `settings.json` (`[domains.accounts.shared_settings]`).
     /// Never touched: identity and credentials, `.claude.json` identity fields,
     /// settings keys outside the allow-list, and hooks you edited or removed.

@@ -88,7 +88,7 @@ pub(crate) fn start_fabric_relay(
     ctx: std::sync::Arc<crate::fabric::Context>,
     graph_wake: Option<std::sync::Arc<super::super::holder::GraphWake>>,
     graph_read: Option<std::sync::Arc<super::super::holder::GraphRead>>,
-) -> Result<provenant_fabric_mcp::lane::HostRelay, String> {
+) -> Result<provenant_fabric_runtime::relay::HostRelay, String> {
     use provenant_core::{CancelToken, Clock};
     use provenant_fabric_runtime::coordination::CoordinationService;
     let launch = context
@@ -99,8 +99,9 @@ pub(crate) fn start_fabric_relay(
     let home = context.roots.home.clone();
     let cwd = relay_cwd.to_path_buf();
     let clock = provenant_os::clock::SystemClock::new();
-    let executor = provenant_os::exec::SystemExecutor::new(provenant_fabric_mcp::lane::WORKERS)
-        .map_err(|e| e.to_string())?;
+    let executor =
+        provenant_os::exec::SystemExecutor::new(provenant_fabric_runtime::relay::WORKERS)
+            .map_err(|e| e.to_string())?;
     let cancel = CancelToken::new();
     // Initialise the store before a lane opens it; store writers persist WAL companions.
     drop(
@@ -121,7 +122,7 @@ pub(crate) fn start_fabric_relay(
     let attempt = context.attempt_id.to_string();
     let graph_clock = provenant_os::clock::SystemClock::new();
     let graph_holder = context.clone();
-    provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+    provenant_fabric_runtime::relay::HostRelay::start_with_graph(
         LaneRuntime::fabric_socket(context.attempt_id),
         provenant_records::Limits {
             max_bytes: ctx.config.limits.input_frame_bytes,
@@ -129,7 +130,7 @@ pub(crate) fn start_fabric_relay(
             max_members: 100_000,
         },
         move |call, cancel, within| {
-            let budget = provenant_fabric_mcp::lane::host_budget(&clock, within)?;
+            let budget = provenant_fabric_runtime::relay::host_budget(&clock, within)?;
             let coordination = CoordinationService::for_identity(
                 &ctx.roots.state,
                 &ctx.identity,
@@ -144,7 +145,7 @@ pub(crate) fn start_fabric_relay(
             call.execute_lane_coordination(&coordination, &ctx.config.limits, budget, cancel)
         },
         move |arguments, cancel: &CancelToken, within| {
-            let budget = provenant_fabric_mcp::lane::host_budget(&graph_clock, within)?;
+            let budget = provenant_fabric_runtime::relay::host_budget(&graph_clock, within)?;
             let observe = arguments["op"] == "read";
             serve_graph_frame(
                 || {
@@ -164,7 +165,7 @@ pub(crate) fn start_fabric_relay(
                                     budget.remaining(graph_clock.mono_now()).as_micros(),
                                 ),
                             ),
-                            None => Err(provenant_fabric_mcp::tools::ServiceError::Cli {
+                            None => Err(provenant_fabric_runtime::relay::ServiceError::Cli {
                                 code: "graph_read_unavailable".into(),
                                 message: "the host has no graph reader; upgrade the host".into(),
                                 data: serde_json::Value::Null,
@@ -190,16 +191,18 @@ pub(crate) fn start_fabric_relay(
 
 /// Finish admission before waking; this also covers an idempotent replay.
 fn serve_graph_frame(
-    serve: impl FnOnce() -> Result<serde_json::Value, provenant_fabric_mcp::tools::ServiceError>,
+    serve: impl FnOnce() -> Result<serde_json::Value, provenant_fabric_runtime::relay::ServiceError>,
     wake: impl FnOnce(&str) -> Result<(), String>,
-) -> Result<serde_json::Value, provenant_fabric_mcp::tools::ServiceError> {
+) -> Result<serde_json::Value, provenant_fabric_runtime::relay::ServiceError> {
     let receipt = serve()?;
     if let Some(id) = receipt["graph_id"].as_str() {
-        wake(id).map_err(|message| provenant_fabric_mcp::tools::ServiceError::Cli {
-            code: "graph_wake_failed".into(),
-            message,
-            data: receipt.clone(),
-        })?;
+        wake(id).map_err(
+            |message| provenant_fabric_runtime::relay::ServiceError::Cli {
+                code: "graph_wake_failed".into(),
+                message,
+                data: receipt.clone(),
+            },
+        )?;
     }
     Ok(receipt)
 }
@@ -232,16 +235,16 @@ mod graph_wake_tests {
         }
         let failed = serve_graph_frame(
             || {
-                Err(provenant_fabric_mcp::tools::ServiceError::Facade(
-                    provenant_fabric_mcp::tools::FacadeError::StateCorrupt,
+                Err(provenant_fabric_runtime::relay::ServiceError::Facade(
+                    provenant_fabric_runtime::relay::FacadeError::StateCorrupt,
                 ))
             },
             |_| panic!("a refused admission must not wake the owner"),
         );
         assert!(matches!(
             failed,
-            Err(provenant_fabric_mcp::tools::ServiceError::Facade(
-                provenant_fabric_mcp::tools::FacadeError::StateCorrupt,
+            Err(provenant_fabric_runtime::relay::ServiceError::Facade(
+                provenant_fabric_runtime::relay::FacadeError::StateCorrupt,
             ))
         ));
     }

@@ -1,4 +1,4 @@
-//! Document-based graph service shared by the CLI and MCP transports.
+//! Document-based graph service shared by the CLI and the lane relay.
 use super::*;
 use provenant_fabric_runtime::coordination::facade::is_map_key_parent;
 use provenant_fabric_runtime::graph::{
@@ -222,7 +222,7 @@ fn launch_input(input: &Value) -> Result<Value, FacadeError> {
 
 /// A `--set attempt.FIELD=VALUE` that arrived as text takes the first reading
 /// the attempt schema accepts: TOML (`true`, `300`, `["a"]`), then the text as
-/// written. A value that arrived typed, as it does over MCP, is left alone.
+/// written. A value that arrived typed, as it does from the lane relay, is left alone.
 fn type_attempt_field(field: &str, value: Value) -> Result<Value, FacadeError> {
     let Value::String(text) = &value else {
         return Ok(value);
@@ -978,8 +978,7 @@ impl Factory {
         announce: Option<super::graph_execution::Announce<'_>>,
     ) -> Result<Value, FacadeError> {
         let operation = required(&input, "op")?;
-        // MCP refuses the retired field at its schema; this shared path must
-        // not silently drop it either.
+        // This shared path must not silently drop the retired field.
         if input.get("operation_id").is_some() {
             return Err(FacadeError::invalid(InvalidInputDetail::OperationIdRetired));
         }
@@ -2640,9 +2639,14 @@ mod tests {
             let restored: FacadeError = serde_json::from_value(serde_json::to_value(&error)?)?;
             assert_eq!(restored.code(), code);
             assert_eq!(restored.diagnostic(), diagnostic);
-            let mcp = ServiceError::Facade(error).structured_error();
-            assert_eq!(mcp["code"], code);
-            assert!(!mcp["message"].as_str().unwrap_or_default().contains(detail));
+            let structured = ServiceError::Facade(error).structured_error();
+            assert_eq!(structured["code"], code);
+            assert!(
+                !structured["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(detail)
+            );
         }
         Ok(())
     }
@@ -2673,15 +2677,15 @@ mod tests {
                 .ok_or("drain repair")?
                 .contains("--yes cannot bypass")
         );
-        let mcp = ServiceError::Facade(restored).structured_error();
-        assert_eq!(mcp["code"], "UPGRADE_DRAIN_REQUIRED");
+        let structured = ServiceError::Facade(restored).structured_error();
+        assert_eq!(structured["code"], "UPGRADE_DRAIN_REQUIRED");
         assert!(
-            mcp["message"]
+            structured["message"]
                 .as_str()
                 .ok_or("drain message")?
                 .contains("previous release")
         );
-        assert!(!serde_json::to_string(&mcp)?.contains("PROMPT_SENTINEL"));
+        assert!(!serde_json::to_string(&structured)?.contains("PROMPT_SENTINEL"));
         Ok(())
     }
 
@@ -2710,7 +2714,6 @@ mod tests {
             cwd: rig.project.clone(),
             assets: rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &Workers,
         })
     }
@@ -3359,7 +3362,6 @@ mod tests {
             cwd: rig.project.clone(),
             assets: rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &Workers,
         };
         let directory = rig.project.join(".provenant/templates");
@@ -3368,7 +3370,7 @@ mod tests {
         std::fs::write(&path, "accesz = \"read_only\"\n")?;
         let error = factory.template_library(None).unwrap_err();
         let structured =
-            provenant_fabric_mcp::tools::ServiceError::Facade(error.clone()).structured_error();
+            provenant_fabric_runtime::relay::ServiceError::Facade(error.clone()).structured_error();
         assert_eq!(structured["code"], error.diagnostic().code);
         assert!(
             structured["detail"]
@@ -4054,7 +4056,7 @@ mod tests {
         let temporary = std::env::temp_dir();
         let relative = rig.root.strip_prefix(std::fs::canonicalize(&temporary)?)?;
         let socket = temporary.join(relative).join("r/s");
-        let _relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+        let _relay = provenant_fabric_runtime::relay::HostRelay::start_with_graph(
             socket.clone(),
             Default::default(),
             |_, _, _| Err(ServiceError::FabricOwnerUnavailable),
@@ -4070,13 +4072,13 @@ mod tests {
         {
             let request = factory.child_request(&input)?;
             let frame = serde_json::to_value(RelayOp::Add(request))?;
-            let receipt = provenant_fabric_mcp::lane::graph(
+            let receipt = provenant_fabric_runtime::relay::graph(
                 &socket,
                 frame.clone(),
                 &cancel,
                 std::time::Duration::from_secs(30),
             )?;
-            let replay = provenant_fabric_mcp::lane::graph(
+            let replay = provenant_fabric_runtime::relay::graph(
                 &socket,
                 frame,
                 &cancel,

@@ -64,7 +64,7 @@ Project identity is a persisted random host-local config binding, shared by
 linked worktrees of the canonical Git common directory.
 
 `ConfinedPlan::new(PlanRequest)` freezes work scope, permission roots, access
-mode, Codex clean/inherited config policy and hooks/MCP/plugin policy. Read-only
+mode, Codex clean/inherited config policy and hooks/extension policy. Read-only
 plans require clean config and deny extensions; inherited config is refused.
 This is validated policy, not backend readiness: compile against held anchors
 immediately before handoff. Adapters are enabled by default; recordings do not gate launch.

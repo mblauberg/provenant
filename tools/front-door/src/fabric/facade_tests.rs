@@ -292,14 +292,6 @@ fn graph_document_decoder_checks_header_before_typed_graph() {
 
 #[cfg(test)]
 #[test]
-fn cli_failure_uses_stderr_without_structured_json() {
-    let error = cli_failure(b"not json", b"specific failure\nadditional detail\n");
-    assert!(matches!(error, ServiceError::Cli { code, message, data }
-        if code == "CLI_FAILED" && message == "specific failure" && data.is_null()));
-}
-
-#[cfg(test)]
-#[test]
 fn scratch_prepare_lock_timeout_keeps_a_fixed_cause() {
     use provenant_confinement::worktrees::WorktreeError;
     let error = scratch_prepare_error(WorktreeError::Filesystem(
@@ -1030,7 +1022,6 @@ extend: Vec::new(),
             cwd: fixture.rig.project.clone(),
             assets: fixture.rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &FreeWorkers,
         };
         let document = fixture.rig.project.join(format!("{id}-graph.json"));
@@ -1128,7 +1119,6 @@ extend: Vec::new(),
             cwd: fixture.rig.project.clone(),
             assets: fixture.rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &FreeWorkers,
         };
         let cancel = CancelToken::new();

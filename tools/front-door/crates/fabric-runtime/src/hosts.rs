@@ -824,6 +824,9 @@ fn stderr_has_line(bytes: &[u8], expected: &str) -> bool {
         .map(str::trim)
         .any(|line| plain_text(line, 200) == expected)
 }
+/// The one federation port: how a request reaches a peer host and its reply
+/// comes back. SSH is the only production implementation; the trait is the seam where a
+/// different carrier would plug in, and federation is always in the build.
 pub trait PeerTransport {
     fn exchange(
         &self,
@@ -1461,6 +1464,83 @@ mod tests {
             })
         }
     }
+    /// The `PeerTransport` contract every implementation honours: a health
+    /// exchange answers as the addressed host for the requested project, a
+    /// cancelled token is refused before any peer contact, and a request
+    /// addressed to another host than the peer is refused as a project error.
+    fn assert_peer_transport_conforms(
+        transport: &dyn PeerTransport,
+        peer: &Peer,
+        health: &PeerRequest,
+        budget: WaitBudget,
+    ) {
+        let response = transport
+            .exchange(peer, health, budget, &CancelToken::new())
+            .unwrap();
+        assert_eq!(response.host, peer.host);
+        assert_eq!(response.project, health.project.key);
+        assert!(matches!(response.result, PeerResult::Health { .. }));
+        let cancelled = CancelToken::new();
+        cancelled.cancel();
+        assert!(matches!(
+            transport.exchange(peer, health, budget, &cancelled),
+            Err(PeerError::Cancelled)
+        ));
+        let mut misaddressed = health.clone();
+        misaddressed.target_host = HostId::from_bytes([9; 16]);
+        assert!(matches!(
+            transport.exchange(peer, &misaddressed, budget, &CancelToken::new()),
+            Err(PeerError::Project)
+        ));
+    }
+
+    #[test]
+    fn ssh_transport_conforms_to_the_peer_transport_port() {
+        let clock = TestClock::new(WallTime::from_micros(1).unwrap(), MonoTime::from_micros(1));
+        let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+        let (local, host) = (HostId::from_bytes([1; 16]), HostId::from_bytes([2; 16]));
+        let peer = Peer {
+            host,
+            destination: "worker".into(),
+            remote_executable: None,
+            connect_timeout_seconds: 10,
+        };
+        let project = ProjectLocator {
+            extra: Default::default(),
+            key: project_key(Path::new("/home/a")),
+            common_dir: "repo/.git".into(),
+        };
+        let health = PeerRequest::new(
+            host,
+            local,
+            "chair".into(),
+            project,
+            PeerAction::Health {
+                extra: Default::default(),
+            },
+        );
+        let ssh = Ssh {
+            request: Mutex::new(None),
+            lose_reply: false,
+            calls: AtomicUsize::new(0),
+            expected_executable: "/usr/bin/ssh".into(),
+            expected_connect_timeout: "-oConnectTimeout=10".into(),
+            expected_remote_command: "provenant fabric peer".into(),
+            expected_timeout: None,
+        };
+        let transport = SshTransport {
+            executor: &ssh,
+            clock: &clock,
+            home: Path::new("/home/a"),
+            cwd: Path::new("/home/a/repo"),
+            executable: "/usr/bin/ssh".into(),
+            seconds: 30,
+        };
+        assert_peer_transport_conforms(&transport, &peer, &health, budget);
+        // Only the first exchange reached the executor.
+        assert_eq!(ssh.calls.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn fixed_peer_transport_preserves_mutation_uncertainty_without_retry() {
         let clock = TestClock::new(WallTime::from_micros(1).unwrap(), MonoTime::from_micros(1));

@@ -155,7 +155,7 @@ which puts a system Git ahead of the lane's Git wrapper, and a writer's ordinary
 `git add` then fails on the protected Git directory. They can also source
 secrets. A lane keeps the `PATH` of the environment that launched it.
 
-A lane's Fabric MCP server runs inside its sandbox and reads the state directory's
+A lane's Fabric relay runs inside its sandbox and reads the state directory's
 `config.toml`, `host-id`, `projects` and Fabric database directly, so the lane's
 other commands can read them too, . Nested Fabric and nested
 launches need these reads. Serving them through the Fabric socket would close this

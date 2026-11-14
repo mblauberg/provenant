@@ -15,7 +15,7 @@ Numeric range and requirement builders in `crates/cli/src/metadata.rs` install
 clap rules and retain their catalogue metadata from the same declaration;
 clap does not expose those rules through public getters. Compact help uses
 command markers and the grammar's descriptions. Graph submission uses the same
-template compiler for CLI and MCP.
+template compiler for the CLI and the lane relay.
 
 Waits and time-based `--since` filters share a whole-number span
 grammar: bare seconds or the suffix `s`, `m`, `h` or `d`. Waits retain their
@@ -422,7 +422,7 @@ scan budgets and pagination.
 ### Pure entry points, one spelling
 
 `help`, `--version` and `root` resolve no checkout, open no database, start
-no thread, probe no provider and create no state; the MCP server starts only through `fabric mcp`. There are no aliases or abbreviated options; unknown,
+no thread, probe no provider and create no state. There are no aliases or abbreviated options; unknown,
 duplicate or conflicting options fail with exit 2, and paths stay raw bytes.
 - Why (default): scripts call these constantly, and an alias can turn a typo into a
   different authority.
@@ -439,7 +439,7 @@ the newest. A removed spelling fails in one line naming its replacement. CLI
 and Fabric submissions share one typed request model. Manifest validation
 rejects conflicting task settings rather than silently choosing a source.
 - Why (default): `stop`, `retry` and `steer` act on exactly one piece of work,
-  and one request shape serves CLI and MCP.
+  and one request shape serves the CLI and the lane relay.
 - Test: `crates/cli/src/lib.rs::every_target_verb_parses_the_generated_target_table_alike`;
   `crates/cli/src/lib.rs::each_removed_spelling_exits_2_with_one_line_naming_its_replacement`;
   `crates/cli/src/target.rs::round_trips_through_display`;
@@ -562,8 +562,7 @@ Every wait has an explicit budget, and a timeout exits 124. A target needing
 input satisfies a wait (exit 5). Neither expiry nor cancelling a wait stops the
 work: `wait` only reads checkpoints and pull request state. `--any` returns at
 the first target to settle; otherwise the wait returns when every target has.
-`provenant help --all` and the MCP `tools/list` response own the accepted
-bounds.
+`provenant help --all` owns the accepted bounds.
 - Why (default): an impatient reader must never kill a healthy lane.
 - Test: `src/status_wait.rs::any_returns_at_the_first_settlement_and_takes_its_verdict`;
   `src/status_wait.rs::all_waits_for_every_target_and_a_timeout_is_124`;

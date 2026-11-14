@@ -30,8 +30,7 @@ flowchart TB
     CLI --> Run["run"]
     CLI --> Workflow["workflow"]
     CLI --> Telemetry["telemetry"]
-    CLI --> MCP["fabric-mcp"]
-    MCP --> Runtime["fabric-runtime"]
+    CLI --> Runtime["fabric-runtime"]
     Runtime --> Run
     Runtime --> FabricStore["fabric-store"]
     Runtime --> Routing
@@ -65,9 +64,9 @@ procedures. The architecture separates three kinds of evidence:
 - Release evidence proves an authorised external action against its target;
   an accepted delivery does not grant that authority.
 
-CLI and Fabric MCP use the same execution services. Confinement compiles the
+The CLI and the lane relay use the same execution services. Confinement compiles the
 host-derived access plan, providers prepare launches, supervisor owns process
-custody, and run owns attempts and terminal evidence. Neither the transport nor
+custody, and run owns attempts and terminal evidence. Neither the relay nor
 the provider's success certifies delivery acceptance. See
 [ADR 0021](adr/0021-configured-workspace-dispatch-boundaries.md).
 

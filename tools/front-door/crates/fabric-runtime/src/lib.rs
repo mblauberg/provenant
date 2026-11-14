@@ -13,6 +13,7 @@ pub mod identity;
 pub mod inbox;
 pub mod peer_agent;
 pub mod read_roots;
+pub mod relay;
 pub use provenant_records::result_capture;
 pub mod runs;
 #[cfg(test)]

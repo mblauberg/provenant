@@ -367,8 +367,6 @@ pub fn code(output: &ExecOutcome) -> i64 {
     }
 }
 
-pub mod mcp;
-
 /// A launched graph after `wait` returned: what the launch said, how the wait
 /// ended and where the graph stands.
 pub struct Settled {
