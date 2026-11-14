@@ -630,9 +630,9 @@ impl RunStore {
             AttemptState::Terminal { .. }
         ))
     }
-    /// Whether lanes the attempt `id`, from any project, submits or admits
-    /// must be sandboxed ([`AttemptRecord::floors_children`]). A record that
-    /// cannot be read floors.
+    /// Whether attempt `id`, from any project, carries a user-enabled
+    /// sandbox floor ([`AttemptRecord::floors_children`]).
+    /// Missing evidence does not enable the optional sandbox policy.
     pub fn attempt_floors_children(&self, id: AttemptId, call: &Request<'_>) -> bool {
         let read = || -> Result<bool> {
             call.check()?;
@@ -652,7 +652,7 @@ impl RunStore {
                 .record(id, call)?
                 .floors_children())
         };
-        read().unwrap_or(true)
+        read().unwrap_or(false)
     }
     /// The record read for view paths. It reports the published checkpoint
     /// without syncing it, so status, lane listings and output paging do not

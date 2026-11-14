@@ -517,6 +517,16 @@ fn run_input(
         if let Some(sandbox) = sandbox {
             parameters["attempt.sandbox"] = json!(sandbox);
         }
+        let mut policy_inputs = Vec::new();
+        if let Some(BriefSource::File(path)) = &brief_source {
+            policy_inputs.push(std::path::absolute(path).map_err(|_| file_input_error(path))?);
+        }
+        if let Some(path) = &request.file {
+            policy_inputs.push(std::path::absolute(path).map_err(|_| file_input_error(path))?);
+        }
+        if !policy_inputs.is_empty() {
+            parameters["attempt.policy_inputs"] = json!(policy_inputs);
+        }
         input["set"] = parameters;
         if let Some(source) = brief_source {
             let brief = read_brief(source, provenant_cli::brief::MAX_BRIEF_BYTES)
@@ -564,7 +574,7 @@ fn validate_set_path(key: &str) -> Result<(), Box<provenant_records::diagnostic:
         "host" | "account" | "confidential" | "provider_timeout" | "capabilities"
         | "capability" | "build_heavy" | "build_weight" | "write_roots" | "write_root"
         | "local_cargo" | "ci_scope" | "preset" | "isolation" | "supervision" | "receipts"
-        | "sandbox" | "token_budget" | "on_budget" | "budget_grace" => Ok(()),
+        | "sandbox" | "policy_inputs" | "token_budget" | "on_budget" | "budget_grace" => Ok(()),
         _ if path.starts_with("mode.") => {
             Err(cli_input_error("use --mode for attempt access mode"))
         }
