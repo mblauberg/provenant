@@ -7,6 +7,12 @@ on:
       request:
         required: true
         type: string
+      task:
+        description: Workflow job to run.
+        required: true
+        type: choice
+        options: [tier, lane]
+        default: tier
       commit:
         required: true
         type: string
@@ -20,7 +26,7 @@ permissions:
 
 jobs:
   verify:
-    if: inputs.tier != 'lane'
+    if: inputs.task == 'tier'
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
@@ -41,7 +47,6 @@ jobs:
         uses: ./.github/actions/install-nextest
         timeout-minutes: 10
       - name: Install mutation testing
-        if: inputs.tier == '3'
         uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
         timeout-minutes: 3
         with:
@@ -53,7 +58,7 @@ jobs:
 
   lane:
     name: Lane compile and lint
-    if: inputs.tier == 'lane'
+    if: inputs.task == 'lane'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:

@@ -64,6 +64,7 @@ The command and option spellings below appeared in the v1.11.2 command surface o
 
 - `domains.fabric.limits.lease_seconds`: remove this obsolete key; custody records replace the old lease mechanism. (#3078)
 - `.provenant/verify.json`: move verification declarations to the versioned `.provenant/ports.json` table; each tier declares its selection and host-load policy. (#3078)
+- `verify-tiers.yml` dispatch `tier=lane`: use `task=lane`; configured tier names, including `lane`, use `task=tier`. (#3078)
 - `domains.fabric.lanes.build_wait_minutes`: build slots try once and proceed; Cargo manages its own locks. (#3078)
 - `lanes.slot_wait_seconds`: build-slot waits and their wall-clock extension have been removed. (#3078)
 - `lane.max_continuations`: no direct equivalent; use graph `limits.continuations` to bound restarts. (#3078)

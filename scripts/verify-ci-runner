@@ -24,7 +24,7 @@ def main():
     repo = parsed.hostname + parsed.path.rstrip("/")
     request = uuid.uuid4().hex
     subprocess.run(["gh", "workflow", "run", "verify-tiers.yml", "--repo", repo, "--ref", branches[0],
-                    "-f", f"commit={commit}", "-f", f"tier={tier}", "-f", f"request={request}"], check=True, stdout=sys.stderr)
+                    "-f", f"commit={commit}", "-f", "task=tier", "-f", f"tier={tier}", "-f", f"request={request}"], check=True, stdout=sys.stderr)
     deadline = time.monotonic() + 3600
     while time.monotonic() < deadline:
         runs = json.loads(subprocess.check_output(["gh", "run", "list", "--repo", repo, "--workflow", "verify-tiers.yml",

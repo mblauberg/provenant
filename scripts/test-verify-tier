@@ -160,21 +160,40 @@ class Selection(unittest.TestCase):
         self.assertEqual(shlex.split(command[3]), ["sh", "-s", "--", "https://example.invalid/repo.git", "abc", "2"])
         self.assertEqual(run.call_args.kwargs["input"], peer.REMOTE)
 
-    def test_dispatched_ci_receipt_is_bound_to_commit(self):
+    def test_dispatched_ci_receipt_is_bound_to_commit_and_tier_task(self):
         ci = load_script("verify_ci", "verify-ci-runner")
+        for tier in ("assurance/linux", "lane"):
+            with self.subTest(tier=tier):
+                run = {"databaseId": 5, "displayTitle": "verify-unique", "headSha": "abc", "status": "completed", "conclusion": "success"}
+                with mock.patch.object(ci.sys, "argv", ["verify-ci-runner", "upstream", "abc", tier]), \
+                     mock.patch.object(ci.uuid, "uuid4", return_value=mock.Mock(hex="unique")), \
+                     mock.patch.object(ci.subprocess, "check_output", side_effect=["abc\trefs/heads/test\n", "https://example.com/owner/repo.git\n", "https://github.com/owner/repo\n", json.dumps([run])]), \
+                     mock.patch.object(ci.subprocess, "run") as dispatch, \
+                     mock.patch.object(ci.sys, "stdout", new_callable=io.StringIO) as out, \
+                     mock.patch.object(ci.sys, "stderr", new_callable=io.StringIO):
+                    with self.assertRaises(SystemExit) as result:
+                        ci.main()
+                self.assertEqual(result.exception.code, 0)
+                self.assertEqual(json.loads(out.getvalue()), {"commit": "abc", "tier": tier, "exit_status": 0})
+                command = dispatch.call_args.args[0]
+                self.assertIn("commit=abc", command)
+                self.assertIn("task=tier", command)
+                self.assertIn(f"tier={tier}", command)
+                self.assertEqual(command[command.index("--repo") + 1], "github.com/owner/repo")
+
+    def test_lane_check_dispatches_the_lane_task_separately(self):
+        lane = load_script("lane_check", "lane-check")
         run = {"databaseId": 5, "displayTitle": "verify-unique", "headSha": "abc", "status": "completed", "conclusion": "success"}
-        with mock.patch.object(ci.sys, "argv", ["verify-ci-runner", "upstream", "abc", "assurance/linux"]), \
-             mock.patch.object(ci.uuid, "uuid4", return_value=mock.Mock(hex="unique")), \
-             mock.patch.object(ci.subprocess, "check_output", side_effect=["abc\trefs/heads/test\n", "https://example.com/owner/repo.git\n", "https://github.com/owner/repo\n", json.dumps([run])]), \
-             mock.patch.object(ci.subprocess, "run") as dispatch, \
-             mock.patch.object(ci.sys, "stdout", new_callable=io.StringIO) as out, \
-             mock.patch.object(ci.sys, "stderr", new_callable=io.StringIO):
-            with self.assertRaises(SystemExit) as result:
-                ci.main()
-        self.assertEqual(result.exception.code, 0)
-        self.assertEqual(json.loads(out.getvalue()), {"commit": "abc", "tier": "assurance/linux", "exit_status": 0})
-        self.assertIn("commit=abc", dispatch.call_args.args[0])
-        self.assertEqual(dispatch.call_args.args[0][dispatch.call_args.args[0].index("--repo") + 1], "github.com/owner/repo")
+        with mock.patch.object(lane, "output", side_effect=[
+                 "abc\trefs/heads/test\n", "https://github.com/owner/repo.git",
+                 "https://github.com/owner/repo", json.dumps([run])]), \
+             mock.patch.object(lane.uuid, "uuid4", return_value=mock.Mock(hex="unique")), \
+             mock.patch.object(lane.subprocess, "run") as dispatch, \
+             mock.patch.object(lane.sys, "argv", ["lane-check", "test"]):
+            lane.main()
+        command = dispatch.call_args.args[0]
+        self.assertIn("task=lane", command)
+        self.assertNotIn("tier=lane", command)
 
     def test_nextest_build_and_execution_are_separate_commands(self):
         nextest = load_script("verify_nextest", "verify-nextest")
