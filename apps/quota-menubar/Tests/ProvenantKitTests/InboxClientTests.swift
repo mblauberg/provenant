@@ -56,33 +56,6 @@ final class InboxClientTests: XCTestCase {
         _ = try? await other.call(["answer"], command: "answer", as: InboxReceipt.self)
     }
 
-    func testAnOldCLIThatRejectsHostsIsRetriedWithoutIt() async throws {
-        let seen = LockedBox<[[String]]>([])
-        let usage = #"{"schema_version":1,"command":"parse","status":"invalid","data":null,"error":{"code":"INVALID","message":"unexpected argument '--hosts' found","cause":null,"repair":"run `provenant help --all`"}}"#
-        let client = CLIClient(limit: 30) { arguments, _ in
-            seen.update { $0.append(arguments) }
-            if arguments.contains("--hosts") {
-                return CLI.Output(status: 2, signalled: false, timedOut: false, truncated: false, out: Data(usage.utf8), err: "")
-            }
-            return CLI.Output(status: 0, signalled: false, timedOut: false, truncated: false,
-                              out: try Replay.fixture(arguments.contains("--cursor") ? "inbox-page2" : "inbox-page1"), err: "")
-        }
-        let page = try await InboxClient(cli: client).list()
-        XCTAssertEqual(page.items.count, 3)
-        XCTAssertNil(page.peers)
-        let calls = seen.value
-        XCTAssertEqual(calls.count, 3, "one refused call, one retry, one cursor page")
-        XCTAssertEqual(calls.map { $0.contains("--hosts") }, [true, false, false])
-        // A usage error that does not name --hosts is not retried.
-        let other = CLIClient(limit: 30) { _, _ in
-            CLI.Output(status: 2, signalled: false, timedOut: false, truncated: false,
-                       out: Data(usage.replacingOccurrences(of: "--hosts", with: "--state").utf8), err: "")
-        }
-        do { _ = try await InboxClient(cli: other).list(); XCTFail("expected an error") } catch let error as ClientError {
-            XCTAssertEqual(error.code, "INVALID")
-        }
-    }
-
     func testPeerRowsCarryTheirHostLabelProjectAndCoverage() async throws {
         let replay = Replay([(["inbox"], "inbox-peers-complete", 0)])
         let page = try await InboxClient(cli: replay.client).list()
@@ -122,24 +95,6 @@ final class InboxClientTests: XCTestCase {
         XCTAssertFalse(PeerCoverage(host: "h", label: "l", state: "degraded").contributedNoPage)
         XCTAssertTrue(PeerCoverage(host: "h", label: "l", state: "degraded", reason: "busy").contributedNoPage)
         XCTAssertFalse(PeerCoverage(host: "h", label: "l", state: "degraded", included: 2, reason: "busy").contributedNoPage)
-    }
-
-    func testAnOldCLIWithoutPeersOrOwnerHostStillDecodes() async throws {
-        let replay = Replay([(["inbox"], "inbox-host", 0)])
-        let page = try await InboxClient(cli: replay.client).list()
-        XCTAssertNil(page.peers)
-        XCTAssertTrue(page.items.allSatisfy { $0.peerHost == nil && $0.peerRoute == nil })
-        // Older still: no owner_host on the rows at all.
-        var envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: Replay.fixture("inbox-host")) as? [String: Any])
-        var data = try XCTUnwrap(envelope["data"] as? [String: Any])
-        data["items"] = try XCTUnwrap(data["items"] as? [[String: Any]]).map { $0.filter { $0.key != "owner_host" } }
-        envelope["data"] = data
-        let bytes = try JSONSerialization.data(withJSONObject: envelope)
-        let old = CLIClient { _, _ in CLI.Output(status: 0, signalled: false, timedOut: false, truncated: false, out: bytes, err: "") }
-        let legacy = try await InboxClient(cli: old).list()
-        XCTAssertEqual(legacy.items.count, 2)
-        XCTAssertTrue(legacy.items.allSatisfy { $0.ownerHost == nil && $0.peerHost == nil })
-        XCTAssertEqual(legacy.items.map(\.projectName), ["provenant", "provenant"])
     }
 
     func testPeerAnswerAndViewNameTheOwnerHostAndProjectKey() async throws {

@@ -40,6 +40,23 @@ final class DestinationTests: XCTestCase {
     }
 }
 
+final class ConsoleDeepLinkTests: XCTestCase {
+    func testParsesOneEncodedIdentifierForSupportedRoutes() throws {
+        XCTAssertEqual(ConsoleDeepLink.parse(try XCTUnwrap(URL(string: "provenant-console://request/request%2Fchild"))),
+                       .request("request/child"))
+        XCTAssertEqual(ConsoleDeepLink.parse(try XCTUnwrap(URL(string: "provenant-console://attempt/attempt-1"))),
+                       .attempt("attempt-1"))
+    }
+
+    func testRejectsUnknownOrAmbiguousRoutes() throws {
+        for value in ["other-console://request/id", "provenant-console://unknown/id",
+                      "provenant-console://request/", "provenant-console://request/id/extra",
+                      "provenant-console://request/id?query=value"] {
+            XCTAssertNil(ConsoleDeepLink.parse(try XCTUnwrap(URL(string: value))), value)
+        }
+    }
+}
+
 final class StampTests: XCTestCase {
     func testParsesFractionalAndWholeSecondTimestamps() {
         XCTAssertNotNil(Stamp.parse("2026-11-02T01:57:31.286667Z"))
@@ -138,6 +155,24 @@ final class ConsoleModelTests: XCTestCase {
         model.show(.runs)
         model.show(.inbox)
         XCTAssertEqual(model.item, .inbox(.filter(.blocking)))
+    }
+
+    func testOpeningARequestRefreshesAndSelectsItInTheInbox() async {
+        let (model, _) = model()
+        model.searchText = "an old filter"
+        await model.openRequest("11111111111111111111111111111111")
+        XCTAssertEqual(model.destination, .inbox)
+        XCTAssertEqual(model.item, .inbox(.all))
+        XCTAssertEqual(model.inbox.selection, "11111111111111111111111111111111")
+        XCTAssertEqual(model.inbox.selected?.request.title, "Pick the storage layer")
+    }
+
+    func testOpeningAnAttemptSelectsRunsAndTheInspector() async {
+        let (model, _) = model()
+        await model.openAttempt("65656565656565656565656565656565")
+        XCTAssertEqual(model.destination, .runs)
+        XCTAssertTrue(model.inspectorShown)
+        XCTAssertEqual(model.attempt.attemptID, "65656565656565656565656565656565")
     }
 
     func testRequestSearchStaysInTheInboxAndOtherScopesGoToResults() async {
