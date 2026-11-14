@@ -243,6 +243,7 @@ pub(crate) fn plan(state: &Path, receipt_format: Option<u64>) -> io::Result<Opti
 }
 
 fn check_provider_history(root: &Directory) -> io::Result<()> {
+    check_archive_ancestors(root, Path::new("provider-history/format-1"))?;
     let mut found = Vec::new();
     attempts(root, Path::new(""), &mut found)?;
     for (path, attempt) in found {
@@ -254,12 +255,12 @@ fn check_provider_history(root: &Directory) -> io::Result<()> {
                 path.join("provider-history").display()
             )));
         }
-    }
-    check_archive_ancestors(root, Path::new("provider-history/format-1"))?;
-    let mut found = Vec::new();
-    attempts(root, Path::new(""), &mut found)?;
-    for (path, _) in found {
-        check_archive_ancestors(root, &Path::new("provider-history/format-1").join(path))?;
+        check_archive_ancestors(
+            root,
+            &Path::new("provider-history/format-1")
+                .join(path)
+                .join("provider-history"),
+        )?;
     }
     Ok(())
 }

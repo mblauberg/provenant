@@ -3345,9 +3345,11 @@ fn reset_invalid_provider_history_refuses_during_preflight() -> Result {
         "attempts/a1/provider-history",
         "provider-history",
         "provider-history/format-1",
+        "provider-history/format-1/attempts/a1/provider-history",
     ] {
         for link in [false, true] {
             let (rig, stage) = reset_fixture()?;
+            fs::create_dir_all(rig.state.join("attempts/a1"))?;
             let invalid = rig.state.join(name);
             fs::create_dir_all(invalid.parent().ok_or("history parent")?)?;
             let outside = rig.root.join("outside-history");
