@@ -396,7 +396,7 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         &roots,
         &home,
         &root.join("source"),
-        &inventory,
+        inventory.entries(),
         &[],
         &[],
     )?;

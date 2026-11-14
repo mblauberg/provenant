@@ -124,7 +124,6 @@ pub(super) fn compile_sbpl(
         plan,
         profile,
         anchors,
-        false,
         ProfileLimits::default(),
         &Policy::default(),
     )
@@ -148,7 +147,7 @@ pub(super) fn compile_sbpl_with_diagnostic(
             error,
         ));
     }
-    compile_sbpl_impl(plan, profile, anchors, true, limits, policy)
+    compile_sbpl_impl(plan, profile, anchors, limits, policy)
 }
 
 #[cfg(target_os = "macos")]
@@ -156,12 +155,10 @@ fn compile_sbpl_impl(
     plan: &PlanPermissions,
     profile: &ProviderProfile,
     anchors: &Anchors<'_>,
-    diagnostic: bool,
     limits: ProfileLimits,
     policy: &Policy,
 ) -> Result<ConfinedLaunch, PermissionError> {
-    compile_sbpl_inner(plan, profile, anchors, diagnostic, limits, policy)
-        .map_err(compile_boundary_error)
+    compile_sbpl_inner(plan, profile, anchors, limits, policy).map_err(compile_boundary_error)
 }
 
 #[cfg(target_os = "macos")]
@@ -201,7 +198,6 @@ fn compile_sbpl_inner(
     plan: &PlanPermissions,
     profile: &ProviderProfile,
     anchors: &Anchors<'_>,
-    diagnostic: bool,
     limits: ProfileLimits,
     policy: &Policy,
 ) -> Result<ConfinedLaunch, PermissionError> {

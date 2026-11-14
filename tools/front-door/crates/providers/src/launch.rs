@@ -939,7 +939,7 @@ pub(crate) fn prepare_tool_requirements(
     input: &PrepareInput<'_>,
     spec: &mut LaunchSpec,
 ) -> Result<(), ProviderError> {
-    spec.complete_tool_requirements(input.confined, input.home, input.cwd)?;
+    spec.complete_tool_requirements(input.confined, input.cwd)?;
     Ok(())
 }
 
@@ -1050,7 +1050,6 @@ impl LaunchSpec {
     pub fn complete_tool_requirements(
         &mut self,
         plan: &ConfinedPlan,
-        home: &Path,
         cwd: &Path,
     ) -> Result<(), ProviderError> {
         if self.native_environment() {

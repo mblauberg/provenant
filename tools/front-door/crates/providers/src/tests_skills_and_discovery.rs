@@ -222,7 +222,7 @@ fn optional_unrepresentable_write_is_omitted_from_applied_access()
     spec.tool_requirements
         .writes
         .push(crate::launch::subtree(&target));
-    spec.complete_tool_requirements(&plan, &home, Path::new("/fixture/repo"))?;
+    spec.complete_tool_requirements(&plan, Path::new("/fixture/repo"))?;
     assert!(
         spec.profile
             .spec
@@ -344,7 +344,7 @@ fn discovered_grants_in_credential_roots_are_omitted() -> Result<(), Box<dyn std
     // Feed an independently discovered Node prefix through the same resolver.
     spec.tool_requirements = crate::launch::ToolRequirements::default();
     crate::launch::homebrew_tools(&node_alias, &mut spec.tool_requirements, &mut spec.env);
-    spec.complete_tool_requirements(&plan, &home, Path::new("/fixture/repo"))?;
+    spec.complete_tool_requirements(&plan, Path::new("/fixture/repo"))?;
     let node_bin = node_prefix.join("bin");
     assert!(
         spec.omitted_discovery
@@ -729,7 +729,7 @@ fn applied_access_matches_compiled_profile() -> Result<(), Box<dyn std::error::E
         vec![],
         project_receipt.clone(),
     );
-    spec.complete_tool_requirements(&plan, &home, Path::new("/fixture/repo"))?;
+    spec.complete_tool_requirements(&plan, Path::new("/fixture/repo"))?;
     assert_eq!(spec.project_requirements_receipt(), Some(&project_receipt));
     assert!(spec.profile.spec.runtime_reads.contains(&project_grant));
     assert!(spec.profile.spec.tool_exec_roots.contains(&project_grant));

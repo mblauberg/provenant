@@ -378,7 +378,7 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
     let request = PlanRequest {
         scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
         permissions: PlanPermissions {
-            credential_roots: provenant_core::CredentialRoots::for_home(&roots.home),
+            credential_roots: roots.credential_roots().clone(),
             policy: None,
             read_only: None,
             mode: AccessMode::ReadOnly,

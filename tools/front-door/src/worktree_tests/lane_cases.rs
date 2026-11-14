@@ -75,7 +75,7 @@ fn lane_prepare_cases(cases: &[(&str, bool, bool, u8)]) -> Result {
 }
 
 fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
-    use provenant_confinement::permissions::{PathGrant, PathScope};
+    use provenant_confinement::permissions::PathScope;
     let rig = repository()?;
     let cleanup = provenant_supervisor::fixture::ProcessCleanupGuard::new(&rig.state);
     ok(
@@ -284,20 +284,19 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         ]
         .into();
         host.credential_roots.clear();
-        host.credential_roots.extend([
-            PathGrant {
-                path: home.join(".cargo/credentials.toml"),
-                scope: PathScope::Exact,
-            },
-            PathGrant {
-                path: home.join(".cargo/credentials"),
-                scope: PathScope::Exact,
-            },
-            PathGrant {
-                path: home.join("Library/Keychains/login.keychain-db"),
-                scope: PathScope::Exact,
-            },
-        ]);
+        host.credential_roots.extend(
+            [
+                ".cargo/credentials.toml",
+                ".cargo/credentials",
+                "Library/Keychains/login.keychain-db",
+            ]
+            .map(|relative| provenant_core::CredentialRoot {
+                path: home.join(relative),
+                scope: provenant_core::CredentialScope::Exact,
+                source: "fixture host credential".into(),
+                kind: provenant_core::CredentialKind::Store,
+            }),
+        );
         host.github_roots = vec![home.join(".config/gh")];
         host.provider_path_environment = [
             ("CODEX_HOME".into(), home.join(".codex").into_os_string()),

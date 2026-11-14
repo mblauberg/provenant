@@ -41,7 +41,7 @@ fn assert_cargo_credentials_ungranted(spec: &LaunchSpec) {
                 .flat_map(|grant| &grant.in_place_writes),
         )
         .collect();
-    for name in provenant_confinement::cargo::CREDENTIAL_FILES {
+    for name in provenant_core::CARGO_CREDENTIAL_FILES {
         let credential = PathGrant {
             path: home.join(name),
             scope: PathScope::Exact,

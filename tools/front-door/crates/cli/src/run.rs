@@ -364,12 +364,10 @@ pub fn admit_source_root(
             candidate
         }
         SourceAdmissionMode::Proposed => candidate,
-        SourceAdmissionMode::Registered => {
-            let verified = run::resolve_reader_source(state, cwd, &candidate).map_err(|_| {
+        SourceAdmissionMode::Registered => run::resolve_reader_source(state, cwd, &candidate)
+            .map_err(|_| {
                 refuse("graph source checkout is no longer registered with the project")
-            })?;
-            verified
-        }
+            })?,
     };
     check_credentials(&path)?;
     if !run::access_root_allowed(&path, state, true) {

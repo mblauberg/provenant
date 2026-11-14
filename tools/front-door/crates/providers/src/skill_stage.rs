@@ -34,7 +34,6 @@ impl StagedUserSkills {
 }
 
 struct Capture<'a> {
-    home: &'a Path,
     credential_roots: &'a provenant_core::CredentialRoots,
     root: &'a Path,
     source: &'a Path,
@@ -275,7 +274,6 @@ pub(crate) fn capture(
         return skipped("changed_during_copy");
     }
     let mut capture = Capture {
-        home,
         credential_roots,
         root: destination,
         source: &canonical,
@@ -439,7 +437,6 @@ mod tests {
         };
         let credential_roots = provenant_core::CredentialRoots::for_home(&home);
         let mut capture = Capture {
-            home: &home,
             credential_roots: &credential_roots,
             root: &destination,
             source: &source,

@@ -2946,9 +2946,13 @@ mod host_clock_tests {
             ("/private/tmp/fixture-agent/socket", CredentialScope::Exact),
             ("/fixture/config/opencode", CredentialScope::Subtree),
         ] {
-            assert!(roots.iter().any(|root| root.path == Path::new(path)
-                && root.scope == scope
-                && !root.source.is_empty()));
+            assert!(
+                roots
+                    .iter()
+                    .any(|root| root.path == std::path::Path::new(path)
+                        && root.scope == scope
+                        && !root.source.is_empty())
+            );
         }
         assert!(
             !roots

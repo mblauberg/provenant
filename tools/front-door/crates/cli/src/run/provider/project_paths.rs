@@ -151,7 +151,6 @@ pub(super) fn apply(
     let read_start = candidate.spec.runtime_reads.len();
     let exec_start = candidate.spec.tool_exec_roots.len();
     let write_start = candidate.spec.tool_writes.len();
-    let home = context.home;
     let cwd = context.cwd;
     let receipt = apply_to(&mut spec.env, &mut candidate, plan, context);
     spec.set_project_requirements(
@@ -160,7 +159,7 @@ pub(super) fn apply(
         candidate.spec.tool_writes[write_start..].to_vec(),
         receipt,
     );
-    spec.complete_tool_requirements(plan, home, cwd)?;
+    spec.complete_tool_requirements(plan, cwd)?;
     Ok(spec
         .project_requirements_receipt()
         .cloned()

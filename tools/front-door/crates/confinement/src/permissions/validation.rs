@@ -12,7 +12,7 @@ use provenant_records::policy::{Facts, Policy};
 use std::ffi::OsStr;
 #[cfg(target_os = "macos")]
 use std::io::Read;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 pub(super) const MAX_PATH_BYTES: usize = 4096;
 #[cfg(test)]
@@ -484,11 +484,11 @@ pub fn refuses_lane_root(path: &Path, read: bool, credentials: &CredentialRoots)
 
 /// The grant-level form of [`refuses_lane_root`], honouring an exact grant's
 /// narrower reach.
-pub(super) fn refuses_credential_grant(
+pub(super) fn refuses_credential_grant<'a>(
     grant: &PathGrant,
     read: bool,
-    credentials: &CredentialRoots,
-) -> Option<&provenant_core::CredentialRoot> {
+    credentials: &'a CredentialRoots,
+) -> Option<&'a provenant_core::CredentialRoot> {
     credentials.refusal(
         &grant.path,
         match grant.scope {

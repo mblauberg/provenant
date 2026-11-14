@@ -80,7 +80,7 @@ fn fixture() -> Result<TestRig> {
         fs::create_dir_all(rig.home.join(name))?;
     }
     fs::write(rig.home.join(".rustup/settings.toml"), b"")?;
-    for name in provenant_confinement::cargo::CREDENTIAL_FILES {
+    for name in provenant_core::CARGO_CREDENTIAL_FILES {
         fs::write(rig.home.join(".cargo").join(name), b"synthetic cargo token")?;
     }
     // The rig's CODEX_HOME is the auto-detected Codex identity.
@@ -343,7 +343,7 @@ pub(crate) fn provider() -> Result {
         fs::create_dir_all(&target)?;
         fs::write(target.join("compose-target"), b"target")?;
         denied(&cargo.join("registry/compose-home"))?;
-        for name in provenant_confinement::cargo::CREDENTIAL_FILES {
+        for name in provenant_core::CARGO_CREDENTIAL_FILES {
             assert!(fs::read(cargo.join(name)).is_err());
             denied(&cargo.join(name))?;
         }

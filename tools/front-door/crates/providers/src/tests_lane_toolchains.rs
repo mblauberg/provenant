@@ -1421,11 +1421,7 @@ fn native_adapter_finalisation_supplies_cargo_environment_without_tool_discovery
     let mut launch = claude::Claude.prepare(input)?;
     // The CLI finalises every adapter, even those that skip sandbox-only Rust
     // discovery. Repeated finalisation must retain one set of selectors.
-    launch.complete_tool_requirements(
-        &plan,
-        Path::new("/fixture/home"),
-        Path::new("/fixture/repo"),
-    )?;
+    launch.complete_tool_requirements(&plan, Path::new("/fixture/repo"))?;
     assert_eq!(cargo_home_path(&launch), Path::new("/fixture/home/.cargo"));
     for (name, expected) in [
         ("RUSTUP_HOME", "/fixture/home/.rustup"),

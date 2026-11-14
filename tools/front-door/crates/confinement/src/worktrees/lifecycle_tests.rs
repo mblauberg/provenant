@@ -1001,7 +1001,11 @@ fn merge_proof_scenario() -> Result<(), Box<dyn Error>> {
         .iter()
         .map(|tree| tree.path.clone())
         .collect();
-    assert_eq!(previewed, [via_batch.path.clone()], "{preview:?}");
+    assert_eq!(
+        previewed,
+        std::slice::from_ref(&via_batch.path),
+        "{preview:?}"
+    );
     assert!(branch_exists(&fixture, "proof-via-batch"));
     let applied = collect(&context, &lanes, &policy(pin, false), &cancel())?;
     // Containment, or a tree-equivalent squash, in a retained ref retires the

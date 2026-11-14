@@ -647,6 +647,16 @@ impl MandatoryRoots {
 mod tests {
     use super::*;
 
+    /// A declared subtree credential store, as host declarations produce.
+    fn credential_store(path: PathBuf) -> CredentialRoot {
+        CredentialRoot {
+            path,
+            scope: CredentialScope::Subtree,
+            source: "fixture credential store".into(),
+            kind: CredentialKind::Store,
+        }
+    }
+
     #[test]
     fn relocated_cargo_credentials_are_mandatory_denials() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -1061,10 +1071,7 @@ mod tests {
             &roots,
             &home,
             &root.join("source"),
-            &[PathGrant {
-                path: store,
-                scope: PathScope::Subtree,
-            }],
+            &[credential_store(store)],
             &[],
             &[],
         )?;
@@ -1128,7 +1135,7 @@ mod tests {
             &roots,
             &home,
             &root.join("source"),
-            &[huge, subtree(later)],
+            &[credential_store(huge.path.clone()), credential_store(later)],
             &[],
             &[],
         )?;
@@ -1447,9 +1454,9 @@ mod tests {
         }
         let mut credentials = endpoints[1..7]
             .iter()
-            .map(|(store, _)| subtree(store.clone()))
+            .map(|(store, _)| credential_store(store.clone()))
             .collect::<Vec<_>>();
-        credentials.push(subtree(root.join("declared")));
+        credentials.push(credential_store(root.join("declared")));
         let inventory = MandatoryRoots::for_host(
             &roots,
             &home,

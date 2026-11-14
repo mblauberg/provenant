@@ -3990,7 +3990,7 @@ pub(super) fn prepare_candidates(
         if writer.is_none() {
             super::command::scratch_cargo_output(&mut spec.env, scratch);
         }
-        spec.complete_tool_requirements(&plan, &home, &cwd)?;
+        spec.complete_tool_requirements(&plan, &cwd)?;
         if isolated {
             super::source_tree::ensure_profile_isolated(&source, &spec.profile.spec)
                 .map_err(PrepareError::SourceProfileIsolated)?;

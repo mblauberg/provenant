@@ -299,7 +299,7 @@ pub(super) fn prepare_command(
             settings.jobs(),
         );
     }
-    spec.complete_tool_requirements(&plan, &home, &cwd)?;
+    spec.complete_tool_requirements(&plan, &cwd)?;
     if isolated {
         super::source_tree::ensure_profile_isolated(&source, &spec.profile.spec)?;
         super::source_tree::ensure_view_read_only(
