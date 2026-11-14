@@ -445,7 +445,7 @@ fn gc_retention_bytes(data: &GcData) -> Vec<provenant_config::RetentionBytes> {
                         || data
                             .worktree_cleanup
                             .iter()
-                            .any(|r| !r.byte_errors.is_empty()) =>
+                            .any(|r| !r.cache_errors.is_empty()) =>
                 {
                     ByteObservation::Partial {
                         bytes: gc_cache_bytes(data),
@@ -785,7 +785,7 @@ fn gc_data_summary(data: &GcData) -> String {
         for ((class, action), count) in classes {
             human.push_str(&format!("{class}: {count} {action}\n"));
         }
-        for error in &project.byte_errors {
+        for error in project.byte_errors.iter().chain(&project.cache_errors) {
             human.push_str(&format!(
                 "{}: {}: {}\n",
                 error.path.display(),
@@ -2133,6 +2133,37 @@ mod gc_preview_tests {
             "would_remove"
         );
     }
+    #[test]
+    fn measurement_failure_is_scoped_to_its_retention_class() {
+        use provenant_config::{ByteObservation, RetentionIssue, RetentionKind};
+        for failed_class in [RetentionKind::GitWorktrees, RetentionKind::LaneCargoCaches] {
+            let mut report = worktrees::WorktreeGcReport::default();
+            let issues = if failed_class == RetentionKind::GitWorktrees {
+                &mut report.byte_errors
+            } else {
+                &mut report.cache_errors
+            };
+            issues.push(RetentionIssue {
+                path: "/fixture".into(),
+                operation: "measure".into(),
+                cause: "unavailable".into(),
+            });
+            let mut data = GcData::default();
+            data.worktree_cleanup.push(report);
+            for row in gc_retention_bytes(&data).into_iter().filter(|r| {
+                matches!(
+                    r.class,
+                    RetentionKind::GitWorktrees | RetentionKind::LaneCargoCaches
+                )
+            }) {
+                assert_eq!(
+                    matches!(row.observation, ByteObservation::Partial { .. }),
+                    row.class == failed_class
+                );
+            }
+        }
+    }
+
     #[test]
     fn gc_reports_every_retention_class_and_only_existing_byte_measurements() {
         use provenant_config::{ByteObservation, RETENTION_CLASSES, RetentionKind};

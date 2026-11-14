@@ -176,6 +176,7 @@ pub struct WorktreeGcReport {
     pub bytes: u64,
     pub caches: Vec<crate::cache::CacheGcEntry>,
     pub byte_errors: Vec<RetentionIssue>,
+    pub cache_errors: Vec<RetentionIssue>,
 }
 
 #[derive(Debug, Serialize)]
@@ -644,7 +645,7 @@ fn collect_impl(
                 match crate::cache::preview_worktree_cargo_cache(context.home, &locked.verified) {
                     Ok(entry) => entry,
                     Err(error) => {
-                        report.byte_errors.push(RetentionIssue {
+                        report.cache_errors.push(RetentionIssue {
                             path: lane.path.clone(),
                             operation: "measure private cache".into(),
                             cause: error.to_string(),
@@ -714,7 +715,7 @@ fn collect_impl(
                                 });
                             }
                         }
-                        Err(error) => report.byte_errors.push(RetentionIssue {
+                        Err(error) => report.cache_errors.push(RetentionIssue {
                             path: cache.to_owned(),
                             operation: "remove worktree private cache".into(),
                             cause: error.to_string(),
