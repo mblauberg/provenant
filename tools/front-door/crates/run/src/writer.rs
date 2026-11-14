@@ -1989,27 +1989,27 @@ mod cargo_setup_tests {
                 all_busy,
                 "preparation must report the held repository lock as busy"
             );
-            for writer in std::iter::once(&mut writer)
-                .chain(std::iter::once(&mut second))
-                .chain(siblings.iter_mut())
-            {
-                let request = WriterRequest {
-                    extra: [("custody_project".into(), serde_json::json!(custody_project))].into(),
-                    project: project.clone(),
-                    worktree: writer.worktree.path().to_path_buf(),
-                };
-                *writer = prepare_writer_with_facts(
-                    &request,
-                    &state,
-                    custody_project,
-                    &worktrees::RepoFacts::default(),
-                )
-                .map_err(|error| error.to_string())?;
-                prepare_writer_git(writer, &state, &root, None, &CancelToken::new())
-                    .map_err(|error| error.to_string())?;
-            }
             Ok::<(), String>(())
         })?;
+        for writer in std::iter::once(&mut writer)
+            .chain(std::iter::once(&mut second))
+            .chain(siblings.iter_mut())
+        {
+            let request = WriterRequest {
+                extra: [("custody_project".into(), serde_json::json!(custody_project))].into(),
+                project: project.clone(),
+                worktree: writer.worktree.path().to_path_buf(),
+            };
+            *writer = prepare_writer_with_facts(
+                &request,
+                &state,
+                custody_project,
+                &worktrees::RepoFacts::default(),
+            )
+            .map_err(|error| error.to_string())?;
+            prepare_writer_git(writer, &state, &root, None, &CancelToken::new())
+                .map_err(|error| error.to_string())?;
+        }
         for writer in std::iter::once(&writer)
             .chain(std::iter::once(&second))
             .chain(&siblings)

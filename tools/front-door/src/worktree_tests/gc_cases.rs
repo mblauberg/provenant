@@ -769,8 +769,11 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
     assert!(
         cleanup
             .iter()
-            .flat_map(|report| ["output", "idle_output"])
-            .flat_map(|field| report[field].as_array().into_iter().flatten())
+            .flat_map(|report| {
+                ["output", "idle_output"]
+                    .into_iter()
+                    .flat_map(move |field| report[field].as_array().into_iter().flatten())
+            })
             .any(|entry| {
                 entry["reason"] == "would_remove"
                     && entry["removed"] == false

@@ -243,7 +243,7 @@ and artifact reference, and readers and dependent nodes rehydrate the full
 findings without losing the verdict.
 - Why: dependants use bounded evidence without copying transcripts.
 - Test: `crates/fabric-runtime/src/graph/graph_inputs_and_outputs_tests.rs::outputs_feed_direct_dependants_and_survive_replay`;
-  `crates/fabric-runtime/src/graph/graph_review_contract_tests.rs::seven_long_blocking_findings_remain_retrievable_with_the_verdict`;
+  `crates/fabric-runtime/src/graph/graph_review_contract_tests.rs::oversized_blocking_findings_remain_retrievable_with_the_verdict`;
   `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::matched_required_contract_cannot_override_ambiguous_verdict_evidence`
 
 ### Checkpoint before launch
