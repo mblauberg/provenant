@@ -1790,7 +1790,6 @@ pub struct AdmissionTicket {
     pub active: bool,
     /// Advisory available-memory floor as basis points of installed memory.
     pub memory_floor_basis_points: u64,
-    pub disk_floor_bytes: u64,
     /// Spacing for this lane's class, fixed at submission.
     pub startup_spacing_ms: u64,
     pub lane_class: LaneClass,

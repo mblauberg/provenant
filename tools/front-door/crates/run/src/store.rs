@@ -757,8 +757,6 @@ impl RunStore {
         }
         // Configuration and volume probes happen before the store transaction,
         // but a stored refusal replays without depending on current host state.
-        let disk_floor_bytes = provenant_config::GcSettings::read(&self.writer_registry)?
-            .free_floor_bytes(&self.writer_registry)?;
         let task = &input.request.task;
         let telemetry_context = crate::telemetry_context::capture(task, input.created_at);
         let mut operation_extra = provenant_records::ExtraFields::default();
@@ -849,7 +847,7 @@ impl RunStore {
             tx.execute("INSERT INTO attempts(id,project,graph,node,attempt,digest,actor,operation,number,continues,operation_record,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,1,0,?12)", params![attempt_id.to_string(), context.project_id.to_string(), key.graph(), key.node(), key.attempt(), digest.to_string(), context.actor_id.to_string(), input.operation_id.as_str(), i64::from(key.attempt()), input.request.parent.map(|target| target.to_string()), bytes(&operation)?, crate::db::attempt_bytes(&attempt)?])?;
             insert_event(tx, &attempt)?;
             let class = Service::lane_class(task.writer.is_some(), &task.access.write_roots, &[]);
-            self.queue_ticket(tx, &attempt, class, task.provider_timeout_seconds, disk_floor_bytes)?;
+            self.queue_ticket(tx, &attempt, class, task.provider_timeout_seconds)?;
             Ok(None)
         })?;
         if let Some(existing) = admitted {

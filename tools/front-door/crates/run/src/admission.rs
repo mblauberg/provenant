@@ -277,7 +277,6 @@ impl RunStore {
         attempt: &AttemptRecord,
         class: LaneClass,
         runtime_seconds: u64,
-        disk_floor_bytes: u64,
     ) -> Result<()> {
         let sequence: i64 = tx.query_row(
             "SELECT sequence FROM attempts WHERE id=?1",
@@ -294,7 +293,6 @@ impl RunStore {
             holder: Some(self.context.actor_id),
             active: false,
             memory_floor_basis_points: self.policy.memory_floor_basis_points,
-            disk_floor_bytes,
             startup_spacing_ms: provenant_config::LaneBuildSettings::read(&self.writer_registry)
                 .unwrap_or_default()
                 .start_spacing_ms
@@ -335,8 +333,23 @@ impl RunStore {
         let attempt = self.attempt_dir(lane.attempt_id, false)?;
         let memory = resources.memory();
         let disk = resources.disk(&attempt);
-        let floor = provenant_config::GcSettings::read(&self.writer_registry)
-            .and_then(|settings| settings.free_floor_bytes(&self.writer_registry));
+        let limits = provenant_config::GcSettings::read(&self.writer_registry)
+            .and_then(|settings| settings.disk_limits(&self.writer_registry));
+        let disk_observation = match (disk, limits) {
+            (Ok(free), Ok(limits)) => format!(
+                "disk={free} bytes, level={:?}, {}",
+                limits.level(free),
+                limits.detail(free)
+            ),
+            (Err(_), Ok(limits)) => format!(
+                "disk unavailable; gc.free_floor is {} bytes (source: {}); gc.critical_free is {} bytes (source: {})",
+                limits.free_floor,
+                limits.free_floor_source.description(),
+                limits.critical_free,
+                limits.critical_free_source.description()
+            ),
+            (_, Err(_)) => "disk limits unavailable; proceeding".to_owned(),
+        };
         let pressure = resources.pressure();
         let settings = provenant_config::LaneBuildSettings::read(&self.writer_registry);
         let budget = resources.process_budget();
@@ -349,7 +362,7 @@ impl RunStore {
         let cap = self.lane_cap_hit(&ticket, call);
         let caps = self.lane_caps();
         Ok(format!(
-            "memory={memory:?}, floor={} basis points; disk={disk:?}, floor={floor:?} bytes; pressure={pressure:?}, threshold={:?}; process budget={budget:?}, reserved headroom={:?}; startup spacing remaining={spacing:?} ms (window={} ms); writer cap={cap:?}, host limit={}, project limit={}",
+            "memory={memory:?}, floor={} basis points; {disk_observation}; pressure={pressure:?}, threshold={:?}; process budget={budget:?}, reserved headroom={:?}; startup spacing remaining={spacing:?} ms (window={} ms); writer cap={cap:?}, host limit={}, project limit={}",
             ticket.memory_floor_basis_points,
             settings.map(|settings| settings.memory_pressure_threshold()),
             budget.as_ref().ok().map(|budget| budget.headroom()),
@@ -1165,7 +1178,7 @@ mod process_wait_tests {
     }
 
     #[test]
-    fn admission_observations_name_memory_sample_and_floor()
+    fn admission_observations_name_memory_and_sourced_disk_limits()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let clock = crate::tests::clock();
@@ -1181,6 +1194,9 @@ mod process_wait_tests {
             "{message}"
         );
         assert!(message.contains("floor=500 basis points"), "{message}");
+        assert!(message.contains("gc.free_floor"), "{message}");
+        assert!(message.contains("gc.critical_free"), "{message}");
+        assert!(message.contains("shipped default"), "{message}");
         Ok(())
     }
 
