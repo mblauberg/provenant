@@ -185,7 +185,7 @@ retention_classes! {
         measure: AllocatedTree,
         eligibility: Declared,
         detail: "free custody and census; clean Git; subsumed tip or idle retirement",
-        settings: ["gc.idle_days"],
+        settings: ["gc.idle_days", "gc.regenerable", "gc.keep", "gc.foreign_worktrees", "gc.integration_branches", "gc.keep_paths", "gc.remote_branches", "gc.remote_min_tip_age_days"],
         triggers: GC_SETTLEMENT_MERGE
     },
     QuotaHistory => {
