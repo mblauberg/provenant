@@ -158,7 +158,7 @@ fn attempt() -> Value {
         "key":{"project":ID,"graph":"g","node":"n","attempt":1},"attempt_number":1,"revision":1,"generation":1,
         "requested_route":requested_route(),"resolved_route":route_record(),
         "applied_route":route_record(),"observed_route":route_record(),"authority_digest":digest(),
-        "write_grants":[write_grant()],"protected_paths":[path()],"delivery":writer_delivery_record(),
+        "read_only_writable":[],"write_grants":[write_grant()],"protected_paths":[path()],"delivery":writer_delivery_record(),
         "queued_at":NOW,"state":terminal_state(),"usage":{},"prompt":artifact(),"result":artifact(),
         "exit_evidence":artifact(),"skipped_routes":[skipped_route()],"trace":{"host":ID,"attempt":ID}})
 }
@@ -274,7 +274,7 @@ cases! {
     artifact_record_preserves_digest: run::ArtifactRecord => artifact();
     write_grant_record_preserves_digest: run::WriteGrantRecord => write_grant();
     lane_wait_preserves_digest: run::LaneWait => json!({"attempt_id":ID,"lane_class":"writer","waiting_for":"capacity"});
-    admission_ticket_preserves_digest: run::AdmissionTicket => json!({"schema_version":1,"operation_id":"operation","attempt_id":ID,"project_id":ID,"sequence":1,"generation":1,"active":true,"memory_floor_basis_points":1000,"disk_floor_bytes":1,"startup_spacing_ms":1,"run_concurrency":1,"admission_deadline":NOW});
+    admission_ticket_preserves_digest: run::AdmissionTicket => json!({"schema_version":1,"operation_id":"operation","attempt_id":ID,"project_id":ID,"sequence":1,"generation":1,"active":true,"lane_class":"writer","memory_floor_basis_points":1000,"disk_floor_bytes":1,"startup_spacing_ms":1,"run_concurrency":1,"runtime_seconds":60,"admission_deadline":NOW});
     run_event_preserves_digest: run::RunEvent => json!({"schema_version":1,"sequence":1,"project_id":ID,"attempt_id":ID,"revision":1,"change":terminal_state(),"trace":{}});
 
     resolved_route_preserves_digest: ResolvedRoute => resolved_route();

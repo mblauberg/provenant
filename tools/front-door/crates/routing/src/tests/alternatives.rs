@@ -745,15 +745,15 @@ fn account_spend_and_expiring_override_ignore_reserve() -> Result<(), Box<dyn st
             &std::collections::BTreeMap::from([
                 (
                     "PACING_ADAPTER".into(),
-                    provenant_records::policy::Strength::Refuse,
+                    provenant_records::policy::Strength::Warn,
                 ),
                 (
                     "PACING_ACCOUNT".into(),
-                    provenant_records::policy::Strength::Refuse,
+                    provenant_records::policy::Strength::Warn,
                 ),
                 (
                     "PACING_FREE".into(),
-                    provenant_records::policy::Strength::Refuse,
+                    provenant_records::policy::Strength::Warn,
                 ),
             ]),
             provenant_records::policy::Source::Dispatch,
