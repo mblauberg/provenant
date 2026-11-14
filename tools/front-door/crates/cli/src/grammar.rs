@@ -95,6 +95,14 @@ pub enum Command {
     /// Show graph, node and attempt status
     #[command(add = crate::metadata::CoreCommand(1, "provenant status"))]
     Status(Status),
+    /// Take custody of an item created outside Provenant (KIND:ID)
+    Adopt {
+        subject: provenant_records::custody::Subject,
+    },
+    /// Release an item from custody (KIND:ID)
+    Release {
+        subject: provenant_records::custody::Subject,
+    },
     /// Wait for graph work or pull requests to settle
     #[command(add = crate::metadata::CoreCommand(10, "provenant wait fix-login"))]
     Wait(Wait),
@@ -1227,6 +1235,12 @@ pub(crate) fn observation_wait_seconds(value: &str) -> Result<u64, &'static str>
 }
 #[derive(Clone, Debug, Args)]
 pub struct Status {
+    /// Active custody of this chair and unattended items, across projects unless --project is set
+    #[arg(long, conflicts_with_all = ["targets", "session_stream", "all"])]
+    pub mine: bool,
+    /// Exact chair session for the custody view (used by the session-start digest)
+    #[arg(long = "session", requires = "mine")]
+    pub custody_session: Option<String>,
     /// Stream a bounded attempt inventory page for the session collector,
     /// paged with --all, --limit and --cursor like the graph listing.
     #[arg(long, hide = true, conflicts_with = "targets")]
