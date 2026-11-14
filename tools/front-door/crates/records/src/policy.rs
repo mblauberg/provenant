@@ -20,6 +20,16 @@ pub enum Strength {
     Off,
 }
 
+impl Strength {
+    pub const fn behaviour(self) -> &'static str {
+        match self {
+            Self::Refuse => "refuse the violated predicate",
+            Self::Warn => "warn and proceed",
+            Self::Off => "proceed without a policy warning",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
@@ -51,6 +61,23 @@ impl Rule {
             (_, Strength::Refuse) => true,
             _ => false,
         }
+    }
+
+    /// Generated guidance follows the same supported strengths as enforcement.
+    pub fn behaviour(&self) -> String {
+        let strengths = self
+            .strengths()
+            .into_iter()
+            .map(|strength| format!("{}: {}", strength_name(strength), strength.behaviour()))
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!(
+            "Policy {} (default={}, source=compiled default; override={}): {}.",
+            self.code,
+            strength_name(self.strength),
+            self.knob.as_deref().unwrap_or("none; immutable boundary"),
+            strengths
+        )
     }
 
     pub fn strengths(&self) -> Vec<Strength> {
@@ -265,6 +292,24 @@ const fn strength_name(strength: Strength) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn generated_guidance_tracks_every_supported_strength() {
+        for rule in table() {
+            let behaviour = rule.behaviour();
+            for strength in [Strength::Refuse, Strength::Warn, Strength::Off] {
+                assert_eq!(
+                    behaviour.contains(&format!("{}:", strength_name(strength))),
+                    rule.supports(strength),
+                    "{}",
+                    rule.code
+                );
+                if rule.supports(strength) {
+                    assert!(behaviour.contains(strength.behaviour()));
+                }
+            }
+        }
+    }
+
     #[test]
     fn non_boundary_defaults_never_refuse() {
         for rule in table() {

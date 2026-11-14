@@ -135,8 +135,9 @@ An occupied concurrency threshold warns and proceeds unless its declared policy 
   `crates/fabric-runtime/src/graph/plan_tests.rs::plan_validates_host_limits_before_saving`
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
-### Verified live steering
+### Live steering unavailable
 
+Every provider currently returns `control_unsupported` for live steering; delivery transports come later (2.1, #3278).
 The host verifies launch evidence and ownership before reading steering input.
 Only the current live continuation leaf may receive control; authenticated
 peer requests must also match the origin and receiver identities. Missing,

@@ -153,6 +153,41 @@ def cli_reference(data, all_commands=False):
     return text.rstrip() + "\n"
 
 
+def reference_data(root):
+    """Read the declarations from their Rust owners, never by parsing Rust source."""
+    output = cargo(root, "run", "--locked", "--quiet", "-p", "provenant-cli",
+                   "--bin", "print-reference-data")
+    data = json.loads(output)
+    if not isinstance(data.get("external_contract"), dict) or not isinstance(data.get("policy"), list):
+        raise ValueError("print-reference-data returned an unsupported document")
+    return data
+
+
+def external_contract_reference(data):
+    text = header("External contract", "crates/cli/src/external_contract.rs")
+    text += ("Only the interfaces below are declared outward contracts. Reading internal run or "
+             "state files is unsupported; use the CLI JSON interfaces.\n\n")
+    text += f"Declaration schema version: {data['schema_version']}.\n\n"
+    for interface in data['interfaces']:
+        text += "## " + interface['kind'].replace('_', ' ').title() + "\n\n"
+        text += fenced(interface) + "\n"
+    return text.rstrip() + "\n"
+
+
+def with_policy_effects(data, policy):
+    """Attach generated behaviour by the table's threshold, without a second knob list."""
+    for section in data.values():
+        if not isinstance(section, dict) or 'settings' not in section:
+            continue
+        prefix = section.get('path', '')
+        for name, setting in section['settings'].items():
+            effects = [rule['effect'] for rule in policy
+                       if rule['threshold'] == f"{prefix}.{name}"]
+            if effects:
+                setting['effect'] = setting.get('effect', '') + ' ' + ' '.join(effects)
+    return data
+
+
 def wire_schemas(root):
     """Published wire schemas, printed by the records crate that defines them."""
     output = cargo(root, "run", "--locked", "--quiet", "-p", "provenant-records", "--bin", "print-wire-schemas")
@@ -299,7 +334,14 @@ def generate(root, binary=None):
         gaps.append(reason)
         files[name] = header("Source gap", reason) + "This source is unavailable.\n"
 
+    policy = None
     if (root / WORKSPACE / "Cargo.toml").is_file():
+        try:
+            declarations = reference_data(root)
+            files["external-contract.md"] = external_contract_reference(declarations["external_contract"])
+            policy = declarations["policy"]
+        except (ValueError, KeyError, TypeError, AttributeError, subprocess.CalledProcessError):
+            gap("external-contract.md", "provenant-cli print-reference-data is unavailable")
         for name, all_commands in [("cli.md", False), ("cli-all.md", True)]:
             try:
                 data = catalogue(root, binary, all_commands)
@@ -320,7 +362,13 @@ def generate(root, binary=None):
     ]:
         if (root / source).is_file():
             try:
-                files[name] = render(json.loads((root / source).read_text()))
+                data = json.loads((root / source).read_text())
+                if policy is not None:
+                    data = with_policy_effects(data, policy)
+                elif any(isinstance(section, dict) and 'settings' in section
+                         for section in data.values()):
+                    raise ValueError("policy behaviour declaration is unavailable")
+                files[name] = render(data)
             except (ValueError, KeyError, TypeError, AttributeError):
                 gap(name, f"{source} has no supported machine-readable schema")
         else:

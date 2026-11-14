@@ -21,6 +21,10 @@ class ReferenceTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix='provenant-reference-test-')
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        declarations = {'external_contract': {'schema_version': 1, 'interfaces': []}, 'policy': []}
+        self.declarations = patch.dict(GLOBALS, reference_data=lambda _: declarations)
+        self.declarations.start()
+        self.addCleanup(self.declarations.stop)
 
     def test_compact_configuration_keeps_advanced_fields_discoverable(self):
         data = {"documented_fields": ["lanes.max_depth"], "knobs": {
@@ -44,6 +48,29 @@ class ReferenceTests(unittest.TestCase):
             self.assertIn('Cargo.toml is missing', files[name])
         for text in files.values():
             self.assertIn('scripts/generate-reference', text.splitlines()[0])
+
+    def test_policy_effects_follow_declared_thresholds(self):
+        for strength in ('off', 'warn', 'refuse'):
+            with self.subTest(strength=strength):
+                effect = f'declared {strength} behaviour'
+                data = {'knobs': {}, 'host_lane_build_settings': {
+                    'path': 'domains.fabric.lanes', 'settings': {'arbitrary_cap': {
+                        'type': 'int', 'default': 1, 'effect': 'Observed threshold.',
+                    }}}}
+                data = GEN['with_policy_effects'](data, [{
+                    'threshold': 'domains.fabric.lanes.arbitrary_cap', 'effect': effect}])
+                text = GEN['config_reference'](data, all_fields=True)
+                self.assertIn(effect, text)
+
+    def test_external_contract_document_preserves_every_declared_interface(self):
+        interfaces = [{'kind': 'lane_environment', 'name': 'FIXTURE'},
+                      {'kind': 'stable_commands', 'state': {'state': 'none_declared'}}]
+        text = GEN['external_contract_reference']({'schema_version': 1, 'interfaces': interfaces})
+        for interface in interfaces:
+            for value in interface.values():
+                if isinstance(value, str):
+                    self.assertIn(value, text)
+        self.assertIn('unsupported', text)
 
     def test_host_build_reference_uses_registry_values(self):
         text = GEN['config_reference']({'knobs': {}, 'host_lane_build_settings': {

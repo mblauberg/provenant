@@ -5,6 +5,7 @@ Anchor: `tests/parser.rs`, `crates/cli/src/render.rs`, `tests/catalogue_read_onl
 
 Use `provenant help --all` for commands and `provenant config schema` for configuration.
 The outward contract is declared in `crates/cli/src/external_contract.rs`, covering commands, lane environment and JSON schemas.
+`scripts/generate-reference` renders `external-contract.md` from that declaration through `provenant-cli print-reference-data`; the same data derives threshold behaviour from the policy table.
 No command currently promises cross-version stability, and direct internal-state readers are unsupported.
 
 ## Targets
