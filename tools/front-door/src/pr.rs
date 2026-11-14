@@ -442,11 +442,11 @@ pub fn run(command: Pr, globals: &Globals, _workers: &dyn WorkerObserver) -> u8 
         let result = (|| -> Result<()> {
             let project = roots::selected_project(globals.project.as_deref(), true)?;
             let number = number.to_string();
-            let repository = observer::repository_for_project(&project, WATCH_BUDGET)?;
             let state =
                 roots::resolve(globals, roots::Workspace::Project, roots::Product::Optional)?
                     .roots
                     .state;
+            let repository = status::wait_repository(state.as_path(), &project, WATCH_BUDGET)?;
             let mut observer =
                 observer::Observer::open(state.as_path(), &project, &repository, WATCH_BUDGET)
                     .map_err(|error| {

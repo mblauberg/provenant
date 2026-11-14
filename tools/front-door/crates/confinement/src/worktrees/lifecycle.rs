@@ -480,7 +480,7 @@ fn create_with_default(
         // only the exact commit the remote fetch proved.
         drop(_lock);
         let default = default_creation_base(context, facts, cancel)?;
-        return create_with_default(context, request, cancel, Some(default), Vec::new());
+        return create_with_default(context, request, cancel, Some(default), naming_warnings);
     }
 
     if create_branch {

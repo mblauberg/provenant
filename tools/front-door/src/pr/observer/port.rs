@@ -1,10 +1,16 @@
 //! Repository-declared CI observation transport implementing the common Forge port.
 use super::super::gh::{Forge, Response};
-use super::GhTransport;
+use super::{GhTransport, ObserveError};
 use provenant_config::{PortCommand, PortCommandDisposition, PortSource};
 use provenant_os::exec::SystemExecutor;
 use serde::Deserialize;
-use std::{collections::BTreeMap, ffi::OsString, io, path::PathBuf, time::Duration};
+use std::{
+    collections::BTreeMap,
+    ffi::OsString,
+    io,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -12,8 +18,43 @@ struct PortResponse {
     status: u16,
     #[serde(default)]
     headers: BTreeMap<String, String>,
-    /// CI endpoints return JSON; a 304 response uses the empty string.
+    /// Resource endpoints return UTF-8 bytes; a 304 response uses an empty string.
     body: String,
+}
+
+/// Select the one effective CI observation adapter for this project and request budget.
+pub(crate) fn select_transport(
+    state: &Path,
+    project: &Path,
+    budget: Duration,
+) -> Result<SelectedTransport, ObserveError> {
+    let ports = provenant_config::PortTable::read_for(Some(project), state).map_err(|error| {
+        ObserveError::Unavailable(format!("CI port configuration is unavailable: {error}"))
+    })?;
+    let source = ports.ci_observation.source;
+    match ports.ci_observation.backend {
+        provenant_config::PortBackend::Builtin => Ok(SelectedTransport::Builtin(GhTransport {
+            project: project.to_owned(),
+            left: budget,
+        })),
+        provenant_config::PortBackend::Command { command } => {
+            let executor = SystemExecutor::new(1).map_err(|error| {
+                ObserveError::Unavailable(format!("cannot start CI command executor: {error}"))
+            })?;
+            Ok(SelectedTransport::Command(CommandTransport::new(
+                command,
+                source,
+                project.to_owned(),
+                state.to_owned(),
+                executor,
+                budget,
+                provenant_core::CancelToken::new(),
+            )))
+        }
+        provenant_config::PortBackend::None => Err(ObserveError::Unavailable(
+            "CI observation is disabled by the effective repository port".into(),
+        )),
+    }
 }
 
 pub(crate) enum SelectedTransport {

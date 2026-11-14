@@ -33,6 +33,7 @@ const RETRY_LAST: Duration = Duration::from_secs(15);
 const RATE_FILE: &str = "rate-limit.json";
 const RATE_LOCK: &str = "rate-limit.lock";
 const CACHE_LIMIT: u64 = 16 * 1024 * 1024;
+const REPOSITORY_CONTEXT_PATH: &str = "repos/{owner}/{repo}";
 const RECENT_CACHE_LIMIT: usize = 64;
 const RUN_HISTORY_LIMIT: usize = 512;
 
@@ -99,14 +100,15 @@ impl Forge for GhTransport {
     }
 }
 
-/// Resolve the selected repository through the shared GitHub transport context.
+/// Resolve the selected repository through the selected observation transport context.
 #[allow(clippy::disallowed_methods, reason = "forge transport timing boundary")]
 pub(crate) fn repository_for_project(
+    state: &Path,
     project: &Path,
     budget: Duration,
 ) -> Result<String, ObserveError> {
-    let mut gh = Gh::in_checkout(project.to_owned(), budget);
-    let response = gh.get("repos/{owner}/{repo}", None).map_err(|error| {
+    let mut forge = port::select_transport(state, project, budget)?;
+    let response = forge.get(REPOSITORY_CONTEXT_PATH, None).map_err(|error| {
         ObserveError::Unavailable(format!("cannot identify repository: {error}"))
     })?;
     if let Some(reset) = rate_limit_reset(&response, jiff::Timestamp::now().as_second()) {
@@ -356,38 +358,7 @@ impl Observer<port::SelectedTransport, WallClock> {
         repository: &str,
         budget: Duration,
     ) -> Result<Self, ObserveError> {
-        let ports =
-            provenant_config::PortTable::read_for(Some(project), state).map_err(|error| {
-                ObserveError::Unavailable(format!("CI port configuration is unavailable: {error}"))
-            })?;
-        let source = ports.ci_observation.source;
-        let transport = match ports.ci_observation.backend {
-            provenant_config::PortBackend::Builtin => {
-                port::SelectedTransport::Builtin(GhTransport {
-                    project: project.to_owned(),
-                    left: budget,
-                })
-            }
-            provenant_config::PortBackend::Command { command } => {
-                let executor = provenant_os::exec::SystemExecutor::new(1).map_err(|error| {
-                    ObserveError::Unavailable(format!("cannot start CI command executor: {error}"))
-                })?;
-                port::SelectedTransport::Command(port::CommandTransport::new(
-                    command,
-                    source,
-                    project.to_owned(),
-                    state.to_owned(),
-                    executor,
-                    budget,
-                    provenant_core::CancelToken::new(),
-                ))
-            }
-            provenant_config::PortBackend::None => {
-                return Err(ObserveError::Unavailable(
-                    "CI observation is disabled by the effective repository port".into(),
-                ));
-            }
-        };
+        let transport = port::select_transport(state, project, budget)?;
         let settings = match settings_roots(state, project).and_then(|roots| {
             let sections = provenant_config::DomainSections::<WaitDomain>::new(&WAIT_SECTIONS);
             provenant_config::read_with_domains(&roots, &sections)
@@ -1251,6 +1222,59 @@ mod tests {
         assert_eq!(requests[0].0, "repos/Owner/Repo/pulls/12");
         assert_eq!(requests[0].1, None);
         assert_eq!(requests[1].1.as_deref(), Some("stable"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_context_uses_the_selected_transport_and_none_does_not_fall_back() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let project = tempfile::tempdir().expect("project");
+        let state = tempfile::tempdir().expect("state");
+        let config = project.path().join(".provenant");
+        std::fs::create_dir(&config).expect("port config directory");
+        let command = project.path().join("ci-context-command");
+        std::fs::write(
+            &command,
+            r#"#!/bin/sh
+[ "$PROVENANT_PORT_REQUEST_PATH" = 'repos/{owner}/{repo}' ] || exit 71
+[ -z "$PROVENANT_PORT_IF_NONE_MATCH" ] || exit 72
+printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}"}'
+"#,
+        )
+        .expect("command fixture");
+        let mut permissions = std::fs::metadata(&command)
+            .expect("command metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&command, permissions).expect("executable command");
+
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.ci_observation.backend = provenant_config::PortBackend::Command {
+            command: provenant_config::PortCommand {
+                argv: vec![command.to_string_lossy().into_owned()],
+                exit_codes: provenant_config::CommandExitCodes {
+                    success: vec![0],
+                    unknown: Vec::new(),
+                    other: provenant_config::ExitDisposition::Refused,
+                },
+            },
+        };
+        let path = config.join("ports.json");
+        std::fs::write(&path, serde_json::to_vec(&ports).expect("encode ports"))
+            .expect("write command port");
+        assert_eq!(
+            repository_for_project(state.path(), project.path(), Duration::from_secs(30))
+                .expect("selected command repository"),
+            "owner/repo"
+        );
+
+        ports.ci_observation.backend = provenant_config::PortBackend::None;
+        std::fs::write(&path, serde_json::to_vec(&ports).expect("encode ports"))
+            .expect("write disabled port");
+        let error = repository_for_project(state.path(), project.path(), Duration::from_secs(30))
+            .expect_err("none must fail before any request");
+        assert!(error.to_string().contains("disabled"), "{error}");
     }
 
     #[test]

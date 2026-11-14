@@ -1383,6 +1383,11 @@ impl RunStore {
             let (admitted_record, skipped) = self.admission_skip(&request, &record, call);
             record = admitted_record;
             if let Some(reason) = skipped {
+                use std::io::Write as _;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: repository admission skipped {id}: {reason}"
+                );
                 started.push(Started::Skipped {
                     attempt: id,
                     reason,

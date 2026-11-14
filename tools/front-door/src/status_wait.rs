@@ -662,8 +662,12 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         );
     }
     if !prs.is_empty() {
-        let repository = crate::pr::status::wait_repository(&edge.cwd, pr_read_timeout)
-            .map_err(|error| error.to_string());
+        let repository = crate::pr::status::wait_repository(
+            edge.roots.state.as_path(),
+            &edge.cwd,
+            pr_read_timeout,
+        )
+        .map_err(|error| error.to_string());
         sources.extend(prs.into_iter().map(|number| Source::Pr {
             number,
             repository: repository.clone(),

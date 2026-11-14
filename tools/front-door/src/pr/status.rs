@@ -524,8 +524,14 @@ fn open_numbers(project: &Path) -> Result<Vec<u64>> {
     Ok(listed.into_iter().map(|entry| entry.number).collect())
 }
 /// Resolve the selected repository once before a `wait --pr` observation loop.
-pub(crate) fn wait_repository(project: &Path, budget: std::time::Duration) -> Result<String> {
-    Ok(super::observer::repository_for_project(project, budget)?)
+pub(crate) fn wait_repository(
+    state: &Path,
+    project: &Path,
+    budget: std::time::Duration,
+) -> Result<String> {
+    Ok(super::observer::repository_for_project(
+        state, project, budget,
+    )?)
 }
 
 /// Revalidate PR metadata and its CI through the shared observer during a wait loop.

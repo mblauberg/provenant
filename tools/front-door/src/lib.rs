@@ -634,22 +634,17 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
         let options = config::EditOptions::new("cli");
         Ok(match action {
             ConfigAction::Ports => {
-                let table =
-                    config::PortTable::read_for(Some(&context.project), roots.state.as_path())?;
+                let table = config::PortTable::read_for_inspection(
+                    Some(&context.project),
+                    roots.state.as_path(),
+                )?;
                 let ports: Vec<_> = table
                     .entries()
-                    .map(|(name, source, backend, valid)| {
+                    .map(|(name, source, backend, _, unavailable_reason)| {
                         let backend = match backend {
                             config::PortBackendKind::Builtin => "builtin",
                             config::PortBackendKind::Command => "command",
                             config::PortBackendKind::None => "none",
-                        };
-                        let unavailable_reason = if !valid {
-                            Some("the port declaration is invalid")
-                        } else if backend == "none" {
-                            Some("the effective declaration disables this port")
-                        } else {
-                            None
                         };
                         serde_json::json!({
                             "name": name,

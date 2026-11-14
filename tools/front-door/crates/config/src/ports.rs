@@ -109,10 +109,54 @@ impl PortCommandExecution {
     }
 }
 
+#[allow(
+    clippy::expect_used,
+    reason = "PortCommand fields serialize infallibly"
+)]
 fn command_digest(command: &PortCommand) -> FileDigest {
     let declaration = serde_json::to_vec(command)
         .expect("PortCommand serialization is infallible for its declared fields");
     CanonicalV1::file_digest(&declaration)
+}
+
+// Project declarations do not grant access to ambient credential variables.
+const COMMAND_CONTEXT_ENV: &[&str] = &[
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "LANG",
+    "LANGUAGE",
+    "TZ",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+    "LC_COLLATE",
+    "LC_TIME",
+    "LC_NUMERIC",
+    "LC_MONETARY",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN",
+];
+
+fn command_environment(
+    ambient: impl IntoIterator<Item = (OsString, OsString)>,
+    explicit: &[(OsString, OsString)],
+) -> Vec<(OsString, OsString)> {
+    let mut environment: Vec<_> = ambient
+        .into_iter()
+        .filter(|(name, _)| {
+            name.to_str()
+                .is_some_and(|name| COMMAND_CONTEXT_ENV.contains(&name))
+        })
+        .collect();
+    for (name, value) in explicit {
+        environment.retain(|(existing, _)| existing != name);
+        environment.push((name.clone(), value.clone()));
+    }
+    environment
 }
 
 /// Run a declared argv port with process-group cleanup and bounded output.
@@ -138,11 +182,7 @@ pub fn execute_port_command(
     }
     let mut argv: Vec<_> = command.argv.iter().map(OsString::from).collect();
     argv.extend_from_slice(arguments);
-    let mut env: Vec<_> = std::env::vars_os().collect();
-    for (key, value) in environment {
-        env.retain(|(existing, _)| existing != key);
-        env.push((key.clone(), value.clone()));
-    }
+    let env = command_environment(std::env::vars_os(), environment);
     let mut options = ExecOptions::new(&argv, cwd, timeout);
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture {
@@ -319,9 +359,22 @@ pub struct WorktreeLayoutPort {
 }
 
 impl WorktreeLayoutPort {
+    pub fn unavailable_reason(&self) -> Option<&'static str> {
+        match self.backend {
+            PortBackend::Builtin => None,
+            PortBackend::Command { .. } => {
+                Some("worktree layout command backend is not implemented")
+            }
+            PortBackend::None => Some("the effective declaration disables this port"),
+        }
+    }
+
     /// Resolve the declared default path for a validated Git branch.
     pub fn path_for_branch(&self, branch: &str) -> io::Result<PathBuf> {
-        if !matches!(self.backend, PortBackend::Builtin) || branch.is_empty() {
+        if let Some(reason) = self.unavailable_reason() {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, reason));
+        }
+        if branch.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "worktree layout is unavailable",
@@ -382,6 +435,15 @@ trait PortEntry {
     fn set_source(&mut self, source: PortSource);
     fn backend_kind(&self) -> PortBackendKind;
     fn valid(&self) -> bool;
+    fn unavailable_reason(&self) -> Option<&'static str> {
+        if !self.valid() {
+            Some("the port declaration is invalid")
+        } else if self.backend_kind() == PortBackendKind::None {
+            Some("the effective declaration disables this port")
+        } else {
+            None
+        }
+    }
 }
 
 impl PortEntry for Port {
@@ -424,6 +486,15 @@ impl PortEntry for VerifyPort {
     }
 }
 impl PortEntry for LandPort {
+    fn unavailable_reason(&self) -> Option<&'static str> {
+        match self.backend {
+            LandBackend::Builtin => None,
+            LandBackend::Command { .. } => {
+                Some("landing command strategy wiring is not implemented")
+            }
+            LandBackend::None => Some("the effective declaration disables this port"),
+        }
+    }
     fn source(&self) -> PortSource {
         self.source
     }
@@ -445,6 +516,9 @@ impl PortEntry for LandPort {
     }
 }
 impl PortEntry for WorktreeLayoutPort {
+    fn unavailable_reason(&self) -> Option<&'static str> {
+        WorktreeLayoutPort::unavailable_reason(self)
+    }
     fn source(&self) -> PortSource {
         self.source
     }
@@ -505,9 +579,9 @@ macro_rules! declare_ports {
                 false
             }
 
-            pub fn entries(&self) -> impl Iterator<Item = (&'static str, PortSource, PortBackendKind, bool)> + '_ {
+            pub fn entries(&self) -> impl Iterator<Item = (&'static str, PortSource, PortBackendKind, bool, Option<&'static str>)> + '_ {
                 [$(
-                    (stringify!($field), self.$field.source(), self.$field.backend_kind(), self.$field.valid()),
+                    (stringify!($field), self.$field.source(), self.$field.backend_kind(), self.$field.valid(), self.$field.unavailable_reason()),
                 )+].into_iter()
             }
         }
@@ -605,7 +679,7 @@ impl PortTable {
 
     pub fn validate(&self) -> io::Result<()> {
         if self.schema_version != PORTS_SCHEMA_VERSION
-            || self.entries().any(|(_, _, _, valid)| !valid)
+            || self.entries().any(|(_, _, _, valid, _)| !valid)
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -619,6 +693,13 @@ impl PortTable {
     /// compiled declarations, then explicit project entries. Omitted ports
     /// inherit their lower layer and retain that layer's source.
     pub fn read_for(project: Option<&Path>, host_state: &Path) -> io::Result<Self> {
+        let table = Self::read_for_inspection(project, host_state)?;
+        table.validate()?;
+        Ok(table)
+    }
+
+    /// Inspect well-typed declarations without hiding semantically invalid ports.
+    pub fn read_for_inspection(project: Option<&Path>, host_state: &Path) -> io::Result<Self> {
         let mut document = serde_json::to_value(Self::builtin()).map_err(io::Error::other)?;
         let mut sources = BTreeMap::new();
         apply_layer(
@@ -644,7 +725,6 @@ impl PortTable {
                 ));
             }
         }
-        table.validate()?;
         Ok(table)
     }
 }
@@ -687,6 +767,12 @@ mod tests {
             PortBackend::None,
         ];
         for backend in cases {
+            let mut layout = table.worktree_layout.clone();
+            layout.backend = backend.clone();
+            assert_eq!(
+                layout.unavailable_reason().is_none(),
+                layout.path_for_branch("feature/topic").is_ok()
+            );
             let value = serde_json::to_value(&backend).unwrap();
             assert_eq!(
                 serde_json::from_value::<PortBackend>(value).unwrap(),
@@ -796,6 +882,43 @@ mod tests {
     }
 
     #[test]
+    fn command_environment_inherits_execution_context_only() {
+        let ambient = COMMAND_CONTEXT_ENV
+            .iter()
+            .map(|name| (OsString::from(*name), OsString::from("context")))
+            .chain([
+                ("GH_TOKEN".into(), "credential".into()),
+                ("SSH_AUTH_SOCK".into(), "agent".into()),
+            ]);
+        let result: BTreeMap<_, _> =
+            command_environment(ambient, &[("PATH".into(), "explicit".into())])
+                .into_iter()
+                .collect();
+        for name in COMMAND_CONTEXT_ENV {
+            assert!(result.contains_key(&OsString::from(*name)));
+        }
+        assert_eq!(
+            result.get(&OsString::from("PATH")),
+            Some(&OsString::from("explicit"))
+        );
+        assert!(!result.contains_key(&OsString::from("GH_TOKEN")));
+        assert!(!result.contains_key(&OsString::from("SSH_AUTH_SOCK")));
+    }
+
+    #[test]
+    fn inspection_reports_invalid_ports_without_executing_them() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join(".provenant")).unwrap();
+        std::fs::write(directory.path().join(PORTS_CONFIG), r#"{"schema_version":2,"naming":{"backend":{"kind":"command","command":{"argv":[],"exit_codes":{"success":[0],"unknown":[],"other":"refused"}}}}}"#).unwrap();
+        let table =
+            PortTable::read_for_inspection(Some(directory.path()), directory.path()).unwrap();
+        let naming = table.entries().find(|entry| entry.0 == "naming").unwrap();
+        assert!(!naming.3);
+        assert!(naming.4.is_some());
+        assert!(PortTable::read_for(Some(directory.path()), directory.path()).is_err());
+    }
+
+    #[test]
     fn command_digest_binds_argv_and_each_exit_disposition() {
         let base = PortCommand {
             argv: vec!["admit".into(), "--phase".into()],
@@ -847,7 +970,7 @@ mod tests {
         let table = PortTable::read_for(Some(&project), &host).unwrap();
         let sources: BTreeMap<_, _> = table
             .entries()
-            .map(|(name, source, _, _)| (name, source))
+            .map(|(name, source, _, _, _)| (name, source))
             .collect();
         assert_eq!(sources["ci_observation"], PortSource::Host);
         assert_eq!(sources["naming"], PortSource::Project);
@@ -870,7 +993,7 @@ mod tests {
         assert!(
             loaded
                 .entries()
-                .all(|(_, source, _, _)| source == PortSource::Project)
+                .all(|(_, source, _, _, _)| source == PortSource::Project)
         );
         forged.set_sources(PortSource::Project);
         assert_eq!(
