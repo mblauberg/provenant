@@ -39,6 +39,42 @@ fn landing_review_query_reads_typed_settlement_on_only_the_exact_head() {
     assert!(landing_reviews(&root, project, head).unwrap().is_empty());
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn watching_the_checkpoint_observes_publication_after_the_precommit_event_log() {
+    use provenant_os::changes::watch::{WaitOutcome, Watcher};
+    use std::time::Duration;
+
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base);
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let fixture: StoredCheckpoint =
+        serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    journal.bind(fixture.execution).unwrap();
+    journal.save(&fixture.checkpoint).unwrap();
+    let paths = FileJournal::observation_paths(&root, project, "g-test").unwrap();
+    let directory = journal.directory.current_path().unwrap();
+    let checkpoint = directory.join(journal.checkpoint_name());
+    assert!(paths.contains(&checkpoint));
+    let mut watcher = Watcher::subscribe(&[checkpoint]).unwrap();
+
+    journal.save(&fixture.checkpoint).unwrap();
+
+    assert!(directory.join(super::events::name("g-test")).is_file());
+    assert_eq!(
+        watcher.wait(Duration::from_secs(2)).unwrap(),
+        WaitOutcome::Changed
+    );
+}
+
 #[test]
 fn interrupted_peer_origin_publication_never_reuses_the_launch_name() {
     use super::journal::{CRASH_POINT, CrashPoint};

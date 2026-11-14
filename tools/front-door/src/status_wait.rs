@@ -215,16 +215,13 @@ struct Update {
     reading: Reading,
 }
 
-pub(crate) fn graph_event_path(
-    state: &std::path::Path,
+fn graph_observation_paths(
+    state: &provenant_core::StateRoot,
     project: provenant_core::ProjectId,
     graph: &str,
-) -> PathBuf {
-    state
-        .join("fabric")
-        .join("graphs")
-        .join(project.to_string())
-        .join(format!("{graph}.events.jsonl"))
+) -> Result<Vec<PathBuf>, String> {
+    provenant_fabric_runtime::graph::FileJournal::observation_paths(state, project, graph)
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn observation_text(
@@ -749,12 +746,23 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     let local_host = project.as_ref().ok().map(|(_, host)| host.clone());
     let project_error = project.as_ref().err().cloned();
     let mut pending_index_error = None;
+    let mut observation_path_error = None;
     let event_paths = match project {
-        Ok((project, _)) if !command.targets.is_empty() => command
-            .targets
-            .iter()
-            .map(|target| graph_event_path(resolved.roots.state.as_path(), project, &target.name))
-            .collect::<Vec<_>>(),
+        Ok((project, _)) if !command.targets.is_empty() => {
+            let paths = command
+                .targets
+                .iter()
+                .map(|target| graph_observation_paths(&resolved.roots.state, project, &target.name))
+                .collect::<Result<Vec<_>, _>>();
+            match paths {
+                Ok(paths) => paths.into_iter().flatten().collect(),
+                Err(error) => {
+                    observation_path_error =
+                        Some(format!("cannot resolve graph observation paths: {error}"));
+                    Vec::new()
+                }
+            }
+        }
         Ok((project, _)) if command.prs.is_empty() => {
             let names = provenant_fabric_runtime::graph::FileJournal::pending_graph_ids(
                 &resolved.roots.state,
@@ -767,19 +775,17 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         .into_iter()
                         .take(settings.max_targets as usize)
                         .collect::<Vec<_>>();
-                    if names.is_empty() {
-                        vec![graph_event_path(
-                            resolved.roots.state.as_path(),
-                            project,
-                            ".wait",
-                        )]
-                    } else {
-                        names
-                            .iter()
-                            .map(|name| {
-                                graph_event_path(resolved.roots.state.as_path(), project, name)
-                            })
-                            .collect()
+                    match names
+                        .iter()
+                        .map(|name| graph_observation_paths(&resolved.roots.state, project, name))
+                        .collect::<Result<Vec<_>, _>>()
+                    {
+                        Ok(paths) => paths.into_iter().flatten().collect(),
+                        Err(error) => {
+                            observation_path_error =
+                                Some(format!("cannot resolve graph observation paths: {error}"));
+                            Vec::new()
+                        }
                     }
                 }
                 Err(error) => {
@@ -790,7 +796,9 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         }
         _ => Vec::new(),
     };
-    let setup_fallback = project_error.or(pending_index_error);
+    let setup_fallback = project_error
+        .or(pending_index_error)
+        .or(observation_path_error);
     let (mut event_watcher, initial_fallback) = if event_paths.is_empty() {
         (
             None,

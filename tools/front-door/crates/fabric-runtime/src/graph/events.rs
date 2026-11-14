@@ -87,7 +87,7 @@ fn effect_identifier(kind: &str, value: Option<&str>) -> Option<Value> {
     Some(serde_json::json!({"effect":kind,"identifier":value}))
 }
 
-fn name(id: &str) -> OsString {
+pub(super) fn name(id: &str) -> OsString {
     format!("{id}.events.jsonl").into()
 }
 

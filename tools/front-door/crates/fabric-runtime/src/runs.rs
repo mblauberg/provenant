@@ -1,6 +1,6 @@
 //! Typed F3 run records and helpers consumed by the binary facade.
 
-use super::coordination::facade::{AttemptTarget, WaitCondition};
+use super::coordination::facade::{AttemptTarget, FacadeError, WaitCondition};
 use provenant_core::OperationId;
 use provenant_records::WorkKey;
 use provenant_records::run::{AttemptRecord, RunEvent};
@@ -258,6 +258,29 @@ pub struct RunCapabilities {
     pub events: bool,
 }
 
+/// Finalize every wait return through the same snapshot rule. At expiry the
+/// owner may refresh local records; the callback must not start remote reads or
+/// grant another wait budget.
+pub fn finish_wait_snapshot(
+    condition: WaitCondition,
+    mut attempts: Vec<AttemptRecord>,
+    expired: bool,
+    extra: provenant_records::ExtraFields,
+    refresh_local: impl FnOnce(&mut [AttemptRecord]) -> Result<(), FacadeError>,
+) -> Result<RunResult, FacadeError> {
+    if expired {
+        refresh_local(&mut attempts)?;
+    }
+    let satisfied = wait_satisfied(condition, attempts.iter().map(|record| &record.state));
+    Ok(RunResult::Wait {
+        extra,
+        condition,
+        attempts,
+        satisfied,
+        timed_out: expired && !satisfied,
+    })
+}
+
 /// Input-required wakes either condition; other outcomes remain result data.
 pub fn wait_satisfied<'a>(
     condition: WaitCondition,
@@ -383,6 +406,38 @@ mod tests {
             summary["visible_extension"],
             serde_json::json!({"kept": true})
         );
+    }
+
+    #[test]
+    fn expired_wait_evaluates_the_final_local_snapshot_before_its_verdict() {
+        for condition in [WaitCondition::Any, WaitCondition::All] {
+            let pending = attempt();
+            let result = finish_wait_snapshot(
+                condition,
+                vec![pending],
+                true,
+                Default::default(),
+                |records| {
+                    records[0].state = AttemptState::Terminal {
+                        extra: Default::default(),
+                        outcome: Outcome::Succeeded,
+                        exit_code: Some(0),
+                        finished_at: WallTime::from_micros(2).unwrap(),
+                        reason: None,
+                    };
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert!(matches!(
+                result,
+                RunResult::Wait {
+                    satisfied: true,
+                    timed_out: false,
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]

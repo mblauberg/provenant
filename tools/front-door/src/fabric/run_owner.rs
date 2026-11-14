@@ -1496,7 +1496,7 @@ impl BinaryRunOwner<'_> {
                 // SQLite events can precede commit visibility and the shared
                 // hint is lossy under contention; deadline results get one final
                 // committed read from the owning store.
-                let refresh_local = |attempts: &mut Vec<provenant_records::run::AttemptRecord>| {
+                let refresh_local = |attempts: &mut [provenant_records::run::AttemptRecord]| {
                     if let Some(session) = &local_session {
                         for index in &local_indices {
                             attempts[*index] = session
@@ -1528,19 +1528,14 @@ impl BinaryRunOwner<'_> {
                     if budget.remaining(self.factory.clock.mono_now()).as_micros() == 0
                         && !(budget.is_nonblocking() && last_attempts.is_none())
                     {
-                        if let Some(mut attempts) = last_attempts {
-                            refresh_local(&mut attempts)?;
-                            let satisfied = provenant_fabric_runtime::runs::wait_satisfied(
-                                condition,
-                                attempts.iter().map(|record| &record.state),
-                            );
-                            return Ok(RunResult::Wait {
-                                extra: observation_extra(&observation),
+                        if let Some(attempts) = last_attempts {
+                            return provenant_fabric_runtime::runs::finish_wait_snapshot(
                                 condition,
                                 attempts,
-                                satisfied,
-                                timed_out: !satisfied,
-                            });
+                                true,
+                                observation_extra(&observation),
+                                &refresh_local,
+                            );
                         }
                         return Err(FacadeError::Timeout);
                     }
@@ -1581,20 +1576,14 @@ impl BinaryRunOwner<'_> {
                                         budget.remaining(self.factory.clock.mono_now()).as_micros()
                                             == 0;
                                     return match last_attempts {
-                                        Some(mut attempts) if expired => {
-                                            refresh_local(&mut attempts)?;
-                                            let satisfied =
-                                                provenant_fabric_runtime::runs::wait_satisfied(
-                                                    condition,
-                                                    attempts.iter().map(|record| &record.state),
-                                                );
-                                            Ok(RunResult::Wait {
-                                                extra: observation_extra(&observation),
+                                        Some(attempts) if expired => {
+                                            provenant_fabric_runtime::runs::finish_wait_snapshot(
                                                 condition,
                                                 attempts,
-                                                satisfied,
-                                                timed_out: !satisfied,
-                                            })
+                                                true,
+                                                observation_extra(&observation),
+                                                &refresh_local,
+                                            )
                                         }
                                         None if expired => Err(FacadeError::Timeout),
                                         _ => Err(error),
@@ -1636,13 +1625,13 @@ impl BinaryRunOwner<'_> {
                     let timed_out =
                         budget.remaining(self.factory.clock.mono_now()).as_micros() == 0;
                     if satisfied || timed_out {
-                        return Ok(RunResult::Wait {
-                            extra: observation_extra(&observation),
+                        return provenant_fabric_runtime::runs::finish_wait_snapshot(
                             condition,
                             attempts,
-                            satisfied,
-                            timed_out: !satisfied && timed_out,
-                        });
+                            timed_out,
+                            observation_extra(&observation),
+                            &refresh_local,
+                        );
                     }
                     last_attempts = Some(attempts);
 

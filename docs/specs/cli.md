@@ -84,7 +84,7 @@ for settlement logs and store changes. When that source is unavailable, the resu
 and rereads at `domains.wait.local_interval_ms`. Peer or relayed rows also use
 paced rereads at that setting because the relay socket has no remote event
 subscription; the result identifies that source. Pull requests use forge
-observation. Settlement events are emitted as they are observed. Expiry reports the last observed state and marks the wait as timed out; it does not extend the read budget.
+observation. Settlement events are emitted as they are observed. Expiry ends blocking observation. Local stores take one final snapshot; remote reads use only the original wait budget. Results identify unsatisfied waits as timed out.
 With `--json`, wait emits JSONL events followed by a terminal command-result envelope, including without `--follow`.
 
 - Why: a reader must neither terminate healthy work nor wake on stale evidence.

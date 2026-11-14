@@ -2407,12 +2407,17 @@ impl Factory {
                 "lane graph state is observed through the host relay without a local event log",
             );
         }
-        let path = crate::status_wait::graph_event_path(
-            self.context.roots.state.as_path(),
+        match provenant_fabric_runtime::graph::FileJournal::observation_paths(
+            &self.context.roots.state,
             self.context.identity.project,
             graph,
-        );
-        crate::status_wait::LocalObservation::subscribe(std::slice::from_ref(&path), interval)
+        ) {
+            Ok(paths) => crate::status_wait::LocalObservation::subscribe(&paths, interval),
+            Err(error) => crate::status_wait::LocalObservation::paced(
+                interval,
+                format!("cannot resolve graph observation paths: {error}"),
+            ),
+        }
     }
 
     fn wait_document(
