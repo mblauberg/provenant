@@ -783,6 +783,12 @@ mod tests {
     #[test]
     fn bare_wait_reports_an_unreadable_graph_as_unsuccessful()
     -> Result<(), Box<dyn std::error::Error>> {
+        if crate::fabric::peer_tests::host_test(
+            "status_wait::tests::bare_wait_reports_an_unreadable_graph_as_unsuccessful",
+        )? {
+            return Ok(());
+        }
+
         use provenant_core::Clock;
         use provenant_fabric_runtime::graph::FileJournal;
         let rig = crate::worktree_tests::repository()?;

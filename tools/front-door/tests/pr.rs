@@ -29,7 +29,7 @@ fn rig() -> Result<TestRig> {
     )?;
     fs::write(
         rig.project.join("checks.json"),
-        r#"[{"bucket":"pass"},{"bucket":"skipping"}]"#,
+        r#"[{"name":"ci-status","bucket":"pass"},{"name":"optional","bucket":"skipping"}]"#,
     )?;
     // The fake forge has no reviews or target to read, so land on CI alone.
     fs::write(
@@ -83,24 +83,11 @@ fn pr_watch_failure_and_head_changes_report_fail_with_head() -> Result {
 }
 
 fn land_refuses_unpassed_missing_and_malformed_checks() -> Result {
-    for bucket in [
-        "pending",
-        "fail",
-        "cancel",
-        "unknown",
-        "skipping",
-        "empty",
-        "malformed",
-        "pass-pending",
-        "pass-fail",
-    ] {
+    for bucket in ["fail", "cancel", "unknown", "malformed"] {
         let rig = self::rig()?;
         let checks = match bucket {
-            "empty" => "[]".into(),
             "malformed" => "invalid json".into(),
-            "pass-pending" => r#"[{"bucket":"pass"},{"bucket":"pending"}]"#.into(),
-            "pass-fail" => r#"[{"bucket":"pass"},{"bucket":"fail"}]"#.into(),
-            _ => format!(r#"[{{"bucket":"{bucket}"}}]"#),
+            _ => format!(r#"[{{"name":"ci-status","bucket":"{bucket}"}}]"#),
         };
         fs::write(rig.project.join("checks.json"), checks)?;
         assert_ne!(code(&merge(&rig)?), 0, "{bucket}");

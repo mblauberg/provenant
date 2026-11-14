@@ -70,6 +70,15 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         std::fs::create_dir(&config)?;
         std::os::unix::fs::symlink(config, home.join(".config"))?;
     }
+    // Resolve host authority after establishing credential-parent aliases.
+    #[cfg(target_os = "macos")]
+    if !fence_only {
+        let skill_root = home.join(".gemini/skills");
+        std::fs::create_dir_all(&skill_root)?;
+        std::os::unix::fs::symlink(&skill_root, skill_root.join("bin"))?;
+        std::os::unix::fs::symlink(&skill_root, home.join(".cargo"))?;
+        std::fs::create_dir_all(home.join(".rustup/toolchains"))?;
+    }
     let executor = SystemExecutor::new(1)?;
     let git = init_fixture_repository(&executor, &project, &git_home)?;
     let roots = provenant_core::RootInputs {
@@ -688,12 +697,6 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             required_anchors, system_backend,
         };
         let skill_root = home.join(".gemini/skills");
-        std::fs::create_dir_all(&skill_root)?;
-        // Skill discovery and Rust discovery omit the same canonical root.
-        // Repeated read/exec grants for that root collapse within Toolchain.
-        std::os::unix::fs::symlink(&skill_root, skill_root.join("bin"))?;
-        std::os::unix::fs::symlink(&skill_root, home.join(".cargo"))?;
-        std::fs::create_dir_all(home.join(".rustup/toolchains"))?;
         let login = home.join("Library/Keychains/login.keychain-db");
         std::fs::create_dir_all(login.parent().unwrap())?;
         std::fs::write(&login, b"fixture")?;

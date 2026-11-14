@@ -1735,7 +1735,8 @@ mod provisioning_tests {
     fn writer_child_worktree_is_created_at_source_and_dirty_reuse_is_refused()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
-        let home = root.path().join("home");
+        let canonical_root = root.path().canonicalize()?;
+        let home = canonical_root.join("home");
         let project = home.join("project");
         std::fs::create_dir_all(&project)?;
         for args in [
