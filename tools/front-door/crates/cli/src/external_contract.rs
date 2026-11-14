@@ -62,6 +62,7 @@ pub fn external_contract() -> ExternalContract {
     use provenant_core::{RUN_STATE_DIRECTORY_ENV, STATE_DIRECTORY_ENV};
     use provenant_run::{LANE_DEPTH_ENV, PARENT_ATTEMPT_ENV};
     use provenant_supervisor::process_tree;
+    use provenant_os::lane_ports;
 
     let envelope = command_result_schema();
     ExternalContract {
@@ -73,6 +74,8 @@ pub fn external_contract() -> ExternalContract {
             ExternalInterface::LaneEnvironment { name: RUN_STATE_DIRECTORY_ENV.into() },
             ExternalInterface::LaneEnvironment { name: STATE_DIRECTORY_ENV.into() },
             ExternalInterface::LaneEnvironment { name: "HOME".into() },
+            ExternalInterface::LaneEnvironment { name: lane_ports::BASE_ENV.into() },
+            ExternalInterface::LaneEnvironment { name: lane_ports::COUNT_ENV.into() },
             ExternalInterface::LaneEnvironment { name: "PROVENANT_ROOT".into() },
             ExternalInterface::LaneEnvironment { name: "PROVENANT_GIT".into() },
             ExternalInterface::LaneEnvironment { name: "PROVENANT_SANDBOX".into() },
@@ -121,6 +124,15 @@ pub fn external_contract() -> ExternalContract {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn allocated_port_block_environment_is_declared() {
+        let table = external_contract();
+        for variable in [provenant_os::lane_ports::BASE_ENV, provenant_os::lane_ports::COUNT_ENV] {
+            assert!(table.interfaces.iter().any(|interface| matches!(interface,
+                ExternalInterface::LaneEnvironment { name } if name == variable)));
+        }
+    }
 
     #[test]
     fn every_declared_interface_kind_is_reachable_and_round_trips() {

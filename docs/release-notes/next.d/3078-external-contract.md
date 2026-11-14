@@ -4,7 +4,7 @@
 
 ### CLI and install
 
-The command and option spellings below were accepted by the v1.11.2 parser and now have the listed replacements. Work-facing JSON identity uses format-2 WorkKey, whose CLI target spelling is `GRAPH/NODE#N`. Reading internal run files has no supported replacement.
+The command and option spellings below appeared in the v1.11.2 command surface or its legacy repair hints; their current replacements are listed. Work-facing JSON identity uses format-2 WorkKey, whose CLI target spelling is `GRAPH/NODE#N`. Reading internal run files has no supported replacement.
 
 - `dispatch`: provenant run TEMPLATE BRIEF. (#3078)
 - `lanes`: provenant status. (#3078)
@@ -62,6 +62,8 @@ The command and option spellings below were accepted by the v1.11.2 parser and n
 
 ### Lanes and settlement
 
+- `domains.fabric.limits.lease_seconds`: remove this obsolete key; custody records replace the old lease mechanism. (#3078)
+- `.provenant/verify.json`: move verification declarations to the versioned `.provenant/ports.json` table; each tier declares its selection and host-load policy. (#3078)
 - `domains.fabric.lanes.build_wait_minutes`: build slots try once and proceed; Cargo manages its own locks. (#3078)
 - `lanes.slot_wait_seconds`: build-slot waits and their wall-clock extension have been removed. (#3078)
 - `lane.max_continuations`: no direct equivalent; use graph `limits.continuations` to bound restarts. (#3078)
