@@ -62,7 +62,9 @@ proposes a diff and never applies it.
 ## Attribution is detected, never guessed
 
 Usage rows retain per-session account identity, epoch and evidence source from the provider identity port; unavailable identity is typed unknown, never inferred from a config-directory path.
-Ingest preserves that attribution; unknown usage remains `unattributed`, never dropped. Ingest stores token counts
+Ingest preserves that attribution; unknown usage remains `unattributed`, never dropped.
+Conflicting known identities persist as a per-session override that masks dated rows
+before account filtering. Ingest stores token counts
 without prompt, reply, tool or path text, and rerunning it adds nothing. The
 store is one segment per UTC day; a day that reaches its cap stops additions to
 that day visibly, and no reader loads the whole store.

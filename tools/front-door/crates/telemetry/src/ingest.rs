@@ -9,6 +9,7 @@
 //! no operation meets a whole-store size.
 use crate::{claude::Raw, segments};
 use provenant_records::AccountIdentity;
+use crate::usage::{Identity, UnknownIdentityReason};
 use provenant_core::Roots;
 use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,10 @@ pub const PROVIDER: &str = "claude";
 const DIRECTORY: &str = "ingest";
 const LOCK: &str = "ingest.lock";
 const CURSORS: &str = "ingest-cursors.json";
+const IDENTITY_OVERRIDES: &str = "identity-overrides";
+const IDENTITY_OVERRIDE_PREFIX: &str = "session-identity-";
+const IDENTITY_OVERRIDE_SCHEMA_VERSION: u64 = 1;
+const IDENTITY_OVERRIDE_CAP: u64 = 16 << 10;
 const CURSOR_CAP: u64 = 32 << 20;
 /// Largest day ingest rewrites. At about 250 bytes a row this is roughly a
 /// quarter of a million messages in one day; past it ingest stops adding rows
@@ -54,6 +59,8 @@ pub enum IngestError {
     Io(#[from] std::io::Error),
     #[error("another ingest is running")]
     Busy,
+    #[error("the ingest identity-override store is invalid")]
+    IdentityOverrideStore,
 }
 
 impl IngestError {
@@ -63,6 +70,7 @@ impl IngestError {
             Self::Filesystem(_) => "filesystem",
             Self::Io(_) => "io",
             Self::Busy => "busy",
+            Self::IdentityOverrideStore => "identity_override_store",
         }
     }
 }
@@ -419,6 +427,27 @@ struct CursorStore {
     files: BTreeMap<String, Cursor>,
 }
 
+/// A durable mask for every row from a session with conflicting identity evidence.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionIdentityOverride {
+    schema_version: u64,
+    provider: String,
+    session: String,
+    identity: AccountIdentity,
+}
+
+impl SessionIdentityOverride {
+    fn conflict(session: &str) -> Self {
+        Self {
+            schema_version: IDENTITY_OVERRIDE_SCHEMA_VERSION,
+            provider: PROVIDER.to_owned(),
+            session: session.to_owned(),
+            identity: AccountIdentity::conflicting_provider_observations(),
+        }
+    }
+}
+
 fn read_cursors(directory: &Directory, store: &str) -> BTreeMap<String, Cursor> {
     let Ok(file) = directory.open_read(OsStr::new(CURSORS)) else {
         return BTreeMap::new();
@@ -697,6 +726,36 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
         })?;
     let store = open_segments(&directory, true)?;
     sweep_staging(&store)?;
+    let mut override_directory = open_identity_override_directory(&store, false)?;
+    if let Some(overrides) = &override_directory {
+        sweep_staging(overrides)?;
+    }
+    let mut identity_overrides = read_identity_overrides(override_directory.as_ref())?;
+    for (session, identity) in request.chair_sessions {
+        if matches!(
+            &identity.identity,
+            Identity::Unknown {
+                reason: UnknownIdentityReason::ConflictingProviderIdentity,
+            }
+        ) {
+            if !valid_session(session)
+                || identity != &AccountIdentity::conflicting_provider_observations()
+            {
+                return Err(IngestError::IdentityOverrideStore);
+            }
+            if !identity_overrides.contains_key(session) {
+                if override_directory.is_none() {
+                    override_directory = open_identity_override_directory(&store, true)?;
+                }
+                let Some(directory) = &override_directory else {
+                    return Err(IngestError::IdentityOverrideStore);
+                };
+                let record = SessionIdentityOverride::conflict(session);
+                write_identity_override(directory, &record)?;
+                identity_overrides.insert(session.clone(), record.identity);
+            }
+        }
+    }
     let mut cursors = if request.incremental {
         read_cursors(&directory, &fingerprint(&store)?)
     } else {
@@ -754,6 +813,11 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
         }
     }
     report.messages = messages.len() as u64;
+    for ((session, _), pending) in &mut messages {
+        if let Some(identity) = identity_overrides.get(session) {
+            pending.identity = identity.clone();
+        }
+    }
 
     // Load the days new messages fall on and the newest few, so later chair
     // and attempt records still reach recent rows. Older days stay on disk.
@@ -785,9 +849,14 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
                 row.source = Source::Chair;
                 segment.changed = true;
             }
-            if matches!(&row.identity.identity, crate::usage::Identity::Unknown { .. })
+            if let Some(identity) = identity_overrides.get(&row.session) {
+                if row.identity != *identity {
+                    row.identity = identity.clone();
+                    segment.changed = true;
+                }
+            } else if matches!(&row.identity.identity, Identity::Unknown { .. })
                 && let Some(identity) = request.chair_sessions.get(&row.session)
-                && matches!(&identity.identity, crate::usage::Identity::Known { .. })
+                && matches!(&identity.identity, Identity::Known { .. })
             {
                 row.identity = identity.clone();
                 segment.changed = true;
@@ -1002,6 +1071,94 @@ impl Segment {
     }
 }
 
+fn identity_override_name(provider: &str, session: &str) -> String {
+    let key = format!("{provider}\0{session}");
+    format!("{IDENTITY_OVERRIDE_PREFIX}{}.json", digest(key.as_bytes()))
+}
+
+fn open_identity_override_directory(
+    store: &Directory,
+    create: bool,
+) -> Result<Option<Directory>, IngestError> {
+    if create {
+        match store.mkdir(OsStr::new(IDENTITY_OVERRIDES), 0o700) {
+            Ok(()) => store.sync()?,
+            Err(error) if error.is_exists() => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    match store.open_directory(OsStr::new(IDENTITY_OVERRIDES)) {
+        Ok(directory) => Ok(Some(directory)),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_identity_overrides(
+    directory: Option<&Directory>,
+) -> Result<BTreeMap<String, AccountIdentity>, IngestError> {
+    let Some(directory) = directory else {
+        return Ok(BTreeMap::new());
+    };
+    let mut overrides = BTreeMap::new();
+    for entry in directory.entries()? {
+        let entry = entry?;
+        let name = entry.to_str().ok_or(IngestError::IdentityOverrideStore)?;
+        if name.starts_with(".ingest-") {
+            continue;
+        }
+        let Some(hash) = name
+            .strip_prefix(IDENTITY_OVERRIDE_PREFIX)
+            .and_then(|name| name.strip_suffix(".json"))
+        else {
+            return Err(IngestError::IdentityOverrideStore);
+        };
+        if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(IngestError::IdentityOverrideStore);
+        }
+        let file = directory.open_read(OsStr::new(name))?;
+        if file.metadata()?.size > IDENTITY_OVERRIDE_CAP {
+            return Err(IngestError::IdentityOverrideStore);
+        }
+        let mut bytes = Vec::new();
+        file.take(IDENTITY_OVERRIDE_CAP + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > IDENTITY_OVERRIDE_CAP {
+            return Err(IngestError::IdentityOverrideStore);
+        }
+        let record: SessionIdentityOverride = serde_json::from_slice(&bytes)
+            .map_err(|_| IngestError::IdentityOverrideStore)?;
+        if record.schema_version != IDENTITY_OVERRIDE_SCHEMA_VERSION
+            || record.provider != PROVIDER
+            || !valid_session(&record.session)
+            || record.identity != AccountIdentity::conflicting_provider_observations()
+            || name != identity_override_name(&record.provider, &record.session)
+            || overrides.insert(record.session, record.identity).is_some()
+        {
+            return Err(IngestError::IdentityOverrideStore);
+        }
+    }
+    Ok(overrides)
+}
+
+fn write_identity_override(
+    directory: &Directory,
+    record: &SessionIdentityOverride,
+) -> Result<(), IngestError> {
+    let bytes = serde_json::to_vec(record).map_err(std::io::Error::other)?;
+    if bytes.len() as u64 > IDENTITY_OVERRIDE_CAP {
+        return Err(IngestError::IdentityOverrideStore);
+    }
+    directory
+        .atomic_write(
+            OsStr::new(&identity_override_name(&record.provider, &record.session)),
+            ".ingest-identity-",
+            &bytes,
+            PublishMode::Replace,
+        )?
+        .require_durable()?;
+    Ok(())
+}
+
 /// The segments directory, created on request.
 fn open_segments(root: &Directory, create: bool) -> Result<Directory, IngestError> {
     if create {
@@ -1104,6 +1261,8 @@ pub fn read_rows(roots: &Roots, filter: &RowFilter) -> Result<Vec<Row>, IngestEr
         Err(IngestError::Filesystem(error)) if error.is_not_found() => return Ok(Vec::new()),
         Err(error) => return Err(error),
     };
+    let override_directory = open_identity_override_directory(&directory, false)?;
+    let identity_overrides = read_identity_overrides(override_directory.as_ref())?;
     let day = |seconds: i64| {
         jiff::Timestamp::from_second(seconds)
             .ok()
@@ -1118,9 +1277,12 @@ pub fn read_rows(roots: &Roots, filter: &RowFilter) -> Result<Vec<Row>, IngestEr
             continue;
         }
         each_line(directory.open_read(OsStr::new(&name))?, |line| {
-            let Ok(row) = serde_json::from_slice::<Row>(line) else {
+            let Ok(mut row) = serde_json::from_slice::<Row>(line) else {
                 return;
             };
+            if let Some(identity) = identity_overrides.get(&row.session) {
+                row.identity = identity.clone();
+            }
             if row.schema_version != ROW_SCHEMA_VERSION
                 || filter.account.as_ref().is_some_and(|a| a != &row.identity.account_key())
                 || filter.model.as_ref().is_some_and(|m| *m != row.model)

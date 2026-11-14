@@ -120,6 +120,18 @@ fn segment_files(f: &Fixture) -> Result<Vec<String>> {
 }
 
 #[test]
+fn session_identity_override_round_trips_its_declared_store_shape() -> Result {
+    let record = SessionIdentityOverride::conflict("opaque-session");
+    let bytes = serde_json::to_vec(&record)?;
+    let decoded: SessionIdentityOverride = serde_json::from_slice(&bytes)?;
+    assert_eq!(decoded, record);
+    assert_eq!(decoded.schema_version, IDENTITY_OVERRIDE_SCHEMA_VERSION);
+    assert_eq!(decoded.provider, PROVIDER);
+    assert_eq!(decoded.identity, AccountIdentity::conflicting_provider_observations());
+    Ok(())
+}
+
+#[test]
 fn a_message_seen_on_both_sides_of_midnight_is_counted_once() -> Result {
     let f = Fixture::new()?;
     f.write(
@@ -280,6 +292,106 @@ fn session_identities_split_usage_when_a_config_directory_rotates() -> Result {
     assert_eq!(row_for("session-a").output, 3);
     assert_eq!(row_for("session-b").identity, second);
     assert_eq!(row_for("session-b").output, 9);
+    Ok(())
+}
+
+#[test]
+fn a_conflicting_session_identity_masks_old_rows_and_absorbs_future_known_evidence() -> Result {
+    let f = Fixture::new()?;
+    f.write(
+        "rotating",
+        "projects/p/session-a.jsonl",
+        &message("message-a", "2026-10-01T00:00:00Z", 1, 0, 0, 3),
+    )?;
+    f.write(
+        "rotating",
+        "projects/p/session-b.jsonl",
+        &message("message-b", "2026-10-02T00:00:00Z", 1, 0, 0, 4),
+    )?;
+    f.write(
+        "rotating",
+        "projects/p/session-c.jsonl",
+        &message("message-c", "2026-10-03T00:00:00Z", 1, 0, 0, 5),
+    )?;
+    let dirs = [ConfigDir { path: f.dir("rotating") }];
+    let known_a = AccountIdentity::provider_observation("claude", "account-a");
+    let first = BTreeMap::from([("session-a".to_owned(), known_a.clone())]);
+    ingest(
+        &f.roots,
+        &Request {
+            dirs: &dirs,
+            chair_sessions: &first,
+            provider: None,
+            since: None,
+            deadline: None,
+            incremental: false,
+        },
+    )?;
+    let old_account = RowFilter {
+        account: Some("claude/account-a".into()),
+        ..Default::default()
+    };
+    let before_conflict = read_rows(&f.roots, &old_account)?
+        .into_iter()
+        .find(|row| row.session == "session-a")
+        .ok_or("known row missing before conflict")?;
+    assert_eq!(before_conflict.identity, known_a);
+    let files = segment_files(&f)?;
+    let oldest = files.first().ok_or("no dated rows")?;
+    assert!(files.len() > RECENT_SEGMENTS);
+    assert!(!files.iter().rev().take(RECENT_SEGMENTS).any(|name| name == oldest));
+
+    let conflict = AccountIdentity::conflicting_provider_observations();
+    let conflicted = BTreeMap::from([("session-a".to_owned(), conflict.clone())]);
+    ingest(
+        &f.roots,
+        &Request {
+            dirs: &[],
+            chair_sessions: &conflicted,
+            provider: None,
+            since: None,
+            deadline: None,
+            incremental: false,
+        },
+    )?;
+    let historical = read_rows(&f.roots, &RowFilter::default())?
+        .into_iter()
+        .find(|row| row.session == "session-a")
+        .ok_or("historical row missing")?;
+    assert_eq!(historical.identity, conflict);
+    assert!(read_rows(&f.roots, &old_account)?.is_empty());
+
+    f.write(
+        "rotating",
+        "projects/p/session-a.jsonl",
+        &(message("message-a", "2026-10-01T00:00:00Z", 1, 0, 0, 3)
+            + &message("message-new", "2026-10-04T00:00:00Z", 2, 0, 0, 6)),
+    )?;
+    let known_b = BTreeMap::from([(
+        "session-a".to_owned(),
+        AccountIdentity::provider_observation("claude", "account-b"),
+    )]);
+    ingest(
+        &f.roots,
+        &Request {
+            dirs: &dirs,
+            chair_sessions: &known_b,
+            provider: None,
+            since: None,
+            deadline: None,
+            incremental: false,
+        },
+    )?;
+    let session_rows: Vec<_> = read_rows(&f.roots, &RowFilter::default())?
+        .into_iter()
+        .filter(|row| row.session == "session-a")
+        .collect();
+    assert_eq!(session_rows.len(), 2);
+    assert!(session_rows.iter().all(|row| row.identity == conflict));
+    assert!(read_rows(
+        &f.roots,
+        &RowFilter { account: Some("claude/account-b".into()), ..Default::default() }
+    )?.iter().all(|row| row.session != "session-a"));
     Ok(())
 }
 
