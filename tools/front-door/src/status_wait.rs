@@ -67,7 +67,7 @@ impl Reading {
 /// succeeded outcome; a paused graph needs input.
 fn classify_rows(label: &str, rows: &[Value]) -> Reading {
     let pick = |kind: &str| rows.iter().rfind(|row| row["kind"] == kind);
-    let data = json!({ "rows": rows });
+    let data = json!({ "rows": rows, "digests": crate::fabric::node_digests(rows) });
     let Some(row) = pick("graph")
         .or_else(|| pick("node"))
         .or_else(|| pick("attempt"))
@@ -190,6 +190,59 @@ struct Update {
     reading: Reading,
 }
 
+/// Only terminal node/attempt states produce settlement events. In particular
+/// pending -> running is progress, not a reason for --any to return.
+fn digest_settle(digest: &Value) -> Option<Settle> {
+    if digest["settled"] == true {
+        return Some(if digest["outcome"] == "succeeded" {
+            Settle::Succeeded
+        } else {
+            Settle::Unsuccessful
+        });
+    }
+    match digest["state"].as_str()? {
+        "succeeded" => Some(Settle::Succeeded),
+        "failed" | "blocked" | "skipped" | "unreadable" => Some(Settle::Unsuccessful),
+        "terminal" => Some(if digest["outcome"] == "succeeded" {
+            Settle::Succeeded
+        } else {
+            Settle::Unsuccessful
+        }),
+        _ => None,
+    }
+}
+
+fn new_settlements<'a>(previous: Option<&Reading>, reading: &'a Reading) -> Vec<&'a Value> {
+    reading.data["digests"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|digest| {
+            digest_settle(digest).is_some()
+                && !previous.is_some_and(|previous| {
+                    previous.data["digests"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|old| old["key"] == digest["key"] && digest_settle(old).is_some())
+                })
+        })
+        .collect()
+}
+
+fn settlement_verdict(digests: &[&Value]) -> Option<Settle> {
+    if digests
+        .iter()
+        .any(|digest| digest_settle(digest) == Some(Settle::Unsuccessful))
+    {
+        Some(Settle::Unsuccessful)
+    } else if !digests.is_empty() {
+        Some(Settle::Succeeded)
+    } else {
+        None
+    }
+}
+
 /// Fold source readings until the wait is done: under `any`, the first target
 /// that settles or needs input; otherwise every target. Returns false when the
 /// deadline passes first. `settled` records the order targets finished in, and
@@ -233,7 +286,16 @@ fn collect(
         if latest[index].as_ref() == Some(&update.reading) {
             continue;
         }
+        let node_verdict = latest[index].as_ref().and_then(|previous| {
+            settlement_verdict(&new_settlements(Some(previous), &update.reading))
+        });
         changed(index, &update.reading);
+        if any
+            && !update.reading.done()
+            && let Some(verdict) = node_verdict
+        {
+            update.reading.settle = verdict;
+        }
         if update.reading.done() && !settled.contains(&index) {
             settled.push(index);
         }
@@ -354,10 +416,20 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         match provenant_sqlite::with_busy_timeout(Duration::ZERO, || {
             crate::fabric::unsettled_graphs(&edge, deadline, &stop.cancel)
         }) {
-            Ok(graphs) => sources.extend(graphs.into_iter().map(|graph| match graph.error {
-                Some(error) => Source::UnreadableGraph(graph.target, error),
-                None => Source::Graph(graph.target),
-            })),
+            Ok(graphs) => {
+                for graph in graphs {
+                    if graph.error.is_none() {
+                        validation.insert(
+                            graph.target.to_string(),
+                            classify_rows(&graph.target.to_string(), &graph.rows),
+                        );
+                    }
+                    sources.push(match graph.error {
+                        Some(error) => Source::UnreadableGraph(graph.target, error),
+                        None => Source::Graph(graph.target),
+                    });
+                }
+            }
             Err(error) => return preflight_error(error.as_ref(), deadline, &stop.cancel, globals),
         }
     }
@@ -385,14 +457,40 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         .filter_map(|(index, reading)| reading.as_ref().is_some_and(Reading::done).then_some(index))
         .collect();
     let mut write_error = None;
+    let mut announced_targets = std::collections::BTreeSet::new();
+    let mut announced_nodes = std::collections::BTreeSet::new();
+    let mut observed_targets = std::collections::BTreeSet::new();
     let mut transition = |index: usize, reading: &Reading| {
-        if command.follow && write_error.is_none() {
+        let target_settled = reading.done() && announced_targets.insert(index);
+        let first_sample = observed_targets.insert(index);
+        let node_settled: Vec<_> = new_settlements(None, reading)
+            .into_iter()
+            .filter(|digest| {
+                let newly_observed = announced_nodes.insert((index, digest["key"].to_string()));
+                newly_observed && (!first_sample || target_settled)
+            })
+            .collect();
+        let event = if target_settled {
+            "settled"
+        } else if !node_settled.is_empty() {
+            "node_settled"
+        } else {
+            "transition"
+        };
+        if (target_settled || !node_settled.is_empty() || command.follow) && write_error.is_none() {
             let line = if globals.json {
-                json!({"event":"transition","target":sources[index].label(),
-                    "settle":reading.settle,"line":reading.line})
+                json!({"event":event,"target":sources[index].label(),
+                    "settle":settlement_verdict(&node_settled).unwrap_or(reading.settle),"line":reading.line,"digests":reading.data["digests"]})
                 .to_string()
             } else {
-                reading.line.clone()
+                let mut line = format!("{event} {}", reading.line);
+                for digest in reading.data["digests"].as_array().into_iter().flatten() {
+                    if let Some(digest_line) = digest["line"].as_str() {
+                        line.push('\n');
+                        line.push_str(digest_line);
+                    }
+                }
+                line
             };
             write_error = write_line(&line).err();
         }
@@ -474,6 +572,14 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             );
             human.push_str(&line);
             human.push('\n');
+            if let Some(reading) = reading {
+                for digest in reading.data["digests"].as_array().into_iter().flatten() {
+                    if let Some(line) = digest["line"].as_str() {
+                        human.push_str(line);
+                        human.push('\n');
+                    }
+                }
+            }
             json!({
                 "target":label,
                 "settle":reading.as_ref().map_or(Settle::Pending, |reading| reading.settle),

@@ -65,6 +65,32 @@ pub fn project_retained_attempt(
     ))
 }
 
+/// Bounded artifact evidence for the shared status/wait projection. Reads the
+/// sealed handoff rather than reparsing a provider transcript.
+pub fn status_evidence(
+    store: &run::RunStore,
+    context: &run::ExecutionContext,
+    record: &run::AttemptRecord,
+    call: &run::Request<'_>,
+) -> Value {
+    let provider_error = matches!(
+        record.state,
+        run::AttemptState::Terminal {
+            outcome: run::Outcome::Failed,
+            ..
+        }
+    )
+    .then(|| {
+        output::provider_error_with(|part, range| {
+            store
+                .read_output(record.attempt_id, part, range, context, call)
+                .ok()
+        })
+    })
+    .flatten();
+    json!({"provider_error": provider_error, "handoff": store.handoff(record).ok().flatten()})
+}
+
 pub fn project_lane(
     lane: &run::AttemptRecord,
     waits: &[run::LaneWait],

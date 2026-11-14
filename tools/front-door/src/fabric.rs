@@ -2,6 +2,7 @@
 mod graph_human;
 mod graph_inputs;
 mod graph_status;
+pub(crate) use graph_status::node_digests;
 mod interface;
 #[cfg(test)]
 mod lane_read_tests;

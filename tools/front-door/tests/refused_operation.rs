@@ -150,7 +150,7 @@ fn dirty_writer_refusal_is_durable_visible_and_notified_once() -> Result {
         assert_ne!(code(&waited), 0, "{waited:?}");
         assert_ne!(code(&waited), 124, "{waited:?}");
         assert!(start.elapsed() < Duration::from_secs(2));
-        let observed: Value = serde_json::from_slice(&waited.stdout.bytes)?;
+        let observed = support::last_json_record(&waited.stdout.bytes)?;
         assert_eq!(observed["data"]["timed_out"], false, "{observed}");
         let listed = rig.command(&["status", "--all", "--json"])?;
         let listed: Value = serde_json::from_slice(&listed.stdout.bytes)?;
