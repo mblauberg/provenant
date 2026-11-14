@@ -4,7 +4,10 @@ use super::*;
 fn write_grant_warning_threshold_does_not_refuse_large_terminal_ledger() -> TestResult {
     struct Raised(Confined);
     impl Providers for Raised {
-        fn write_grant_limit(&self) -> WriteGrantLimit {
+        fn write_grant_limit(
+            &self,
+            _policy: &provenant_records::policy::Policy,
+        ) -> WriteGrantLimit {
             WriteGrantLimit {
                 bytes: 256 * 1024,
                 origin: provenant_records::diagnostic::SettingSource::Configuration,

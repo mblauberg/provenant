@@ -102,6 +102,28 @@ pub(crate) fn lease(
     request: &Request<'_>,
     owner: &LeaseOwner,
 ) -> Result<Option<WallTime>> {
+    lease_with_policy(
+        db,
+        store,
+        ticket,
+        caps,
+        time,
+        request,
+        owner,
+        &provenant_records::policy::Policy::default(),
+    )
+}
+
+pub(crate) fn lease_with_policy(
+    db: &Connection,
+    store: &Path,
+    ticket: &AdmissionTicket,
+    caps: LaneCaps,
+    time: &dyn Clock,
+    request: &Request<'_>,
+    owner: &LeaseOwner,
+    policy: &provenant_records::policy::Policy,
+) -> Result<Option<WallTime>> {
     let (project, class) = (ticket.project_id, ticket.lane_class);
     let spacing = spacing_micros(ticket.startup_spacing_ms)?;
     let id = ticket.attempt_id.to_string();
@@ -134,14 +156,24 @@ pub(crate) fn lease(
         if tx.execute("UPDATE leases SET yielded=0 WHERE attempt=?1", [&id])? > 0 {
             return Ok(Some(now));
         }
-        let identity = owner
-            .identity
-            .as_ref()
-            .ok_or(RunError::Admission(AdmissionError::GuardianIdentity))?;
-        let owner_id = owner
-            .store
-            .as_ref()
-            .ok_or(RunError::Admission(AdmissionError::GuardianIdentity))?;
+        let identity = owner.identity.as_ref().ok_or_else(|| {
+            policy.boundary_error(
+                "ADMISSION_RUNSTORE_ADMIT_AUTHORITY",
+                provenant_records::policy::Facts::violation(
+                    "guardian process identity is unavailable for lease ownership",
+                ),
+                RunError::Admission(AdmissionError::GuardianIdentity),
+            )
+        })?;
+        let owner_id = owner.store.as_ref().ok_or_else(|| {
+            policy.boundary_error(
+                "ADMISSION_RUNSTORE_ADMIT_AUTHORITY",
+                provenant_records::policy::Facts::violation(
+                    "run-store identity is unavailable for lease ownership",
+                ),
+                RunError::Admission(AdmissionError::GuardianIdentity),
+            )
+        })?;
         tx.execute(
             "INSERT INTO leases(attempt,project,store,class,boot,guardian,owner_id) VALUES (?1,?2,?3,?4,?5,?6,?7)",
             params![

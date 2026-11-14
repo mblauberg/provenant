@@ -132,14 +132,28 @@ fn applied_write_grants(
             Ok(WriteGrantRecord {
                 extra: Default::default(),
                 source: grant.source,
-                path: provenant_records::AbsolutePath::new(&grant.path)
-                    .map_err(|_| WriteGrantError::InvalidPath)?,
+                path: provenant_records::AbsolutePath::new(&grant.path).map_err(|_| {
+                    policy.boundary_error(
+                        "LAUNCH_APPLIED_WRITE_GRANTS_AUTHORITY",
+                        provenant_records::policy::Facts::violation(
+                            "applied write grant path is not canonical and absolute",
+                        ),
+                        WriteGrantError::InvalidPath,
+                    )
+                })?,
                 scope: grant.scope,
             })
         })
         .collect::<std::result::Result<Vec<_>, WriteGrantError>>()?;
-    let encoded =
-        provenant_records::CanonicalV1::bytes(&grants).map_err(|_| WriteGrantError::InvalidPath)?;
+    let encoded = provenant_records::CanonicalV1::bytes(&grants).map_err(|_| {
+        policy.boundary_error(
+            "LAUNCH_APPLIED_WRITE_GRANTS_AUTHORITY",
+            provenant_records::policy::Facts::violation(
+                "applied write grants cannot be encoded canonically",
+            ),
+            WriteGrantError::InvalidPath,
+        )
+    })?;
     let effect = policy.check(
         "WRITE_GRANT_BYTES",
         provenant_records::policy::Facts {
@@ -599,7 +613,7 @@ impl RunStore {
                     })
             })
             .and_then(|mut plan| {
-                let limit = providers.write_grant_limit().checked();
+                let limit = providers.write_grant_limit(&policy).checked(&policy);
                 applied_write_grants(&plan, limit, &policy).map_err(|error| RunError::Input {
                     kind: ErrorKind::ContinuationUnsupported,
                     message: error.to_string(),
@@ -632,15 +646,21 @@ impl Default for WriteGrantLimit {
     }
 }
 impl WriteGrantLimit {
-    fn checked(self) -> Self {
+    fn checked(self, policy: &provenant_records::policy::Policy) -> Self {
         if (1..=provenant_records::run::MAX_WRITE_GRANT_BYTES_CEILING).contains(&self.bytes) {
             self
         } else {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: invalid domains.run.write_grant_limit_bytes; using compiled default"
-            );
+            if let provenant_records::policy::Effect::Warn(message) = policy.check(
+                "WRITE_GRANT_LIMIT_INVALID_NONE",
+                provenant_records::policy::Facts::violation(format!(
+                    "domains.run.write_grant_limit_bytes={} has source {}; using compiled default",
+                    self.bytes,
+                    self.origin.description()
+                )),
+            ) {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            }
             Self::default()
         }
     }
@@ -651,7 +671,7 @@ impl WriteGrantLimit {
 
 pub trait Providers {
     /// Host cap for the encoded applied write-grant ledger.
-    fn write_grant_limit(&self) -> WriteGrantLimit {
+    fn write_grant_limit(&self, _policy: &provenant_records::policy::Policy) -> WriteGrantLimit {
         WriteGrantLimit::default()
     }
     /// Host-selected minimum nice value for this lane.
@@ -1009,11 +1029,20 @@ impl RunStore {
     ) -> Result<Vec<Started>> {
         // Every later use reads this one value, never the store again.
         let request = self.request(run, call)?;
+        let policy = launch_policy(
+            &self.writer_registry,
+            &self.context.project_id.to_string(),
+            &request.task,
+        );
         if let Some(digest) = expected
             && request.digest()? != digest
         {
-            return Err(RunError::Validation(
-                "request changed after launch validation",
+            return Err(policy.boundary_error(
+                "LAUNCH_RUNSTORE_START_INNER_AUTHORITY_2",
+                provenant_records::policy::Facts::violation(
+                    "stored request digest changed after launch validation",
+                ),
+                RunError::Validation("request changed after launch validation"),
             ));
         }
         let operation = self.attempt_operation(run, call)?;
@@ -1095,6 +1124,21 @@ impl RunStore {
                 }) {
                 Ok(prompt) => prompt,
                 Err(error) => {
+                    let code = if matches!(
+                        &error,
+                        RunError::ArtifactMismatch(_) | RunError::TooLarge { .. }
+                    ) {
+                        "ARTIFACTS_RUNSTORE_ARTIFACT_BYTES_DATA_INTEGRITY"
+                    } else {
+                        "ARTIFACTS_RUNSTORE_ARTIFACT_BYTES_AUTHORITY"
+                    };
+                    let error = policy.boundary_error(
+                        code,
+                        provenant_records::policy::Facts::violation(
+                            "stored prompt could not be reopened and verified against the attempt record",
+                        ),
+                        error,
+                    );
                     // A prompt the host cannot read back ends the attempt here;
                     // leaving it Queued would meet the same unreadable input on
                     // every later start.
@@ -1162,11 +1206,6 @@ impl RunStore {
                     "warning: lane priority unavailable ({reason}); using compiled domains.fabric.lanes.priority default {fallback}");
                 fallback
             });
-            let policy = launch_policy(
-                &self.writer_registry,
-                &self.context.project_id.to_string(),
-                task,
-            );
             let prepared = check_launch_policy(providers, task, &policy)
                 .map(|()| priority)
                 .map_err(|refusal| {
@@ -1256,7 +1295,7 @@ impl RunStore {
             };
             let limits = plan.limits.clone();
             set_lane_environment(&mut plan.environment, request.lane_depth.unwrap_or(1), id);
-            let limit = providers.write_grant_limit().checked();
+            let limit = providers.write_grant_limit(&policy).checked(&policy);
             plan.route
                 .extra
                 .insert("write_grant_limit".into(), limit.receipt());
@@ -1527,15 +1566,23 @@ fn lane_port_plan(
     }))
 }
 
-fn lane_port_plan_or_warn(state: &std::path::Path) -> Option<provenant_os::lane_ports::Plan> {
+fn lane_port_plan_or_warn(
+    state: &std::path::Path,
+    policy: &provenant_records::policy::Policy,
+) -> Option<provenant_os::lane_ports::Plan> {
     match lane_port_plan(state) {
         Ok(plan) => plan,
         Err(error) => {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: lane port settings unavailable ({error}); continuing without a port block (domains.fabric.lanes.lane_port_base, domains.fabric.lanes.lane_port_block, domains.fabric.lanes.lane_port_blocks)"
+            let effect = policy.check(
+                "LAUNCH_LANE_PORT_PLAN_OR_WARN_NONE",
+                provenant_records::policy::Facts::violation(format!(
+                    "lane port settings unavailable ({error}); continuing without a port block"
+                )),
             );
+            if let provenant_records::policy::Effect::Warn(message) = effect {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            }
             None
         }
     }
@@ -1550,8 +1597,35 @@ mod lane_environment_tests {
         let temp = tempfile::tempdir()?;
         let not_directory = temp.path().join("not-directory");
         std::fs::write(&not_directory, b"fixture")?;
-        assert!(lane_port_plan_or_warn(&not_directory).is_none());
-        let defaults = lane_port_plan_or_warn(temp.path()).expect("default plan");
+        let policy = provenant_records::policy::Policy::default();
+        assert!(
+            !policy
+                .rule("LAUNCH_LANE_PORT_PLAN_OR_WARN_NONE")
+                .rule
+                .refusable
+        );
+        assert_eq!(
+            policy
+                .rule("LAUNCH_LANE_PORT_PLAN_OR_WARN_NONE")
+                .rule
+                .strength,
+            provenant_records::policy::Strength::Warn
+        );
+        assert!(lane_port_plan_or_warn(&not_directory, &policy).is_none());
+        let mut off = policy.clone();
+        off.overlay(
+            &std::collections::BTreeMap::from([(
+                "LAUNCH_LANE_PORT_PLAN_OR_WARN_NONE".into(),
+                provenant_records::policy::Strength::Off,
+            )]),
+            provenant_records::policy::Source::Project,
+        );
+        assert_eq!(
+            off.rule("LAUNCH_LANE_PORT_PLAN_OR_WARN_NONE").source,
+            provenant_records::policy::Source::Project
+        );
+        assert!(lane_port_plan_or_warn(&not_directory, &off).is_none());
+        let defaults = lane_port_plan_or_warn(temp.path(), &policy).expect("default plan");
         assert_eq!(
             defaults.blocks_origin,
             Some(provenant_os::lane_ports::BlocksOrigin::CompiledDefault)
@@ -1560,7 +1634,7 @@ mod lane_environment_tests {
             temp.path().join("config.toml"),
             "schema_version=1\n[domains.fabric.lanes]\nlane_port_blocks=2\n",
         )?;
-        let configured = lane_port_plan_or_warn(temp.path()).expect("configured plan");
+        let configured = lane_port_plan_or_warn(temp.path(), &policy).expect("configured plan");
         assert_eq!(configured.blocks, 2);
         assert_eq!(
             configured.blocks_origin,

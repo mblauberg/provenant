@@ -13,9 +13,7 @@ fn provider_fence_preparation_reports_causes_and_selects_available_candidate()
 
 fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::{UtilityBudget, UtilityRuntime, worktrees};
-    use provenant_core::{
-        AttemptId, CancelToken, Clock, Digest, OperationId, WaitBudget,
-    };
+    use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId, WaitBudget};
     use provenant_os::clock::SystemClock;
     use provenant_os::exec::ExecOptions;
     use provenant_os::exec::Executor;
@@ -460,7 +458,10 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             assert!(skipped.cause.is_some(), "{skipped:?}");
             if skipped.route.starts_with("cursor/") {
                 assert_eq!(skipped.kind, SkipKind::Setup, "{skipped:?}");
-                assert_eq!(skipped.cause, Some(provenant_records::RouteExclusionReason::SetupFailed));
+                assert_eq!(
+                    skipped.cause,
+                    Some(provenant_records::RouteExclusionReason::SetupFailed)
+                );
             } else {
                 assert!(skipped.cause.is_some(), "{skipped:?}");
             }
@@ -1023,7 +1024,12 @@ printf 'agy 1.0.0\n'
         };
         assert!(permissions.write_roots.contains(&lock_grant));
         let mandatory = permissions.policy.as_ref().ok_or("policy")?.mandatory();
-        assert!(mandatory.protected().iter().any(|root| root.path == project));
+        assert!(
+            mandatory
+                .protected()
+                .iter()
+                .any(|root| root.path == project)
+        );
         assert!(mandatory.host_writes().contains(&lock_grant));
         host_writer_roots_inside_other_checkouts(
             binding.project_id(),
@@ -1095,12 +1101,14 @@ printf 'agy 1.0.0\n'
         home.join(".codex"),
     )?;
     let codex_prompt = provenant_providers::Prompt::new("grants".into());
+    let launch_policy = provenant_records::policy::Policy::default();
     let images = vec![PathBuf::from("/outside/shot.png")];
     let codex_runtime = assets.join("provenant");
     let mut codex = provenant_providers::Adapter::prepare(
         &provenant_providers::codex::Codex,
         provenant_providers::PrepareInput {
             images: &images,
+            policy: &launch_policy,
             command: None,
             route: &codex_route,
             confined: &confinement.plan,
@@ -2040,7 +2048,12 @@ fn host_writer_roots_inside_other_checkouts(
         .as_ref()
         .ok_or("policy")?
         .mandatory();
-    assert!(mandatory.protected().iter().any(|root| root.path == primary));
+    assert!(
+        mandatory
+            .protected()
+            .iter()
+            .any(|root| root.path == primary)
+    );
     assert!(mandatory.host_writes().contains(&lock_grant));
     provenant_confinement::ConfinedPlan::new(launched)?;
     // A read-only lane receives no writer roots and no exception.
@@ -2070,7 +2083,11 @@ fn host_writer_roots_inside_other_checkouts(
     ] {
         assert!(
             matches!(
-                request(Some(writer), &run::LaneAccess::default(), &config(vec![path.clone()])),
+                request(
+                    Some(writer),
+                    &run::LaneAccess::default(),
+                    &config(vec![path.clone()])
+                ),
                 Err(PermissionError::ProtectedOverlap)
             ),
             "{}",

@@ -48,7 +48,6 @@ fn refused(code: &str, message: impl Into<String>) -> ServiceError {
         {
             Some(Cause::WriterComposite)
         }
-        "invalid" if message == "write_scope requires a writer child" => Some(Cause::WriteScope),
         "invalid" | "invalid_graph" => Some(Cause::InvalidLaunch),
         _ => None,
     };

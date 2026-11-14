@@ -352,6 +352,11 @@ pub(super) fn check_capacity_policy(
         Effect::Proceed => Ok(None),
         Effect::Warn(message) => Ok(Some(message)),
         Effect::Queue(_) => panic!("capacity rules do not support queue effects"),
-        Effect::Refuse(_) => Err(strict_error),
+        Effect::Refuse(diagnostic) => {
+            if let Some(detail) = diagnostic.detail {
+                report_policy_message(detail);
+            }
+            Err(strict_error)
+        }
     }
 }

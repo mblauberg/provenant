@@ -1011,6 +1011,7 @@ fn launch_prompt_preserves_admitted_text_when_host_additions_exceed_one_mib()
                 adapter,
                 65_536,
                 provenant_records::diagnostic::SettingSource::Configuration,
+                &provenant_records::policy::Policy::default(),
             )?;
             assert_eq!(prompt.text(), text);
             assert!(prompt.file().is_none());
@@ -1023,6 +1024,7 @@ fn launch_prompt_preserves_admitted_text_when_host_additions_exceed_one_mib()
             adapter,
             65_536,
             provenant_records::diagnostic::SettingSource::Configuration,
+            &provenant_records::policy::Policy::default(),
         )?;
         if AdapterSpec::get(adapter).is_some_and(|spec| spec.argv_prompt) {
             assert_eq!(
@@ -1055,6 +1057,7 @@ fn launch_prompt_keeps_oversized_stdin_prompts_in_memory() -> Result<(), Box<dyn
                     adapter,
                     65_536,
                     provenant_records::diagnostic::SettingSource::Configuration,
+                    &provenant_records::policy::Policy::default(),
                 )?;
                 assert_eq!(prompt.text(), text);
                 assert!(prompt.file().is_none());
@@ -1069,6 +1072,14 @@ fn launch_prompt_keeps_oversized_stdin_prompts_in_memory() -> Result<(), Box<dyn
 fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::PermissionsExt;
+    let mut strict_policy = provenant_records::policy::Policy::default();
+    strict_policy.overlay(
+        &std::collections::BTreeMap::from([(
+            "ARGV_PROMPT".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]),
+        provenant_records::policy::Source::Dispatch,
+    );
     for adapter in ["cursor", "agy"] {
         let temp = tempfile::tempdir()?;
         let attempt = canonical(temp.path())?;
@@ -1082,12 +1093,18 @@ fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
             adapter,
             65_536,
             provenant_records::diagnostic::SettingSource::Configuration,
+            &strict_policy,
         )
         .err()
         .ok_or("nested argv spill accepted")?;
-        assert!(
-            matches!(error, LaunchPromptError::NestedArgvTooLarge { .. }),
-            "{error}"
+        assert!(matches!(
+            error,
+            LaunchPromptError::Provider(provenant_providers::ProviderError::PromptTooLarge { .. })
+        ));
+        assert_eq!(strict_policy.rule("ARGV_PROMPT").rule.code, "ARGV_PROMPT");
+        assert_eq!(
+            strict_policy.rule("ARGV_PROMPT").rule.strength,
+            provenant_records::policy::Strength::Refuse
         );
         assert!(!attempt.join("prompt.md").exists());
 
@@ -1100,6 +1117,7 @@ fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
                 adapter,
                 65_536,
                 provenant_records::diagnostic::SettingSource::Configuration,
+                &strict_policy,
             )?;
             assert_eq!(prompt.file(), Some(attempt.join("prompt.md").as_path()));
             assert!(prompt.text().len() < 1024);
@@ -1120,7 +1138,8 @@ fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
                 &attempt,
                 adapter,
                 65_536,
-                provenant_records::diagnostic::SettingSource::Configuration
+                provenant_records::diagnostic::SettingSource::Configuration,
+                &strict_policy,
             )
             .is_err()
         );
@@ -1139,17 +1158,82 @@ fn nested_argv_prompt_respects_configured_byte_limit() -> Result<(), Box<dyn std
     let mut paths = prompt_paths(&attempt)?;
     paths.lane_depth = 2;
     let text = "a".repeat(65_537);
+    let warn_policy = provenant_records::policy::Policy::default();
+    let warned = launch_prompt(
+        &text,
+        &paths,
+        &attempt,
+        "cursor",
+        65_536,
+        provenant_records::diagnostic::SettingSource::Configuration,
+        &warn_policy,
+    )?;
+    assert_eq!(warned.text(), text);
+    assert!(warned.file().is_none());
+    assert_eq!(warn_policy.rule("ARGV_PROMPT").rule.code, "ARGV_PROMPT");
+    assert_eq!(
+        warn_policy.rule("ARGV_PROMPT").rule.strength,
+        provenant_records::policy::Strength::Warn
+    );
+    assert!(!attempt.join("prompt.md").exists());
+
+    let mut off_policy = warn_policy.clone();
+    off_policy.overlay(
+        &std::collections::BTreeMap::from([(
+            "ARGV_PROMPT".into(),
+            provenant_records::policy::Strength::Off,
+        )]),
+        provenant_records::policy::Source::Dispatch,
+    );
+    let off = launch_prompt(
+        &text,
+        &paths,
+        &attempt,
+        "cursor",
+        65_536,
+        provenant_records::diagnostic::SettingSource::Configuration,
+        &off_policy,
+    )?;
+    assert_eq!(off.text(), text);
+    assert!(off.file().is_none());
+    assert_eq!(
+        off_policy.rule("ARGV_PROMPT").rule.strength,
+        provenant_records::policy::Strength::Off
+    );
+    assert_eq!(
+        off_policy.rule("ARGV_PROMPT").source,
+        provenant_records::policy::Source::Dispatch
+    );
+    assert!(!attempt.join("prompt.md").exists());
+
+    let mut strict_policy = warn_policy.clone();
+    strict_policy.overlay(
+        &std::collections::BTreeMap::from([(
+            "ARGV_PROMPT".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]),
+        provenant_records::policy::Source::Dispatch,
+    );
+    let error = launch_prompt(
+        &text,
+        &paths,
+        &attempt,
+        "cursor",
+        65_536,
+        provenant_records::diagnostic::SettingSource::Configuration,
+        &strict_policy,
+    )
+    .err()
+    .ok_or("strict nested argv policy continued")?;
     assert!(matches!(
-        launch_prompt(
-            &text,
-            &paths,
-            &attempt,
-            "cursor",
-            65_536,
-            provenant_records::diagnostic::SettingSource::Configuration
-        ),
-        Err(LaunchPromptError::NestedArgvTooLarge { limit: 65_536, .. })
+        error,
+        LaunchPromptError::Provider(provenant_providers::ProviderError::PromptTooLarge { .. })
     ));
+    assert_eq!(
+        strict_policy.rule("ARGV_PROMPT").rule.strength,
+        provenant_records::policy::Strength::Refuse
+    );
+    assert!(!attempt.join("prompt.md").exists());
     let prompt = launch_prompt(
         &text,
         &paths,
@@ -1157,6 +1241,7 @@ fn nested_argv_prompt_respects_configured_byte_limit() -> Result<(), Box<dyn std
         "cursor",
         131_072,
         provenant_records::diagnostic::SettingSource::Configuration,
+        &warn_policy,
     )?;
     assert_eq!(prompt.text(), text);
     assert!(prompt.file().is_none());
@@ -1177,7 +1262,8 @@ fn launch_prompt_refuses_symlinked_attempt_ancestors() -> Result<(), Box<dyn std
             &state,
             "cursor",
             65_536,
-            provenant_records::diagnostic::SettingSource::Configuration
+            provenant_records::diagnostic::SettingSource::Configuration,
+            &provenant_records::policy::Policy::default(),
         )
         .is_err()
     );

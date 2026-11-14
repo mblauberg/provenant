@@ -207,8 +207,7 @@ pub(super) fn continuation_for_policy(
         .join("attempts")
         .join(prior.attempt_id.to_string())
         .join("provider-state");
-    let mut policy = StateCopyPolicy::read(config_root);
-    policy.enforcement = Some(enforcement.clone());
+    let policy = StateCopyPolicy::read(config_root, enforcement);
     let located = if AdapterSpec::get(&route.adapter)
         .is_some_and(|spec| spec.model_observation == ModelObservation::SessionDatabase)
     {
@@ -294,7 +293,7 @@ impl StateCopyPolicy {
             origins: [provenant_records::diagnostic::SettingSource::ShippedDefault; 3],
         }
     }
-    fn read(state_root: &Path) -> Self {
+    fn read(state_root: &Path, enforcement: &provenant_records::policy::Policy) -> Self {
         use provenant_records::diagnostic::SettingSource;
         match provenant_confinement::run_config::RunConfig::read_with_keys(state_root) {
             Ok((config, keys)) => {
@@ -311,11 +310,7 @@ impl StateCopyPolicy {
                     }
                 });
                 Self {
-                    enforcement: Some(provenant_config::policy::read(
-                        state_root,
-                        "",
-                        &Default::default(),
-                    )),
+                    enforcement: Some(enforcement.clone()),
                     limits: StateLimits {
                         bytes: config.continuation_copy_limit_bytes,
                         entries: config.continuation_copy_entries,
@@ -325,13 +320,17 @@ impl StateCopyPolicy {
                 }
             }
             Err(error) => {
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: continuation copy settings unavailable ({error}); using compiled defaults"
-                );
+                if let provenant_records::policy::Effect::Warn(message) = enforcement.check(
+                    "CONTINUATION_STATECOPYPOLICY_READ_NONE",
+                    provenant_records::policy::Facts::violation(format!(
+                        "continuation copy settings unavailable ({error}); using compiled defaults"
+                    )),
+                ) {
+                    use std::io::Write;
+                    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                }
                 let mut policy = Self::shipped(RETAINED_STATE);
-                policy.enforcement = Some(provenant_records::policy::Policy::default());
+                policy.enforcement = Some(enforcement.clone());
                 policy
             }
         }

@@ -379,7 +379,7 @@ impl RunStore {
                 )));
             }
             if confinement.sandboxed {
-                match confinement.command(&plan.argv, &id, call.cancel) {
+                match confinement.command(&plan.argv, &id, call.cancel, &policy) {
                     Ok(command) => {
                         plan.argv = command.argv;
                         profile_file = Some(command.profile);
@@ -413,7 +413,7 @@ impl RunStore {
             .confinement
             .as_ref()
             .filter(|c| c.writer.is_some())
-            .and_then(|c| lane_port_plan_or_warn(&c.state_root));
+            .and_then(|c| lane_port_plan_or_warn(&c.state_root, &policy));
         let key = record.key.clone();
         let command = ProviderCommand {
             policy,

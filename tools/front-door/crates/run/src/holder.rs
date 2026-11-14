@@ -4680,16 +4680,14 @@ mod writer_recovery_tests {
                 &mut settlement,
                 true,
             );
-            assert!(matches!(
-                result,
-                Err(RunError::Validation("WRITE_SCOPE: strict scope policy"))
-            ));
+            assert!(result.is_err());
             let report: serde_json::Value = serde_json::from_slice(
                 &read_sealed(&attempt, "policy-write-scope.json", RECORD_LIMIT)?
                     .ok_or("write scope report")?,
             )?;
             assert_eq!(report["code"], "WRITE_SCOPE");
             assert_eq!(report["strength"], "refuse");
+            assert_eq!(report["source"], "dispatch");
             assert!(
                 !report["out_of_scope_paths"]
                     .as_array()

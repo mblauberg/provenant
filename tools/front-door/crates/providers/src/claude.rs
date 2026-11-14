@@ -662,11 +662,25 @@ fn prepare(
     let mut tool_requirements = crate::launch::ToolRequirements::default();
     // No credential path is granted: the token arrives through a pipe.
     if plan.selected_authentication.is_some() {
-        return Err(ProviderError::UnsupportedPolicy);
+        return Err(input.boundary_error(
+            "CLAUDE_PREPARE_CREDENTIALS",
+            "Claude receives its selected account token through the host pipe",
+            ProviderError::UnsupportedPolicy,
+        ));
     }
-    let token = input.token.ok_or(ProviderError::UnsupportedPolicy)?;
+    let token = input.token.ok_or_else(|| {
+        input.boundary_error(
+            "CLAUDE_PREPARE_CREDENTIALS",
+            "Claude launch requires its selected host-read token",
+            ProviderError::UnsupportedPolicy,
+        )
+    })?;
     if token.account.is_some() && input.account.is_none() {
-        return Err(ProviderError::IdentityMismatch);
+        return Err(input.boundary_error(
+            "CLAUDE_PREPARE_AUTHORITY",
+            "Claude token identity must match the selected account",
+            ProviderError::IdentityMismatch,
+        ));
     }
     if let Some(account) = input.account
         && token
@@ -674,11 +688,21 @@ fn prepare(
             .as_ref()
             .is_none_or(|(key, dir)| key != account.key() || dir != account.directory())
     {
-        return Err(ProviderError::IdentityMismatch);
+        return Err(input.boundary_error(
+            "CLAUDE_PREPARE_AUTHORITY",
+            "Claude token identity must match the selected account",
+            ProviderError::IdentityMismatch,
+        ));
     }
     let session_id = match (session, input.continuation) {
         (Session::Resume, Some(continuation)) => continuation.session().to_owned(),
-        (Session::Resume, None) => return Err(ProviderError::UnknownIdentity),
+        (Session::Resume, None) => {
+            return Err(input.boundary_error(
+                "CLAUDE_PREPARE_AUTHORITY",
+                "resumed Claude invocation has no validated continuation identity",
+                ProviderError::UnknownIdentity,
+            ));
+        }
         (Session::Fresh, _) => uuid_v4(input.nonce),
     };
     let mut argv: Vec<OsString> = [
@@ -824,11 +848,14 @@ fn prepare(
     let skill_reads = user_skills.iter().map(subtree).collect::<Vec<_>>();
     let omitted_discovery = package_omissions;
     let discover_skills = user_skills.is_some();
-    let private = &plan
-        .private_state
-        .as_ref()
-        .ok_or(ProviderError::UnsupportedPolicy)?
-        .path;
+    let private = crate::launch::private_state_or_scratch(
+        plan.private_state
+            .as_ref()
+            .map(|state| state.path.as_path()),
+        &plan.scratch.path,
+        input.policy,
+        "CLAUDE_PREPARE_NONE",
+    )?;
     let config = if input.sandboxed() {
         private.join("claude-config")
     } else {

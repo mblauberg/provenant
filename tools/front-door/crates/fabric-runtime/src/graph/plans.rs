@@ -1041,7 +1041,10 @@ fn prepare_nested(
         if !child.write_scope.is_empty() {
             child
                 .prompt
-                .push_str(&format!("Write scope: {}\n", child.write_scope.join(", ")));
+                .push_str(&format!(
+                    "Advisory write-scope paths: {}. The whole worktree remains writable; list out-of-scope edits in the handoff.\n",
+                    child.write_scope.join(", ")
+                ));
         }
         child.prompt.push_str(&format!(
             "Acceptance checks:\n{}",

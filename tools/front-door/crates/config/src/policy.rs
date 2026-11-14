@@ -14,12 +14,39 @@ pub struct Settings {
 pub struct Project {
     pub rules: BTreeMap<String, Strength>,
 }
-impl DomainConfig for Settings {}
-pub const SECTION: DomainSection = DomainSection::new::<Settings>("policy", |_| "[projects]\n")
-    .with_fields(&[FieldMetadata::enumeration(
-        "projects.{project}.rules.{code}",
-        &["refuse", "queue", "warn", "off"],
-    )]);
+impl DomainConfig for Settings {
+    fn validate(&self) -> Vec<crate::SectionError> {
+        let mut errors = Vec::new();
+        for (project, settings) in &self.projects {
+            for (code, strength) in &settings.rules {
+                let field = format!("projects.{project}.rules.{code}");
+                let Some(rule) = provenant_records::policy::table()
+                    .iter()
+                    .find(|rule| rule.code == *code)
+                else {
+                    errors.push(crate::SectionError {
+                        field,
+                        code: "unknown_policy_rule",
+                        detail: Some("policy rule is not in the compiled table"),
+                    });
+                    continue;
+                };
+                if !rule.supports(*strength) {
+                    errors.push(crate::SectionError {
+                        field,
+                        code: "unsupported_policy_strength",
+                        detail: Some("strength is not supported by this policy rule"),
+                    });
+                }
+            }
+        }
+        errors
+    }
+}
+pub const SECTION: DomainSection =
+    DomainSection::new::<Settings>("policy", |_| "[projects]\n").with_fields(&[
+        FieldMetadata::new("projects.{project}.rules.{code}", "string"),
+    ]);
 impl Settings {
     pub fn resolve_with_knobs(
         &self,
@@ -61,11 +88,7 @@ pub fn read(state: &Path, project: &str, dispatch: &BTreeMap<String, Strength>) 
     {
         let mut values = BTreeMap::new();
         for (name, value) in knobs {
-            if name == "policy" {
-                if let Ok(nested) = serde_json::from_value::<BTreeMap<String, Strength>>(value) {
-                    values.extend(nested);
-                }
-            } else if let Some(code) = name.strip_prefix("policy.")
+            if let Some(code) = name.strip_prefix("policy.")
                 && let Ok(strength) = serde_json::from_value(value)
             {
                 values.insert(code.to_owned(), strength);
@@ -100,6 +123,16 @@ pub fn for_task(state: &Path, project: &str, task: &provenant_records::run::Task
         // replace table-owned boundaries, codes, knobs or justifications.
         let mut policy = Policy::default();
         for row in snapshot.rules {
+            let Some(table_rule) = policy
+                .rules
+                .iter()
+                .find(|effective| effective.rule.code == row.rule.code)
+            else {
+                continue;
+            };
+            if table_rule.rule.knob.is_none() {
+                continue;
+            }
             policy.overlay(
                 &BTreeMap::from([(row.rule.code, row.rule.strength)]),
                 row.source,
@@ -130,4 +163,34 @@ pub fn overlay_knobs(policy: &mut Policy, knobs: &BTreeMap<String, crate::KnobVa
         })
         .collect();
     policy.overlay(&values, Source::Host);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_rules_reject_unsupported_strengths_and_unknown_codes() {
+        let settings = Settings {
+            projects: BTreeMap::from([(
+                "project".into(),
+                Project {
+                    rules: BTreeMap::from([
+                        ("PROCESS_CENSUS".into(), Strength::Queue),
+                        ("MISSING_RULE".into(), Strength::Off),
+                    ]),
+                },
+            )]),
+        };
+        let errors = settings.validate();
+        assert_eq!(errors.len(), 2);
+        assert!(errors.iter().any(|error| {
+            error.field == "projects.project.rules.PROCESS_CENSUS"
+                && error.code == "unsupported_policy_strength"
+        }));
+        assert!(errors.iter().any(|error| {
+            error.field == "projects.project.rules.MISSING_RULE"
+                && error.code == "unknown_policy_rule"
+        }));
+    }
 }

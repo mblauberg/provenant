@@ -37,7 +37,11 @@ fn prepare(
     input.prompt.check_argv(input.policy)?;
     let plan = input.confined.permissions();
     if plan.selected_authentication.as_deref() != Some("login") {
-        return Err(ProviderError::UnsupportedPolicy);
+        return Err(input.boundary_error(
+            "CURSOR_PREPARE_CREDENTIALS",
+            "Cursor requires its selected login authentication",
+            ProviderError::UnsupportedPolicy,
+        ));
     }
     let mut argv = vec![
         input.executable.into(),
@@ -56,7 +60,13 @@ fn prepare(
         Access::WorktreeWrite => argv.push("--force".into()),
     }
     if session == Session::Resume {
-        let continuation = input.continuation.ok_or(ProviderError::UnknownIdentity)?;
+        let continuation = input.continuation.ok_or_else(|| {
+            input.boundary_error(
+                "CURSOR_PREPARE_AUTHORITY",
+                "resumed Cursor invocation has no validated continuation identity",
+                ProviderError::UnknownIdentity,
+            )
+        })?;
         argv.extend(["--resume".into(), continuation.session().into()]);
     }
     if !input.route.model.is_empty() {

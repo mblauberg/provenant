@@ -39,6 +39,37 @@ pub struct Rule {
     pub justification: String,
     pub site: String,
     pub threshold: Option<String>,
+    /// A non-boundary rule may offer a strict, user-selected refusal only
+    /// when its consumer has a meaningful refusal path.
+    #[serde(default)]
+    pub refusable: bool,
+    /// Queue is available only where the consumer actually waits for capacity
+    /// or for an observed resource to recover.
+    #[serde(default)]
+    pub queueable: bool,
+}
+impl Rule {
+    pub fn supports(&self, strength: Strength) -> bool {
+        match (self.boundary, strength) {
+            (Boundary::None, Strength::Refuse) => self.refusable,
+            (Boundary::None, Strength::Queue) => self.queueable,
+            (Boundary::None, Strength::Warn | Strength::Off) => true,
+            (_, Strength::Refuse) => true,
+            _ => false,
+        }
+    }
+
+    pub fn strengths(&self) -> Vec<Strength> {
+        [
+            Strength::Refuse,
+            Strength::Queue,
+            Strength::Warn,
+            Strength::Off,
+        ]
+        .into_iter()
+        .filter(|strength| self.supports(*strength))
+        .collect()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -118,14 +149,44 @@ impl Default for Policy {
 impl Policy {
     /// Apply layers in increasing precedence: host, project, then dispatch.
     /// Boundary rules have no knob, so these overlays cannot grant authority.
+    #[allow(clippy::print_stderr)]
     pub fn overlay(&mut self, values: &BTreeMap<String, Strength>, source: Source) {
-        for effective in &mut self.rules {
-            if effective.rule.knob.is_some()
-                && let Some(strength) = values.get(&effective.rule.code)
-            {
-                effective.rule.strength = *strength;
-                effective.source = source;
+        use std::io::Write;
+        for (code, strength) in values {
+            let Some(effective) = self.rules.iter_mut().find(|value| value.rule.code == *code)
+            else {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "policy override {code} ignored: no such rule"
+                );
+                continue;
+            };
+            if effective.rule.knob.is_none() {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "policy override {code} ignored: boundary rules have no override"
+                );
+                continue;
             }
+            if !effective.rule.supports(*strength) {
+                let supported = effective
+                    .rule
+                    .strengths()
+                    .into_iter()
+                    .map(strength_name)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "policy override {code}={}: unsupported; supported strengths: {supported}; retaining {} from {:?}",
+                    strength_name(*strength),
+                    strength_name(effective.rule.strength),
+                    effective.source
+                );
+                continue;
+            }
+            effective.rule.strength = *strength;
+            effective.source = source;
         }
     }
     #[allow(clippy::expect_used)] // Enforcement callers use table-owned static codes.
@@ -187,15 +248,31 @@ impl Policy {
             .iter()
             .map(|value| {
                 format!(
-                    "{} boundary={:?} strength={:?} source={:?} knob={}\n",
+                    "{} boundary={:?} strength={:?} source={:?} knob={} supported={}\n",
                     value.rule.code,
                     value.rule.boundary,
                     value.rule.strength,
                     value.source,
-                    value.rule.knob.as_deref().unwrap_or("none")
+                    value.rule.knob.as_deref().unwrap_or("none"),
+                    value
+                        .rule
+                        .strengths()
+                        .into_iter()
+                        .map(strength_name)
+                        .collect::<Vec<_>>()
+                        .join(",")
                 )
             })
             .collect()
+    }
+}
+
+const fn strength_name(strength: Strength) -> &'static str {
+    match strength {
+        Strength::Refuse => "refuse",
+        Strength::Queue => "queue",
+        Strength::Warn => "warn",
+        Strength::Off => "off",
     }
 }
 
@@ -207,8 +284,39 @@ mod tests {
         for rule in table() {
             if rule.boundary == Boundary::None {
                 assert_ne!(rule.strength, Strength::Refuse, "{}", rule.code);
+                assert!(rule.knob.is_some(), "{}", rule.code);
+                assert!(rule.supports(Strength::Warn), "{}", rule.code);
+                assert!(rule.supports(Strength::Off), "{}", rule.code);
+                assert_eq!(
+                    rule.supports(Strength::Refuse),
+                    rule.refusable,
+                    "{}",
+                    rule.code
+                );
+                assert_eq!(
+                    rule.supports(Strength::Queue),
+                    rule.queueable,
+                    "{}",
+                    rule.code
+                );
+            } else {
+                assert_eq!(rule.strength, Strength::Refuse, "{}", rule.code);
+                assert!(rule.knob.is_none(), "{}", rule.code);
+                assert!(rule.supports(Strength::Refuse), "{}", rule.code);
+                assert!(!rule.supports(Strength::Queue), "{}", rule.code);
+                assert!(!rule.supports(Strength::Warn), "{}", rule.code);
+                assert!(!rule.supports(Strength::Off), "{}", rule.code);
             }
         }
+        assert!(
+            table()
+                .iter()
+                .filter(|rule| rule.queueable)
+                .all(|rule| rule.code.starts_with("ADMISSION_")),
+            "only real admission waits may expose Queue"
+        );
+        assert!(!Policy::default().rule("PROCESS_CENSUS").rule.refusable);
+        assert!(!Policy::default().rule("PROCESS_CENSUS").rule.queueable);
     }
     #[test]
     #[allow(clippy::panic)]
@@ -239,5 +347,34 @@ mod tests {
             );
             assert_eq!(policy.rule(&rule.code).rule.strength, Strength::Refuse);
         }
+    }
+
+    #[test]
+    fn unsupported_queue_override_retains_warn_default() {
+        let mut policy = Policy::default();
+        policy.overlay(
+            &BTreeMap::from([("ARGV_PROMPT".into(), Strength::Queue)]),
+            Source::Dispatch,
+        );
+        assert_eq!(policy.rule("ARGV_PROMPT").rule.strength, Strength::Warn);
+        assert_eq!(policy.rule("ARGV_PROMPT").source, Source::CompiledDefault);
+        assert!(matches!(
+            policy.check("ARGV_PROMPT", Facts::violation("oversized prompt")),
+            Effect::Warn(_)
+        ));
+
+        policy.overlay(
+            &BTreeMap::from([("ADMISSION_WRITERS".into(), Strength::Queue)]),
+            Source::Dispatch,
+        );
+        assert_eq!(
+            policy.rule("ADMISSION_WRITERS").rule.strength,
+            Strength::Queue
+        );
+        assert_eq!(policy.rule("ADMISSION_WRITERS").source, Source::Dispatch);
+        assert!(matches!(
+            policy.check("ADMISSION_WRITERS", Facts::violation("writer cap reached")),
+            Effect::Queue(_)
+        ));
     }
 }

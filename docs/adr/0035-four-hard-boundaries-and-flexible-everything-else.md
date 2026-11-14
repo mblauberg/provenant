@@ -50,9 +50,10 @@ boundary, its default strength and its knob. No rule without a boundary defaults
 to refuse. Host, project and dispatch overrides resolve in that order, and
 `provenant config show` includes the effective policy with its source. Lane
 preambles render these same rows. Process census is advisory for admission;
-the exclusive writer lease and retained-work Git fences remain authoritative.
-Paths within a worktree are advisory write scope; settlement and handoff report
-out-of-scope paths. `policy.WRITE_SCOPE=refuse` explicitly selects strict scope.
+only rules with a real waiting action support Queue. The exclusive writer lease
+and retained-work Git fences remain authoritative. Declared paths within a
+worktree are advisory write scope; settlement and handoff report out-of-scope
+paths. `policy.WRITE_SCOPE=refuse` explicitly selects strict scope.
 
 ## Consequences
 

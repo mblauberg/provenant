@@ -88,15 +88,30 @@ fn prepare(
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
     let mut tool_requirements = crate::launch::ToolRequirements::default();
-    if input.confined.codex_policy() != CodexPolicy::Clean
-        || plan.selected_authentication.as_deref() != Some("login")
-    {
-        return Err(ProviderError::UnsupportedPolicy);
+    if input.confined.codex_policy() != CodexPolicy::Clean {
+        return Err(input.boundary_error(
+            "CODEX_PREPARE_AUTHORITY",
+            "Codex requires its clean configuration policy",
+            ProviderError::UnsupportedPolicy,
+        ));
+    }
+    if plan.selected_authentication.as_deref() != Some("login") {
+        return Err(input.boundary_error(
+            "CODEX_PREPARE_CREDENTIALS",
+            "Codex requires its selected login authentication",
+            ProviderError::UnsupportedPolicy,
+        ));
     }
     let codex_home = &plan
         .private_state
         .as_ref()
-        .ok_or(ProviderError::UnsupportedPolicy)?
+        .ok_or_else(|| {
+            input.boundary_error(
+                "CODEX_PREPARE_CREDENTIALS",
+                "Codex login requires its isolated private credential state",
+                ProviderError::UnsupportedPolicy,
+            )
+        })?
         .path;
     let credential = input.account.map_or_else(
         || input.home.join(".codex/auth.json"),
@@ -104,7 +119,13 @@ fn prepare(
     );
     let mut argv: Vec<OsString> = vec![input.executable.into(), "exec".into()];
     if session == Session::Resume {
-        let continuation = input.continuation.ok_or(ProviderError::UnknownIdentity)?;
+        let continuation = input.continuation.ok_or_else(|| {
+            input.boundary_error(
+                "CODEX_PREPARE_AUTHORITY",
+                "resumed Codex invocation has no validated continuation identity",
+                ProviderError::UnknownIdentity,
+            )
+        })?;
         argv.extend(["resume".into(), continuation.session().into()]);
     }
     argv.extend(

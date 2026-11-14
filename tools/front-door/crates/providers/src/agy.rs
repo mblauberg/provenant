@@ -343,20 +343,21 @@ fn prepare(
     let plan = input.confined.permissions();
     let mut tool_requirements = crate::launch::ToolRequirements::default();
     if plan.selected_authentication.as_deref() != Some("keychain") {
-        return Err(ProviderError::UnsupportedPolicy);
+        return Err(input.boundary_error(
+            "AGY_PREPARE_CREDENTIALS",
+            "Agy requires its selected keychain authentication",
+            ProviderError::UnsupportedPolicy,
+        ));
     }
     input.prompt.check_argv(input.policy)?;
-    let private_home = plan.private_state.as_ref().map_or_else(
-        || {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: Agy private state is unavailable; using the attempt scratch directory"
-            );
-            &plan.scratch.path
-        },
-        |state| &state.path,
-    );
+    let private_home = crate::launch::private_state_or_scratch(
+        plan.private_state
+            .as_ref()
+            .map(|state| state.path.as_path()),
+        &plan.scratch.path,
+        input.policy,
+        "AGY_PREPARE_NONE",
+    )?;
     let keychain = match input.account {
         Some(account) => account_keychain(account.directory(), input.home)?,
         None => None,
@@ -418,7 +419,13 @@ fn prepare(
         argv.extend(["--add-dir".into(), parent.as_os_str().to_owned()]);
     }
     if session == Session::Resume {
-        let continuation = input.continuation.ok_or(ProviderError::UnknownIdentity)?;
+        let continuation = input.continuation.ok_or_else(|| {
+            input.boundary_error(
+                "AGY_PREPARE_AUTHORITY",
+                "resumed Agy invocation has no validated continuation identity",
+                ProviderError::UnknownIdentity,
+            )
+        })?;
         argv.extend(["--conversation".into(), continuation.session().into()]);
     }
     argv.extend(["--model".into(), input.route.model.as_str().into()]);

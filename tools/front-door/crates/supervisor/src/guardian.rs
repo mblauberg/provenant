@@ -823,9 +823,16 @@ fn lane_port_allocation(
     match plan.try_acquire() {
         Ok(Some(lease)) => Ok((Some(lease), None)),
         Ok(None) => {
-            use provenant_records::policy::Facts;
+            use provenant_records::policy::{Effect, Facts};
             let effect = policy.check("PORT_BLOCKS", Facts::violation("lane port pool exhausted"));
-            if !effect.blocks() { return Ok((None, effect.message().map(str::to_owned))); }
+            match effect {
+                Effect::Proceed => return Ok((None, None)),
+                Effect::Warn(message) => return Ok((None, Some(message))),
+                // Queue has no actual port-block wait path. Policy validation
+                // rejects it, and an invalid serialized value must not refuse.
+                Effect::Queue(_) => return Ok((None, None)),
+                Effect::Refuse(_) => {}
+            }
             use provenant_records::diagnostic::PortSettingSource;
             let origin = match plan.blocks_origin {
                 Some(provenant_os::lane_ports::BlocksOrigin::CompiledDefault) => {
@@ -841,12 +848,19 @@ fn lane_port_allocation(
                 origin,
             })
         }
-        Err(_) => Ok((
-            None,
-            Some(
-                "lane port block unavailable; continuing without allocation (domains.fabric.lanes.lane_port_blocks)".into(),
-            ),
-        )),
+        Err(_) => {
+            let effect = policy.check(
+                "GUARDIAN_LANE_PORT_ALLOCATION_NONE",
+                provenant_records::policy::Facts::violation(
+                    "lane port allocation failed; continuing without a block",
+                ),
+            );
+            let warning = match effect {
+                provenant_records::policy::Effect::Warn(message) => Some(message),
+                _ => None,
+            };
+            Ok((None, warning))
+        }
     }
 }
 

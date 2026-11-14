@@ -43,22 +43,24 @@ site = "cli/src/run/provider/preparation.rs#dependency_preparation_event"
 boundary = "none"
 strength = "warn"
 knob = "policy.PREPARATION_DEPENDENCY_PREPARATION_EVENT_NONE"
-justification = "Dependency preparation failures warn with lanes.prepare_deps and its compiled default or sealed profile origin; the provider may repair dependencies in the lane."
+justification = "A failed optional dependency install is recorded in the launch event; Off suppresses that event while the provider may repair dependencies in the lane."
 
 [[rule]]
 code = "GRANT_COUNT"
-site = "confinement/src/permissions/validation.rs#validate_plan_grant_limit"
+site = "confinement/src/permissions/render.rs#compile_sbpl"
 boundary = "none"
 strength = "warn"
+refusable = true
 knob = "policy.GRANT_COUNT"
 threshold = "domains.run.grant_limit"
 justification = "Plan grant counts warn above the effective threshold, naming the count, threshold and host or compiled origin."
 
 [[rule]]
 code = "PROFILE_BYTES"
-site = "confinement/src/permissions/render.rs#render_with_limit"
+site = "confinement/src/permissions/render.rs#compile_sbpl"
 boundary = "none"
 strength = "warn"
+refusable = true
 knob = "policy.PROFILE_BYTES"
 threshold = "domains.run.profile_limit_bytes"
 justification = "Rendered sandbox profile size warns above the effective threshold, naming the bytes, threshold and host or compiled origin."
@@ -68,16 +70,10 @@ code = "ARGV_PROMPT"
 site = "providers/src/contract.rs#Prompt::check_argv"
 boundary = "none"
 strength = "warn"
+refusable = true
 knob = "policy.ARGV_PROMPT"
 threshold = "domains.run.argv_prompt_limit_bytes"
-justification = "The argv prompt byte threshold defaults to 65536 and can be overridden; top-level launches spill above it."
-
-[[rule]]
-code = "OBSERVATION_CHECK_LAUNCH_PROMPT_AUTHORITY"
-site = "cli/src/run/provider/observation.rs#check_launch_prompt"
-boundary = "authority"
-strength = "refuse"
-justification = "Nested argv prompts above the threshold cannot spill to a parent-writable file without allowing the parent to alter the child task."
+justification = "The argv prompt byte threshold warns by default; explicit Refuse may use a private file for top-level launches, while nested lanes retain immutable argv."
 
 [[rule]]
 code = "CONTRACT_CONTINUATION_VALIDATE_AUTHORITY"
@@ -126,18 +122,26 @@ code = "WRITE_GRANT_BYTES"
 site = "run/src/launch.rs#applied_write_grants"
 boundary = "none"
 strength = "warn"
+refusable = true
 knob = "policy.WRITE_GRANT_BYTES"
 threshold = "domains.run.write_grant_limit_bytes"
 justification = "The encoded applied write-grant ledger has a configurable warning threshold; the warning and receipt report the effective value and origin. Historical limit diagnostics remain readable."
 
 [[rule]]
-code = "LAUNCH_RUNSTORE_START_INNER_NONE"
-site = "run/src/launch.rs#RunStore::start_inner"
+code = "WRITE_GRANT_LIMIT_READ_NONE"
+site = "cli/src/run.rs#Registry::write_grant_limit"
 boundary = "none"
 strength = "warn"
-knob = "policy.LAUNCH_RUNSTORE_START_INNER_NONE"
-threshold = "domains.fabric.lanes.priority"
-justification = "Unavailable lane priority warns and falls back to the compiled priority for the lane mode."
+knob = "policy.WRITE_GRANT_LIMIT_READ_NONE"
+justification = "An unreadable write-grant threshold configuration warns and uses the compiled default."
+
+[[rule]]
+code = "WRITE_GRANT_LIMIT_INVALID_NONE"
+site = "run/src/launch.rs#WriteGrantLimit::checked"
+boundary = "none"
+strength = "warn"
+knob = "policy.WRITE_GRANT_LIMIT_INVALID_NONE"
+justification = "An out-of-range write-grant threshold warns and uses the compiled default."
 
 [[rule]]
 code = "CONFINEMENT_HOST_INDEXES_PROTECTED_DATA_INTEGRITY"
@@ -176,7 +180,7 @@ justification = "Publishing policy must be read and its selected GitHub credenti
 
 [[rule]]
 code = "PREPARATION_PREPARE_WRITER_DEPENDENCIES_NONE"
-site = "cli/src/run/provider/preparation.rs#prepare_writer_dependencies"
+site = "cli/src/run/provider/preparation.rs#prepare_writer_dependencies_with_policy"
 boundary = "none"
 strength = "warn"
 knob = "policy.PREPARATION_PREPARE_WRITER_DEPENDENCIES_NONE"
@@ -195,6 +199,7 @@ code = "PORT_BLOCKS"
 site = "supervisor/src/guardian.rs#Driver::run"
 boundary = "none"
 strength = "warn"
+refusable = true
 knob = "policy.PORT_BLOCKS"
 threshold = "domains.fabric.lanes.lane_port_blocks"
 justification = "An exhausted port-block pool warns the writer and reports the effective count, its host or compiled origin, and the setting that can raise the pool or disable allocation."
@@ -212,6 +217,7 @@ code = "PACING_ADAPTER"
 site = "routing/src/resolve.rs#pacing_reserve_window"
 boundary = "none"
 strength = "warn"
+refusable = true
 knob = "policy.PACING_ADAPTER"
 threshold = "domains.routing.pacing_reserve"
 justification = "An adapter reserve defaults to shipped values and can be configured; the observation reports its effective percentage and source."
@@ -221,6 +227,7 @@ code = "PACING_ACCOUNT"
 site = "routing/src/resolve.rs#pacing_reserve_window"
 boundary = "none"
 strength = "warn"
+refusable = true
 knob = "policy.PACING_ACCOUNT"
 threshold = "domains.routing.pacing.accounts"
 justification = "An account pacing profile can override the reserve for its selected window."
@@ -230,6 +237,7 @@ code = "PACING_FREE"
 site = "routing/src/resolve.rs#pacing_reserve_window"
 boundary = "none"
 strength = "warn"
+refusable = true
 knob = "policy.PACING_FREE"
 threshold = "domains.routing.pacing.free"
 justification = "A free-pool pacing profile can override the reserve for its selected window."
@@ -239,13 +247,14 @@ code = "LAUNCH_DISK"
 site = "run/src/launch.rs#Providers::check_policy"
 boundary = "none"
 strength = "warn"
+refusable = true
 knob = "policy.LAUNCH_DISK"
 threshold = "gc.free_floor"
 justification = "Writer launch may warns when available storage remains below the configured free-space floor after collection."
 
 [[rule]]
 code = "DISPATCH_PREPAREDPROVIDER_CHECK_POLICY_AUTHORITY"
-site = "cli/src/run/dispatch.rs#PreparedProvider::check_policy"
+site = "cli/src/run/launch.rs#PreparedProvider::identity_refusal"
 boundary = "authority"
 strength = "refuse"
 justification = "A prepared continuation must retain its validated task identity."
@@ -264,6 +273,7 @@ code = "SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE"
 site = "cli/src/run/submit.rs#check_writer_disk_with_collection"
 boundary = "none"
 strength = "warn"
+refusable = true
 knob = "policy.SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE"
 justification = "An unobservable disk floor or available space warns and allows dispatch; measured low space retains the configurable floor."
 
@@ -276,14 +286,14 @@ justification = "The stored prompt must match its recorded length and digest bef
 
 [[rule]]
 code = "ARTIFACTS_RUNSTORE_ARTIFACT_BYTES_DATA_INTEGRITY"
-site = "run/src/artifacts.rs#RunStore::artifact_bytes"
+site = "run/src/launch.rs#RunStore::start_inner"
 boundary = "data_integrity"
 strength = "refuse"
 justification = "At launch the validated attempt record already limits its recorded prompt to RECORD_LIMIT; a file exceeding that read bound cannot match the recorded length. Length and digest are then verified before use."
 
 [[rule]]
 code = "ARTIFACTS_RUNSTORE_ARTIFACT_BYTES_AUTHORITY"
-site = "run/src/artifacts.rs#RunStore::artifact_bytes"
+site = "run/src/launch.rs#RunStore::start_inner"
 boundary = "authority"
 strength = "refuse"
 justification = "If the stored prompt cannot be reopened, its bytes cannot be verified against the authorised task and no substitute prompt is launched."
@@ -360,7 +370,7 @@ justification = "The writer HEAD must match the selected lane branch before prot
 
 [[rule]]
 code = "WRITER_WRITERLAUNCH_REQUIRE_CONTINUATION_SOURCE_GIT_ISOLATION"
-site = "run/src/writer.rs#WriterLaunch::require_continuation_source"
+site = "run/src/writer.rs#WriterLaunch::require_continuation_source_with_policy"
 boundary = "git_isolation"
 strength = "refuse"
 justification = "The selected source and continuation head must match the pinned commit and its ancestry before the writer is launched."
@@ -371,13 +381,6 @@ site = "run/src/launch/hand_off.rs#RunStore::hand_off"
 boundary = "authority"
 strength = "refuse"
 justification = "A handoff must use the selected worktree and held custody binding; fenced, unknown, invalid or unconfirmed custody cannot be granted to another attempt."
-
-[[rule]]
-code = "CUSTODY_PUBLICATIONRESERVATION_PREPARE_AUTHORITY"
-site = "supervisor/src/custody.rs#PublicationReservation::prepare"
-boundary = "authority"
-strength = "refuse"
-justification = "Existing launch or exit evidence fences an attempt against a second execution."
 
 [[rule]]
 code = "CONTROLS_RUNSTORE_CHECK_WRITER_LINEAGE_AUTHORITY"
@@ -392,22 +395,6 @@ site = "run/src/launch/hand_off.rs#RunStore::hand_off"
 boundary = "authority"
 strength = "refuse"
 justification = "An attempt changed after custody acquisition cannot be handed off."
-
-[[rule]]
-code = "LAUNCH_RUNSTORE_START_INNER_NONE_2"
-site = "run/src/launch.rs#RunStore::start_inner"
-boundary = "none"
-strength = "warn"
-knob = "policy.LAUNCH_RUNSTORE_START_INNER_NONE_2"
-justification = "Untyped candidate preparation failures remain combined in RefusalKind::Preparation; typed per-candidate guard facts survive mixed fallback. These operational setup failures do not assert a security boundary."
-
-[[rule]]
-code = "HAND_OFF_RUNSTORE_HAND_OFF_NONE"
-site = "run/src/launch/hand_off.rs#RunStore::hand_off"
-boundary = "none"
-strength = "warn"
-knob = "policy.HAND_OFF_RUNSTORE_HAND_OFF_NONE"
-justification = "HandOff::Local still combines operational setup failures with typed custody and Git checks. Typed boundary failures retain their boundary cause; these setup failures do not assert a security boundary."
 
 [[rule]]
 code = "PLAN_CONFINEDPLAN_NEW_AUTHORITY"
@@ -446,35 +433,35 @@ justification = "Required roots must be representable and disjoint so the select
 
 [[rule]]
 code = "RENDER_COMPILE_SBPL_GIT_ISOLATION"
-site = "confinement/src/permissions/render.rs#compile_sbpl"
+site = "confinement/src/permissions/render.rs#compile_sbpl_with_diagnostic"
 boundary = "git_isolation"
 strength = "refuse"
 justification = "Writer grants must match held worktree authority and keep real Git metadata outside writable scratch."
 
 [[rule]]
 code = "RENDER_COMPILE_SBPL_CREDENTIALS"
-site = "confinement/src/permissions/render.rs#compile_sbpl"
+site = "confinement/src/permissions/render.rs#compile_sbpl_with_diagnostic"
 boundary = "credentials"
 strength = "refuse"
 justification = "Credential, secret and private-state exclusions must hold after anchors and grants are resolved."
 
 [[rule]]
 code = "RENDER_COMPILE_SBPL_AUTHORITY"
-site = "confinement/src/permissions/render.rs#compile_sbpl"
+site = "confinement/src/permissions/render.rs#compile_sbpl_with_diagnostic"
 boundary = "authority"
 strength = "refuse"
 justification = "The backend cannot claim a requested nested confinement policy that it cannot enforce."
 
 [[rule]]
 code = "RENDER_COMPILE_SBPL_AUTHORITY_2"
-site = "confinement/src/permissions/render.rs#compile_sbpl"
+site = "confinement/src/permissions/render.rs#compile_sbpl_with_diagnostic"
 boundary = "authority"
 strength = "refuse"
 justification = "Held grant anchors are verified before and after rendering so replaced paths cannot change the authority that was approved."
 
 [[rule]]
 code = "RENDER_COMPILE_SBPL_AUTHORITY_3"
-site = "confinement/src/permissions/render.rs#compile_sbpl"
+site = "confinement/src/permissions/render.rs#compile_sbpl_with_diagnostic"
 boundary = "authority"
 strength = "refuse"
 justification = "Required anchors must be present and resolvable to enforce the selected grants."
@@ -497,7 +484,7 @@ justification = "Unrepresentable optional write grants are omitted; unrepresenta
 
 [[rule]]
 code = "PROJECT_PATHS_RESOLVE_NONE"
-site = "cli/src/run/provider/project_paths.rs#resolve"
+site = "cli/src/run/provider/project_paths.rs#apply_to"
 boundary = "none"
 strength = "warn"
 knob = "policy.PROJECT_PATHS_RESOLVE_NONE"
@@ -512,14 +499,14 @@ justification = "Required paths must be encoded losslessly to enforce the reques
 
 [[rule]]
 code = "PROBE_SYSTEM_BACKEND_CREDENTIALS"
-site = "confinement/src/permissions/probe.rs#system_backend"
+site = "confinement/src/permissions/probe.rs#system_backend_with_limits_and_policy"
 boundary = "credentials"
 strength = "refuse"
 justification = "Without an enforcing sandbox the lane could read credential stores outside its selected authentication grants."
 
 [[rule]]
 code = "PROBE_SYSTEM_BACKEND_GIT_ISOLATION"
-site = "confinement/src/permissions/probe.rs#system_backend"
+site = "confinement/src/permissions/probe.rs#system_backend_with_limits_and_policy"
 boundary = "git_isolation"
 strength = "refuse"
 justification = "Without an enforcing sandbox a writer could modify the real Git administrative and common directories."
@@ -565,13 +552,6 @@ site = "confinement/src/repo.rs#reject_alternates"
 boundary = "data_integrity"
 strength = "refuse"
 justification = "The complete alternates declaration must be inspected before protected history can be accepted."
-
-[[rule]]
-code = "REPO_REPOERROR_GIT_ISOLATION"
-site = "confinement/src/repo.rs#RepoError"
-boundary = "git_isolation"
-strength = "refuse"
-justification = "Repository opening and complete metadata reads are prerequisites for establishing the selected worktree and its Git authority."
 
 [[rule]]
 code = "OPENCODE_PREPARE_CREDENTIALS"
@@ -726,6 +706,13 @@ knob = "policy.LANE_LANERUNTIME_MCP_NONE"
 justification = "Unrepresentable Fabric MCP paths warn and omit that optional integration; Claude retains its isolated settings."
 
 [[rule]]
+code = "LANE_LANERUNTIME_ENVIRONMENT_AUTHORITY"
+site = "providers/src/lane.rs#LaneRuntime::environment"
+boundary = "authority"
+strength = "refuse"
+justification = "Required wrapper executable and state paths must remain anchored when providers scrub inherited environment and HOME."
+
+[[rule]]
 code = "LANE_LANERUNTIME_CLAUDE_AUTHORITY"
 site = "providers/src/lane.rs#LaneRuntime::claude"
 boundary = "authority"
@@ -741,12 +728,13 @@ justification = "Request digest and host-owned retry checks bind launch to the v
 
 [[rule]]
 code = "PROFILE_GRANT_COUNT"
-site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
+site = "confinement/src/permissions/render.rs#compile_sbpl"
 boundary = "none"
 strength = "warn"
+refusable = true
 knob = "policy.PROFILE_GRANT_COUNT"
 threshold = "domains.run.grant_limit"
-justification = "Profile family counts warn above the configured grant threshold, naming its effective value and origin; authority validation still warns invalid grants."
+justification = "Profile family counts warn above the configured grant threshold, naming its effective value and origin; authority validation still refuses invalid grants."
 
 [[rule]]
 code = "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_CREDENTIALS"
@@ -757,7 +745,7 @@ justification = "Authentication roots and writes must be confined to the selecte
 
 [[rule]]
 code = "RENDER_FILTERED_NATIVE_CONTROLS_NONE"
-site = "confinement/src/permissions/render.rs#filtered_native_controls"
+site = "confinement/src/permissions/render.rs#filtered_native_controls_with_policy"
 boundary = "none"
 strength = "warn"
 knob = "policy.RENDER_FILTERED_NATIVE_CONTROLS_NONE"
@@ -772,14 +760,14 @@ justification = "A process policy must identify exact executables and the Fabric
 
 [[rule]]
 code = "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_CREDENTIALS_2"
-site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
+site = "confinement/src/permissions/render.rs#verify_discovery_grant"
 boundary = "credentials"
 strength = "refuse"
-justification = "Valid discovery marker anchors reject links or identity changes that could redirect a read into credential material."
+justification = "Discovery grant entries are rechecked against held parent anchors before and after rendering so replacement or redirects cannot change credential-backed reads."
 
 [[rule]]
 code = "RENDER_RENDER_PROFILE_WITH_LIMIT_NONE"
-site = "confinement/src/permissions/render.rs#render_profile_with_limit"
+site = "confinement/src/permissions/render.rs#render_profile_with_policy"
 boundary = "none"
 strength = "warn"
 knob = "policy.RENDER_RENDER_PROFILE_WITH_LIMIT_NONE"
@@ -787,7 +775,7 @@ justification = "Malformed provider endpoints are omitted before SBPL rendering;
 
 [[rule]]
 code = "RENDER_RENDER_PROFILE_WITH_LIMIT_NONE_2"
-site = "confinement/src/permissions/render.rs#render_profile_with_limit"
+site = "confinement/src/permissions/render.rs#render_profile_with_policy"
 boundary = "none"
 strength = "warn"
 knob = "policy.RENDER_RENDER_PROFILE_WITH_LIMIT_NONE_2"
@@ -906,7 +894,7 @@ justification = "The selected account must match the route it authorises."
 
 [[rule]]
 code = "ADMISSION_RUNSTORE_ADMIT_AUTHORITY"
-site = "run/src/admission.rs#RunStore::admit"
+site = "run/src/ledger.rs#lease_with_policy"
 boundary = "authority"
 strength = "refuse"
 justification = "A guardian and store identity are required to bind a lease to its owner and preserve custody when the host later recovers it."
@@ -916,6 +904,8 @@ code = "ADMISSION_DISK"
 site = "run/src/admission.rs#RunStore::admit"
 boundary = "none"
 strength = "warn"
+refusable = true
+queueable = true
 knob = "policy.ADMISSION_DISK"
 threshold = "gc.free_floor"
 justification = "The effective disk floor is configured or shipped; its source and value accompany the observation."
@@ -925,6 +915,8 @@ code = "ADMISSION_PRESSURE"
 site = "run/src/admission.rs#RunStore::admit"
 boundary = "none"
 strength = "warn"
+refusable = true
+queueable = true
 knob = "policy.ADMISSION_PRESSURE"
 threshold = "domains.fabric.lanes.memory_pressure_threshold"
 justification = "The effective pressure threshold is configured or shipped; its source and value accompany the observation."
@@ -934,6 +926,8 @@ code = "ADMISSION_PROJECT_WRITERS"
 site = "run/src/admission.rs#RunStore::admit"
 boundary = "none"
 strength = "warn"
+refusable = true
+queueable = true
 knob = "policy.ADMISSION_PROJECT_WRITERS"
 threshold = "domains.fabric.lanes.max_project_writer_lanes"
 justification = "The applicable host or project cap is configured or shipped; the observation names its setting, source and value."
@@ -943,6 +937,8 @@ code = "ADMISSION_WRITERS"
 site = "run/src/admission.rs#RunStore::admit"
 boundary = "none"
 strength = "warn"
+refusable = true
+queueable = true
 knob = "policy.ADMISSION_WRITERS"
 threshold = "domains.fabric.lanes.max_writer_lanes"
 justification = "The host writer cap is configured or shipped and its source and value accompany the observation."
@@ -952,6 +948,8 @@ code = "ADMISSION_LANES"
 site = "run/src/admission.rs#RunStore::admit"
 boundary = "none"
 strength = "warn"
+refusable = true
+queueable = true
 knob = "policy.ADMISSION_LANES"
 threshold = "domains.fabric.lanes.max_lanes"
 justification = "The host lane cap is configured or shipped and its source and value accompany the observation."
@@ -961,6 +959,8 @@ code = "ADMISSION_PROJECT_LANES"
 site = "run/src/admission.rs#RunStore::admit"
 boundary = "none"
 strength = "warn"
+refusable = true
+queueable = true
 knob = "policy.ADMISSION_PROJECT_LANES"
 threshold = "domains.fabric.lanes.max_project_lanes"
 justification = "The project lane cap is configured or shipped and its source and value accompany the observation."
@@ -975,73 +975,11 @@ threshold = "operating system RLIMIT_NPROC"
 justification = "The operating system's per-user soft process limit is adjustable; the observation identifies the limit and shipped reserved headroom."
 
 [[rule]]
-code = "CUSTODY_DISK"
-site = "run/src/launch/hand_off.rs#custody_refusal"
-boundary = "none"
-strength = "warn"
-knob = "policy.CUSTODY_DISK"
-threshold = "gc.free_floor"
-justification = "A custody admission resource observation retains the effective setting and source in its typed fact."
-
-[[rule]]
-code = "CUSTODY_PRESSURE"
-site = "run/src/launch/hand_off.rs#custody_refusal"
-boundary = "none"
-strength = "warn"
-knob = "policy.CUSTODY_PRESSURE"
-threshold = "domains.fabric.lanes.memory_pressure_threshold"
-justification = "A custody admission resource observation retains the effective setting and source in its typed fact."
-
-[[rule]]
-code = "CUSTODY_PROJECT_WRITERS"
-site = "run/src/launch/hand_off.rs#custody_refusal"
-boundary = "none"
-strength = "warn"
-knob = "policy.CUSTODY_PROJECT_WRITERS"
-threshold = "domains.fabric.lanes.max_project_writer_lanes"
-justification = "A custody admission resource observation retains the effective setting and source in its typed fact."
-
-[[rule]]
-code = "CUSTODY_WRITERS"
-site = "run/src/launch/hand_off.rs#custody_refusal"
-boundary = "none"
-strength = "warn"
-knob = "policy.CUSTODY_WRITERS"
-threshold = "domains.fabric.lanes.max_writer_lanes"
-justification = "A custody admission resource observation retains the effective setting and source in its typed fact."
-
-[[rule]]
-code = "CUSTODY_LANES"
-site = "run/src/launch/hand_off.rs#custody_refusal"
-boundary = "none"
-strength = "warn"
-knob = "policy.CUSTODY_LANES"
-threshold = "domains.fabric.lanes.max_lanes"
-justification = "A custody admission resource observation retains the effective setting and source in its typed fact."
-
-[[rule]]
-code = "CUSTODY_PROJECT_LANES"
-site = "run/src/launch/hand_off.rs#custody_refusal"
-boundary = "none"
-strength = "warn"
-knob = "policy.CUSTODY_PROJECT_LANES"
-threshold = "domains.fabric.lanes.max_project_lanes"
-justification = "A custody admission resource observation retains the effective setting and source in its typed fact."
-
-[[rule]]
-code = "CUSTODY_PROCESSES"
-site = "run/src/launch/hand_off.rs#custody_refusal"
-boundary = "none"
-strength = "warn"
-knob = "policy.CUSTODY_PROCESSES"
-threshold = "operating system RLIMIT_NPROC"
-justification = "A custody admission resource observation retains the effective setting and source in its typed fact."
-
-[[rule]]
 code = "COPY_BYTES"
 site = "cli/src/run/provider/continuation.rs#copy_state_classified"
 boundary = "none"
 strength = "warn"
+refusable = true
 knob = "policy.COPY_BYTES"
 threshold = "domains.run.continuation_copy_limit_bytes"
 justification = "Retained-state copy and search budgets report the effective host setting or shipped default, its source and a corrective action."
@@ -1051,6 +989,7 @@ code = "COPY_ENTRIES"
 site = "cli/src/run/provider/continuation.rs#copy_state_classified"
 boundary = "none"
 strength = "warn"
+refusable = true
 knob = "policy.COPY_ENTRIES"
 threshold = "domains.run.continuation_copy_entries"
 justification = "Retained-state copy and search budgets report the effective host setting or shipped default, its source and a corrective action."
@@ -1060,6 +999,7 @@ code = "COPY_DEPTH"
 site = "cli/src/run/provider/continuation.rs#copy_state_classified"
 boundary = "none"
 strength = "warn"
+refusable = true
 knob = "policy.COPY_DEPTH"
 threshold = "domains.run.continuation_copy_depth"
 justification = "Retained-state copy and search budgets report the effective host setting or shipped default, its source and a corrective action."
@@ -1085,6 +1025,7 @@ code = "SEARCH_ENTRIES"
 site = "cli/src/run/provider/continuation.rs#find_session_state_within"
 boundary = "none"
 strength = "warn"
+refusable = true
 knob = "policy.SEARCH_ENTRIES"
 threshold = "domains.run.continuation_copy_entries"
 justification = "An unfinished session search reports its exhausted configurable budget and host source rather than claiming the session is missing."
@@ -1094,6 +1035,7 @@ code = "SEARCH_DEPTH"
 site = "cli/src/run/provider/continuation.rs#find_session_state_within"
 boundary = "none"
 strength = "warn"
+refusable = true
 knob = "policy.SEARCH_DEPTH"
 threshold = "domains.run.continuation_copy_depth"
 justification = "An unfinished session search reports its exhausted configurable budget and host source rather than claiming the session is missing."
@@ -1117,6 +1059,7 @@ code = "WRITE_SCOPE"
 site = "run/src/writer.rs#WriterLaunch::finish"
 boundary = "none"
 strength = "warn"
+refusable = true
 knob = "policy.WRITE_SCOPE"
 justification = "Paths inside the writer worktree are advisory scope. Report paths outside the declared scope; only an explicit strict setting refuses settlement."
 

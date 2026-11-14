@@ -424,7 +424,37 @@ pub(crate) fn policy_warning(
     }
 }
 
+/// Use the attempt scratch directory when a provider's separate private state
+/// could not be represented. These optional rules are Warn/Off only, so the
+/// confined scratch directory remains the usable fallback for both actions.
+pub(crate) fn private_state_or_scratch<'a>(
+    private_state: Option<&'a Path>,
+    scratch: &'a Path,
+    policy: &Policy,
+    code: &'static str,
+) -> Result<&'a Path, ProviderError> {
+    if let Some(private_state) = private_state {
+        return Ok(private_state);
+    }
+    policy_warning(
+        policy,
+        code,
+        "separate private provider state is unavailable; using confined attempt scratch",
+    )?;
+    Ok(scratch)
+}
+
 impl PrepareInput<'_> {
+    pub(crate) fn boundary_error<E>(
+        &self,
+        code: &'static str,
+        detail: impl Into<String>,
+        typed_error: E,
+    ) -> E {
+        self.policy
+            .boundary_error(code, Facts::violation(detail), typed_error)
+    }
+
     pub(crate) fn sandboxed(&self) -> bool {
         (self.host_var)(provenant_confinement::run_config::SANDBOX_ENV)
             .is_none_or(|value| value != "off")

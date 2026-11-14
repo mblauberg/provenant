@@ -1327,9 +1327,10 @@ pub(super) fn writer_source_context(
     writer: &run::WriterLaunch,
     task: &run::TaskRequest,
     git: &Path,
+    policy: &provenant_records::policy::Policy,
 ) -> Result<Option<String>, PrepareError> {
     let boundary_error = |error: PrepareError| {
-        provenant_records::policy::Policy::default().boundary_error(
+        policy.boundary_error(
             "CONFINEMENT_WRITER_SOURCE_CONTEXT_AUTHORITY",
             provenant_records::policy::Facts::violation(error.to_string()),
             error,
@@ -1372,7 +1373,9 @@ pub(super) fn writer_source_context(
             "invalid pinned writer source".into(),
         ))
     })?;
-    if let Err(error) = writer.require_continuation_source(git, source, predecessor) {
+    if let Err(error) =
+        writer.require_continuation_source_with_policy(git, source, predecessor, policy)
+    {
         return Err(boundary_error(PrepareError::WriterContinuation(
             if uncommitted.is_empty() {
                 error.to_string()

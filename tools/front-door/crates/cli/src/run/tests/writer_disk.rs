@@ -166,9 +166,16 @@ fn writer_gc_settings_use_defaults_when_configuration_is_unreadable()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     std::os::unix::fs::symlink(temp.path().join("missing"), temp.path().join("config.toml"))?;
+    let policy = provenant_records::policy::Policy::default();
     assert_eq!(
-        writer_gc_settings(temp.path()),
+        writer_gc_settings(temp.path(), &policy),
         provenant_config::GcSettings::default()
+    );
+    let rule = policy.rule("RUN_WRITER_GC_SETTINGS_NONE");
+    assert_eq!(rule.rule.code, "RUN_WRITER_GC_SETTINGS_NONE");
+    assert_eq!(
+        rule.rule.strength,
+        provenant_records::policy::Strength::Warn
     );
     Ok(())
 }

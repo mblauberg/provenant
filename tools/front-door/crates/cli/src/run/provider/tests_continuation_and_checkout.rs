@@ -1,4 +1,3 @@
-
 #[test]
 fn writer_continuation_preserves_and_reports_uncommitted_edits()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -485,8 +484,8 @@ fn credential_authority_never_follows_links_below_the_host_root()
 }
 
 #[test]
-fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result<(), Box<dyn std::error::Error>>
-{
+fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
+-> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, Digest};
     use provenant_records::{
         FileDigest, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness,
@@ -574,7 +573,8 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
             };
             store.create(&request, &call)?;
             let candidate = context.state_root.as_path().join(format!(
-                "attempts/{}/provider-state/candidate-0", prior.attempt_id
+                "attempts/{}/provider-state/candidate-0",
+                prior.attempt_id
             ));
             std::fs::DirBuilder::new()
                 .recursive(true)
@@ -686,6 +686,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
             )?)?;
             use provenant_providers::{Adapter, ProviderEvent, codex::Codex};
             let prompt = Prompt::new("continue".into());
+            let launch_policy = provenant_records::policy::Policy::default();
             let account = provenant_providers::identity::RegisteredAccount::new(
                 "codex",
                 "local",
@@ -693,6 +694,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
             )?;
             let launch = Codex.prepare(PrepareInput {
                 images: &[],
+                policy: &launch_policy,
                 command: None,
                 route: &route,
                 confined: &plan,
@@ -826,27 +828,58 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
                 let db = rusqlite::Connection::open(data.join("opencode.db"))?;
                 db.execute_batch("CREATE TABLE session (id TEXT PRIMARY KEY); CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)")?;
                 db.execute("INSERT INTO session VALUES (?1)", ["fixture-session"])?;
-                db.execute("INSERT INTO session_message VALUES (?1, 'assistant', ?2)", ("fixture-session", r#"{"model":{"providerID":"fixture","id":"model"}}"#))?;
+                db.execute(
+                    "INSERT INTO session_message VALUES (?1, 'assistant', ?2)",
+                    (
+                        "fixture-session",
+                        r#"{"model":{"providerID":"fixture","id":"model"}}"#,
+                    ),
+                )?;
                 drop(db);
                 let copied = root.join("copy");
                 let resumed = continuation_for(&prior, &route, "fixture", &root, &root, &copied)?;
                 assert_eq!(resumed.session(), "fixture-session");
-                assert_eq!(provenant_providers::opencode::observe_model(&copied.join("data/opencode"), "fixture-session")?, "opencode/fixture/model");
+                assert_eq!(
+                    provenant_providers::opencode::observe_model(
+                        &copied.join("data/opencode"),
+                        "fixture-session"
+                    )?,
+                    "opencode/fixture/model"
+                );
                 let db = rusqlite::Connection::open(data.join("opencode.db"))?;
-                db.execute("INSERT INTO session_message VALUES (?1, 'assistant', ?2)", ("fixture-session", r#"{"model":{"providerID":"other","id":"model"}}"#))?;
+                db.execute(
+                    "INSERT INTO session_message VALUES (?1, 'assistant', ?2)",
+                    (
+                        "fixture-session",
+                        r#"{"model":{"providerID":"other","id":"model"}}"#,
+                    ),
+                )?;
                 for case in ["ambiguous", "absent"] {
-                    if case == "absent" { db.execute("DELETE FROM session_message", [])?; }
-                    assert!(provenant_providers::opencode::observe_model(&data, "fixture-session").is_err());
+                    if case == "absent" {
+                        db.execute("DELETE FROM session_message", [])?;
+                    }
+                    assert!(
+                        provenant_providers::opencode::observe_model(&data, "fixture-session")
+                            .is_err()
+                    );
                     let target = root.join(format!("copy-{case}"));
-                    assert_eq!(continuation_for(&prior, &route, "fixture", &root, &root, &target)?.session(), "fixture-session");
+                    assert_eq!(
+                        continuation_for(&prior, &route, "fixture", &root, &root, &target)?
+                            .session(),
+                        "fixture-session"
+                    );
                 }
                 let other = state.join("candidate-1/data/opencode");
                 std::fs::create_dir_all(&other)?;
                 std::fs::copy(data.join("opencode.db"), other.join("opencode.db"))?;
-                assert!(super::observation::find_opencode_session(&state, "fixture-session").is_err());
+                assert!(
+                    super::observation::find_opencode_session(&state, "fixture-session").is_err()
+                );
                 std::fs::remove_dir_all(state.join("candidate-1"))?;
                 db.execute("DELETE FROM session", [])?;
-                assert!(super::observation::find_opencode_session(&state, "fixture-session").is_err());
+                assert!(
+                    super::observation::find_opencode_session(&state, "fixture-session").is_err()
+                );
             }
             prior.session = None;
             assert!(continuation_for(&prior, &route, "fixture", state, state, state).is_err());

@@ -1638,10 +1638,39 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
         blocks: 1,
         blocks_origin: Some(provenant_os::lane_ports::BlocksOrigin::HostConfig),
     };
-    let (lease, warning) = lane_port_allocation(&strict_port_policy(), Some(&unavailable))
+    let advisory_policy = provenant_records::policy::Policy::default();
+    assert_eq!(
+        advisory_policy
+            .rule("GUARDIAN_LANE_PORT_ALLOCATION_NONE")
+            .rule
+            .strength,
+        provenant_records::policy::Strength::Warn
+    );
+    assert!(
+        !advisory_policy
+            .rule("GUARDIAN_LANE_PORT_ALLOCATION_NONE")
+            .rule
+            .refusable
+    );
+    let (lease, warning) = lane_port_allocation(&advisory_policy, Some(&unavailable))
         .map_err(std::io::Error::other)?;
     assert!(lease.is_none());
-    assert!(warning.is_some_and(|text| text.contains("domains.fabric.lanes.lane_port_blocks")));
+    assert!(warning.is_some());
+    let mut off_policy = advisory_policy.clone();
+    off_policy.overlay(
+        &std::collections::BTreeMap::from([(
+            "GUARDIAN_LANE_PORT_ALLOCATION_NONE".into(),
+            provenant_records::policy::Strength::Off,
+        )]),
+        provenant_records::policy::Source::Dispatch,
+    );
+    assert_eq!(
+        off_policy.rule("GUARDIAN_LANE_PORT_ALLOCATION_NONE").source,
+        provenant_records::policy::Source::Dispatch
+    );
+    let (_, warning) =
+        lane_port_allocation(&off_policy, Some(&unavailable)).map_err(std::io::Error::other)?;
+    assert!(warning.is_none());
     let env = vec![
         ("PATH".into(), "/bin".into()),
         (provenant_os::lane_ports::BASE_ENV.into(), "1".into()),
@@ -1655,18 +1684,19 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
         state: temp.path().into(),
         ..unavailable
     };
-    let (first, warning) = lane_port_allocation(&strict_port_policy(), Some(&available))
-        .map_err(std::io::Error::other)?;
+    let strict = strict_port_policy();
+    assert_eq!(strict.rule("PORT_BLOCKS").rule.code, "PORT_BLOCKS");
+    assert_eq!(
+        strict.rule("PORT_BLOCKS").rule.strength,
+        provenant_records::policy::Strength::Refuse
+    );
+    let (first, warning) =
+        lane_port_allocation(&strict, Some(&available)).map_err(std::io::Error::other)?;
     assert!(first.is_some());
     assert!(warning.is_none());
-    let error = lane_port_allocation(&strict_port_policy(), Some(&available))
+    let error = lane_port_allocation(&strict, Some(&available))
         .err()
         .ok_or("expected exhausted pool")?;
-    assert!(
-        error
-            .to_string()
-            .contains("domains.fabric.lanes.lane_port_blocks=1 (host configuration)")
-    );
     assert_eq!(
         error.fact(),
         provenant_records::diagnostic::ResourceFact::LanePorts {
@@ -1679,8 +1709,8 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
         blocks_origin: Some(provenant_os::lane_ports::BlocksOrigin::CompiledDefault),
         ..available
     };
-    let (lease, warning) = lane_port_allocation(&Default::default(), Some(&automatic))
-        .map_err(std::io::Error::other)?;
+    let (lease, warning) =
+        lane_port_allocation(&advisory_policy, Some(&automatic)).map_err(std::io::Error::other)?;
     assert!(lease.is_none());
     assert!(warning.is_some());
     Ok(())

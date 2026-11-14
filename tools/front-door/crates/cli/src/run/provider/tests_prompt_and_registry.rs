@@ -1,4 +1,3 @@
-
 #[test]
 fn launch_prompt_refuses_invalid_input_before_account_resolution()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -53,24 +52,16 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
         if matches!(adapter, "cursor" | "agy") {
             let mut nested = prompt_paths(&attempt)?;
             nested.lane_depth = 2;
-            let error = prepare_with(
-                &Registry::default(),
-                &requested,
+            let prompt = launch_prompt(
                 &full,
                 &nested,
-                None,
-                |_| unreachable!("nested argv spill must not probe executables"),
-                None,
-            )
-            .err()
-            .ok_or("nested argv launch accepted")?;
-            assert!(
-                matches!(
-                    error,
-                    PrepareError::Prompt(LaunchPromptError::NestedArgvTooLarge { .. })
-                ),
-                "{error}"
-            );
+                &attempt,
+                adapter,
+                65_536,
+                provenant_records::diagnostic::SettingSource::ShippedDefault,
+                &provenant_records::policy::Policy::default(),
+            )?;
+            assert_eq!(prompt.text(), full);
             assert!(!attempt.join("prompt.md").exists());
             if adapter == "cursor" {
                 let home = attempt.join("fixture-home");
@@ -265,7 +256,7 @@ fn executable_discovery_after_wait_observes_the_completed_update()
     let executable = temp.path().join("cursor-agent");
     let host = run::HostLaunchContext {
         graph_directory: None,
-            configuration_root: temp.path().into(),
+        configuration_root: temp.path().into(),
         cwd: temp.path().into(),
         executables: Default::default(),
         executable_search_path: vec![temp.path().into()],

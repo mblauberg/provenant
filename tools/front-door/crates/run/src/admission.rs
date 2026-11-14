@@ -248,7 +248,7 @@ impl RunStore {
             } else {
                 // The ledger may have committed a yield before a failed store
                 // commit. Always recheck it, even if this ticket says active.
-                let reclaimed = crate::ledger::lease(
+                let reclaimed = crate::ledger::lease_with_policy(
                     &ledger,
                     self.context.state_root.as_path(),
                     &ticket,
@@ -256,6 +256,7 @@ impl RunStore {
                     call.clock,
                     call,
                     owner.as_ref().ok_or(RunError::Conflict)?,
+                    &policy,
                 )?
                 .is_some();
                 ticket.active = reclaimed;
@@ -1195,7 +1196,7 @@ impl RunStore {
             // namespace, so they live in the host ledger, not this store.
             // The ledger reads the clock under its own lock; the lane starts at
             // the time spacing was judged and recorded.
-            let Some(now) = crate::ledger::lease(
+            let Some(now) = crate::ledger::lease_with_policy(
                 &ledger,
                 self.context.state_root.as_path(),
                 &ticket,
@@ -1203,6 +1204,7 @@ impl RunStore {
                 clock,
                 call,
                 &owner,
+                &policy,
             )?
             else {
                 return Ok(None);

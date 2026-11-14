@@ -81,13 +81,13 @@ impl ProviderError {
             Self::IdentityMismatch
             | Self::UnknownIdentity
             | Self::InvalidPath
-            | Self::UnsupportedPolicy
-            | Self::PolicyActionUnsupported { .. } => B::Authority,
+            | Self::UnsupportedPolicy => B::Authority,
             Self::IsolatedKeychainUnavailable(_) | Self::CredentialReadFailed(_) => B::Credentials,
             Self::PromptTooLarge { .. }
             | Self::Malformed
             | Self::MalformedResult(_)
             | Self::Overflow
+            | Self::PolicyActionUnsupported { .. }
             | Self::ProbeDirectory(_)
             | Self::LoginRequired
             | Self::CredentialUnavailable
@@ -114,7 +114,7 @@ fn provider_failure_boundary_depends_on_typed_cause() {
             code: "ARGV_PROMPT"
         }
         .boundary_class(),
-        B::Authority
+        B::None
     );
     assert_eq!(
         ProviderError::PolicyActionUnsupported {

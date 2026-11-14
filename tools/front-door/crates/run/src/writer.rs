@@ -5,7 +5,7 @@ use provenant_confinement::{
     ConfinedPlan, UtilityBudget, UtilityRuntime, VerifiedWorktree,
     permissions::{
         AccessMode, AnchoredDirectory, Anchors, BackendContext, ProfileLimits, ProviderProfile,
-        prepare_writer_directories, required_anchors, system_backend_with_limits,
+        prepare_writer_directories, required_anchors, system_backend_with_limits_and_policy,
     },
     repo::GitRefName,
     worktrees,
@@ -258,11 +258,32 @@ impl WriterLaunch {
         source: GitOid,
         predecessor: GitOid,
     ) -> Result<()> {
+        self.require_continuation_source_with_policy(
+            git,
+            source,
+            predecessor,
+            &provenant_records::policy::Policy::default(),
+        )
+    }
+
+    pub fn require_continuation_source_with_policy(
+        &self,
+        git: &Path,
+        source: GitOid,
+        predecessor: GitOid,
+        policy: &provenant_records::policy::Policy,
+    ) -> Result<()> {
         if self.base != predecessor {
-            return Err(RunError::WriterSourceMismatch {
-                expected: predecessor,
-                actual: self.base,
-            });
+            return Err(policy.boundary_error(
+                "WRITER_WRITERLAUNCH_REQUIRE_CONTINUATION_SOURCE_GIT_ISOLATION",
+                provenant_records::policy::Facts::violation(
+                    "prepared writer base does not match the pinned predecessor head",
+                ),
+                RunError::WriterSourceMismatch {
+                    expected: predecessor,
+                    actual: self.base,
+                },
+            ));
         }
         let repo = self.worktree.repo();
         let descends = crate::objects::command(
@@ -279,10 +300,16 @@ impl WriterLaunch {
         )
         .is_ok();
         if !descends {
-            return Err(RunError::WriterSourceMismatch {
-                expected: source,
-                actual: self.base,
-            });
+            return Err(policy.boundary_error(
+                "WRITER_WRITERLAUNCH_REQUIRE_CONTINUATION_SOURCE_GIT_ISOLATION",
+                provenant_records::policy::Facts::violation(
+                    "pinned predecessor head does not descend from the writer source",
+                ),
+                RunError::WriterSourceMismatch {
+                    expected: source,
+                    actual: self.base,
+                },
+            ));
         }
         Ok(())
     }
@@ -959,7 +986,10 @@ impl ResolvedLaunchLimits {
     }
 }
 
-fn launch_resource_limits(state: &Path) -> ResolvedLaunchLimits {
+fn launch_resource_limits(
+    state: &Path,
+    policy: &provenant_records::policy::Policy,
+) -> ResolvedLaunchLimits {
     match provenant_confinement::run_config::RunConfig::read_with_keys(state) {
         Ok((config, keys)) => {
             let origin = |key: &str| {
@@ -982,12 +1012,15 @@ fn launch_resource_limits(state: &Path) -> ResolvedLaunchLimits {
         }
         Err(error) => {
             let defaults = ProfileLimits::default();
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: launch resource limits unavailable ({error}); using compiled defaults domains.run.grant_limit={} and domains.run.profile_limit_bytes={}",
-                defaults.grant_limit,
-                defaults.profile_limit_bytes
-            );
+            if let provenant_records::policy::Effect::Warn(message) = policy.check(
+                "WRITER_LAUNCH_RESOURCE_LIMITS_NONE",
+                provenant_records::policy::Facts::violation(format!(
+                    "launch resource limits unavailable ({error}); using compiled defaults domains.run.grant_limit={} and domains.run.profile_limit_bytes={}",
+                    defaults.grant_limit, defaults.profile_limit_bytes
+                )),
+            ) {
+                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            }
             ResolvedLaunchLimits {
                 limits: defaults,
                 grant_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
@@ -1143,11 +1176,12 @@ impl LaunchConfinement {
         argv: &[OsString],
         attempt: &provenant_core::AttemptId,
         cancel: &CancelToken,
+        policy: &provenant_records::policy::Policy,
     ) -> Result<provenant_confinement::permissions::ConfinedCommand> {
         let executor =
             SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-        let limits = launch_resource_limits(&self.state_root);
-        let backend = system_backend_with_limits(
+        let limits = launch_resource_limits(&self.state_root, policy);
+        let backend = system_backend_with_limits_and_policy(
             &BackendContext {
                 executor: &executor,
                 cancel,
@@ -1155,6 +1189,7 @@ impl LaunchConfinement {
                 env: &[],
             },
             limits.limits,
+            policy,
         )
         .map_err(RunError::Confinement)?;
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
@@ -2569,6 +2604,7 @@ impl WriterLaunch {
         attempt: &Directory,
         scope: provenant_supervisor::custody::Scope,
     ) -> Result<()> {
+        let policy = writer_policy_for_attempt(state, attempt);
         seal_writer_ownership(attempt, &self.worktree)?;
         let utility = runtime(state)?;
         let head = self
@@ -2579,7 +2615,13 @@ impl WriterLaunch {
         if std::str::from_utf8(&head).map(str::trim).ok()
             != Some(format!("ref: {}", self.branch.as_str()).as_str())
         {
-            return Err(RunError::WriterHeadNotLaneBranch);
+            return Err(policy.boundary_error(
+                "WRITER_WRITERLAUNCH_SNAPSHOT_GIT_ISOLATION",
+                provenant_records::policy::Facts::violation(
+                    "writer worktree HEAD no longer names the selected lane branch",
+                ),
+                RunError::WriterHeadNotLaneBranch,
+            ));
         }
         let head = crate::objects::resolve_ref(
             utility.git_program_path(),
@@ -2587,7 +2629,13 @@ impl WriterLaunch {
             self.branch.as_str(),
         )?;
         if head != self.base {
-            return Err(RunError::Validation("writer base changed before launch"));
+            return Err(policy.boundary_error(
+                "WRITER_WRITERLAUNCH_SNAPSHOT_GIT_ISOLATION",
+                provenant_records::policy::Facts::violation(
+                    "writer selected branch head changed before launch",
+                ),
+                RunError::Validation("writer base changed before launch"),
+            ));
         }
         crate::artifacts::seal(
             attempt,
@@ -2606,7 +2654,15 @@ impl WriterLaunch {
             &reference,
         ) {
             Ok(current) if current == self.base => return Ok(()),
-            Ok(_) => return Err(RunError::Validation("writer Git base pin changed")),
+            Ok(_) => {
+                return Err(policy.boundary_error(
+                    "WRITER_WRITERLAUNCH_SNAPSHOT_GIT_ISOLATION",
+                    provenant_records::policy::Facts::violation(
+                        "writer lane-base reference changed after preparation",
+                    ),
+                    RunError::Validation("writer Git base pin changed"),
+                ));
+            }
             Err(_) => {}
         }
         crate::objects::command(
@@ -3189,6 +3245,27 @@ fn invalid_write_scope_snapshot(policy: &provenant_records::policy::Policy) -> R
     )
 }
 
+fn writer_policy_for_attempt(
+    state: &Path,
+    attempt: &Directory,
+) -> provenant_records::policy::Policy {
+    let request = crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)
+        .ok()
+        .flatten()
+        .and_then(|raw| crate::db::decode::<crate::CanonicalRequest>(&raw).ok());
+    let Some(request) = request else {
+        return Default::default();
+    };
+    let project = request
+        .task
+        .profile
+        .extra
+        .get("policy_project")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    crate::launch_policy(state, project, &request.task)
+}
+
 impl WriterLaunch {
     /// A diagnostic naming the edits a writer left uncommitted, or `None` when
     /// it committed or its tree is clean. Call it after `terminal` succeeds.
@@ -3516,7 +3593,8 @@ mod launch_resource_limit_tests {
             state.path().join("config.toml"),
             "schema_version=1\n[domains.run]\ngrant_limit=0\n",
         )?;
-        let limits = launch_resource_limits(state.path());
+        let policy = provenant_records::policy::Policy::default();
+        let limits = launch_resource_limits(state.path(), &policy);
         let defaults = ProfileLimits::default();
         assert_eq!(limits.limits.grant_limit, defaults.grant_limit);
         assert_eq!(
@@ -3546,7 +3624,7 @@ mod launch_resource_limit_tests {
             state.path().join("config.toml"),
             "schema_version=1\n[domains.run]\ngrant_limit=128\n",
         )?;
-        let explicit_default = launch_resource_limits(state.path());
+        let explicit_default = launch_resource_limits(state.path(), &policy);
         assert_eq!(
             explicit_default.grant_origin,
             provenant_records::diagnostic::SettingSource::Configuration
@@ -3559,7 +3637,7 @@ mod launch_resource_limit_tests {
             state.path().join("config.toml"),
             "schema_version=1\n[domains.run]\ngrant_limit=256\nprofile_limit_bytes=1048576\n",
         )?;
-        let configured = launch_resource_limits(state.path());
+        let configured = launch_resource_limits(state.path(), &policy);
         assert_eq!(configured.limits.grant_limit, 256);
         assert_eq!(
             configured.grant_origin,
