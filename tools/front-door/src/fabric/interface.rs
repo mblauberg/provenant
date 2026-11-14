@@ -371,7 +371,7 @@ fn bind_launch_controls(input: &Value, node: &mut Value, cwd: &Path) -> Result<(
         provenant_confinement::repo::GitRevision::new(base).map_err(|_| invalid("base"))?;
         let worktree = provenant_confinement::worktrees::managed_writer_relative_path(cwd, branch)
             .map_err(|_| invalid("branch"))?;
-        node["worktree"] = json!(worktree);
+        node["worktree"] = json!(cwd.join(worktree));
         if node.get("attempt").is_none() {
             node["attempt"] = json!({});
         }
@@ -3670,17 +3670,15 @@ mod tests {
             &mut node,
             cwd,
         )?;
-        assert_eq!(node["worktree"], ".worktrees/fix-parser");
+        assert_eq!(node["worktree"], "/fixture/project/.worktrees/fix-parser");
         let mut explicit = json!({"id":"task","use":"task"});
         bind_launch_controls(
             &json!({"worktree":".worktrees/fix-parser"}),
             &mut explicit,
             Path::new("/fixture/project"),
         )?;
-        let branch_path =
-            Path::new("/fixture/project").join(node["worktree"].as_str().ok_or("branch path")?);
         assert_eq!(
-            branch_path.to_str().ok_or("branch path")?,
+            node["worktree"].as_str().ok_or("branch path")?,
             explicit["worktree"].as_str().ok_or("explicit worktree")?
         );
         let mut relative = json!({"id":"task","use":"task"});

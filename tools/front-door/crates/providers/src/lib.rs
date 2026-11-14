@@ -18,7 +18,7 @@ pub mod identity;
 mod lane;
 mod launch;
 mod skill_stage;
-pub use lane::{BuildSlotGate, GhShim, LaneRuntime};
+pub use lane::{BuildSlotGate, BuildSlotSetupOutcome, GhShim, LaneRuntime};
 pub use skill_stage::{SkillWarning, StagedUserSkills};
 pub mod opencode;
 pub mod quota;
