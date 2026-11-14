@@ -204,6 +204,8 @@ pub struct GitRevision(String);
 #[error("Git revision must be bounded printable text and cannot start with `-`")]
 pub struct GitRevisionError;
 
+const DISCARD_ARCHIVE_REF_PREFIX: &str = "refs/provenant/discard-archives/";
+
 impl GitRefName {
     pub fn new(value: impl AsRef<str>) -> Result<Self, GitRefError> {
         let value = value.as_ref();
@@ -214,6 +216,25 @@ impl GitRefName {
             return Err(GitRefError);
         }
         Ok(Self(value.to_owned()))
+    }
+
+    /// The private ref that keeps an archived tip reachable until its bundle
+    /// is published. `id` is host-generated, one alphanumeric path component.
+    pub fn discard_archive(id: impl AsRef<str>) -> Result<Self, GitRefError> {
+        let id = id.as_ref();
+        if id.is_empty() || id.len() > 64 || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+            return Err(GitRefError);
+        }
+        Ok(Self(format!("{DISCARD_ARCHIVE_REF_PREFIX}{id}")))
+    }
+
+    /// Parse a full ref previously produced by `discard_archive`.
+    pub fn parse_discard_archive(value: impl AsRef<str>) -> Result<Self, GitRefError> {
+        value
+            .as_ref()
+            .strip_prefix(DISCARD_ARCHIVE_REF_PREFIX)
+            .ok_or(GitRefError)
+            .and_then(Self::discard_archive)
     }
 
     /// A remote-tracking ref named `remote/branch`, such as `origin/main`.

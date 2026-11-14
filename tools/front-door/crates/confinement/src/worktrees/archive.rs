@@ -53,6 +53,14 @@ pub(super) fn capture(
     }
     let root = context.project_state.open_verified_directory(root_name)?;
     let nonce = temporary_name()?;
+    // Git refuses a ref component that starts with a dot, so the archive ref
+    // carries only the random suffix of the staging name.
+    let ref_id = nonce
+        .to_string_lossy()
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_owned();
     let stage_name = OsString::from(format!(".stage-{}", nonce.to_string_lossy()));
     root.mkdir(&stage_name, 0o700)?;
     let stage = root.open_verified_directory(&stage_name)?;
@@ -61,11 +69,8 @@ pub(super) fn capture(
         OsStr::new("archive.lock"),
         provenant_os::fs::LockMode::Exclusive,
     )?;
-    let archive_reference = GitRefName::new(format!(
-        "refs/provenant/discard-archives/{}",
-        nonce.to_string_lossy()
-    ))
-    .map_err(|_| WorktreeError::InvalidRequest)?;
+    let archive_reference =
+        GitRefName::discard_archive(&ref_id).map_err(|_| WorktreeError::InvalidRequest)?;
     let intent = serde_json::to_vec(
         &serde_json::json!({ "reference": archive_reference.as_str(), "tip": tip }),
     )
@@ -81,11 +86,8 @@ pub(super) fn capture(
         .map_err(|_| WorktreeError::InvalidOutput)?;
     // An incomplete stage is never evidence authorising discard.
     let capture = (|| -> Result<(), WorktreeError> {
-        let reference = GitRefName::new(format!(
-            "refs/provenant/discard-archives/{}",
-            nonce.to_string_lossy()
-        ))
-        .map_err(|_| WorktreeError::InvalidRequest)?;
+        let reference =
+            GitRefName::discard_archive(&ref_id).map_err(|_| WorktreeError::InvalidRequest)?;
         execute_mutation(
             context,
             GitMutation::CreateArchiveRef {
@@ -204,10 +206,7 @@ pub(super) fn capture(
     })();
     if let Err(error) = capture {
         drop(stage_lease);
-        let released = if let Ok(reference) = GitRefName::new(format!(
-            "refs/provenant/discard-archives/{}",
-            nonce.to_string_lossy()
-        )) {
+        let released = if let Ok(reference) = GitRefName::discard_archive(&ref_id) {
             let cleanup = CancelToken::new();
             match super::ref_tip(context, &reference, &cleanup) {
                 Ok(None) => true,
@@ -421,7 +420,7 @@ pub fn collect_archives(
                 if let Some(intent) = intent {
                     let reference = intent["reference"]
                         .as_str()
-                        .and_then(|s| GitRefName::new(s).ok());
+                        .and_then(|s| GitRefName::parse_discard_archive(s).ok());
                     let tip = intent["tip"].as_str().and_then(|s| GitOid::parse(s).ok());
                     let (Some(reference), Some(tip)) = (reference, tip) else {
                         report.errors.push(RetentionIssue {
