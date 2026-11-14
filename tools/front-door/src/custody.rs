@@ -451,7 +451,7 @@ pub fn settle_graph(
 pub fn settle_landing(
     project: Option<&Path>,
     state: &Path,
-    record: &crate::pr::landing::owner::LandingRecord,
+    record: &provenant_records::landing::LandingRecord,
 ) -> Result<(), Error> {
     let Some(project) = project else {
         return Ok(());
@@ -491,7 +491,7 @@ pub fn settle_landing(
                 &call,
             )?;
         }
-        if let Some(crate::pr::landing::owner::MemberOutcome::Landed { commit }) =
+        if let Some(provenant_records::landing::MemberOutcome::Landed { commit }) =
             record.outcomes.get(&member.pr)
         {
             let evidence = LandedEvidence {

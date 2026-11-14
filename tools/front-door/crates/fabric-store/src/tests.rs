@@ -1,7 +1,7 @@
 use super::*;
 use provenant_core::{
     CancelToken, Clock, DurationMicros, MessageId, MonoTime, PathResolver, RootInputs, StateRoot,
-    TestClock, TimeError,
+    TestClock,
 };
 use provenant_records::{ArtifactRef, PathWire, RecordHeader};
 use std::{

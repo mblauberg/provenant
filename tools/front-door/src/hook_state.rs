@@ -8,8 +8,6 @@ use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Te
 use provenant_workflow::session::{
     CommandPrefix, LaneLine, SessionState, Unavailable, WorktreeLine,
 };
-#[cfg(test)]
-use provenant_workflow::session::{PrLine, PrUnread};
 use serde_json::Value;
 use std::{
     ffi::OsString,
@@ -488,33 +486,6 @@ fn parse_worktree_stream(bytes: &[u8]) -> Option<(Vec<WorktreeLine>, usize)> {
     let skipped = total.saturating_sub(entries.len().max(1));
     Some((parse_worktrees(&Value::Array(entries)), skipped))
 }
-/// Read the first line of the CLI's status array; unknown fields stay unknown.
-#[cfg(test)]
-fn pr_status(data: &Value) -> (String, String) {
-    let data = data
-        .as_array()
-        .and_then(|lines| lines.first())
-        .unwrap_or(data);
-    let state = data["state"].as_str().unwrap_or("unknown").to_owned();
-    let head: String = data["head"]
-        .as_str()
-        .unwrap_or("unknown")
-        .chars()
-        .take(7)
-        .collect();
-    let checks = match (
-        data["checks_passed"].as_u64(),
-        data["checks_total"].as_u64(),
-        data["checks_failed"].as_u64(),
-        data["checks_pending"].as_u64(),
-    ) {
-        (Some(passed), Some(total), Some(failed), Some(pending)) => {
-            format!("checks={passed}/{total} failed={failed} pending={pending}")
-        }
-        _ => "checks=unavailable".to_owned(),
-    };
-    (state, format!("{head} {checks}"))
-}
 
 #[cfg(test)]
 mod tests {
@@ -856,7 +827,7 @@ esac
             "provenant --state-dir '/work/rel/state' pr status 9"
         );
         let unread = SessionState {
-            prs_unread: vec![PrUnread {
+            prs_unread: vec![provenant_workflow::session::PrUnread {
                 number: 9,
                 command: commands(Some(Path::new("rel/state"))).command("pr status 9"),
             }],
@@ -903,43 +874,5 @@ esac
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].branch, "feat/a");
         assert_eq!(list[0].path, "/p/.worktrees/a");
-    }
-
-    #[test]
-    fn digest_reports_unavailable_checks_without_claiming_zero() {
-        use super::*;
-        use serde_json::json;
-        let (state, summary) = pr_status(
-            &json!([{"state":"OPEN", "head":"abcdef123456", "checks_passed":null, "checks_total":null, "checks_failed":null, "checks_pending":null}]),
-        );
-        let digest = SessionState {
-            prs: vec![PrLine {
-                number: 42,
-                state,
-                summary,
-            }],
-            ..Default::default()
-        }
-        .digest(provenant_workflow::session::DIGEST_LIMIT);
-        assert!(
-            digest.contains("#42 abcdef1 checks=unavailable"),
-            "{digest}"
-        );
-        assert!(!digest.contains("0/0"));
-        let (_, zero) = pr_status(
-            &json!([{"state":"OPEN", "head":"abcdef1", "checks_passed":0, "checks_total":0, "checks_failed":0, "checks_pending":0}]),
-        );
-        assert!(zero.contains("checks=0/0"));
-    }
-
-    #[test]
-    fn pr_status_reads_cli_array() {
-        use super::*;
-        use serde_json::json;
-        let (state, summary) = pr_status(
-            &json!([{"state":"OPEN", "head":"abcdef123456", "checks_passed":2, "checks_total":3, "checks_failed":0, "checks_pending":1}]),
-        );
-        assert_eq!(state, "OPEN");
-        assert_eq!(summary, "abcdef1 checks=2/3 failed=0 pending=1");
     }
 }

@@ -319,35 +319,34 @@ impl LandPolicy {
         let rules_file = Source::new("target_rule", rules_key.clone(), rules_path)
             .field("", origins)?
             .path;
-        if let Some(target) = target {
-            if let Some((index, rule)) = rules
+        if let Some(target) = target
+            && let Some((index, rule)) = rules
                 .iter()
                 .enumerate()
                 .rev()
                 .find(|(_, rule)| target_matches(&rule.target, target))
-            {
-                let override_ = LandOverride {
-                    strategy: rule.strategy,
-                    compose: rule.compose.clone(),
-                    ..LandOverride::default()
-                };
-                apply(
-                    &mut fields,
-                    &override_,
-                    Source {
-                        layer: "target_rule".into(),
-                        path: rules_file.clone(),
-                        key: format!("{rules_key}.{index}"),
-                        rule: Some(TargetRule {
-                            index,
-                            target: rule.target.clone(),
-                        }),
-                    },
-                    false,
-                    &mut budget_rate_micros_per_minute,
-                    origins,
-                )?;
-            }
+        {
+            let override_ = LandOverride {
+                strategy: rule.strategy,
+                compose: rule.compose.clone(),
+                ..LandOverride::default()
+            };
+            apply(
+                &mut fields,
+                &override_,
+                Source {
+                    layer: "target_rule".into(),
+                    path: rules_file.clone(),
+                    key: format!("{rules_key}.{index}"),
+                    rule: Some(TargetRule {
+                        index,
+                        target: rule.target.clone(),
+                    }),
+                },
+                false,
+                &mut budget_rate_micros_per_minute,
+                origins,
+            )?;
         }
         for (layer, key, override_) in [
             (

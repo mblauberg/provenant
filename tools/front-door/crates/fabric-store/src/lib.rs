@@ -12,7 +12,6 @@ mod messages;
 mod operations;
 
 pub use chairs::*;
-pub use claims::*;
 pub use db::{CURRENT_SCHEMA_VERSION, Request, Store};
 pub use events::*;
 pub use federation::*;

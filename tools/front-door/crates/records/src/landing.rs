@@ -318,10 +318,10 @@ pub struct StrategyDeclaration {
 }
 
 macro_rules! declare_strategies {
-    ($( $variant:ident => ($name:literal, $plan:expr, $requirements:expr, $resolver:ident, $execution:ident); )+) => {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    ($( $(#[$attr:meta])* $variant:ident => ($name:literal, $plan:expr, $requirements:expr, $resolver:ident, $execution:ident); )+) => {
+        #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
         #[serde(rename_all = "snake_case")]
-        pub enum Strategy { $( #[serde(rename = $name)] $variant, )+ }
+        pub enum Strategy { $( $(#[$attr])* #[serde(rename = $name)] $variant, )+ }
 
         pub const STRATEGY_CHOICES: &[&str] = &[$($name),+];
 
@@ -340,17 +340,12 @@ macro_rules! declare_strategies {
 
 declare_strategies! {
     Direct => ("direct", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Single, schedule: Schedule::Immediate, publication: Publication::ExactCandidate, completion: Completion::Event }, &[], resolve_preset, Builtin);
+    #[default]
     Batch => ("batch", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Batch, schedule: Schedule::Immediate, publication: Publication::ExactCandidate, completion: Completion::Event }, &[], resolve_preset, Builtin);
     Stack => ("stack", Plan { dependencies: Dependencies::Stack, candidate: CandidateKind::Batch, schedule: Schedule::Ordered, publication: Publication::ExactCandidate, completion: Completion::Event }, &[ForgeCapability::Restack], resolve_preset, Unavailable);
     Queue => ("queue", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Single, schedule: Schedule::Ordered, publication: Publication::ExactCandidate, completion: Completion::Event }, &[ForgeCapability::MergeQueue], resolve_queue, Unavailable);
     Async => ("async", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Single, schedule: Schedule::Immediate, publication: Publication::ExactCandidate, completion: Completion::Event }, &[ForgeCapability::AutoMerge, ForgeCapability::AsyncMerge], resolve_preset, Unavailable);
     Command => ("command", Plan { dependencies: Dependencies::Independent, candidate: CandidateKind::Batch, schedule: Schedule::Immediate, publication: Publication::ExactCandidate, completion: Completion::Event }, &[], resolve_preset, Command);
-}
-
-impl Default for Strategy {
-    fn default() -> Self {
-        Self::Batch
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

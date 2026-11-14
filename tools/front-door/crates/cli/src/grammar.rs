@@ -1241,7 +1241,9 @@ pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
         .ok_or("duration must be a positive span; run `provenant help` for examples")?;
     let maximum = provenant_core::MAX_LANE_RUNTIME_SECONDS;
     if seconds > maximum {
-        eprintln!(
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr().lock(),
             "warning: wait budget clamped to maximum {maximum}s (source: provenant_core::MAX_LANE_RUNTIME_SECONDS)"
         );
     }

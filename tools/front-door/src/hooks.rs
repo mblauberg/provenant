@@ -738,6 +738,7 @@ mod disk_warning_tests {
     }
 }
 /// Collect state and save it to the hook-owned file beside the checkpoint.
+#[allow(clippy::too_many_arguments)]
 fn autosave(
     store: &provenant_workflow::session::SessionStore,
     globals: &Globals,

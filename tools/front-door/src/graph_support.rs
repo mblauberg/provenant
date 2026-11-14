@@ -73,33 +73,6 @@ pub(crate) fn project_worktrees(directory: &Path) -> ProjectWorktrees {
     }
 }
 
-#[cfg(test)]
-mod discovery_tests {
-    use super::*;
-    use std::os::unix::fs::symlink;
-
-    #[test]
-    fn repository_discovery_classification_uses_git_markers() {
-        let temp = tempfile::tempdir().unwrap();
-        let worktree = temp.path().join("checkout/src");
-        std::fs::create_dir_all(&worktree).unwrap();
-        assert!(!has_repository_markers(&worktree).unwrap());
-        let git = temp.path().join("checkout/.git");
-        std::fs::create_dir(&git).unwrap();
-        assert!(has_repository_markers(&worktree).unwrap());
-        std::fs::remove_dir(&git).unwrap();
-        let bare = temp.path().join("bare");
-        std::fs::create_dir_all(bare.join("objects")).unwrap();
-        std::fs::create_dir(bare.join("refs")).unwrap();
-        std::fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-        assert!(has_repository_markers(&bare).unwrap());
-        let linked = temp.path().join("linked");
-        std::fs::create_dir(&linked).unwrap();
-        symlink(git, linked.join(".git")).unwrap();
-        assert!(has_repository_markers(&linked).unwrap());
-    }
-}
-
 /// Whether a read root is exactly one `${parameter}`, with nothing around it.
 pub(crate) fn bare_placeholder(text: &str) -> bool {
     text.strip_prefix("${")
@@ -234,4 +207,30 @@ fn replace_path(text: &str, from: &str, to: &str) -> String {
 
 pub(crate) fn format_family_group(group_index: usize) -> String {
     format!("group-{group_index}")
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    #[test]
+    fn repository_discovery_classification_uses_git_markers() {
+        use super::*;
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("checkout/src");
+        std::fs::create_dir_all(&worktree).unwrap();
+        assert!(!has_repository_markers(&worktree).unwrap());
+        let git = temp.path().join("checkout/.git");
+        std::fs::create_dir(&git).unwrap();
+        assert!(has_repository_markers(&worktree).unwrap());
+        std::fs::remove_dir(&git).unwrap();
+        let bare = temp.path().join("bare");
+        std::fs::create_dir_all(bare.join("objects")).unwrap();
+        std::fs::create_dir(bare.join("refs")).unwrap();
+        std::fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert!(has_repository_markers(&bare).unwrap());
+        let linked = temp.path().join("linked");
+        std::fs::create_dir(&linked).unwrap();
+        symlink(git, linked.join(".git")).unwrap();
+        assert!(has_repository_markers(&linked).unwrap());
+    }
 }

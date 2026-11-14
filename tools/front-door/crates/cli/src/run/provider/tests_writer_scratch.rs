@@ -973,7 +973,7 @@ printf 'agy 1.0.0\n'
         assert_eq!(receipt["mode"], if expected { "discover" } else { "off" });
         assert_eq!(
             receipt["exposed"],
-            expected && confinement.sandboxed,
+            expected && confinement.sandbox.effective,
             "{settings}"
         );
         assert!(receipt["warnings"].as_array().unwrap().is_empty());

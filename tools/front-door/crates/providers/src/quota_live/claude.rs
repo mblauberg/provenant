@@ -416,6 +416,16 @@ impl LiveQuota {
         )
     }
 }
+pub(crate) fn capture_source(
+    live: &LiveQuota,
+    plan: &QuotaProbePlan,
+    previous: Option<&AccountRecord>,
+) -> Result<ProbeCapture, ProbeFailure> {
+    live.capture_source(plan, previous, None, |live, account, deadline, details| {
+        live.claude(account, deadline, details)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -826,14 +836,4 @@ mod tests {
         selected.token = None;
         assert!(!usable(&selected, 1000));
     }
-}
-
-pub(crate) fn capture_source(
-    live: &LiveQuota,
-    plan: &QuotaProbePlan,
-    previous: Option<&AccountRecord>,
-) -> Result<ProbeCapture, ProbeFailure> {
-    live.capture_source(plan, previous, None, |live, account, deadline, details| {
-        live.claude(account, deadline, details)
-    })
 }

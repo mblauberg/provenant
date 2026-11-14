@@ -1,5 +1,5 @@
-use super::{Account, LiveQuota};
-use provenant_quota::{AccountRecord, ProbeCapture, QuotaDetails, QuotaProbePlan};
+use super::LiveQuota;
+use provenant_quota::{AccountRecord, ProbeCapture, QuotaProbePlan};
 use std::{
     collections::{HashMap, HashSet},
     path::Path,

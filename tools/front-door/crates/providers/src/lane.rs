@@ -2875,7 +2875,7 @@ mod tests {
 
         let mut argv = Vec::new();
         assert!(matches!(
-            lane.claude(Path::new("/fixture/scratch"), &mut argv, &policy, None, &[],),
+            lane.claude(Path::new("/fixture/scratch"), &mut argv, policy, None, &[],),
             Err(ProviderError::InvalidPath)
         ));
         let mut env = Vec::new();
@@ -2886,7 +2886,7 @@ mod tests {
                 &mut env,
                 &mut setup,
                 false,
-                &policy,
+                policy,
             )
             .expect_err("the required command context cannot encode the selected executable");
         assert_eq!(

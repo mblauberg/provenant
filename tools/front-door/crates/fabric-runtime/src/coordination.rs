@@ -223,22 +223,22 @@ pub enum ClaimResult {
     Acquired {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
-        change: CustodyChange,
+        change: Box<CustodyChange>,
     },
     Renewed {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
-        record: CustodyRecord,
+        record: Box<CustodyRecord>,
     },
     Verified {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
-        record: CustodyRecord,
+        record: Box<CustodyRecord>,
     },
     Released {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
-        record: CustodyRecord,
+        record: Box<CustodyRecord>,
     },
     Listed {
         #[serde(flatten)]
@@ -627,34 +627,41 @@ impl LocalCoordination<'_> {
                 }
                 ClaimResult::Acquired {
                     extra: Default::default(),
-                    change: ledger.acquire_custody(
+                    change: Box::new(ledger.acquire_custody(
                         self.project,
                         &subject,
                         &holder,
                         Origin::Provenant,
                         &call,
-                    )?,
+                    )?),
                 }
             }
             ClaimInput::Renew { subject, .. } => ClaimResult::Renewed {
                 extra: Default::default(),
-                record: ledger.touch_custody(self.project, &subject, self.actor, &call)?,
+                record: Box::new(ledger.touch_custody(
+                    self.project,
+                    &subject,
+                    self.actor,
+                    &call,
+                )?),
             },
             ClaimInput::Verify { subject, .. } => ClaimResult::Verified {
                 extra: Default::default(),
-                record: ledger
-                    .custody_item(self.project, &subject, &call)?
-                    .ok_or(provenant_fabric_store::Error::NotFound)?,
+                record: Box::new(
+                    ledger
+                        .custody_item(self.project, &subject, &call)?
+                        .ok_or(provenant_fabric_store::Error::NotFound)?,
+                ),
             },
             ClaimInput::Release { subject, .. } => ClaimResult::Released {
                 extra: Default::default(),
-                record: ledger.change_custody_state(
+                record: Box::new(ledger.change_custody_state(
                     self.project,
                     &subject,
                     CustodyState::Released,
                     Some(self.actor),
                     &call,
-                )?,
+                )?),
             },
             ClaimInput::List { after, limit, .. } => ClaimResult::Listed {
                 extra: Default::default(),

@@ -104,12 +104,13 @@ fn custody_queries_page_and_include_nested_lanes_without_crossing_chairs() {
         attempt: AttemptId::from_bytes([3; 16]),
         chair: Some(chair.clone()),
     };
+    let other = holder(2);
     for n in 1..=4 {
         ledger
             .acquire_custody(
                 ProjectId::from_bytes([n; 16]),
                 &Subject::new(SubjectKind::Branch, format!("branch-{n}")),
-                if n % 2 == 0 { &nested } else { &holder(2) },
+                if n % 2 == 0 { &nested } else { &other },
                 Origin::Provenant,
                 &f.request(),
             )

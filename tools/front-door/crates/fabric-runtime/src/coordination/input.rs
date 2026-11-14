@@ -547,7 +547,9 @@ impl ValidateInput for HostsInput {
 #[cfg(test)]
 mod tests {
     use super::super::facade::{GraphInput, OutputInput, RunInput, SubmitInput};
-    use super::super::{ClaimInput, CoordinationApi, CoordinationError, CoordinationService};
+    use super::super::{
+        ClaimInput, CoordinationApi, CoordinationError, CoordinationService, Subject,
+    };
     use provenant_core::ThreadPause;
     use provenant_core::{
         ActorId, CancelToken, Clock, MonoTime, PathResolver, ProjectId, RootInputs, TestClock,

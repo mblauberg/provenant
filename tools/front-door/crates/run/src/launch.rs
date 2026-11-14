@@ -1265,7 +1265,7 @@ impl RunStore {
                     } else {
                         RefusalKind::Policy
                     };
-                    (kind, refusal)
+                    Box::new((kind, refusal))
                 })
                 .and_then(|priority| {
                     providers
@@ -1273,12 +1273,13 @@ impl RunStore {
                         .map(|plan| (plan, priority))
                         .map_err(|reason| {
                             let refusal = check_preparation_refusal(&policy, reason);
-                            (refusal.kind(), refusal)
+                            Box::new((refusal.kind(), refusal))
                         })
                 });
             let (mut plan, priority) = match prepared {
                 Ok(prepared) => prepared,
-                Err((kind, refusal)) => {
+                Err(refused) => {
+                    let (kind, refusal) = *refused;
                     if !refusal.skipped_routes.is_empty() {
                         self.record_skipped_routes(id, &refusal.skipped_routes, call)?;
                     }

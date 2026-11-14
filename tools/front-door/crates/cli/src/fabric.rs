@@ -493,7 +493,7 @@ fn execute(
                 extra: Default::default(),
                 subject,
                 holder: Holder::Chair {
-                    chair: current_chair(ctx),
+                    chair: current_chair(&ctx),
                 },
             }),
             operation,

@@ -1783,7 +1783,7 @@ mod tests {
         response.as_object_mut().unwrap().remove("protocol");
         assert!(
             provenant_records::decode::<PeerResponse<serde_json::Value>, _>(
-                &serde_json::to_vec(&response).unwrap(),
+                serde_json::to_vec(&response).unwrap().as_slice(),
                 Limits::CONFIG,
             )
             .is_err()

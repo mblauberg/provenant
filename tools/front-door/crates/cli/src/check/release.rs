@@ -364,6 +364,7 @@ const BYTE_RULES: &[(&str, &str, &str)] = &[
         r"(?-u)(?:^|[^A-Za-z0-9_])AKIA[A-Z0-9]{16}(?:$|[^A-Za-z0-9_])",
     ),
 ];
+#[allow(clippy::expect_used)] // Compiled patterns; the byte-rule tests build this set.
 static BYTE_MATCHERS: std::sync::LazyLock<regex::bytes::RegexSet> =
     std::sync::LazyLock::new(|| {
         regex::bytes::RegexSet::new(BYTE_RULES.iter().map(|(_, _, pattern)| *pattern))

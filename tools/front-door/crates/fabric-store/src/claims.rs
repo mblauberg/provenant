@@ -303,7 +303,7 @@ impl HostStore {
                 limit + 1,
                 MAX_RECORD_READ_BYTES
             ],
-            |row| Ok((row.get::<_, u64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
         )?;
         let mut items = Vec::new();
         let mut cursor = query.after;
@@ -322,7 +322,7 @@ impl HostStore {
             }
             items.push(record);
             bytes += raw.len();
-            cursor = seq;
+            cursor = u64::try_from(seq).map_err(|_| Error::Invalid("custody cursor"))?;
         }
         Ok(CustodyPage {
             items,

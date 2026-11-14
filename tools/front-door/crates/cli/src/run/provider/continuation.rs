@@ -581,7 +581,7 @@ fn copy_state_classified(
                 let typed_error = StateCopyError {
                     message: error.message.clone(),
                     class: error.class,
-                    resource: error.resource.clone(),
+                    resource: error.resource,
                 };
                 return Err(enforcement.boundary_error(
                     code,

@@ -222,9 +222,7 @@ pub(crate) fn run(
         .recursive(true)
         .mode(0o700)
         .create(parent)?;
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_nanos());
+    let nonce = provenant_core::hex(&provenant_os::fs::entropy_128().map_err(io::Error::other)?);
     let stage = parent.join(format!(
         ".{}.handoff-{}-{nonce}",
         name.to_string_lossy(),

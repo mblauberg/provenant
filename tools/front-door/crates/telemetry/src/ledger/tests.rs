@@ -157,7 +157,7 @@ fn concurrent_retries_count_an_attempt_once() -> Result {
     });
     let ledger = read(&state)?;
     assert!(ledger.unrecognised.is_empty());
-    assert_eq!(ledger.rows, [row.clone()]);
+    assert_eq!(ledger.rows, std::slice::from_ref(&row));
     assert_eq!(spend(&ledger.rows, None, None, None)?.attempts, 1);
     let directory = Directory::open_anchor(&state.join(DIRECTORY))?;
     let mut conflicting = row.clone();

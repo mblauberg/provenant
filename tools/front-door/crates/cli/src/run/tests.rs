@@ -649,7 +649,9 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
             index
                 .read(session.context.project_id, &graph, call)?
                 .unwrap()
-                .chair,
+                .holder
+                .chair()
+                .cloned(),
             chair
         );
         Ok(())
