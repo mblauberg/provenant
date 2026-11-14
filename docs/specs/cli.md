@@ -77,7 +77,10 @@ command catalogue owns the list of codes and their meanings.
 
 Waiting observes work; timeout or cancellation does not stop it. A target
 settles by its own state, so an older settlement cannot satisfy a wait for new
-work. Settlement events are emitted as they are observed.
+work. Local graph waiters share one filesystem event source (inotify or kqueue)
+for settlement logs. When that source is unavailable, the result reports why
+and rereads at `domains.wait.local_interval_ms`. Pull requests use forge
+observation. Settlement events are emitted as they are observed.
 With `--json`, wait emits JSONL events followed by a terminal command-result envelope, including without `--follow`.
 
 - Why: a reader must neither terminate healthy work nor wake on stale evidence.

@@ -136,6 +136,7 @@ struct Row {
     attempt_id: Option<AttemptId>,
     graph: Option<String>,
     error_code: Option<String>,
+    observation: Option<String>,
     #[serde(skip)]
     effort: Option<String>,
 }
@@ -282,6 +283,7 @@ fn inventory(roots: &provenant_core::Roots) -> Result<Vec<Row>, Box<dyn std::err
                 attempt_id: None,
                 graph: None,
                 error_code: None,
+                observation: None,
                 effort: efforts
                     .iter()
                     .find(|effort| effort.as_str() == "low")
@@ -367,6 +369,7 @@ fn live(
     let entropy = provenant_os::fs::entropy_128()?;
     let name = format!("provider-check-{:032x}", u128::from_le_bytes(entropy));
     row.graph = Some(name.clone());
+    let interval = Duration::from_micros(u64::try_from(interval.as_micros()).unwrap_or_default());
     let budget =
         provenant_core::WaitBudget::cli(factory.clock.mono_now(), settings.timeout_seconds.value)?;
     let on_stop = provenant_records::OnStop::new(
@@ -386,8 +389,25 @@ fn live(
     if let Some(error) = &launch_error {
         row.error_code = Some(error.code().to_owned());
     }
-    // Re-read the typed graph state at the configured local wait interval
-    // (domains.wait.local_interval_ms) until it settles or the budget ends.
+    // The graph directory is created by launch; subscribe before the first
+    // authoritative status read. Settlement before subscription is visible in
+    // that read, and later settlements remain queued by the native port.
+    let event_path = crate::status_wait::graph_event_path(
+        factory.context.roots.state.as_path(),
+        factory.context.identity.project,
+        &name,
+    );
+    let (mut watcher, setup_error) =
+        match provenant_os::changes::watch::Watcher::subscribe(&[event_path]) {
+            Ok(watcher) => (Some(watcher), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+    row.observation = Some(crate::status_wait::observation_text(
+        watcher.as_ref(),
+        interval,
+        setup_error.as_deref(),
+    ));
+    // Wait on settlement events; paced rereads remain only the event-source fallback.
     let wait = provenant_core::WaitBudget::cli(
         factory.clock.mono_now(),
         settings
@@ -415,7 +435,33 @@ fn live(
             row.error_code = Some("settlement_wait_expired".into());
             return Ok(());
         }
-        let pause = remaining.as_micros().min(interval.as_micros());
+        let timeout =
+            Duration::from_micros(u64::try_from(remaining.as_micros()).unwrap_or_default());
+        match watcher.as_mut().map(|source| source.wait(timeout)) {
+            Some(Ok(
+                provenant_os::changes::watch::WaitOutcome::Changed
+                | provenant_os::changes::watch::WaitOutcome::TimedOut,
+            )) => continue,
+            Some(Ok(provenant_os::changes::watch::WaitOutcome::Woken)) => {
+                row.status = Verdict::Fail;
+                row.cause = Cause::Check(CheckCause::SettlementFailed);
+                row.error_code = Some("settlement_wait_interrupted".into());
+                return Ok(());
+            }
+            Some(Err(error)) => {
+                watcher = None;
+                row.observation = Some(crate::status_wait::observation_text(
+                    None,
+                    interval,
+                    Some(&format!("event source failed: {error}")),
+                ));
+            }
+            None => {}
+        }
+        let remaining = wait.remaining(factory.clock.mono_now());
+        let pause = remaining
+            .as_micros()
+            .min(i64::try_from(interval.as_micros()).unwrap_or(i64::MAX));
         factory
             .backoff
             .wait(DurationMicros::from_micros(pause), &cancel);
@@ -496,7 +542,7 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
                     .and_then(|value| value.as_str().map(str::to_owned))
                     .unwrap_or_else(|| "settlement_failed".into());
                 human += &format!(
-                    "{} {} {} attempt={} harness={} signed_in={} signin_source={} quota={} quota_source={} pools={}\n",
+                    "{} {} {} attempt={} harness={} signed_in={} signin_source={} quota={} quota_source={} pools={} observation={}\n",
                     row.route,
                     if row.status == Verdict::Pass {
                         "pass"
@@ -515,7 +561,8 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
                     row.signin_source,
                     row.quota.coverage.label(),
                     row.quota.source,
-                    row.pools.join(",")
+                    row.pools.join(","),
+                    row.observation.as_deref().unwrap_or("-")
                 );
             }
             crate::emit(

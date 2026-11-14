@@ -1,7 +1,6 @@
 //! `provenant wait`: block until graph targets or pull requests settle. A wait
-//! is a reader: neither expiry nor cancellation stops the work. Every target
-//! resolves before the wait starts, and each source polls on its own thread so
-//! a slow read never delays another target.
+//! is a reader: neither expiry nor cancellation stops the work. Local graphs
+//! share one event source; pull requests remain on forge observation.
 // This edge owns the real deadline for channel receives and source I/O.
 #![allow(clippy::disallowed_methods)]
 use provenant_cli::Globals;
@@ -10,9 +9,8 @@ use provenant_records::Outcome;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
-    os::unix::fs::MetadataExt,
-    path::Path,
-    sync::{Condvar, Mutex, mpsc},
+    path::PathBuf,
+    sync::{Arc, Condvar, Mutex, mpsc},
     time::{Duration, Instant},
 };
 
@@ -113,9 +111,7 @@ fn classify_rows(label: &str, rows: &[Value]) -> Reading {
     }
 }
 
-/// Read one source. The flag is true when this host's stamped files fully
-/// represent the reading, so later ticks may skip reads while they are
-/// unchanged; see [`Reads`].
+/// Read one source after a native event or a configured fallback tick.
 fn read(
     source: &Source,
     edge: &provenant_cli::run::Edge<'_>,
@@ -123,14 +119,11 @@ fn read(
     deadline: Instant,
     pr_read_timeout: Duration,
     cancel: &CancelToken,
-) -> (Reading, bool) {
+) -> Reading {
     let label = source.label();
     let left = deadline.saturating_duration_since(Instant::now());
     if cancel.is_cancelled() || left.is_zero() {
-        return (
-            Reading::unavailable(&label, "wait deadline or cancellation reached"),
-            false,
-        );
+        return Reading::unavailable(&label, "wait deadline or cancellation reached");
     }
     let reading = match source {
         Source::UnreadableGraph(_, error) => classify_rows(
@@ -144,8 +137,7 @@ fn read(
                 crate::fabric::read_status_rows(target, edge, session, deadline, cancel)
             }) {
                 Ok(rows) => {
-                    let host = session.as_ref().map(|context| &context.identity.host);
-                    return (classify_rows(&label, &rows), rows_local(&rows, host));
+                    return classify_rows(&label, &rows);
                 }
                 Err(error) => Reading::unavailable(&label, &error.to_string()),
             }
@@ -170,98 +162,7 @@ fn read(
             Err(error) => Reading::unavailable(&label, &error.to_string()),
         },
     };
-    (reading, false)
-}
-
-/// Whether every attempt row belongs to `host`. Without a host (a relay from
-/// inside a lane) nothing local backs the rows. Rows of another host were
-/// enriched from that peer's own store, which no file here stamps.
-fn rows_local<H: std::str::FromStr + PartialEq>(rows: &[Value], host: Option<&H>) -> bool {
-    host.is_some_and(|host| {
-        rows.iter().all(|row| {
-            row["kind"] != "attempt"
-                || row["attempt_id"]
-                    .as_str()
-                    .and_then(|id| id.split_once('/'))
-                    .is_none_or(|(owner, _)| owner.parse::<H>().is_ok_and(|owner| &owner == host))
-        })
-    })
-}
-
-/// Longest a local target goes without a full read while its files look
-/// untouched. The read samples sources a file stamp cannot see, such as
-/// process liveness.
-const IDLE_REFRESH: Duration = Duration::from_secs(10);
-
-/// Inode, size and modification time of one file a read depends on.
-type FileStamp = Option<(u64, u64, i64, i64)>;
-
-/// Cheap change hint for a graph source: the metadata of the Run store, its
-/// WAL and the graph checkpoint directory (checkpoints publish by atomic
-/// rename, so the directory changes with every write). Interval ticks compare
-/// stamps and skip the full read, which opens the Run store and the checkpoint,
-/// while nothing has been written. Once a read has opened the project, only
-/// that project's directory is stamped. `None` means the source has no file
-/// hint (a pull request).
-fn stamp(
-    source: &Source,
-    state: &Path,
-    project: Option<provenant_core::ProjectId>,
-) -> Option<Vec<FileStamp>> {
-    if !matches!(source, Source::Graph(_)) {
-        return None;
-    }
-    let mut files = vec![state.join("run.sqlite3"), state.join("run.sqlite3-wal")];
-    let graphs = state.join("fabric").join("graphs");
-    match project {
-        Some(project) => files.push(graphs.join(project.to_string())),
-        None => files.extend(
-            std::fs::read_dir(&graphs)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .map(|entry| entry.path()),
-        ),
-    }
-    Some(
-        files
-            .iter()
-            .map(|path| {
-                let meta = std::fs::metadata(path).ok()?;
-                Some((meta.ino(), meta.size(), meta.mtime(), meta.mtime_nsec()))
-            })
-            .collect(),
-    )
-}
-
-/// Decides when a waiter pays for a full read. The stamp is taken before the
-/// read, so a write that lands during it is seen on the next tick. Only a read
-/// whose reading is fully represented by the stamped files arms the gate, and
-/// the last tick before the deadline always reads, so a wait never times out on
-/// a hint alone.
-#[derive(Default)]
-struct Reads {
-    seen: Option<(Vec<FileStamp>, Instant)>,
-}
-impl Reads {
-    fn due(
-        &self,
-        now: Instant,
-        stamp: Option<&Vec<FileStamp>>,
-        left: Duration,
-        interval: Duration,
-    ) -> bool {
-        match (&self.seen, stamp) {
-            (Some((seen, at)), Some(stamp)) => {
-                left <= interval || seen != stamp || now.duration_since(*at) >= IDLE_REFRESH
-            }
-            _ => true,
-        }
-    }
-    /// `gated` is true for a successful read of a locally represented source.
-    fn record(&mut self, now: Instant, stamp: Option<Vec<FileStamp>>, gated: bool) {
-        self.seen = stamp.filter(|_| gated).map(|stamp| (stamp, now));
-    }
+    reading
 }
 
 /// Cancellation wakes source pauses and interrupts in-flight GitHub reads.
@@ -270,10 +171,24 @@ struct Stop {
     stopped: Mutex<bool>,
     wake: Condvar,
     cancel: CancelToken,
+    event_wake: Mutex<Option<provenant_os::changes::watch::WakeHandle>>,
 }
 impl Stop {
+    fn install_event_wake(&self, wake: provenant_os::changes::watch::WakeHandle) {
+        if let Ok(mut slot) = self.event_wake.lock() {
+            *slot = Some(wake.clone());
+        }
+        if self.cancel.is_cancelled() {
+            let _ = wake.wake();
+        }
+    }
     fn stop(&self) {
         self.cancel.cancel();
+        if let Ok(slot) = self.event_wake.lock() {
+            if let Some(wake) = slot.as_ref() {
+                let _ = wake.wake();
+            }
+        }
         if let Ok(mut stopped) = self.stopped.lock() {
             *stopped = true;
         }
@@ -292,6 +207,40 @@ impl Stop {
 struct Update {
     target: usize,
     reading: Reading,
+}
+
+pub(crate) fn graph_event_path(
+    state: &std::path::Path,
+    project: provenant_core::ProjectId,
+    graph: &str,
+) -> PathBuf {
+    state
+        .join("fabric")
+        .join("graphs")
+        .join(project.to_string())
+        .join(format!("{graph}.events.jsonl"))
+}
+
+pub(crate) fn observation_text(
+    watcher: Option<&provenant_os::changes::watch::Watcher>,
+    interval: Duration,
+    fallback: Option<&str>,
+) -> String {
+    match watcher {
+        Some(watcher) => format!(
+            "filesystem events via {}",
+            match watcher.backend() {
+                provenant_os::changes::watch::Backend::Inotify => "inotify",
+                provenant_os::changes::watch::Backend::Kqueue => "kqueue",
+                provenant_os::changes::watch::Backend::Unsupported => "unsupported",
+            }
+        ),
+        None => format!(
+            "paced reread every {} ms (domains.wait.local_interval_ms); event source unavailable: {}",
+            interval.as_millis(),
+            fallback.unwrap_or("no event source")
+        ),
+    }
 }
 
 /// Only terminal node/attempt states produce settlement events. In particular
@@ -486,7 +435,88 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     };
     let deadline = Instant::now() + Duration::from_secs(settings.timeout(command.timeout));
     let stop = Stop::default();
+    let interval = Duration::from_millis(settings.local_interval_ms);
     let mut sources: Vec<Source> = command.targets.iter().cloned().map(Source::Graph).collect();
+
+    // Subscribe before the first status read so settlement during preflight
+    // remains queued for the single local graph worker.
+    let project = if provenant_cli::fabric::in_lane() {
+        Err(
+            "lane targets are read through their owner; local event files are unavailable"
+                .to_owned(),
+        )
+    } else {
+        provenant_cli::fabric::Context::open_read_only(
+            resolved.roots.clone(),
+            &resolved.home,
+            &resolved.project,
+        )
+        .map(|context| context.identity.project)
+        .map_err(|error| format!("cannot resolve project event logs: {error}"))
+    };
+    let project_error = project.as_ref().err().cloned();
+    let mut pending_index_error = None;
+    let event_paths = match project {
+        Ok(project) if !command.targets.is_empty() => command
+            .targets
+            .iter()
+            .map(|target| graph_event_path(resolved.roots.state.as_path(), project, &target.name))
+            .collect::<Vec<_>>(),
+        Ok(project) if command.prs.is_empty() => {
+            let names = provenant_fabric_runtime::graph::FileJournal::pending_graph_ids(
+                &resolved.roots.state,
+                project,
+            )
+            .map_err(|error| format!("cannot resolve pending graph events: {error}"));
+            match names {
+                Ok(names) => {
+                    let names = names
+                        .into_iter()
+                        .take(settings.max_targets as usize)
+                        .collect::<Vec<_>>();
+                    if names.is_empty() {
+                        vec![graph_event_path(
+                            resolved.roots.state.as_path(),
+                            project,
+                            ".wait",
+                        )]
+                    } else {
+                        names
+                            .iter()
+                            .map(|name| {
+                                graph_event_path(resolved.roots.state.as_path(), project, name)
+                            })
+                            .collect()
+                    }
+                }
+                Err(error) => {
+                    pending_index_error = Some(error);
+                    Vec::new()
+                }
+            }
+        }
+        _ => Vec::new(),
+    };
+    let setup_fallback = project_error.or(pending_index_error);
+    let (mut event_watcher, initial_fallback) = if event_paths.is_empty() {
+        (
+            None,
+            setup_fallback.unwrap_or_else(|| "no local graph targets".to_owned()),
+        )
+    } else {
+        match provenant_os::changes::watch::Watcher::subscribe(&event_paths) {
+            Ok(watcher) => (Some(watcher), String::new()),
+            Err(error) => (None, setup_fallback.unwrap_or_else(|| error.to_string())),
+        }
+    };
+    if let Some(watcher) = &event_watcher {
+        stop.install_event_wake(watcher.wake_handle());
+    }
+    let observation = Arc::new(Mutex::new(observation_text(
+        event_watcher.as_ref(),
+        interval,
+        Some(&initial_fallback),
+    )));
     let mut validation = std::collections::BTreeMap::new();
     if let Err(error) = provenant_sqlite::with_busy_timeout(Duration::ZERO, || {
         crate::fabric::check_targets(
@@ -602,45 +632,52 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         }
     }
     let (sender, receiver) = mpsc::sync_channel(128);
+    let graph_indices = sources
+        .iter()
+        .enumerate()
+        .filter_map(|(index, source)| match source {
+            Source::Graph(_) | Source::UnreadableGraph(..) => Some(index),
+            Source::Pr(_) => None,
+        })
+        .collect::<Vec<_>>();
     let done = std::thread::scope(|scope| {
-        for (index, source) in sources.iter().enumerate() {
-            if latest[index].as_ref().is_some_and(Reading::done) {
-                continue;
-            }
-            let sampled = latest[index].is_some();
+        if !graph_indices.is_empty() {
             let sender = sender.clone();
             let edge = &edge;
             let stop = &stop;
-            let interval = Duration::from_millis(match source {
-                Source::Pr(_) => settings.pr_interval_ms,
-                Source::Graph(_) | Source::UnreadableGraph(..) => settings.local_interval_ms,
-            });
-            scope.spawn(move || {
-                if sampled
-                    && !stop.pause(interval.min(deadline.saturating_duration_since(Instant::now())))
-                {
-                    return;
-                }
-                let mut reads = Reads::default();
-                let mut session = None;
-                loop {
-                    let left = deadline.saturating_duration_since(Instant::now());
-                    if stop.cancel.is_cancelled() {
-                        break;
-                    }
-                    let project = session
+            let observation = Arc::clone(&observation);
+            let pending = graph_indices
+                .iter()
+                .copied()
+                .filter(|index| {
+                    latest[*index]
                         .as_ref()
-                        .map(|context: &provenant_cli::fabric::Context| context.identity.project);
-                    let stamped = stamp(source, edge.roots.state.as_path(), project);
-                    if !left.is_zero()
-                        && !reads.due(Instant::now(), stamped.as_ref(), left, interval)
-                    {
-                        if !stop.pause(interval.min(left)) {
-                            break;
-                        }
+                        .is_none_or(|reading| !reading.done())
+                })
+                .collect::<Vec<_>>();
+            let initial_reads = pending
+                .iter()
+                .copied()
+                .filter(|index| latest[*index].is_none())
+                .collect::<Vec<_>>();
+            let graph_sources = graph_indices
+                .iter()
+                .map(|index| (*index, sources[*index].clone()))
+                .collect::<Vec<_>>();
+            let mut watcher = event_watcher.take();
+            scope.spawn(move || {
+                let mut session = None;
+                let mut pending = pending;
+                // A graph discovered after watcher registration (or an
+                // unreadable graph without a preflight sample) gets one read.
+                for index in initial_reads {
+                    let Some((_, source)) = graph_sources
+                        .iter()
+                        .find(|(candidate, _)| *candidate == index)
+                    else {
                         continue;
-                    }
-                    let (reading, local) = read(
+                    };
+                    let reading = read(
                         source,
                         edge,
                         &mut session,
@@ -648,7 +685,124 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         pr_read_timeout,
                         &stop.cancel,
                     );
-                    reads.record(Instant::now(), stamped, local);
+                    let finished = reading.done();
+                    if sender
+                        .send(Update {
+                            target: index,
+                            reading,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    if finished {
+                        pending.retain(|candidate| *candidate != index);
+                    }
+                }
+                while !pending.is_empty() && !stop.cancel.is_cancelled() {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        break;
+                    }
+                    let changed = if let Some(source) = watcher.as_mut() {
+                        match source.wait(left) {
+                            Ok(provenant_os::changes::watch::WaitOutcome::Changed) => true,
+                            Ok(provenant_os::changes::watch::WaitOutcome::TimedOut) => {
+                                if deadline.saturating_duration_since(Instant::now()).is_zero() {
+                                    break;
+                                }
+                                continue;
+                            }
+                            Ok(provenant_os::changes::watch::WaitOutcome::Woken) => break,
+                            Err(error) => {
+                                watcher = None;
+                                if let Ok(mut current) = observation.lock() {
+                                    *current = observation_text(
+                                        None,
+                                        interval,
+                                        Some(&format!("event source failed: {error}")),
+                                    );
+                                }
+                                if !stop.pause(interval.min(left)) {
+                                    break;
+                                }
+                                true
+                            }
+                        }
+                    } else {
+                        if !stop.pause(interval.min(left)) {
+                            break;
+                        }
+                        true
+                    };
+                    if !changed {
+                        continue;
+                    }
+                    for index in pending.clone() {
+                        if stop.cancel.is_cancelled() {
+                            break;
+                        }
+                        let Some((_, source)) = graph_sources
+                            .iter()
+                            .find(|(candidate, _)| *candidate == index)
+                        else {
+                            continue;
+                        };
+                        let reading = read(
+                            source,
+                            edge,
+                            &mut session,
+                            deadline,
+                            pr_read_timeout,
+                            &stop.cancel,
+                        );
+                        let finished = reading.done();
+                        if sender
+                            .send(Update {
+                                target: index,
+                                reading,
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                        if finished {
+                            pending.retain(|candidate| *candidate != index);
+                        }
+                    }
+                }
+            });
+        }
+        for (index, source) in sources.iter().enumerate() {
+            if !matches!(source, Source::Pr(_)) || latest[index].as_ref().is_some_and(Reading::done)
+            {
+                continue;
+            }
+            let sampled = latest[index].is_some();
+            let sender = sender.clone();
+            let edge = &edge;
+            let stop = &stop;
+            let interval = Duration::from_millis(settings.pr_interval_ms);
+            scope.spawn(move || {
+                if sampled
+                    && !stop.pause(interval.min(deadline.saturating_duration_since(Instant::now())))
+                {
+                    return;
+                }
+                let mut session = None;
+                loop {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if stop.cancel.is_cancelled() {
+                        break;
+                    }
+                    let reading = read(
+                        source,
+                        edge,
+                        &mut session,
+                        deadline,
+                        pr_read_timeout,
+                        &stop.cancel,
+                    );
                     let finished = reading.done();
                     if sender
                         .send(Update {
@@ -717,11 +871,18 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     if !done {
         human.push_str("wait timed out; the work continues\n");
     }
+    let observation = observation
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_else(|_| "event source status unavailable".into());
+    if !graph_indices.is_empty() {
+        human.push_str(&format!("local observation: {observation}\n"));
+    }
     crate::emit(
         &provenant_records::CommandResult::new(
             "wait",
             outcome,
-            json!({"targets":rows,"timed_out":!done}),
+            json!({"targets":rows,"timed_out":!done,"local_observation":if graph_indices.is_empty(){Value::Null}else{json!(observation)}}),
         ),
         globals,
         &human,
@@ -822,7 +983,7 @@ mod tests {
             .into_iter()
             .find(|graph| graph.target.name == "broken")
             .ok_or("broken graph was hidden")?;
-        let (reading, _) = read(
+        let reading = read(
             &Source::UnreadableGraph(graph.target, graph.error.ok_or("decode failure")?),
             &edge,
             &mut None,
@@ -835,47 +996,11 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn idle_source_skips_reads_until_its_files_change_or_the_refresh_lapses() {
-        let now = Instant::now();
-        let (base, far) = (Duration::from_millis(500), Duration::from_secs(60));
-        let stamp = vec![Some((1, 10, 5, 0))];
-        let mut reads = Reads::default();
-        assert!(
-            reads.due(now, Some(&stamp), far, base),
-            "first read is always due"
-        );
-        reads.record(now, Some(stamp.clone()), true);
-        let soon = now + IDLE_REFRESH / 2;
-        assert!(!reads.due(soon, Some(&stamp), far, base));
-        assert!(reads.due(soon, Some(&vec![Some((1, 11, 6, 0))]), far, base));
-        assert!(reads.due(now + IDLE_REFRESH, Some(&stamp), far, base));
-        assert!(
-            reads.due(soon, None, far, base),
-            "sources without a file hint always read"
-        );
-        assert!(
-            reads.due(now, Some(&stamp), base, base),
-            "the last tick before the deadline reads whatever the stamp says"
-        );
-        reads.record(soon, Some(stamp.clone()), false);
-        assert!(
-            reads.due(soon, Some(&stamp), far, base),
-            "a failed read, or one the files do not fully represent, is never gated"
-        );
-    }
+    // File-stamp gates were removed with local polling; native event wake
+    // coverage lives beside the OS port, with paced fallback exercised by reads.
 
-    #[test]
-    fn a_selection_with_peer_or_relayed_attempts_is_not_locally_represented() {
-        let row = |id: &str| json!({"kind": "attempt", "attempt_id": id});
-        let here = "aa".to_owned();
-        assert!(rows_local(
-            &[row("aa/1"), json!({"kind": "graph"})],
-            Some(&here)
-        ));
-        assert!(!rows_local(&[row("aa/1"), row("bb/2")], Some(&here)));
-        assert!(!rows_local::<String>(&[row("aa/1")], None));
-    }
+    // Local-stamp ownership checks were removed with file polling. Native graph
+    // event subscription is covered by the OS port's multi-log invariant.
 
     #[test]
     fn preflight_expiry_and_cancellation_use_wait_exit_codes() {
