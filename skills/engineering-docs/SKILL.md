@@ -51,10 +51,7 @@ replaces. Merge or delete superseded ADRs and leave no compatibility stubs.
 A kept prototype lives in the repository with a one-line index entry in its
 owning doc; throwaway ones are not indexed. The root instruction file routes;
 by default a nested `AGENTS.md` is added only at a real boundary after an
-observed failure, and `CLAUDE.md` holds just `@AGENTS.md`. Diagrams default to
-Mermaid (`d2-diagrams` for a justified fixed layout) with `accTitle` and
-`accDescr`; render the block and open the output, because a clean parse is not
-visual verification. Archive retired docs with owner authority and repair
+observed failure, and `CLAUDE.md` holds just `@AGENTS.md`. Use `d2-diagrams` for diagram authoring and visual verification. Archive retired docs with owner authority and repair
 references.
 
 See [placement](references/placement.md) for default homes.

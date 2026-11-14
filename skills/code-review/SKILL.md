@@ -17,8 +17,7 @@ gets a delta review against the prior findings and the invariant under repair.
 
 ## Independence
 
-- The reviewer reads the pinned commit with `git show` and `git diff`, never
-  the working tree, and uses no Git write verbs.
+- Follow the pinned-commit and read-only rules in the reviewer context.
 - The brief carries the spec, never the author's hypothesis, expected verdict
   or scratchpad.
 - A review that cannot read its rubric or required context is `incomplete`,
@@ -35,7 +34,7 @@ receives it, and a manual review applies it too. Inspection questions are in
 ## What a clean verdict proves
 
 Say what was inspected: the dependency cone read (callers, owners, tests,
-config, migrations), the checks that ran with their results, and what was not
+config, persisted state), the checks that ran with their results, and what was not
 reachable. Never infer coverage from a green summary. Check that criteria map
 to evidence and that no test was loosened or deleted to mask a real defect
 (pruning rigid, redundant or implementation-pinned tests with stated reasons is
