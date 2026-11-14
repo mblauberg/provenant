@@ -4,7 +4,7 @@ use super::{
     model::*,
     ports::{
         AlarmSink, Approval, Forge, GateRunner, MergeTree, PullRequestInfo, PullRequestState, Repo,
-        ReviewRecord, ReviewRecords, Reviews, StackMember, StackMembership,
+        ReviewRecord, ReviewRecordSource, Reviews, StackMember, StackMembership,
     },
 };
 use crate::pr::{
@@ -473,6 +473,53 @@ fn encode_branch(branch: &str) -> String {
 }
 
 impl Forge for GhForge {
+    fn capabilities(
+        &mut self,
+        target: &str,
+    ) -> Result<provenant_records::landing::Capabilities, LandingError> {
+        use provenant_records::landing::{Capabilities, CapabilityState, ForgeCapability};
+        let repository = self.repository_identity()?;
+        let metadata = self.json("repos/{owner}/{repo}")?;
+        let mut values = std::collections::BTreeMap::new();
+        if let Some(allowed) = metadata["allow_auto_merge"].as_bool() {
+            values.insert(
+                ForgeCapability::AutoMerge,
+                if allowed {
+                    CapabilityState::Available
+                } else {
+                    CapabilityState::Unavailable
+                },
+            );
+        }
+        // Rules are specific to the root target, including names with slashes.
+        let encoded = encode_branch(target);
+        if let Ok(rules) = self.json(&format!(
+            "repos/{{owner}}/{{repo}}/rules/branches/{encoded}"
+        )) && let Some(rules) = rules.as_array()
+        {
+            values.insert(
+                ForgeCapability::MergeQueue,
+                if rules.iter().any(|rule| rule["type"] == "merge_queue") {
+                    CapabilityState::Available
+                } else {
+                    CapabilityState::Unavailable
+                },
+            );
+        }
+        // A successful, typed stack listing is positive evidence for this repository.
+        // A forbidden or unavailable endpoint remains unknown, never assumed absent.
+        if let Ok(stacks) = self.json("repos/{owner}/{repo}/stacks")
+            && stacks["stacks"].is_array()
+        {
+            for capability in [ForgeCapability::AsyncMerge, ForgeCapability::Restack] {
+                values.insert(capability, CapabilityState::Available);
+            }
+        }
+        Ok(Capabilities {
+            repository: Some(repository),
+            values,
+        })
+    }
     fn stack_members(&mut self, number: u64) -> Result<Vec<StackMember>, LandingError> {
         let endpoint = format!("repos/{{owner}}/{{repo}}/stacks/{number}");
         let bytes = self.get(&[&endpoint, "-H", "X-GitHub-Api-Version:2026-03-10"])?;
@@ -744,6 +791,29 @@ impl Forge for GhForge {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandResult {
+    Landed,
+    Refused,
+    Unknown,
+}
+
+fn command_result(
+    command: &provenant_records::landing::RepositoryCommand,
+    termination: Termination,
+    timed_out: bool,
+) -> CommandResult {
+    if timed_out {
+        return CommandResult::Unknown;
+    }
+    match termination {
+        Termination::Exit(0) => CommandResult::Landed,
+        Termination::Exit(code) if code == command.unknown_exit_code => CommandResult::Unknown,
+        Termination::Exit(_) => CommandResult::Refused,
+        _ => CommandResult::Unknown,
+    }
+}
+
 // ----- Repo --------------------------------------------------------------
 
 /// Git plumbing in the project checkout. Refs live on the remote the target tracks.
@@ -877,6 +947,50 @@ impl<'a> GitRepo<'a> {
 }
 
 impl Repo for GitRepo<'_> {
+    fn publish_command(
+        &mut self,
+        command: &provenant_records::landing::RepositoryCommand,
+        attempt: &PendingAttempt,
+    ) -> Result<PublishResult, LandingError> {
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor};
+        if !command.valid() {
+            return Err(LandingError::Refused("invalid repository publisher".into()));
+        }
+        let input = serde_json::to_vec(attempt)
+            .map_err(|error| LandingError::Refused(format!("encode command intent: {error}")))?;
+        let argv: Vec<std::ffi::OsString> = command.argv.iter().map(Into::into).collect();
+        let mut options = ExecOptions::new(
+            &argv,
+            &self.project,
+            Duration::from_secs(command.timeout_seconds),
+        );
+        options.stdin = Some(&input);
+        options.cleanup_process_group = true;
+        let executor = SystemExecutor::new(1).map_err(|error| {
+            LandingError::Refused(format!("prepare repository publisher: {error}"))
+        })?;
+        let outcome = executor
+            .execute(options)
+            .map_err(|_| LandingError::PublicationUnknown)?;
+        // Publisher output is diagnostic; only the declared exit protocol is evidence.
+        let _ = std::io::stderr().write_all(&outcome.stdout.bytes);
+        let _ = std::io::stderr().write_all(&outcome.stderr.bytes);
+        match command_result(command, outcome.termination, outcome.timed_out) {
+            CommandResult::Landed => Ok(PublishResult {
+                landed: attempt
+                    .candidate
+                    .steps
+                    .iter()
+                    .map(|step| step.commit.clone())
+                    .collect(),
+                alarms: Vec::new(),
+            }),
+            CommandResult::Unknown => Err(LandingError::PublicationUnknown),
+            CommandResult::Refused => Err(LandingError::Refused(
+                "repository publisher refused the intent".into(),
+            )),
+        }
+    }
     fn project_path(&self) -> Option<&Path> {
         self.local.as_ref().map(|_| self.project.as_path())
     }
@@ -1148,19 +1262,20 @@ impl Repo for GitRepo<'_> {
 /// Typed review-lane settlements in the registered project's graph journal.
 pub struct ProvenantReviews {
     root: provenant_core::StateRoot,
-    project: Option<provenant_core::ProjectId>,
 }
 impl ProvenantReviews {
-    pub fn new(
-        root: provenant_core::StateRoot,
-        project: Option<provenant_core::ProjectId>,
-    ) -> Self {
-        Self { root, project }
+    pub fn new(root: provenant_core::StateRoot) -> Self {
+        Self { root }
     }
 }
-impl ReviewRecords for ProvenantReviews {
-    fn reviews(&self, _number: u64, head: &str) -> Result<Reviews, LandingError> {
-        let Some(project) = self.project else {
+impl ReviewRecordSource for ProvenantReviews {
+    fn reviews(
+        &self,
+        scope: &provenant_records::landing::ReviewScope,
+        _number: u64,
+        head: &str,
+    ) -> Result<Reviews, LandingError> {
+        let Some(project) = scope.project else {
             return Ok(Reviews {
                 unusable: vec!["provenant_review needs a registered project".to_owned()],
                 ..Reviews::default()
@@ -1434,6 +1549,39 @@ fn deliver_alarm(
     reason = "custom worktree harness includes tests without the test runner"
 )]
 mod tests {
+    #[test]
+    fn repository_command_exit_protocol_preserves_uncertainty() {
+        use provenant_records::landing::RepositoryCommand;
+        for unknown_exit_code in [17, 75, 255] {
+            let command = RepositoryCommand {
+                argv: vec!["publisher".into()],
+                unknown_exit_code,
+                timeout_seconds: 30,
+            };
+            for code in [0, 1, unknown_exit_code] {
+                let result = super::command_result(&command, Termination::Exit(code), false);
+                assert_eq!(
+                    result,
+                    if code == 0 {
+                        super::CommandResult::Landed
+                    } else if code == unknown_exit_code {
+                        super::CommandResult::Unknown
+                    } else {
+                        super::CommandResult::Refused
+                    }
+                );
+                assert_eq!(
+                    super::command_result(&command, Termination::Exit(code), true),
+                    super::CommandResult::Unknown
+                );
+            }
+            assert_eq!(
+                super::command_result(&command, Termination::Signal(9), false),
+                super::CommandResult::Unknown
+            );
+        }
+    }
+
     use super::*;
 
     #[test]

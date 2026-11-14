@@ -98,10 +98,10 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 filter = 'package(=provenant) & binary(=graph_provider) & test(=graph_opencode_observes_v2_wal_session)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-# Six real writer launches queue on one registry lock and each settles a fixture
+# Two rounds of simultaneous real writer launches each settle a fixture
 # provider, which takes about 30 seconds on a developer Mac.
 [[profile.default.overrides]]
-filter = 'package(=provenant) & binary(=graph_provider) & test(=simultaneous_writer_launches_create_attempts)'
+filter = 'package(=provenant) & binary(=graph_provider) & test(=simultaneous_writer_launches_are_admitted_or_scheduled_for_retry)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 # One real writer launch from a fetched remote branch takes about 20 seconds on
@@ -179,10 +179,6 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 filter = 'package(=provenant) & binary(=fabric_lane) & test(=child_relay_honours_launch_allowance_longer_than_fifty_five_seconds)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-# This real registry-lock fixture crosses the former 55-second socket ceiling.
-[[profile.default.overrides]]
-filter = 'package(=provenant-cli) & test(=fabric::graph_relay::provisioning_tests::child_launch_receipt_and_refusal_follow_the_confirmed_launch_deadline)'
-slow-timeout = { period = "30s", terminate-after = 4 }
 
 # This native timeout/replay fixture prepares a backend and Git repository,
 # submits twice, permits a 30-second status wait, then checks descendant

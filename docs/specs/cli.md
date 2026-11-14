@@ -120,6 +120,29 @@ incomplete required check evidence.
 
 Approval must cover the exact head and come from an authorised independent
 source or an explicit owner override. Graph landing uses the same policy.
+Approval evidence is the union of configured sources. A new passing independent
+review on the pinned head cannot invalidate an existing forge approval; loss of
+all current approvals still excludes the member. The publication lock fences
+landing identity, generation and snapshot revision before dispatch: a superseded
+generation cannot publish, including during recovery.
+
+`land --strategy` choices come from the records strategy declaration; `--target`
+selects the root branch, defaulting to the forge repository's default branch.
+Repository `.provenant/config.toml` declarations, host settings, project overrides,
+target rules, risk tier and invocation resolve into one saved plan with sources.
+`--explain --json` reports repository, target, effective plan, capability decisions
+and unavailable alternatives. An unavailable execution returns its landing record
+ID and typed alternatives without silently selecting another strategy.
+
+The `command` strategy invokes `land.command.argv` in the repository checkout,
+with the full pending intent as JSON on stdin. Its required declaration includes
+`unknown_exit_code` (1..255) and `timeout_seconds` (>0). Exit 0 attests that the
+supplied candidate landed; other exits refuse, except the declared unknown code.
+Timeouts and signals are also unknown. The same pending markers, gate, approvals,
+custody and settlement evidence apply. Unknown commands are observed through
+candidate ancestry and exact-head forge evidence, never replayed or replaced by
+a builtin publisher while their outcome remains uncertain.
+
 Cleanup after merge preserves moved branches, dirty worktrees and work that is
 not proven merged; incomplete cleanup is reported.
 Approval sources default to Provenant review then forge and are overridable by project and tier; the first usable proof still covers the exact head.

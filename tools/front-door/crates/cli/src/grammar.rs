@@ -104,6 +104,12 @@ pub enum Command {
         /// Pull request numbers in landing order
         #[arg(catalog_u64_range = 1..)]
         numbers: Vec<u64>,
+        /// Select a declared landing strategy
+        #[arg(long, value_parser = landing_strategy_parser())]
+        strategy: Option<provenant_records::landing::Strategy>,
+        /// Root branch to land against (defaults to the repository default branch)
+        #[arg(long)]
+        target: Option<String>,
         /// Compute the candidate and decisions without publishing
         #[arg(long)]
         shadow: bool,
@@ -199,6 +205,19 @@ pub enum Command {
     Hook(Hook),
     #[command(subcommand, hide = true)]
     Internal(Internal),
+}
+
+fn landing_strategy_parser()
+-> impl clap::builder::TypedValueParser<Value = provenant_records::landing::Strategy> {
+    use clap::builder::TypedValueParser as _;
+    clap::builder::PossibleValuesParser::new(provenant_records::landing::Strategy::choices())
+        .try_map(|name| {
+            provenant_records::landing::STRATEGY_DECLARATIONS
+                .iter()
+                .find(|entry| entry.name == name)
+                .map(|entry| entry.strategy)
+                .ok_or_else(|| format!("undeclared landing strategy: {name}"))
+        })
 }
 #[derive(Debug, Subcommand)]
 pub enum Tracker {

@@ -8,6 +8,8 @@ pub enum EventKind {
     MailSent,
     MailRead,
     RunChanged,
+    /// Detail is a records::landing::LandingChanged payload; envelope unchanged.
+    LandingChanged,
     ClaimAcquired,
     ClaimRenewed,
     ClaimReleased,

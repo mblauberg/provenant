@@ -15,6 +15,11 @@ pub mod ports;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LandingError {
+    #[error("landing {id} unavailable: {reason}")]
+    Unavailable {
+        id: provenant_records::landing::LandingId,
+        reason: Box<provenant_records::landing::Unavailable>,
+    },
     #[error("landing operation is not implemented: {0}")]
     Unimplemented(&'static str),
     #[error("landing operation failed: {0}")]
@@ -87,6 +92,8 @@ pub mod split;
 /// policy and sources without requiring pull request numbers.
 pub struct Options {
     pub numbers: Vec<u64>,
+    pub strategy: Option<provenant_records::landing::Strategy>,
+    pub target: Option<String>,
     /// Any object name that resolves to one commit; resolved before landing.
     pub head: Option<String>,
     pub wait: Option<u64>,
@@ -189,7 +196,9 @@ fn batch_response(
         Some(LandingError::RateLimited(_)) => (Outcome::Unavailable, "RATE_LIMITED"),
         Some(LandingError::SpendingCap { .. }) => (Outcome::Refused, "LAND_SPENDING_CAP"),
         Some(LandingError::Conflict(_)) => (Outcome::Failed, "LAND_CONFLICT"),
-        Some(LandingError::Unimplemented(_)) => (Outcome::Unavailable, "LAND_UNSUPPORTED"),
+        Some(LandingError::Unimplemented(_) | LandingError::Unavailable { .. }) => {
+            (Outcome::Unavailable, "LAND_UNSUPPORTED")
+        }
         Some(_) => (Outcome::Failed, "LAND_FAILED"),
         None if report
             .outcomes
@@ -201,6 +210,10 @@ fn batch_response(
         None => (Outcome::Failed, ""),
     };
     let mut value = serde_json::json!({"receipts": report.receipts, "outcomes": report.outcomes, "warnings": report.warnings, "local_follow_up": report.local_steps});
+    if let Some(LandingError::Unavailable { id, reason }) = &failure {
+        value["landing_id"] = serde_json::json!(id);
+        value["unavailable"] = serde_json::json!(reason);
+    }
     if report.outcomes.len() == 1
         && let Some((&number, outcome)) = report.outcomes.iter().next()
     {
@@ -278,29 +291,18 @@ fn gate_definition(
     })
 }
 
-/// The review-exempt paths of a project's host configuration.
-fn review_exempt(state: &std::path::Path, project: Option<&str>) -> ReviewExempt {
-    project.map_or_else(ReviewExempt::none, |project| {
-        provenant_confinement::run_config::RunConfig::review_exempt_at(state, project)
-    })
-}
-
-/// Provenant review records need a registered project.
-fn review_records(
-    effective: &provenant_cli::domains::LandSettings,
-    state: &provenant_core::StateRoot,
+/// Freeze the project and exemption patterns used by every resumed approval read.
+fn review_scope(
+    state: &std::path::Path,
     project: Option<&str>,
-) -> Result<adapters::ProvenantReviews, Box<dyn std::error::Error>> {
-    use provenant_cli::domains::ApprovalSource;
-    let scope = if effective
-        .approval_sources
-        .contains(&ApprovalSource::ProvenantReview)
-    {
-        project.map(provenant_core::ProjectId::parse).transpose()?
-    } else {
-        None
-    };
-    Ok(adapters::ProvenantReviews::new(state.clone(), scope))
+) -> Result<provenant_records::landing::ReviewScope, Box<dyn std::error::Error>> {
+    let exempt = project.map_or_else(ReviewExempt::none, |project| {
+        provenant_confinement::run_config::RunConfig::review_exempt_at(state, project)
+    });
+    Ok(provenant_records::landing::ReviewScope {
+        project: project.map(provenant_core::ProjectId::parse).transpose()?,
+        exempt_patterns: exempt.patterns().into_iter().map(str::to_owned).collect(),
+    })
 }
 
 /// The landing policy one adapter call resolved for a checkout.
@@ -310,6 +312,7 @@ pub(crate) struct Prepared {
     policy: policy::LandPolicy,
     effective: provenant_cli::domains::LandSettings,
     tier_warning: Option<String>,
+    target: String,
 }
 
 /// Resolve the checkout, its project and the effective landing policy.
@@ -317,6 +320,8 @@ pub(crate) fn prepare(
     globals: &provenant_cli::Globals,
     tier: Option<&str>,
     poll: Option<u64>,
+    strategy: Option<provenant_records::landing::Strategy>,
+    target: Option<&str>,
 ) -> Result<Prepared, Box<dyn std::error::Error>> {
     use provenant_cli::domains::LandOverride;
     let resolved = crate::roots::resolve(
@@ -336,16 +341,32 @@ pub(crate) fn prepare(
         provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))?,
         &provenant_core::CancelToken::new(),
     )?;
+    use ports::Forge as _;
+    let target = match target {
+        Some(target) => target.to_owned(),
+        None => adapters::GhForge::new(&resolved.project, resolved.roots.state.as_path())
+            .target_branch()?,
+    };
+    if !super::git::plain_ref(&target) {
+        return Err("landing target must be a plain branch name".into());
+    }
+    let repository_path = resolved.project.join(provenant_config::REPOSITORY_CONFIG);
+    let repository = provenant_config::read_land::<LandOverride>(&resolved.project)?;
     let invocation = LandOverride {
+        strategy,
         poll_seconds: poll,
         ..LandOverride::default()
     };
-    let policy = policy::LandPolicy::resolve(
+    let policy = policy::LandPolicy::resolve_for(
         &config.domains.pr.land,
         &config.origins,
         project.as_deref(),
         tier,
         &invocation,
+        repository
+            .as_ref()
+            .map(|declaration| (declaration, repository_path.as_path())),
+        Some(&target),
     )?;
     let effective = policy.settings()?;
     let tier_warning = tier
@@ -373,13 +394,14 @@ pub(crate) fn prepare(
         policy,
         effective,
         tier_warning,
+        target,
     })
 }
 
 /// One submission through the landing owner, with what an adapter renders.
 pub(crate) struct Submission {
-    pub(crate) id: Option<owner::LandingId>,
-    pub(crate) record: Option<owner::LandingRecord>,
+    pub(crate) id: Option<provenant_records::landing::LandingId>,
+    pub(crate) record: Option<provenant_records::landing::LandingRecord>,
     pub(crate) report: driver::Report,
     pub(crate) failure: Option<LandingError>,
     pub(crate) repository: Option<String>,
@@ -388,13 +410,13 @@ pub(crate) struct Submission {
 /// Submit `request` to the one landing owner over the live forge and Git.
 pub(crate) fn submit(
     prepared: &Prepared,
-    request: owner::LandRequest,
+    mut request: provenant_records::landing::LandRequest,
     shadow: bool,
     globals: &provenant_cli::Globals,
     workers: &dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> Result<Submission, Box<dyn std::error::Error>> {
     use owner::LandingOwner as _;
-    use provenant_cli::domains::Integration;
+
     let Prepared {
         resolved,
         project,
@@ -402,13 +424,12 @@ pub(crate) fn submit(
         effective,
         ..
     } = prepared;
-    let mut settings = effective.clone();
-    if settings.integration == Integration::Single {
-        // Single integration lands one pull request per candidate.
-        settings.batch_size = 1;
-    }
+    request
+        .target
+        .get_or_insert_with(|| prepared.target.clone());
+    let settings = effective.clone();
     let mut tracking = std::collections::BTreeMap::new();
-    if !shadow && request.authority != owner::Authority::Observe {
+    if !shadow && request.authority != provenant_records::landing::Authority::Observe {
         for member in &request.members {
             tracking.insert(
                 member.pr,
@@ -430,22 +451,18 @@ pub(crate) fn submit(
         workers,
         tracking,
     )?;
-    let reviews = review_records(&settings, &resolved.roots.state, project.as_deref())?;
-    let exempt = review_exempt(resolved.roots.state.as_path(), project.as_deref());
+    let reviews = adapters::ProvenantReviews::new(resolved.roots.state.clone());
+    let review_scope = review_scope(resolved.roots.state.as_path(), project.as_deref())?;
     let mut owner = owner::Owner {
         forge: &mut *forge,
         repo: &mut *repo,
         runner: &mut *runner,
         alarms: &mut *alarms,
         state: resolved.roots.state.as_path(),
-        settings: &settings,
         policy,
         gate: &definition,
-        approvals: approval::Approvals::new(&settings.approval_sources, &reviews).governed(
-            settings.approval_tier,
-            &exempt,
-            None,
-        ),
+        reviews: &reviews,
+        review_scope,
         shadow,
         last: None,
     };
@@ -453,6 +470,7 @@ pub(crate) fn submit(
     let submitted = owner.submit(request);
     let (id, record) = match &submitted {
         Ok(id) => (Some(id.clone()), owner.record(id)?),
+        Err(LandingError::Unavailable { id, .. }) => (Some(id.clone()), owner.record(id)?),
         Err(_) => (None, None),
     };
     let (mut report, failure) = owner.last.take().unwrap_or_default();
@@ -465,10 +483,16 @@ pub(crate) fn submit(
             report.outcomes.insert(
                 *number,
                 match outcome {
-                    owner::MemberOutcome::Landed { .. } => model::Outcome::Landed,
-                    owner::MemberOutcome::Pending { .. } => model::Outcome::Pending,
-                    owner::MemberOutcome::Unknown { .. } => model::Outcome::PendingUnknown,
-                    owner::MemberOutcome::Refused { reason } => {
+                    provenant_records::landing::MemberOutcome::Landed { .. } => {
+                        model::Outcome::Landed
+                    }
+                    provenant_records::landing::MemberOutcome::Pending { .. } => {
+                        model::Outcome::Pending
+                    }
+                    provenant_records::landing::MemberOutcome::Unknown { .. } => {
+                        model::Outcome::PendingUnknown
+                    }
+                    provenant_records::landing::MemberOutcome::Refused { reason } => {
                         report.exclusion_reasons.insert(*number, reason.clone());
                         model::Outcome::Excluded
                     }
@@ -497,9 +521,15 @@ fn run_inner(
     globals: &provenant_cli::Globals,
     workers: &dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> Result<u8, Box<dyn std::error::Error>> {
-    use provenant_cli::domains::{Integration, LandSettings};
+    use provenant_cli::domains::LandSettings;
     use provenant_records::{CommandResult, Outcome};
-    let prepared = prepare(globals, options.tier.as_deref(), options.poll)?;
+    let prepared = prepare(
+        globals,
+        options.tier.as_deref(),
+        options.poll,
+        options.strategy,
+        options.target.as_deref(),
+    )?;
     let (policy, effective) = (&prepared.policy, &prepared.effective);
     if options.explain {
         let mut warnings = prepared
@@ -522,7 +552,31 @@ fn run_inner(
             );
         }
         let patience = options.wait.unwrap_or(effective.gate.timeout_seconds);
-        let value = serde_json::json!({"fields": policy.fields, "budget_rate_micros_per_minute": policy.budget_rate_micros_per_minute, "ci_patience_seconds": patience, "ci_patience_source": if options.wait.is_some() { "--wait" } else { "gate.timeout_seconds" }, "warnings": warnings});
+        use ports::Forge as _;
+        let mut forge = adapters::GhForge::new(
+            &prepared.resolved.project,
+            prepared.resolved.roots.state.as_path(),
+        );
+        let repository = forge.repository_identity()?;
+        let capabilities = match forge.capabilities(&prepared.target) {
+            Ok(capabilities) => capabilities,
+            Err(error) => {
+                warnings.push(format!("optional forge capabilities unknown: {error}"));
+                provenant_records::landing::Capabilities {
+                    repository: Some(repository.clone()),
+                    ..Default::default()
+                }
+            }
+        };
+        let plan = policy.plan(
+            capabilities,
+            &review_scope(
+                prepared.resolved.roots.state.as_path(),
+                prepared.project.as_deref(),
+            )?,
+        )?;
+        let unavailable = plan.strategy.ensure_executable(&plan.plan).err();
+        let value = serde_json::json!({"repository": repository, "target": prepared.target, "resolved_plan": plan, "unavailable": unavailable, "fields": policy.fields, "budget_rate_micros_per_minute": policy.budget_rate_micros_per_minute, "ci_patience_seconds": patience, "ci_patience_source": if options.wait.is_some() { "--wait" } else { "gate.timeout_seconds" }, "warnings": warnings});
         let text = format!("{}\n", serde_json::to_string_pretty(&value)?);
         return Ok(crate::emit(
             &CommandResult::new("land", Outcome::Ok, value),
@@ -533,11 +587,6 @@ fn run_inner(
     }
     if options.numbers.is_empty() {
         return Err("supply at least one pull request number".into());
-    }
-    if effective.integration == Integration::ForgeQueue {
-        return Err(
-            LandingError::Failed("land.integration=forge_queue is not supported".into()).into(),
-        );
     }
     if options.head.is_some() && options.numbers.len() > 1 {
         return Err("--head pins one pull request; land a batch without it".into());
@@ -550,26 +599,29 @@ fn run_inner(
     let review_proof = options
         .accept_delta
         .clone()
-        .map_or(owner::ReviewProof::Policy, |reason| {
-            owner::ReviewProof::Accepted { reason }
+        .map_or(provenant_records::landing::ReviewProof::Policy, |reason| {
+            provenant_records::landing::ReviewProof::Accepted { reason }
         });
-    let request = owner::LandRequest {
+    let request = provenant_records::landing::LandRequest {
         members: options
             .numbers
             .iter()
-            .map(|number| owner::LandMember {
+            .map(|number| provenant_records::landing::LandMember {
                 pr: *number,
                 head: head.map(|head| head.to_string()),
                 base: None,
                 review_proof: review_proof.clone(),
             })
             .collect(),
-        authority: owner::Authority::Chair,
-        policy: owner::PolicyChoice {
+        target: options.target.clone(),
+        strategy: options.strategy,
+        authority: provenant_records::landing::Authority::Chair,
+        policy: provenant_records::landing::PolicyChoice {
             tier: options.tier.clone(),
             poll_seconds: options.poll,
             patience_seconds: options.wait,
         },
+        ..Default::default()
     };
     let submission = submit(&prepared, request, options.shadow, globals, workers)?;
     let mut report = submission.report;
