@@ -672,7 +672,10 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             if Path::new("live-pr").exists() {
                 let live_head: serde_json::Value = serde_json::from_slice(&fs::read("head.json")?)?;
                 let base = fs::read_to_string("base-sha")?;
-                assert!(Some(commit) == live_head["headRefOid"].as_str() || commit == base, "{value}");
+                assert!(
+                    Some(commit) == live_head["headRefOid"].as_str() || commit == base,
+                    "{value}"
+                );
             } else {
                 assert!(commit == HEAD || commit == OTHER, "{value}");
             }

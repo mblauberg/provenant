@@ -862,19 +862,18 @@ pub fn events(
                     limit: page.limit,
                     wait_seconds: no_budget.then_some(0),
                 };
-                let observation: Result<EventsResult, Box<dyn std::error::Error>> =
-                    if remote {
-                        provenant_fabric_runtime::relay::ToolCall::Events(input, None)
-                            .relay_within(
-                                &factory.context.lane_relay_socket()?,
-                                &cancel,
-                                std::time::Duration::from_micros(remaining.as_micros()),
-                            )
-                            .map_err(Into::into)
-                            .and_then(|value| serde_json::from_value(value).map_err(Into::into))
-                    } else {
-                        service.events(input, budget, &cancel).map_err(Into::into)
-                    };
+                let observation: Result<EventsResult, Box<dyn std::error::Error>> = if remote {
+                    provenant_fabric_runtime::relay::ToolCall::Events(input, None)
+                        .relay_within(
+                            &factory.context.lane_relay_socket()?,
+                            &cancel,
+                            std::time::Duration::from_micros(remaining.as_micros()),
+                        )
+                        .map_err(Into::into)
+                        .and_then(|value| serde_json::from_value(value).map_err(Into::into))
+                } else {
+                    service.events(input, budget, &cancel).map_err(Into::into)
+                };
                 match observation {
                     Ok(value) => value,
                     Err(_)

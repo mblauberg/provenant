@@ -159,11 +159,7 @@ pub(super) fn graph_run_refuses_low_disk_writers() -> Result {
     Ok(())
 }
 
-fn wait_graph_gate(
-    pending: &mut PendingGraphCommand,
-    marker: &Path,
-    name: &str,
-) -> Result {
+fn wait_graph_gate(pending: &mut PendingGraphCommand, marker: &Path, name: &str) -> Result {
     let observed = provenant_test_support::wait_for(
         name,
         Duration::from_secs(20),
