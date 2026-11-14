@@ -225,8 +225,6 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
         if scenario == "unknown" {
             context.workers = &unknown;
         }
-        // The first foreign pass only previews.
-        acknowledge_foreign_preview(&context)?;
         let retirement = HostRetirementFixture::new(&test)?;
         let regenerable = ["target".into()];
         let report = collect(
@@ -348,8 +346,6 @@ fn gc_native_output_preview_creates_no_writer_state() -> Result<(), Box<dyn Erro
         assert!(path.join("target/artifact").is_file());
         assert_eq!(slot.exists(), existing_slot);
         assert!(!slot.join(WRITER_LOCK).exists());
-        // The first foreign pass only previews.
-        acknowledge_foreign_preview(&context)?;
         let applied = collect(
             &context,
             &lanes,

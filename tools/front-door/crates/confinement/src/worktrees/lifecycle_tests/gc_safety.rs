@@ -392,7 +392,8 @@ fn gc_foreign_cleanup_respects_exclusions_census_and_durable_ownership()
             "native",
             path.to_str().ok_or("path")?,
         ])?;
-        if scenario == "unmerged" {
+        // Recency only protects work that is not already landed.
+        if matches!(scenario, "unmerged" | "recent") {
             fs::write(path.join("new-work"), b"new work")?;
             run_in_worktree(&fixture, &path, &["add", "new-work"])?;
             run_in_worktree(
@@ -472,6 +473,9 @@ fn gc_foreign_cleanup_respects_exclusions_census_and_durable_ownership()
                         provenant_records::custody::RemovalOutcome::Removed { .. }
                     )
             }));
+        } else if scenario == "unmerged" {
+            // An idle, unlanded lane is retired but its branch, the work, stays.
+            assert!(!path.exists(), "idle unlanded tree was not retired");
         } else {
             assert!(
                 path.exists(),
@@ -483,7 +487,7 @@ fn gc_foreign_cleanup_respects_exclusions_census_and_durable_ownership()
                 .project_state
                 .open_verified_directory(&state_dir_name(&path))
                 .is_ok(),
-            !matches!(scenario, "default" | "preview" | "live-lane" | "unmerged"),
+            !matches!(scenario, "default" | "preview" | "live-lane"),
             "exclusion state after {scenario}"
         );
         assert_eq!(branch_exists(&fixture, "native"), scenario != "apply");
