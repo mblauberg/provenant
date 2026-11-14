@@ -205,6 +205,11 @@ pub enum Command {
     /// Inspect issue specifications for stale or misleading references
     #[command(subcommand)]
     Tracker(Tracker),
+    /// Run a declared repository verification tier
+    Verify {
+        /// Free-form tier name from the effective verify port
+        tier: Option<String>,
+    },
     /// Run fast repository checks
     #[command(subcommand)]
     Check(Check),

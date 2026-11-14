@@ -49,6 +49,7 @@ mod state_reset;
 mod status_wait;
 mod target_seed_build;
 mod usage;
+mod verify;
 #[cfg(test)]
 pub mod worktree_tests;
 mod worktrees;
@@ -1612,6 +1613,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Disk(provenant_cli::Disk::Report) => disk::run(globals),
         Command::Cloud(command) => cloud::run(command, globals),
         Command::Tracker(command) => tracker::run(command, globals),
+        Command::Verify { tier } => verify::run(tier.as_deref(), globals),
         Command::Check(check) => checks::run(check, globals, process.workers()),
         Command::Hook(hook) => hooks::run(hook, globals),
     }

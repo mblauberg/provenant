@@ -182,7 +182,10 @@ pub fn execute_port_command(
     }
     let mut argv: Vec<_> = command.argv.iter().map(OsString::from).collect();
     argv.extend_from_slice(arguments);
-    let env = command_environment(std::env::vars_os(), environment);
+    let ambient = COMMAND_CONTEXT_ENV
+        .iter()
+        .filter_map(|name| std::env::var_os(*name).map(|value| (OsString::from(*name), value)));
+    let env = command_environment(ambient, environment);
     let mut options = ExecOptions::new(&argv, cwd, timeout);
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture {
@@ -360,13 +363,7 @@ pub struct WorktreeLayoutPort {
 
 impl WorktreeLayoutPort {
     pub fn unavailable_reason(&self) -> Option<&'static str> {
-        match self.backend {
-            PortBackend::Builtin => None,
-            PortBackend::Command { .. } => {
-                Some("worktree layout command backend is not implemented")
-            }
-            PortBackend::None => Some("the effective declaration disables this port"),
-        }
+        port_unavailable_reason(self)
     }
 
     /// Resolve the declared default path for a validated Git branch.
@@ -435,14 +432,17 @@ trait PortEntry {
     fn set_source(&mut self, source: PortSource);
     fn backend_kind(&self) -> PortBackendKind;
     fn valid(&self) -> bool;
-    fn unavailable_reason(&self) -> Option<&'static str> {
-        if !self.valid() {
-            Some("the port declaration is invalid")
-        } else if self.backend_kind() == PortBackendKind::None {
-            Some("the effective declaration disables this port")
-        } else {
-            None
-        }
+    fn backend_unavailable_reason(&self) -> Option<&'static str> {
+        (self.backend_kind() == PortBackendKind::None)
+            .then_some("the effective declaration disables this port")
+    }
+}
+
+fn port_unavailable_reason(port: &impl PortEntry) -> Option<&'static str> {
+    if !port.valid() {
+        Some("the port declaration is invalid")
+    } else {
+        port.backend_unavailable_reason()
     }
 }
 
@@ -486,7 +486,7 @@ impl PortEntry for VerifyPort {
     }
 }
 impl PortEntry for LandPort {
-    fn unavailable_reason(&self) -> Option<&'static str> {
+    fn backend_unavailable_reason(&self) -> Option<&'static str> {
         match self.backend {
             LandBackend::Builtin => None,
             LandBackend::Command { .. } => {
@@ -516,8 +516,14 @@ impl PortEntry for LandPort {
     }
 }
 impl PortEntry for WorktreeLayoutPort {
-    fn unavailable_reason(&self) -> Option<&'static str> {
-        WorktreeLayoutPort::unavailable_reason(self)
+    fn backend_unavailable_reason(&self) -> Option<&'static str> {
+        match self.backend {
+            PortBackend::Builtin => None,
+            PortBackend::Command { .. } => {
+                Some("worktree layout command backend is not implemented")
+            }
+            PortBackend::None => Some("the effective declaration disables this port"),
+        }
     }
     fn source(&self) -> PortSource {
         self.source
@@ -581,7 +587,7 @@ macro_rules! declare_ports {
 
             pub fn entries(&self) -> impl Iterator<Item = (&'static str, PortSource, PortBackendKind, bool, Option<&'static str>)> + '_ {
                 [$(
-                    (stringify!($field), self.$field.source(), self.$field.backend_kind(), self.$field.valid(), self.$field.unavailable_reason()),
+                    (stringify!($field), self.$field.source(), self.$field.backend_kind(), self.$field.valid(), port_unavailable_reason(&self.$field)),
                 )+].into_iter()
             }
         }
@@ -916,6 +922,21 @@ mod tests {
         assert!(!naming.3);
         assert!(naming.4.is_some());
         assert!(PortTable::read_for(Some(directory.path()), directory.path()).is_err());
+        let mut invalid = PortTable::builtin();
+        invalid.worktree_layout.default = "../outside/{branch}".into();
+        assert!(
+            invalid
+                .worktree_layout
+                .path_for_branch("feature/topic")
+                .is_err()
+        );
+        for (_, _, _, valid, reason) in invalid
+            .entries()
+            .filter(|entry| entry.0 == "worktree_layout")
+        {
+            assert!(!valid);
+            assert!(reason.is_some());
+        }
     }
 
     #[test]

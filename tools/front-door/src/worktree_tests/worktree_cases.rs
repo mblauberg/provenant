@@ -129,17 +129,20 @@ pub(super) fn naming_and_post_create_ports_are_advisory_and_evidenced() -> Resul
         rig.project.join(provenant_config::PORTS_CONFIG),
         serde_json::to_vec(&ports)?,
     )?;
-    let failed = ok(
+    // Omit --base to exercise the default-remote discovery re-entry.
+    let remote = rig
+        .project
+        .parent()
+        .ok_or("fixture parent")?
+        .join("naming-origin.git");
+    let remote_text = remote.to_str().ok_or("fixture remote path")?;
+    git(
         &rig,
-        &[
-            "worktree",
-            "create",
-            "setup-failure",
-            "--base",
-            "HEAD",
-            "--json",
-        ],
+        &["init", "--bare", "--initial-branch=main", remote_text],
     )?;
+    git(&rig, &["remote", "add", "origin", remote_text])?;
+    git(&rig, &["push", "-u", "origin", "main"])?;
+    let failed = ok(&rig, &["worktree", "create", "setup-failure", "--json"])?;
     let warnings = failed["data"]["warnings"]
         .as_array()
         .ok_or("worktree warnings are not an array")?;

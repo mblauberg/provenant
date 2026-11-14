@@ -10,4 +10,4 @@
 
 ### CLI and install
 
-- `config ports` lists effective backends, sources and unavailable declarations. Repository ports override host ports; naming, post-create, admission, CI observation, tracker and release checks support command backends with execution receipts. (#3078)
+- `config ports` lists effective backends, sources and unavailable declarations; `verify [TIER]` dispatches the effective verification port. Repository ports override host ports; naming, post-create, admission, CI observation, tracker and release checks support command backends with execution receipts. (#3078)
