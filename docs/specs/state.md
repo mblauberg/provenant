@@ -13,10 +13,23 @@ Keys and defaults: `provenant config schema`. Operator steps: the
 ### Root selection never falls back
 
 An empty or relative explicit root fails and never yields to the default. A
-root that overlaps a protected location is refused. Reads create no state.
-The first 2.0 install stops 1.x agents and seeds only `config.toml`, `host-id` and `install/receipt.json` into an absent or empty default root; the 1.x root remains untouched.
+root that overlaps a declared credential, Git-metadata or other-state boundary
+is refused, whether it contains that location or lies inside it. Ordinary
+checkout/workspace directories and the retired agent-harness location warn
+with their source and proceed. OS binding captures existing Git markers and
+linked-worktree metadata; installed release directories imply no Git boundary.
+The same declaration and decision apply before
+and after alias binding. Existing workspace `.agent-run` stores are captured
+as other-state boundaries; that name alone establishes no boundary.
+Reads create no state.
+The first 2.0 install validates a sibling staging root against the captured
+install root inputs, changing only the state candidate, before stopping 1.x
+agents. It seeds only `config.toml`, `host-id` and `install/receipt.json` into an
+absent or empty default root; the 1.x root remains untouched.
 - Why: a wrong root mixes or destroys another installation's state.
-- Test: `crates/core/src/roots.rs::roots_refuse_home_checkout_old_roots_and_any_agent_run_component`;
+- Test: `crates/core/src/roots.rs::protected_locations_enforce_only_their_declared_boundaries`;
+  `crates/core/src/roots.rs::changing_the_candidate_preserves_all_captured_boundaries`;
+  `src/state_handoff.rs::tests::copies_only_owner_configuration_and_never_writes_the_old_root`;
   `tests/parser.rs::root_uses_release_location_and_explicit_state_without_creating_it`
 - Owner: `crates/core/src/roots.rs`, `src/roots.rs`
 

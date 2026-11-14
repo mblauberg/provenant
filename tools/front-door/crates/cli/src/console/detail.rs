@@ -1,5 +1,5 @@
 use super::Error;
-use provenant_core::{ActorId, AttemptId, CancelToken, ProjectId, RootInputs, Roots};
+use provenant_core::{ActorId, AttemptId, CancelToken, ProjectId, Roots};
 use provenant_os::clock::SystemClock;
 use provenant_run::{ExecutionContext, RunStore};
 use serde_json::{Value, json};
@@ -76,10 +76,9 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
                         let path = node["store_path"].as_str()?;
                         let project_id: ProjectId =
                             node["lane_id"]["project_id"].as_str()?.parse().ok()?;
-                        let mut inputs =
-                            RootInputs::new("/".into(), "/__provenant_tree_excluded__".into());
-                        inputs.state_dir = Some(path.into());
-                        let child = inputs.resolve(&provenant_os::fs::SystemPathResolver).ok()?;
+                        let child = roots
+                            .with_state_dir(path.into(), &provenant_os::fs::SystemPathResolver)
+                            .ok()?;
                         let context = ExecutionContext {
                             state_root: child.state,
                             project_id,

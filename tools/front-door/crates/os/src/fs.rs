@@ -118,6 +118,62 @@ impl provenant_core::PathResolver for SystemPathResolver {
     }
 }
 
+/// Bind a captured root context, discovering actual Git markers and their
+/// private/common directories and existing workspace state roots. Installed
+/// release assets need not be checkouts; a pathname alone implies no live state.
+pub fn bind_roots(
+    inputs: &provenant_core::RootInputs,
+) -> Result<provenant_core::Roots, provenant_core::RootError> {
+    let mut inputs = inputs.clone();
+    for top in std::iter::once(&inputs.checkout).chain(&inputs.workspaces) {
+        let metadata = (|| -> io::Result<Vec<PathBuf>> {
+            let path = top.join(".git");
+            match std::fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+                Err(error) => return Err(error),
+                Ok(_) => {}
+            }
+            let marker = crate::git::repository_marker(top)
+                .filter(|marker| marker.git_dir.is_some() && marker.common_dir.is_some())
+                .ok_or_else(|| {
+                    io::Error::other(format!("cannot read Git metadata at {}", path.display()))
+                })?;
+            let mut paths = vec![path];
+            for target in marker.git_dir.iter().chain(&marker.common_dir) {
+                paths.push(std::fs::canonicalize(target)?);
+            }
+            Ok(paths)
+        })()
+        .map_err(|source| provenant_core::RootError::Resolution {
+            path: top.clone(),
+            source,
+        })?;
+        for path in metadata {
+            if !inputs.git_metadata.contains(&path) {
+                inputs.git_metadata.push(path);
+            }
+        }
+    }
+    for workspace in &inputs.workspaces {
+        let state = workspace.join(".agent-run");
+        match std::fs::symlink_metadata(&state) {
+            Ok(_) => {
+                if !inputs.old_roots.contains(&state) {
+                    inputs.old_roots.push(state);
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(provenant_core::RootError::Resolution {
+                    path: state,
+                    source,
+                });
+            }
+        }
+    }
+    inputs.resolve(&SystemPathResolver)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LockRefusal {
     AnchorOwner,

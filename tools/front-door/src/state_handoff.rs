@@ -186,14 +186,11 @@ fn transfer_receipt(path: &Path) -> io::Result<()> {
 /// Validate the staged bytes with their runtime owners before stopping anything.
 /// Config remains TOML at the same schema version; host-id remains 32 hex bytes.
 /// Neither needs a legacy codec. Invalid input is a preflight error.
-fn validate_stage(plan: &Handoff, stage: &Path) -> io::Result<()> {
+fn validate_stage(plan: &Handoff, stage: &Path, context: &provenant_core::Roots) -> io::Result<()> {
     let home = provenant_core::default_state_home(&plan.to)
         .ok_or_else(|| io::Error::other("handoff destination is not the default root"))?;
-    let mut inputs = provenant_core::RootInputs::new(home.to_path_buf(), home.to_path_buf());
-    inputs.state_dir = Some(stage.to_path_buf());
-    let roots = inputs
-        .resolve(&provenant_os::fs::SystemPathResolver)
-        .map_err(io::Error::other)?;
+    let roots =
+        crate::roots::state_candidate(context, stage.to_path_buf()).map_err(io::Error::other)?;
     provenant_config::config_show(&roots, &provenant_cli::domains::SECTIONS)
         .map_err(io::Error::other)?;
     provenant_config::lookup_host(&roots).map_err(io::Error::other)?;
@@ -208,6 +205,7 @@ fn validate_stage(plan: &Handoff, stage: &Path) -> io::Result<()> {
 /// Nothing under `plan.from` is written.
 pub(crate) fn run(
     plan: &Handoff,
+    context: &provenant_core::Roots,
     stop_agents: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<Handoff> {
     let parent = plan
@@ -254,7 +252,7 @@ pub(crate) fn run(
         ) {
             std::fs::File::open(directory)?.sync_all()?;
         }
-        validate_stage(plan, &stage).map_err(|error| {
+        validate_stage(plan, &stage, context).map_err(|error| {
             io::Error::other(format!(
                 "handoff preflight failed; agents left running: {error}"
             ))
@@ -344,6 +342,12 @@ mod tests {
         ))
     }
 
+    fn install_roots(home: &Path) -> Result<provenant_core::Roots> {
+        let mut inputs = provenant_core::RootInputs::new(home.into(), home.join("release"));
+        inputs.workspaces.push(home.join("project"));
+        Ok(inputs.resolve(&provenant_os::fs::SystemPathResolver)?)
+    }
+
     #[test]
     fn copies_only_owner_configuration_and_never_writes_the_old_root() -> Result {
         let (_temp, home, state) = legacy_home()?;
@@ -351,7 +355,7 @@ mod tests {
         let before = tree(&legacy)?;
         let plan = plan(&state, &home)?.ok_or("hand-off planned")?;
         let mut stopped = false;
-        let done = run(&plan, || {
+        let done = run(&plan, &install_roots(&home)?, || {
             assert!(!state.exists(), "agents stop before the root exists");
             stopped = true;
             Ok(())
@@ -415,7 +419,7 @@ mod tests {
             let plan = plan(&state, &home)?.ok_or("hand-off planned")?;
             let mut stopped = false;
             assert!(
-                run(&plan, || {
+                run(&plan, &install_roots(&home)?, || {
                     stopped = true;
                     Ok(())
                 })
@@ -432,7 +436,12 @@ mod tests {
     fn a_failed_agent_stop_copies_nothing() -> Result {
         let (_temp, home, state) = legacy_home()?;
         let plan = plan(&state, &home)?.ok_or("hand-off planned")?;
-        assert!(run(&plan, || Err(io::Error::other("still running"))).is_err());
+        assert!(
+            run(&plan, &install_roots(&home)?, || Err(io::Error::other(
+                "still running"
+            )))
+            .is_err()
+        );
         assert!(!state.exists());
         Ok(())
     }

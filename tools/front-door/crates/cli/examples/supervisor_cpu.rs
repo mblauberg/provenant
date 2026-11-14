@@ -85,7 +85,7 @@ fn capture(root: &Path, churn: bool) -> Result {
     }
     let mut inputs = RootInputs::new(home.clone(), project.clone());
     inputs.state_dir = Some(state.clone());
-    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let roots = provenant_os::fs::bind_roots(&inputs)?;
     let ctx = provenant_cli::fabric::Context::open(roots, &home, &project)?;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();

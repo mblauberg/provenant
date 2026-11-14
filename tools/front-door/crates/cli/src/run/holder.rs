@@ -135,7 +135,7 @@ impl HolderFabric {
             context.roots.checkout.clone(),
         );
         inputs.state_dir = Some(launch.configuration_root.clone());
-        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let roots = provenant_os::fs::bind_roots(&inputs)?;
         let directory = launch.graph_directory.as_deref().unwrap_or(&launch.cwd);
         let mut ctx = crate::fabric::Context::open(roots, &context.roots.home, directory)?;
         if ctx.identity.project != context.project_id {
