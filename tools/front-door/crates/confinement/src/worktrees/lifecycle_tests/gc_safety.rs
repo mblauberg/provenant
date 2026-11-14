@@ -511,6 +511,8 @@ fn gc_output_pruning_holds_writer_but_not_repository_lock() -> Result<(), Box<dy
     fs::create_dir(&target)?;
     fs::write(target.join("artifact"), "output")?;
     lane.dirty = WorktreeCondition::Ignored;
+    let retirement = HostRetirementFixture::new(&test_context)?;
+    retirement.seed_lane(&context, &lane)?;
     let state = context
         .project_state
         .open_verified_directory(&state_dir_name(&lane.path))?;
@@ -538,8 +540,8 @@ fn gc_output_pruning_holds_writer_but_not_repository_lock() -> Result<(), Box<dy
         std::slice::from_ref(&lane),
         &WorktreeGcPolicy {
             include_foreign: false,
-            retirement_port: None,
-            retirement_feeds: None,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
             mode: CollectionMode::Worktrees,
             proof: None,
             upstream_reference: None,
@@ -853,6 +855,7 @@ fn gc_refreshes_the_owned_ref_generation_before_recording_retirement() -> Result
     );
 
     let retirement = HostRetirementFixture::new(&test_context)?;
+    let canonical = fs::canonicalize(&lane.path)?;
     let upstream = fixture.head()?;
     let evidence = gc_landing_evidence(&fixture, upstream)?;
     let report = collect(
@@ -886,7 +889,7 @@ fn gc_refreshes_the_owned_ref_generation_before_recording_retirement() -> Result
     assert_eq!(current.origin, original.origin);
     let worktree = provenant_records::custody::Subject::new(
         provenant_records::custody::SubjectKind::Worktree,
-        fs::canonicalize(&lane.path)?.to_string_lossy().into_owned(),
+        canonical.to_string_lossy().into_owned(),
     );
     let recorded = retirement
         .retirement_for_subject(context.binding.project_id(), &worktree)?
@@ -936,20 +939,22 @@ fn gc_reclaims_unmanaged_output_but_keeps_worktree() -> Result<(), Box<dyn Error
         .find(|lane| lane.path == canonical)
         .ok_or("missing unmanaged fixture worktree")?;
     lane.dirty = WorktreeCondition::Ignored;
+    let retirement = HostRetirementFixture::new(&test_context)?;
     let report = collect(
         &context,
         &[lane],
         &WorktreeGcPolicy {
-            include_foreign: false,
-            retirement_port: None,
-            retirement_feeds: None,
-            mode: CollectionMode::Worktrees,
+            include_foreign: true,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
+            // Output retention alone reclaims the output and keeps the tree.
+            mode: CollectionMode::Outputs,
             proof: None,
             upstream_reference: None,
             integration_patterns: &[],
             excluded_paths: &[],
             upstream: Some(fixture.head()?),
-            terminal: &|_| true,
+            terminal: &|_| false,
             no_live_lanes: &|_| true,
             regenerable: &["target".to_owned()],
             keep: &[],
