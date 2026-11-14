@@ -634,6 +634,43 @@ pub(super) enum PrepareError {
     Other(String),
 }
 
+fn candidate_refusal_message(
+    skipped_routes: &[SkippedRoute],
+    fallback_outcome: Option<provenant_records::run::PreparationFailure>,
+) -> Option<String> {
+    if skipped_routes.is_empty() {
+        return None;
+    }
+    let mut reasons = skipped_routes
+        .iter()
+        .map(|skipped| {
+            let diagnostic = skipped.diagnostic();
+            let mut reason = format!(
+                "{}: {}",
+                provenant_records::diagnostic::safe_text(&skipped.route),
+                diagnostic
+                    .detail
+                    .as_deref()
+                    .unwrap_or("the route was refused")
+            );
+            if let Some(next) = diagnostic.next {
+                reason.push_str("; ");
+                reason.push_str(&next);
+            }
+            let accounts = provenant_records::SkippedAccount::read(&skipped.extra);
+            if !accounts.is_empty() {
+                reason.push_str("; accounts skipped: ");
+                reason.push_str(&provenant_records::SkippedAccount::describe(&accounts));
+            }
+            reason
+        })
+        .collect::<Vec<_>>();
+    if fallback_outcome == Some(provenant_records::run::PreparationFailure::AuthRequired) {
+        reasons.push("no eligible fallback remains".into());
+    }
+    Some(reasons.join("; "))
+}
+
 fn policy_code_for_boundary(
     class: provenant_records::diagnostic::BoundaryClass,
 ) -> Option<&'static str> {
@@ -727,6 +764,8 @@ impl PrepareError {
                 let policy_code = policy_code_for_boundary(boundary_class)
                     .map(str::to_owned)
                     .or_else(|| policy_code_for_resource(candidate_resource));
+                let message =
+                    candidate_refusal_message(&skipped_routes, fallback_outcome).unwrap_or(message);
                 let mut refusal = run::PrepareRefusal {
                     boundary_class,
                     policy_code,

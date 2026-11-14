@@ -1210,6 +1210,11 @@ pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
         .filter(|n| (1..=provenant_core::MAX_LANE_RUNTIME_SECONDS).contains(n))
         .ok_or("duration must be 1s to 4h; run `provenant help` for examples")
 }
+pub(crate) fn observation_wait_seconds(value: &str) -> Result<u64, &'static str> {
+    span_seconds(value)
+        .filter(|n| *n <= provenant_core::MAX_LANE_RUNTIME_SECONDS)
+        .ok_or("duration must be 0s to 4h; run `provenant help` for examples")
+}
 #[derive(Clone, Debug, Args)]
 pub struct Status {
     /// Stream a bounded attempt inventory page for the session collector,
@@ -1246,7 +1251,7 @@ pub struct Wait {
     #[arg(long)]
     pub follow: bool,
     /// Wait budget (default domains.wait.timeout_seconds; at most 4 hours)
-    #[arg(long, value_name = "SPAN", catalog_duration())]
+    #[arg(long, value_name = "SPAN", catalog_observation_wait())]
     pub timeout: Option<u64>,
 }
 /// `trace`: a graph's revisions and attempt timeline.

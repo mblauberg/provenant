@@ -36,6 +36,10 @@ pub(crate) fn launch_contention(error: &(dyn Error + 'static)) -> bool {
                 | FacadeError::WriterLockBusy
                 | FacadeError::WriterUnknown
                 | FacadeError::WriterBusy { .. }
+                | FacadeError::GitMutationFailed {
+                    lock_failure: true,
+                    ..
+                }
         )
     )
 }

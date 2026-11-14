@@ -19,6 +19,7 @@ pub(crate) trait CatalogueArg {
     fn catalog_bounds(self, bounds: (u64, u64)) -> Self;
     fn catalog_u8_range(self, range: impl RangeBounds<i64>) -> Self;
     fn catalog_duration(self) -> Self;
+    fn catalog_observation_wait(self) -> Self;
     fn catalog_u64_range(self, range: impl RangeBounds<u64>) -> Self;
     fn catalog_u32_range(self, range: impl RangeBounds<i64>) -> Self;
     fn catalog_i64_range(self, range: impl RangeBounds<i64>) -> Self;
@@ -64,6 +65,10 @@ impl CatalogueArg for Arg {
     fn catalog_duration(self) -> Self {
         self.value_parser(crate::grammar::duration_seconds)
             .add(NumericBounds((1, provenant_core::MAX_LANE_RUNTIME_SECONDS)))
+    }
+    fn catalog_observation_wait(self) -> Self {
+        self.value_parser(crate::grammar::observation_wait_seconds)
+            .add(NumericBounds((0, provenant_core::MAX_LANE_RUNTIME_SECONDS)))
     }
     fn catalog_u64_range(self, range: impl RangeBounds<u64>) -> Self {
         let bounds = unsigned_bounds(&range);

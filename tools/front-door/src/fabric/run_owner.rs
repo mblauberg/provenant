@@ -87,6 +87,23 @@ pub(crate) fn events_within<T: serde::Serialize>(
     Ok(events.len())
 }
 pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
+    // Preserve resource contention through the public error boundary; an
+    // immediate repository probe must schedule a retry, not fail the writer.
+    if matches!(
+        &error,
+        provenant_run::RunError::Filesystem(provenant_os::fs::FsError::LockTimeout { .. })
+    ) {
+        return FacadeError::Busy;
+    }
+    if matches!(
+        &error,
+        provenant_run::RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::LockBusy
+                | provenant_confinement::worktrees::WorktreeError::RegistryLockTimeout
+        )
+    ) {
+        return FacadeError::WriterLockBusy;
+    }
     if let provenant_run::RunError::Writer(writer) = &error
         && let Some((operation, lock_failure)) = writer.mutation_failure()
     {

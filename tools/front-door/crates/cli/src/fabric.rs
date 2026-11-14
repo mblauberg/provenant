@@ -151,7 +151,7 @@ pub enum Events {
         #[command(flatten)]
         page: SequencePage,
         /// Wait up to this many seconds for new entries
-        #[arg(long, catalog_duration())]
+        #[arg(long, catalog_observation_wait())]
         wait: Option<u64>,
     },
     /// Add a note to the activity log
