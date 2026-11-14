@@ -936,7 +936,7 @@ pub(super) enum Repository<'a> {
     /// ownership under the repository lock.
     Remove,
     /// Explicit destructive authority, requiring an archive before mutation.
-    Discard { non_subsumed: bool },
+    Discard,
     /// Output is deleted under writer custody alone. The lock is taken for the
     /// final registration recheck and the Git mutation, and returned with the
     /// tree. `lanes` is the cheap fence rechecked under it.
@@ -1037,7 +1037,17 @@ pub(super) fn remove_tree(
         entry,
         expected_head,
         cancel,
-        &|| Ok(()),
+        &|| {
+            let refs = retained_refs(context, entry.branch.as_ref(), None, &[], cancel)?;
+            if matches!(
+                removal_evidence(context, expected_head, &refs, cancel)?,
+                RemovalEvidence::Proven(_)
+            ) {
+                Ok(())
+            } else {
+                Err(WorktreeError::IdentityChanged)
+            }
+        },
         Some(output),
         Repository::Remove,
     )
@@ -1071,7 +1081,7 @@ pub(super) fn remove_tree_when(
     eligible()?;
     let prepared =
         worktree_dirty_at(context, locked.verified.repo(), cancel)? == WorktreeCondition::Ignored;
-    if prepared && !matches!(repository, Repository::Discard { .. }) {
+    if prepared && !matches!(repository, Repository::Discard) {
         let settings = output.cloned().unwrap_or_default();
         gc::prepare_removal(
             context,
@@ -1082,7 +1092,7 @@ pub(super) fn remove_tree_when(
         )?;
         if matches!(
             repository,
-            Repository::Held | Repository::Remove | Repository::Discard { .. }
+            Repository::Held | Repository::Remove | Repository::Discard
         ) {
             refresh_census_under_custody(context, &canonical)?;
         }
@@ -1091,7 +1101,7 @@ pub(super) fn remove_tree_when(
     // eligibility before removing the tree while writer exclusion is held.
     let repository_guard = match repository {
         Repository::Held => None,
-        Repository::Acquire { .. } | Repository::Remove | Repository::Discard { .. } => {
+        Repository::Acquire { .. } | Repository::Remove | Repository::Discard => {
             // Any slow census happens before the repository lock is taken.
             if prepared {
                 eligible()?;
@@ -1106,7 +1116,7 @@ pub(super) fn remove_tree_when(
         expected_head,
     )?;
     let fenced = match repository {
-        Repository::Held | Repository::Remove | Repository::Discard { .. } => {
+        Repository::Held | Repository::Remove | Repository::Discard => {
             eligible()?;
             true
         }
@@ -1116,7 +1126,7 @@ pub(super) fn remove_tree_when(
         return Err(WorktreeError::UnknownWriter);
     }
     let cleanliness = worktree_cleanliness_at(context, locked.verified.repo(), cancel)?;
-    let discard = matches!(repository, Repository::Discard { .. });
+    let discard = matches!(repository, Repository::Discard);
     match &cleanliness {
         WorktreeCleanliness::Clean => {}
         WorktreeCleanliness::Dirty(_) | WorktreeCleanliness::Ignored if discard => {}
@@ -1127,8 +1137,17 @@ pub(super) fn remove_tree_when(
         }
         WorktreeCleanliness::Unknown => return Err(WorktreeError::UnknownWriter),
     }
-    let archive_needed = matches!(repository, Repository::Discard { non_subsumed: true })
-        || (discard && !matches!(cleanliness, WorktreeCleanliness::Clean));
+    let current_non_subsumed = if discard {
+        let refs = retained_refs(context, entry.branch.as_ref(), None, &[], cancel)?;
+        !matches!(
+            removal_evidence(context, expected_head, &refs, cancel)?,
+            RemovalEvidence::Proven(_)
+        )
+    } else {
+        false
+    };
+    let archive_needed =
+        current_non_subsumed || (discard && !matches!(cleanliness, WorktreeCleanliness::Clean));
     let archive = if archive_needed {
         let captured = archive::capture(context, locked.verified.repo(), expected_head, cancel)?;
         tree_unchanged(
@@ -1430,6 +1449,16 @@ pub(super) fn settle_branch(
         Disposition::Merged => false,
         Disposition::Discard => true,
     };
+    if !discard {
+        let refs = retained_refs(context, Some(branch), None, &[], cancel)?;
+        if !matches!(
+            removal_evidence(context, tip, &refs, cancel)?,
+            RemovalEvidence::Proven(_)
+        ) {
+            retain(outcome, branch, RetainReason::NotMerged);
+            return Ok(());
+        }
+    }
     context.repo.revalidate()?;
     let fresh = context.facts.fresh_inventory(context, cancel)?;
     if checked_out_elsewhere(&fresh, branch, None)? {
@@ -1520,7 +1549,7 @@ pub(super) fn remove_merged_candidate(
                 return Ok(());
             }
             match remove_tree(context, entry, tip, cancel, output) {
-                Ok(removed) => {
+                Ok(mut removed) => {
                     if let Some(archive) = removed.archive.take() {
                         outcome.archives.push(archive);
                     }
@@ -1658,18 +1687,20 @@ fn remove_with_owner(
                 let branch_tips = read_branch_tips(context, cancel)?;
                 let entry = named_worktree(&entries, &name, context.repo.root_path())?;
                 let tip = entry.head;
-                let non_subsumed = if discard {
-                    let refs = retained_refs(context, entry.branch.as_ref(), None, &[], cancel)?;
-                    !matches!(
-                        removal_evidence(context, tip, &refs, cancel)?,
-                        RemovalEvidence::Proven(_)
-                    )
-                } else {
-                    false
-                };
 
                 let remove_named = || {
                     let eligible = || {
+                        if !discard {
+                            let refs =
+                                retained_refs(context, entry.branch.as_ref(), None, &[], cancel)?;
+                            if !matches!(
+                                removal_evidence(context, tip, &refs, cancel)?,
+                                RemovalEvidence::Proven(_)
+                            ) {
+                                return Err(WorktreeError::IdentityChanged);
+                            }
+                        }
+
                         if let Some(operation) = operation {
                             let tree = verify_worktree(context.repo, &entry.path)?;
                             let owner = load_owner(&tree)?.ok_or(WorktreeError::UnknownWriter)?;
@@ -1689,7 +1720,7 @@ fn remove_with_owner(
                         &eligible,
                         Some(output),
                         if discard {
-                            Repository::Discard { non_subsumed }
+                            Repository::Discard
                         } else {
                             Repository::Remove
                         },

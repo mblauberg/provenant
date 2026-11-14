@@ -70,9 +70,17 @@ impl PreviewWalk {
     }
 }
 
-#[derive(Clone, Copy, Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CollectionMode {
+    Outputs,
+    Worktrees,
+}
+
+#[derive(Clone, Copy)]
 pub struct WorktreeGcPolicy<'a> {
     pub upstream: Option<GitOid>,
+    pub mode: CollectionMode,
+    pub proof: Option<&'a provenant_records::custody::LandedEvidence>,
     pub upstream_reference: Option<&'a str>,
     pub terminal: &'a dyn Fn(&Path) -> bool,
     pub no_live_lanes: &'a dyn Fn(&Path) -> bool,
@@ -113,14 +121,28 @@ pub enum RetirementAction {
 pub trait RetirementOwner {
     fn custody(&self, lane: &WorktreeInfo) -> Result<(), String>;
     fn forge(&self, branch: &GitRefName) -> ForgeObservation;
-    fn integration_bases(&self) -> Vec<String>;
+    fn integration_bases(&self) -> Vec<(String, GitOid)>;
     fn record(
         &self,
         context: &WorktreeContext<'_>,
         lane: &WorktreeInfo,
         action: &RetirementAction,
         completed: bool,
+        prior_id: Option<&str>,
     ) -> Result<String, WorktreeError>;
+    fn remote_guard(
+        &self,
+        context: &WorktreeContext<'_>,
+        branch: &str,
+        tip: GitOid,
+        min_days: u64,
+    ) -> Result<(), String>;
+    fn projection(
+        &self,
+        context: &WorktreeContext<'_>,
+        id: &str,
+        subject: Subject,
+    ) -> Result<Option<RemovalRecord>, WorktreeError>;
 }
 
 #[derive(Debug, Serialize)]
@@ -159,6 +181,23 @@ pub struct OutputEntry {
     pub reason: String,
 }
 
+pub fn branch_candidate(
+    context: &WorktreeContext<'_>,
+    reference: &GitRefName,
+    tip: GitOid,
+) -> WorktreeInfo {
+    WorktreeInfo {
+        warnings: Vec::new(),
+        path: context.repo.root_path().into(),
+        branch: Some(reference.as_str().into()),
+        head: tip,
+        dirty: WorktreeCondition::Clean,
+        owner: Ok(None),
+        primary: true,
+        occupancy: Occupancy::Available,
+    }
+}
+
 fn kept_landing_record(
     project: provenant_core::ProjectId,
     lane: &WorktreeInfo,
@@ -194,6 +233,36 @@ pub fn collect_lazy(
     collect_impl(context, lanes, policy, cancel, true)
 }
 
+fn foreign_preview_marker(context: &WorktreeContext<'_>) -> String {
+    format!(
+        "foreign-preview-{}-{}",
+        context.repo.common_identity().device,
+        context.repo.common_identity().inode
+    )
+}
+pub fn first_foreign_pass(context: &WorktreeContext<'_>) -> Result<bool, WorktreeError> {
+    match context
+        .project_state
+        .metadata_at(OsStr::new(&foreign_preview_marker(context)), false)
+    {
+        Ok(_) => Ok(false),
+        Err(error) if error.is_not_found() => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+pub fn acknowledge_foreign_preview(context: &WorktreeContext<'_>) -> Result<(), WorktreeError> {
+    context
+        .project_state
+        .atomic_write(
+            OsStr::new(&foreign_preview_marker(context)),
+            ".foreign-preview-",
+            b"{\"schema_version\":2}\n",
+            provenant_os::fs::PublishMode::Replace,
+        )?
+        .require_durable()
+        .map_err(|_| WorktreeError::InvalidOutput)
+}
+
 fn collect_impl(
     context: &WorktreeContext<'_>,
     lanes: &[WorktreeInfo],
@@ -204,24 +273,31 @@ fn collect_impl(
     validate_binding(context)?;
     let entries = context.facts.fresh_inventory(context, cancel)?;
     let primary = canonicalize(context.repo.root_path())?;
-    let marker = format!(
-        "foreign-preview-{}-{}",
-        context.repo.common_identity().device,
-        context.repo.common_identity().inode
-    );
-    let foreign_seen = lanes
+    let known_refs = RefLedger::observe_context(context)?
+        .map(|ledger| ledger.list())
+        .transpose()?
+        .unwrap_or_default();
+    let foreign_branch = retained_refs(context, None, None, &[], cancel)?
         .iter()
-        .any(|lane| !lane.primary && matches!(lane.owner, Ok(None)));
-    let first_foreign = foreign_seen
+        .any(|target| {
+            target.reference.as_str().starts_with("refs/heads/")
+                && !entries
+                    .iter()
+                    .any(|entry| entry.branch.as_ref() == Some(&target.reference))
+                && !known_refs.iter().any(|known| {
+                    known.reference == target.reference.as_str()
+                        && known.endpoint == RefEndpoint::Local
+                        && known.origin == RefOrigin::Created
+                })
+        });
+    let foreign_seen = foreign_branch
+        || lanes
+            .iter()
+            .any(|lane| !lane.primary && matches!(lane.owner, Ok(None)));
+    let first_foreign = policy.mode == CollectionMode::Worktrees
+        && foreign_seen
         && policy.include_foreign
-        && match context
-            .project_state
-            .metadata_at(OsStr::new(&marker), false)
-        {
-            Ok(_) => false,
-            Err(error) if error.is_not_found() => true,
-            Err(error) => return Err(error.into()),
-        };
+        && first_foreign_pass(context)?;
     let dry = policy.dry_run || first_foreign;
     let mut report = WorktreeGcReport {
         dry_run: dry,
@@ -246,10 +322,11 @@ fn collect_impl(
                         tip,
                     })
             });
-    let mut patterns = policy.integration_patterns.to_vec();
-    if let Some(owner) = policy.retirement {
-        patterns.extend(owner.integration_bases());
-    }
+    let patterns = policy.integration_patterns;
+    let bases = policy
+        .retirement
+        .map(|owner| owner.integration_bases())
+        .unwrap_or_default();
     for lane in lanes {
         if lane.primary || lane.path == primary {
             continue;
@@ -306,6 +383,11 @@ fn collect_impl(
                 return Ok(());
             }
             if !(policy.no_live_lanes)(&lane.path) {
+                report.removals.push(kept_landing_record(
+                    context.binding.project_id(),
+                    lane,
+                    RemovalUncertainty::RunRecordsUnknown,
+                ));
                 return Err(WorktreeError::UnknownWriter);
             }
             if let Some(owner) = policy.retirement {
@@ -343,19 +425,37 @@ fn collect_impl(
                 &preview_walk,
             )?;
 
+            if policy.mode == CollectionMode::Outputs {
+                row.detail = Some("output retention only".into());
+                return Ok(());
+            }
             let branch = lane
                 .branch
                 .as_deref()
                 .map(GitRefName::new)
                 .transpose()
                 .map_err(|_| WorktreeError::InvalidOutput)?;
-            let refs = retained_refs(
+            let mut refs = retained_refs(
                 context,
                 branch.as_ref(),
                 integration.as_ref(),
                 &patterns,
                 cancel,
             )?;
+            for target in &mut refs {
+                let full = target.reference.as_str();
+                let branch = full.strip_prefix("refs/heads/").or_else(|| {
+                    full.strip_prefix("refs/remotes/")
+                        .and_then(|s| s.split_once('/').map(|(_, name)| name))
+                });
+                if bases.iter().any(|(name, base)| {
+                    branch == Some(name.as_str())
+                        && (*base == target.commit
+                            || is_ancestor(context, *base, target.commit, cancel).unwrap_or(false))
+                }) {
+                    target.integration = true;
+                }
+            }
             let mut proof = removal_evidence(context, lane.head, &refs, cancel)?;
             let forge = match (policy.retirement, branch.as_ref()) {
                 (Some(owner), Some(branch)) => owner.forge(branch),
@@ -393,12 +493,26 @@ fn collect_impl(
                 }
                 RemovalEvidence::NotSubsumed => {
                     if branch.is_none() {
+                        report.removals.push(kept_landing_record(
+                            context.binding.project_id(),
+                            lane,
+                            RemovalUncertainty::UnprovenLanding,
+                        ));
                         row.detail = Some("detached HEAD is not subsumed".into());
                         return Ok(());
                     }
                     let eligible_pr = matches!(forge, ForgeObservation::Absent)
                         || matches!(forge, ForgeObservation::Closed { head } if head == lane.head);
                     if !eligible_pr {
+                        report.removals.push(kept_landing_record(
+                            context.binding.project_id(),
+                            lane,
+                            if matches!(forge, ForgeObservation::Unknown(_)) {
+                                RemovalUncertainty::OfflineForge
+                            } else {
+                                RemovalUncertainty::UnprovenLanding
+                            },
+                        ));
                         row.detail = Some(format!("not subsumed; forge: {forge:?}"));
                         return Ok(());
                     }
@@ -441,6 +555,10 @@ fn collect_impl(
             }
             drop(locked);
             let eligible = || -> Result<(), WorktreeError> {
+                if let RetirementAction::Subsumed(evidence) = &action {
+                    validate_removal_evidence(context, lane.head, evidence, &refs, cancel)?;
+                }
+
                 if !(policy.no_live_lanes)(&lane.path) {
                     return Err(WorktreeError::UnknownWriter);
                 }
@@ -455,10 +573,13 @@ fn collect_impl(
                 census_free(context, &lane.path)
             };
             eligible()?;
+            let mut completed_retirement = None;
             if !dry {
-                if let Some(owner) = policy.retirement {
-                    owner.record(context, lane, &action, false)?;
-                }
+                let retirement_id = if let Some(owner) = policy.retirement {
+                    Some(owner.record(context, lane, &action, false, None)?)
+                } else {
+                    None
+                };
                 let mut removed = remove_tree_when(
                     context,
                     entry,
@@ -488,7 +609,13 @@ fn collect_impl(
                     }
                 }
                 if let Some(owner) = policy.retirement {
-                    owner.record(context, lane, &action, true)?;
+                    completed_retirement = Some(owner.record(
+                        context,
+                        lane,
+                        &action,
+                        true,
+                        retirement_id.as_deref(),
+                    )?);
                 }
             } else {
                 report.worktrees.removed.push(lane.clone());
@@ -509,15 +636,32 @@ fn collect_impl(
                         evidence.predicate
                     ));
                     if !dry {
-                        report.removals.push(RemovalRecord {
-                            project: context.binding.project_id(),
-                            subject: Subject::new(
-                                SubjectKind::Worktree,
-                                lane.path.to_string_lossy(),
-                            ),
-                            tip: lane.head,
-                            outcome: RemovalOutcome::Removed { evidence },
-                        });
+                        let worktree =
+                            Subject::new(SubjectKind::Worktree, lane.path.to_string_lossy());
+                        if let (Some(owner), Some(id)) =
+                            (policy.retirement, completed_retirement.as_deref())
+                        {
+                            if let Some(removal) = owner.projection(context, id, worktree)? {
+                                report.removals.push(removal);
+                            }
+                            if let Some(branch) = &branch {
+                                if let Some(removal) = owner.projection(
+                                    context,
+                                    id,
+                                    Subject::new(SubjectKind::Branch, branch.as_str()),
+                                )? {
+                                    report.removals.push(removal);
+                                }
+                            }
+                        } else {
+                            // Pure collector fixtures without a persistence adapter.
+                            report.removals.push(RemovalRecord {
+                                project: context.binding.project_id(),
+                                subject: worktree,
+                                tip: lane.head,
+                                outcome: RemovalOutcome::Removed { evidence },
+                            });
+                        }
                     }
                 }
                 RetirementAction::Idle => {
@@ -528,6 +672,32 @@ fn collect_impl(
             Ok(())
         })();
         if let Err(error) = result {
+            if !report
+                .removals
+                .iter()
+                .any(|r| r.subject.id == lane.path.to_string_lossy() && r.tip == lane.head)
+            {
+                let cause = match &error {
+                    WorktreeError::IncompleteCensus { .. }
+                    | WorktreeError::CensusUnknown { .. } => RemovalUncertainty::CensusUnknown,
+                    WorktreeError::UnknownOccupancy { .. }
+                    | WorktreeError::UnknownWriter
+                    | WorktreeError::UnknownWriterAt { .. } => RemovalUncertainty::CustodyUnknown,
+                    WorktreeError::LockBusy | WorktreeError::RegistryLockTimeout => {
+                        RemovalUncertainty::Busy
+                    }
+                    WorktreeError::Dirty(_) | WorktreeError::IgnoredPaths(_) => {
+                        RemovalUncertainty::DirtyWorktree
+                    }
+                    WorktreeError::GitEntryHeld { .. } => RemovalUncertainty::LockedOrUnavailable,
+                    _ => RemovalUncertainty::ObservationFailed,
+                };
+                report.removals.push(kept_landing_record(
+                    context.binding.project_id(),
+                    lane,
+                    cause,
+                ));
+            }
             row.detail = Some(error.to_string());
             if let Some(branch) = lane
                 .branch
@@ -540,16 +710,7 @@ fn collect_impl(
         report.candidates.push(row);
     }
     if first_foreign && !policy.dry_run {
-        context
-            .project_state
-            .atomic_write(
-                OsStr::new(&marker),
-                ".foreign-preview-",
-                b"{\"schema_version\":2}\n",
-                provenant_os::fs::PublishMode::Replace,
-            )?
-            .require_durable()
-            .map_err(|_| WorktreeError::InvalidOutput)?;
+        acknowledge_foreign_preview(context)?;
     }
     Ok(report)
 }
@@ -1058,6 +1219,8 @@ fn prepare_removal_before(
         dry_run: true,
         include_foreign: false,
         retirement: None,
+        mode: CollectionMode::Outputs,
+        proof: None,
         upstream_reference: None,
         integration_patterns: &[],
         excluded_paths: &[],

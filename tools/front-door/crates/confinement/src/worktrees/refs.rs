@@ -117,6 +117,21 @@ impl RefLedger {
         Self::within(context.project_state, context.binding.project_id())
     }
 
+    /// Observe the single ref ledger without creating state in a preview.
+    pub fn observe_context(context: &WorktreeContext<'_>) -> Result<Option<Self>, WorktreeError> {
+        match context
+            .project_state
+            .open_verified_directory(OsStr::new(LEDGER))
+        {
+            Ok(directory) => Ok(Some(Self {
+                directory,
+                repository: context.binding.project_id(),
+            })),
+            Err(error) if error.is_not_found() => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn within(project_state: &Directory, repository: ProjectId) -> Result<Self, WorktreeError> {
         Ok(Self {
             directory: private_child(project_state, OsStr::new(LEDGER))?,

@@ -27,6 +27,7 @@ pub struct ArchiveIssue {
 pub struct ArchiveReport {
     pub removed: Vec<PathBuf>,
     pub would_remove: Vec<PathBuf>,
+    pub busy: Vec<PathBuf>,
     pub bytes: u64,
     pub errors: Vec<ArchiveIssue>,
 }
@@ -59,6 +60,28 @@ pub(super) fn capture(
     root.mkdir(&stage_name, 0o700)?;
     let stage = root.open_verified_directory(&stage_name)?;
     let stage_path = stage.current_path()?;
+    let stage_lease = stage.try_lock(
+        OsStr::new("archive.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    let archive_reference = GitRefName::new(format!(
+        "refs/provenant/discard-archives/{}",
+        nonce.to_string_lossy()
+    ))
+    .map_err(|_| WorktreeError::InvalidRequest)?;
+    let intent = serde_json::to_vec(
+        &serde_json::json!({ "reference": archive_reference.as_str(), "tip": tip }),
+    )
+    .map_err(|_| WorktreeError::InvalidOutput)?;
+    stage
+        .atomic_write(
+            OsStr::new("archive-ref.json"),
+            ".archive-",
+            &intent,
+            PublishMode::Replace,
+        )?
+        .require_durable()
+        .map_err(|_| WorktreeError::InvalidOutput)?;
     // An incomplete stage is never evidence authorising discard.
     let capture = (|| -> Result<(), WorktreeError> {
         let reference = GitRefName::new(format!(
@@ -92,12 +115,13 @@ pub(super) fn capture(
         )?;
         let bundle = stage.open_read(OsStr::new("tip.bundle"))?;
         bundle.sync()?;
+        let mut captured = Vec::new();
         for (name, operation) in [
             ("worktree.patch", GitRead::DirtyPatch),
             ("index.patch", GitRead::IndexPatch),
             ("status.porcelain-v2.z", GitRead::StatusIncludingIgnored),
         ] {
-            let result = run_git(context, repo, operation, cancel)?;
+            let result = run_git(context, repo, operation.clone(), cancel)?;
             if exit_code(&result)? != 0
                 || result.stdout.truncated
                 || result.drain_truncated
@@ -106,6 +130,7 @@ pub(super) fn capture(
             {
                 return Err(WorktreeError::InvalidOutput);
             }
+            captured.push((operation, result.stdout.bytes.clone()));
             stage
                 .atomic_write(
                     OsStr::new(name),
@@ -127,6 +152,7 @@ pub(super) fn capture(
         }
         let mut tar = stage.create_new(OsStr::new("untracked.tar"))?;
         let source = Directory::open_anchor(repo.root_path())?;
+        let mut observed = Vec::new();
         for path in paths
             .stdout
             .bytes
@@ -134,12 +160,34 @@ pub(super) fn capture(
             .filter(|p| !p.is_empty())
         {
             let path = PathBuf::from(OsString::from_vec(path.to_vec()));
+            let (parent, name) = source_parent(&source, &path)
+                .map_err(|e| failure("inspect untracked", &repo.root_path().join(&path), e))?;
+            let metadata = parent.metadata_at(&name, false)?;
+            observed.push((path.clone(), metadata));
             append_path(&source, &path, &mut tar)
                 .map_err(|e| failure("archive untracked", &repo.root_path().join(&path), e))?;
         }
         tar.write_all(&[0; 1024])
             .map_err(|e| failure("finish tar", &stage_path, e))?;
         tar.sync()?;
+        captured.push((GitRead::Untracked, paths.stdout.bytes.clone()));
+        for (operation, expected) in captured {
+            let current = run_git(context, repo, operation, cancel)?;
+            if exit_code(&current)? != 0
+                || current.stdout.bytes != expected
+                || current.stdout.truncated
+                || current.drain_truncated
+            {
+                return Err(WorktreeError::IdentityChanged);
+            }
+        }
+        for (path, expected) in observed {
+            let (parent, name) = source_parent(&source, &path)
+                .map_err(|e| failure("recheck untracked", &repo.root_path().join(&path), e))?;
+            if !expected.unchanged(&parent.metadata_at(&name, false)?) {
+                return Err(WorktreeError::IdentityChanged);
+            }
+        }
         let manifest = serde_json::to_vec(&serde_json::json!({
             "schema_version": 2, "tip": tip, "project": context.binding.project_id(),
             "worktree": repo.root_path(), "created_at": context.clock.wall_now().map_err(|e| failure("clock", &stage_path, e))?.as_micros(),
@@ -158,6 +206,7 @@ pub(super) fn capture(
         Ok(())
     })();
     if let Err(error) = capture {
+        drop(stage_lease);
         if let Ok(reference) = GitRefName::new(format!(
             "refs/provenant/discard-archives/{}",
             nonce.to_string_lossy()
@@ -183,6 +232,7 @@ pub(super) fn capture(
     let name = OsString::from(format!("archive-{}", nonce.to_string_lossy()));
     root.rename_noreplace(&stage_name, &root, &name)?;
     root.sync()?;
+    drop(stage_lease);
     Ok(ArchiveInfo {
         path: root.current_path()?.join(name),
         tip,
@@ -191,7 +241,7 @@ pub(super) fn capture(
 
 /// POSIX ustar, deliberately refusing an unrepresentable path before discard.
 /// Ancestors are opened through held directory descriptors; symlinks are data.
-fn append_path(root: &Directory, path: &Path, out: &mut FileHandle) -> io::Result<()> {
+fn source_parent(root: &Directory, path: &Path) -> io::Result<(Directory, OsString)> {
     let components: Vec<_> = path.components().collect();
     if components.is_empty()
         || components
@@ -209,7 +259,14 @@ fn append_path(root: &Directory, path: &Path, out: &mut FileHandle) -> io::Resul
     let name = components
         .last()
         .ok_or_else(|| io::Error::other("missing archive name"))?
-        .as_os_str();
+        .as_os_str()
+        .to_os_string();
+    Ok((directory, name))
+}
+
+fn append_path(root: &Directory, path: &Path, out: &mut FileHandle) -> io::Result<()> {
+    let (directory, name) = source_parent(root, path)?;
+    let name = name.as_os_str();
     let metadata = directory
         .metadata_at(name, false)
         .map_err(io::Error::other)?;
@@ -284,17 +341,30 @@ fn append_path(root: &Directory, path: &Path, out: &mut FileHandle) -> io::Resul
 }
 
 pub fn collect_archives(
-    project_state: &Directory,
+    context: &WorktreeContext<'_>,
     before_ns: i128,
     dry_run: bool,
 ) -> ArchiveReport {
+    let project_state = context.project_state;
     let mut report = ArchiveReport::default();
+    let project_path = match project_state.current_path() {
+        Ok(path) => path,
+        Err(error) => {
+            report.errors.push(ArchiveIssue {
+                path: PathBuf::from("<held project-state directory>"),
+                operation: "resolve archive root".into(),
+                cause: error.to_string(),
+            });
+            return report;
+        }
+    };
+    let root_path = project_path.join("discard-archives");
     let root = match project_state.open_verified_directory(OsStr::new("discard-archives")) {
         Ok(root) => root,
         Err(error) if error.is_not_found() => return report,
         Err(error) => {
             report.errors.push(ArchiveIssue {
-                path: project_state.anchored_path(),
+                path: root_path.clone(),
                 operation: "open archives".into(),
                 cause: error.to_string(),
             });
@@ -304,7 +374,8 @@ pub fn collect_archives(
     let collect = (|| -> Result<(), FsError> {
         for entry in root.entries()? {
             let name = entry?;
-            if !name.as_bytes().starts_with(b"archive-") {
+            if !name.as_bytes().starts_with(b"archive-") && !name.as_bytes().starts_with(b".stage-")
+            {
                 continue;
             }
             let metadata = root.metadata_at(&name, false)?;
@@ -313,6 +384,80 @@ pub fn collect_archives(
             }
             let path = root.current_path()?.join(&name);
             let tree = PayloadTree::claim(&root, &name, &metadata)?;
+            let _lease = match tree.directory().try_lock_existing(
+                OsStr::new("archive.lock"),
+                provenant_os::fs::LockMode::Exclusive,
+            ) {
+                Ok(lease) => Some(lease),
+                Err(error) if error.is_not_found() => None,
+                Err(FsError::LockTimeout { .. }) => {
+                    report.busy.push(path);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if !dry_run && name.as_bytes().starts_with(b".stage-") {
+                let intent = match tree
+                    .directory()
+                    .read_bounded(OsStr::new("archive-ref.json"), 4096)
+                {
+                    Ok(raw) => Some(serde_json::from_slice::<serde_json::Value>(&raw).map_err(
+                        |e| FsError::Io {
+                            operation: "read archive ref",
+                            path: path.clone(),
+                            source: io::Error::other(e),
+                        },
+                    )?),
+                    Err(error) if error.is_not_found() => None,
+                    Err(error) => return Err(error),
+                };
+                if let Some(intent) = intent {
+                    let reference = intent["reference"]
+                        .as_str()
+                        .and_then(|s| GitRefName::new(s).ok());
+                    let tip = intent["tip"].as_str().and_then(|s| GitOid::parse(s).ok());
+                    let (Some(reference), Some(tip)) = (reference, tip) else {
+                        report.errors.push(ArchiveIssue {
+                            path: path.clone(),
+                            operation: "read archive ref".into(),
+                            cause: "unreadable archive ref identity".into(),
+                        });
+                        continue;
+                    };
+                    let cancel = CancelToken::new();
+                    match super::ref_tip(context, &reference, &cancel) {
+                        Ok(None) => {}
+                        Ok(Some(actual)) if actual == tip => {
+                            if let Err(error) = execute_mutation(
+                                context,
+                                GitMutation::DeleteRef {
+                                    name: reference,
+                                    expected_old_oid: tip,
+                                },
+                                &cancel,
+                            ) {
+                                report.errors.push(ArchiveIssue {
+                                    path: path.clone(),
+                                    operation: "release archive ref".into(),
+                                    cause: error.to_string(),
+                                });
+                                continue;
+                            }
+                        }
+                        result => {
+                            report.errors.push(ArchiveIssue {
+                                path: path.clone(),
+                                operation: "release archive ref".into(),
+                                cause: format!(
+                                    "archive reference changed or is unknown: {result:?}"
+                                ),
+                            });
+                            continue;
+                        }
+                    }
+                }
+            }
+
             fn visit(tree: &PayloadTree, dry: bool) -> Result<u64, FsError> {
                 let mut bytes = 0_u64;
                 for name in tree.entries()? {
@@ -330,7 +475,7 @@ pub fn collect_archives(
                 }
                 Ok(bytes)
             }
-            let bytes = visit(&tree, dry_run)?;
+            let bytes = metadata.allocated.saturating_add(visit(&tree, dry_run)?);
             if !dry_run {
                 root.rmdir(&name)?;
                 root.sync()?;
@@ -346,7 +491,7 @@ pub fn collect_archives(
     })();
     if let Err(error) = collect {
         report.errors.push(ArchiveIssue {
-            path: root.anchored_path(),
+            path: root_path.clone(),
             operation: "collect archives".into(),
             cause: error.to_string(),
         });

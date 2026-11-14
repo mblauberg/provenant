@@ -54,10 +54,7 @@ const GC_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::new("alert_below", "string"),
     FieldMetadata::new("projects.{project}.integration_branches", "array"),
     FieldMetadata::new("projects.{project}.keep_paths", "array"),
-    FieldMetadata::enumeration(
-        "projects.{project}.remote_branches",
-        &["never", "managed", "all"],
-    ),
+    FieldMetadata::enumeration("projects.{project}.remote_branches", &["never", "managed"]),
     FieldMetadata::int("projects.{project}.remote_min_tip_age_days", 0, 3650),
     FieldMetadata::enumeration("projects.{project}.foreign_worktrees", &["keep", "collect"]),
 ];

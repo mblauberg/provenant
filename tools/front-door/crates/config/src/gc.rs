@@ -13,6 +13,7 @@ pub enum RetentionTrigger {
     Gc,
     FullGc,
     Settlement,
+    MergeObservation,
     Install,
     Append,
     Never,
@@ -69,6 +70,11 @@ pub struct RetentionClass {
 const GC: &[RetentionTrigger] = &[RetentionTrigger::Gc];
 const FULL_GC: &[RetentionTrigger] = &[RetentionTrigger::FullGc];
 const GC_SETTLEMENT: &[RetentionTrigger] = &[RetentionTrigger::Gc, RetentionTrigger::Settlement];
+const GC_SETTLEMENT_MERGE: &[RetentionTrigger] = &[
+    RetentionTrigger::Gc,
+    RetentionTrigger::Settlement,
+    RetentionTrigger::MergeObservation,
+];
 const INSTALL: &[RetentionTrigger] = &[RetentionTrigger::Install];
 const APPEND: &[RetentionTrigger] = &[RetentionTrigger::Append];
 const NEVER: &[RetentionTrigger] = &[RetentionTrigger::Never];
@@ -144,7 +150,7 @@ retention_classes! {
     },
     TargetSeeds => {
         owner: "run/target_seed_gc",
-        measure: OwnerDefined,
+        measure: AllocatedTree,
         eligibility: Declared,
         detail: "free store/clone and staging build locks",
         settings: ["domains.fabric.lanes.cargo_seed.max_generations", "domains.fabric.lanes.cargo_seed.max_bytes"],
@@ -152,7 +158,7 @@ retention_classes! {
     },
     BuildDirectories => {
         owner: "run/build_dir_gc",
-        measure: OwnerDefined,
+        measure: AllocatedTree,
         eligibility: Declared,
         detail: "GC boundary and free Cargo profile locks",
         settings: ["domains.fabric.lanes.build_dir_max_bytes", "domains.fabric.lanes.build_dir_grace_seconds", "gc.free_floor"],
@@ -164,7 +170,7 @@ retention_classes! {
         eligibility: Declared,
         detail: "free custody and census; clean Git; subsumed tip or idle retirement",
         settings: ["gc.idle_days"],
-        triggers: GC_SETTLEMENT
+        triggers: GC_SETTLEMENT_MERGE
     },
     QuotaHistory => {
         owner: "cli/quota_history",
@@ -690,7 +696,7 @@ pub struct ProjectGcSettings {
     pub integration_branches: Vec<String>,
     pub keep_paths: Vec<String>,
     pub remote_branches: RemoteBranches,
-    pub remote_min_tip_age_days: u64,
+    pub remote_min_tip_age_days: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -708,7 +714,6 @@ pub enum RemoteBranches {
     Never,
     #[default]
     Managed,
-    All,
 }
 
 impl Default for ProjectGcSettings {
@@ -720,14 +725,18 @@ impl Default for ProjectGcSettings {
             integration_branches: Vec::new(),
             keep_paths: Vec::new(),
             remote_branches: RemoteBranches::Managed,
-            remote_min_tip_age_days: 1,
+            remote_min_tip_age_days: None,
         }
     }
 }
 
 impl ProjectGcSettings {
+    pub fn remote_min_tip_age_days(&self) -> u64 {
+        self.remote_min_tip_age_days.unwrap_or(1)
+    }
+
     fn validate(&self) -> Result<(), &'static str> {
-        if self.remote_min_tip_age_days > 3650 {
+        if self.remote_min_tip_age_days.is_some_and(|days| days > 3650) {
             return Err("remote_min_tip_age_days_range");
         }
         let worktree_roots = crate::PortTable::builtin().worktree_layout.roots;

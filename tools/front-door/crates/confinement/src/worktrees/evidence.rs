@@ -111,6 +111,7 @@ pub fn removal_evidence(
                         return Ok(RemovalEvidence::Proven(LandedEvidence {
                             predicate,
                             source: LandingSource::TreeEquivalent {
+                                reference: target.reference.as_str().to_owned(),
                                 head,
                                 target: target.commit,
                                 tree: merged_tree,
@@ -164,4 +165,63 @@ pub fn matches_pattern(path: &str, pattern: &str) -> bool {
         Some((prefix, suffix)) => path.starts_with(prefix) && path.ends_with(suffix),
         None => path == pattern,
     }
+}
+
+/// Recheck the source while the caller holds repository mutation exclusion.
+/// An observed rewrite keeps the candidate; a forge merge attestation survives
+/// a default-branch rewrite and remains independent of local ref movement.
+pub fn validate_removal_evidence(
+    context: &WorktreeContext<'_>,
+    head: GitOid,
+    evidence: &LandedEvidence,
+    references: &[EvidenceRef],
+    cancel: &CancelToken,
+) -> Result<(), WorktreeError> {
+    if let LandingSource::ForgeMerged {
+        head: merged_head, ..
+    } = &evidence.source
+    {
+        return if *merged_head == head {
+            Ok(())
+        } else {
+            Err(WorktreeError::IdentityChanged)
+        };
+    }
+    for target in references {
+        let is_source = match &evidence.source {
+            LandingSource::RetainedRef { reference, commit }
+            | LandingSource::IntegrationTarget { reference, commit } => {
+                target.reference.as_str() == reference && target.commit == *commit
+            }
+            LandingSource::TreeEquivalent {
+                reference,
+                target: commit,
+                ..
+            } => target.reference.as_str() == reference && target.commit == *commit,
+            LandingSource::ForgeMerged { .. } => false,
+        };
+        if !is_source {
+            continue;
+        }
+        let current = run_git(
+            context,
+            context.repo,
+            GitRead::ResolveRef {
+                name: target.reference.clone(),
+            },
+            cancel,
+        )?;
+        if exit_code(&current)? != 0
+            || parse_oid(trim_ascii(&current.stdout.bytes))? != target.commit
+        {
+            continue;
+        }
+        if matches!(
+            removal_evidence(context, head, std::slice::from_ref(target), cancel)?,
+            RemovalEvidence::Proven(_)
+        ) {
+            return Ok(());
+        }
+    }
+    Err(WorktreeError::IdentityChanged)
 }

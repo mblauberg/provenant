@@ -995,6 +995,78 @@ pub(crate) struct LandWorktree {
 /// dirty or live worktree and keeps a branch not contained in `integration`.
 /// The worktree is only removed while its HEAD is still `tip`, the commit the
 /// caller proved merged, so commits made since keep the checkout too.
+/// An observed merge cleans only its linked subjects. The normal daily scan
+/// retries busy/unknown items; it is never the primary event mechanism.
+pub(crate) fn retention_event(
+    resolved: &roots::Resolved,
+    subjects: &[Subject],
+    evidence: &LandedEvidence,
+) -> Result<(), Error> {
+    let facts = worktrees::RepoFacts::default();
+    let workers = worktrees::SystemWorkerObserver;
+    let config = provenant_cli::config_reads::read_for(&resolved.roots, "gc")?;
+    with_context_using_facts(
+        &resolved.roots,
+        &resolved.home,
+        &resolved.project,
+        Duration::ZERO,
+        &workers,
+        &facts,
+        |context, cancel| {
+            let lanes = worktrees::list_for_gc_matching(context, cancel, |path, branch| {
+                subjects.iter().any(|subject| match subject.kind {
+                    SubjectKind::Worktree | SubjectKind::Path => path == Path::new(&subject.id),
+                    SubjectKind::Branch => branch == Some(subject.id.as_str()),
+                    _ => false,
+                })
+            })?;
+            let settings = config
+                .gc
+                .project_settings(&context.binding.project_id().to_string(), &resolved.project);
+            let state = crate::gc_support::lane_states(
+                &resolved.roots,
+                &resolved.home,
+                &resolved.assets,
+                context.binding.project_id(),
+            )
+            .ok();
+            let terminal = |path: &Path| state.as_ref().and_then(|s| s.get(path)) == Some(&true);
+            let free = |path: &Path| state.as_ref().is_some_and(|s| s.no_live_lanes(path));
+            let owner = crate::retention_owner::Owner::new(
+                &resolved.roots,
+                &resolved.home,
+                &resolved.project,
+            )
+            .with_merge_observation(evidence);
+            let policy = worktrees::WorktreeGcPolicy {
+                mode: worktrees::CollectionMode::Worktrees,
+                proof: Some(evidence),
+                upstream: None,
+                upstream_reference: None,
+                terminal: &terminal,
+                no_live_lanes: &free,
+                regenerable: &settings.regenerable,
+                keep: &settings.keep,
+                written_before_ns: i128::MIN,
+                dry_run: false,
+                include_foreign: settings.foreign_worktrees
+                    == provenant_config::ForeignWorktrees::Collect,
+                retirement: Some(&owner),
+                integration_patterns: &settings.integration_branches,
+                excluded_paths: &settings.keep_paths,
+            };
+            for class in provenant_config::retention_schedule(
+                provenant_config::RetentionTrigger::MergeObservation,
+            ) {
+                if class.class == provenant_config::RetentionKind::GitWorktrees {
+                    let _ = worktrees::collect_lazy(context, &lanes, &policy, cancel)?;
+                }
+            }
+            Ok(())
+        },
+    )
+}
+
 pub(crate) fn land_cleanup(
     globals: &Globals,
     branch: &str,
@@ -1108,6 +1180,8 @@ pub(crate) fn land_cleanup(
                     written_before_ns: now_ns,
                     include_foreign: false,
                     retirement: None,
+                    mode: provenant_confinement::worktrees::CollectionMode::Outputs,
+                    proof: None,
                     upstream_reference: None,
                     integration_patterns: &[],
                     excluded_paths: &[],
@@ -1473,6 +1547,8 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                             && settings.foreign_worktrees
                                 == provenant_config::ForeignWorktrees::Collect,
                                     retirement: Some(&retention_owner),
+                                    mode: provenant_confinement::worktrees::CollectionMode::Worktrees,
+                                    proof: None,
                         upstream_reference: upstream.as_ref().map(|(name,_)| name.as_str()),
                         integration_patterns: &settings.integration_branches,
                         excluded_paths: &settings.keep_paths,
@@ -1480,6 +1556,12 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     },
                     cancel,
                 )?;
+                if !report.dry_run {
+                    match retention_owner.recover(context) {
+                        Ok(recovered) => report.removals.extend(recovered),
+                        Err(error) => report.candidates.push(worktrees::CandidateReport { path: project.path.clone(), class: "retirement", action: "kept", tip: upstream.as_ref().map(|(_,tip)| *tip).or_else(|| lanes.first().map(|lane| lane.head)).ok_or(Error::GcObservation("retirement recovery has no observable tip"))?, detail: Some(format!("retirement recovery unknown: {error}")) }),
+                    }
+                }
                 report.upstream_error = upstream_error;
                 append_gc_subpass_removals(&mut report, unsettled.removals);
                 // Only proven landed refs with unchanged ledger tips may go.
@@ -1510,10 +1592,13 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             }
             RetentionKind::DiscardArchives => {
                 for project in &projects {
-                    let mut archived = worktrees::collect_archives(&project.state,
-                        now_ns - i128::from(config.gc.discard_archive_days) * 86_400 * 1_000_000_000, command.dry_run);
+                    let mut archived = with_context_using_facts(&roots, &home, &project.path, Duration::ZERO, workers, &facts, |context, _| {
+                        Ok(worktrees::collect_archives(context, now_ns - i128::from(config.gc.discard_archive_days) * 86_400 * 1_000_000_000, command.dry_run))
+                    }).unwrap_or_else(|error| worktrees::ArchiveReport { errors: vec![worktrees::ArchiveIssue { path: project.path.clone(), operation: "observe archives".into(), cause: error.to_string() }], ..Default::default() });
                     discard_archives.bytes = discard_archives.bytes.saturating_add(archived.bytes);
                     discard_archives.removed.append(&mut archived.removed);
+                    discard_archives.would_remove.append(&mut archived.would_remove);
+                    discard_archives.busy.append(&mut archived.busy);
                     discard_archives.errors.append(&mut archived.errors);
                 }
             }

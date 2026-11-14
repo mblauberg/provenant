@@ -25,7 +25,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
                     policy_code: None,
                     resource: None,
                     terminal_cause: TerminalCause::DiskFloor,
-                    terminal_note: Some("99 bytes available; gc.free_floor is 100 bytes (source: host configuration)".into()),
+                    terminal_note: Some("99 bytes available; gc.critical_free is 100 bytes (source: host configuration)".into()),
                     message: "HOST_DISK_ERROR_SENTINEL".into(),
                     skipped_routes: Vec::new(),
                     fallback_outcome: None,
@@ -138,7 +138,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         let reason = reason.ok_or("missing structured reason")?;
         assert!(reason.starts_with(cause.detail()), "{reason}");
         if disk {
-            assert!(reason.contains("gc.free_floor"), "{reason}");
+            assert!(reason.contains("gc.critical_free"), "{reason}");
             assert!(reason.contains("99 bytes available"), "{reason}");
             assert!(reason.contains("100 bytes"), "{reason}");
             assert!(reason.contains("host configuration"), "{reason}");

@@ -150,7 +150,7 @@ pub(super) fn worktree_cleanliness_at(
     {
         let entry = entry.map_err(|_| WorktreeError::InvalidOutput)?;
         if entry.mode == 0o160000 && initialised_gitlink(repo.root_path(), entry.path)? {
-            return Ok(WorktreeCleanliness::Unknown);
+            return Err(WorktreeError::UnknownOccupancy { path: repo.root_path().join(OsStr::from_bytes(entry.path)), detail: "submodule has independent Git custody; its commits and working data are retained".into() });
         }
     }
     let outcome = run_git(context, repo, GitRead::StatusIncludingIgnored, cancel)?;
@@ -380,31 +380,35 @@ fn lock_worktree_impl(
         });
     }
     let verified = verify_probed_worktree(context, &entry.path, cancel)?;
-    let writer = if preview {
-        cache_writer_probe(context.project_state, verified.path()).map_err(custody_refusal)?
-    } else {
-        let state = writer_directory(context.project_state, verified.path())?;
-        let observation = provenant_supervisor::custody::writer_admission_guard(&state)
-            .map_err(|_| WorktreeError::UnknownWriter)?;
-        let writer = match state.lock(
-            OsStr::new(WRITER_LOCK),
-            LockMode::Exclusive,
-            WaitBudget::nonblocking(context.clock.mono_now()),
-            cancel,
-            context.clock,
-        ) {
-            Ok(guard) => guard,
-            Err(FsError::LockTimeout { .. }) => return Err(WorktreeError::LockBusy),
-            Err(FsError::Cancelled { .. }) => return Err(WorktreeError::Cancelled),
-            Err(_) => return Err(WorktreeError::UnknownWriter),
+    let writer =
+        if preview {
+            cache_writer_probe(context.project_state, verified.path()).map_err(custody_refusal)?
+        } else {
+            let state = writer_directory(context.project_state, verified.path())?;
+            let observation = provenant_supervisor::custody::writer_admission_guard(&state)
+                .map_err(|error| match error {
+                    provenant_supervisor::custody::CustodyError::Busy => WorktreeError::LockBusy,
+                    _ => WorktreeError::UnknownWriter,
+                })?;
+            let writer = match state.lock(
+                OsStr::new(WRITER_LOCK),
+                LockMode::Exclusive,
+                WaitBudget::nonblocking(context.clock.mono_now()),
+                cancel,
+                context.clock,
+            ) {
+                Ok(guard) => guard,
+                Err(FsError::LockTimeout { .. }) => return Err(WorktreeError::LockBusy),
+                Err(FsError::Cancelled { .. }) => return Err(WorktreeError::Cancelled),
+                Err(_) => return Err(WorktreeError::UnknownWriter),
+            };
+            drop(observation);
+            retained_import(&state).map_err(|detail| WorktreeError::UnknownOccupancy {
+                path: verified.path().to_path_buf(),
+                detail,
+            })?;
+            Some(writer)
         };
-        drop(observation);
-        retained_import(&state).map_err(|detail| WorktreeError::UnknownOccupancy {
-            path: verified.path().to_path_buf(),
-            detail,
-        })?;
-        Some(writer)
-    };
     let canonical = canonicalize(verified.path())?;
     if !preview {
         context.workers.invalidate();

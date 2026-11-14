@@ -540,6 +540,12 @@ pub fn settle_landing(
                     )?;
                 }
             }
+            if let Err(error) = crate::worktrees::retention_event(&resolved, &artefacts, &evidence)
+            {
+                provenant_fabric_runtime::custody::warning(format!(
+                    "merge retention will retry: {error}"
+                ));
+            }
         }
     }
     Ok(())

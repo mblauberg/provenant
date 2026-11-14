@@ -958,7 +958,7 @@ fn read_only_disk_warning(
     }
     *warned = true;
     Some(
-        ErrorKind::DiskFloor.diagnostic().category("warning")
+        ErrorKind::DiskAdvisory.diagnostic().category("warning")
             .detail(format!(
                 "disk space: {free} bytes available; gc.free_floor is {floor} bytes (source: {}); lane is proceeding",
                 origin.description()
@@ -1061,7 +1061,7 @@ mod process_wait_tests {
         assert!(!warned);
         let warning =
             read_only_disk_warning(&mut warned, 99, 100, SettingSource::Configuration).unwrap();
-        assert_eq!(warning.code, "DISK_FLOOR");
+        assert_eq!(warning.code, "DISK_ADVISORY");
         assert_eq!(warning.category.as_deref(), Some("warning"));
         assert_eq!(
             warning.detail.as_deref(),

@@ -348,6 +348,7 @@ pub fn prune_owned(
     // fenced below, after rechecking ownership, ancestry and exact HEAD.
     let output_policy = WorktreeGcPolicy {
         upstream: None,
+        mode: CollectionMode::Outputs,
         ..*policy
     };
     collect_lazy(context, &lanes, &output_policy, cancel)?;
@@ -392,12 +393,32 @@ pub fn prune_owned(
         }
         other => other,
     };
+    let refs = retained_refs(
+        context,
+        if matches!(disposition, Disposition::Merged) {
+            Some(branch)
+        } else {
+            None
+        },
+        None,
+        &[],
+        cancel,
+    )?;
+    let proof = if let Some(proof) = policy.proof {
+        proof.clone()
+    } else {
+        match removal_evidence(context, head, &refs, cancel)? {
+            RemovalEvidence::Proven(proof) => proof,
+            _ => return Err(WorktreeError::IdentityChanged),
+        }
+    };
     let removed = remove_tree_when(
         context,
         entry,
         head,
         cancel,
         &|| {
+            validate_removal_evidence(context, head, &proof, &refs, cancel)?;
             ((policy.terminal)(path)
                 && (policy.no_live_lanes)(path)
                 && verify_worktree(context.repo, path)

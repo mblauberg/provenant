@@ -43,6 +43,7 @@ pub(crate) struct Owner<'a> {
     home: &'a Path,
     project: &'a Path,
     pulls: RefCell<Option<Result<Vec<Pull>, String>>>,
+    observed_merge: Option<LandedEvidence>,
 }
 impl<'a> Owner<'a> {
     pub(crate) fn new(roots: &'a Roots, home: &'a Path, project: &'a Path) -> Self {
@@ -51,7 +52,178 @@ impl<'a> Owner<'a> {
             home,
             project,
             pulls: RefCell::new(None),
+            observed_merge: None,
         }
+    }
+
+    pub(crate) fn with_merge_observation(mut self, evidence: &LandedEvidence) -> Self {
+        self.observed_merge = Some(evidence.clone());
+        self
+    }
+
+    /// Recover the one lifecycle by custody pointer, even when its worktree no
+    /// longer appears in inventory. No directory-name discovery is authority.
+    pub(crate) fn recover(
+        &self,
+        context: &WorktreeContext<'_>,
+    ) -> Result<Vec<RemovalRecord>, WorktreeError> {
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let Some(host) =
+            HostStore::open_read_only(&self.roots.state, Instant::now() + Duration::from_secs(2))
+                .map_err(|_| WorktreeError::UnknownWriter)?
+        else {
+            return Ok(Vec::new());
+        };
+        let mut query = CustodyQuery {
+            project: Some(context.binding.project_id()),
+            state: Some(StateKind::Retired),
+            ..Default::default()
+        };
+        let mut ids = std::collections::BTreeSet::new();
+        loop {
+            let page = host
+                .custody(&query, &call)
+                .map_err(|_| WorktreeError::UnknownWriter)?;
+            for item in page.items {
+                if let CustodyState::Retired { retirement_id } = item.state {
+                    ids.insert(retirement_id);
+                }
+            }
+            match page.next {
+                Some(next) if next > query.after => query.after = next,
+                Some(_) => return Err(WorktreeError::InvalidOutput),
+                None => break,
+            }
+        }
+        let mut removals = Vec::new();
+        if ids.is_empty() {
+            return Ok(removals);
+        }
+        let directory = context
+            .project_state
+            .open_verified_directory(OsStr::new("retirements"))?;
+        for id in ids {
+            let raw = directory.read_bounded(OsStr::new(&format!("{id}.json")), 64 * 1024)?;
+            let record: RetirementRecord =
+                serde_json::from_slice(&raw).map_err(|_| WorktreeError::InvalidOutput)?;
+            if record.id != id
+                || record.reference.repository != context.binding.project_id().to_string()
+            {
+                return Err(WorktreeError::IdentityChanged);
+            }
+            if !record.outcomes.iter().any(|step| {
+                matches!(
+                    step.state,
+                    RetirementStepState::Pending | RetirementStepState::Unknown { .. }
+                )
+            }) {
+                continue;
+            }
+            let tip: GitOid = record
+                .expected_tip
+                .parse()
+                .map_err(|_| WorktreeError::InvalidOutput)?;
+            let worktree = record
+                .outcomes
+                .iter()
+                .find_map(|s| s.step.strip_prefix("worktree:"))
+                .map(std::path::PathBuf::from);
+            if let Some(path) = &worktree {
+                if !path.is_absolute() {
+                    return Err(WorktreeError::InvalidOutput);
+                }
+                match std::fs::symlink_metadata(path) {
+                    Ok(_) => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => continue,
+                }
+            }
+            let reference = if record.reference.reference.starts_with("refs/heads/") {
+                Some(
+                    provenant_confinement::repo::GitRefName::new(&record.reference.reference)
+                        .map_err(|_| WorktreeError::InvalidOutput)?,
+                )
+            } else {
+                None
+            };
+            let lane = WorktreeInfo {
+                warnings: Vec::new(),
+                path: worktree
+                    .clone()
+                    .unwrap_or_else(|| context.repo.root_path().into()),
+                branch: reference.as_ref().map(|r| r.as_str().to_owned()),
+                head: tip,
+                dirty: worktrees::WorktreeCondition::Clean,
+                owner: Ok(None),
+                primary: worktree.is_none(),
+                occupancy: worktrees::Occupancy::Available,
+            };
+            self.custody(&lane)
+                .map_err(|detail| WorktreeError::UnknownOccupancy {
+                    path: lane.path.clone(),
+                    detail,
+                })?;
+            let action = if record.decision.action
+                == provenant_records::landing::RetirementAction::Preserve
+            {
+                RetirementAction::Idle
+            } else {
+                RetirementAction::Subsumed(
+                    serde_json::from_str(&record.decision.reason)
+                        .map_err(|_| WorktreeError::InvalidOutput)?,
+                )
+            };
+            if let (Some(reference), RetirementAction::Subsumed(evidence)) = (&reference, &action) {
+                if let Some(actual) = worktrees::ref_tip(context, reference, &cancel)? {
+                    let refs =
+                        worktrees::retained_refs(context, Some(reference), None, &[], &cancel)?;
+                    let ledger = worktrees::RefLedger::observe_context(context)?
+                        .ok_or(WorktreeError::UnknownWriter)?;
+                    let owned = ledger.load(&worktrees::RefEndpoint::Local, reference)?;
+                    if actual == tip
+                        && owned
+                            .as_ref()
+                            .is_some_and(|r| r.generation == record.reference.generation)
+                    {
+                        let eligible = || {
+                            worktrees::validate_removal_evidence(
+                                context, tip, evidence, &refs, &cancel,
+                            )
+                        };
+                        let _ = worktrees::delete_ref_leased_when(
+                            context, reference, tip, &cancel, &eligible,
+                        )?;
+                    }
+                }
+            }
+            // Complete only factual steps; record() independently leaves a
+            // moved/checked-out branch pending or refused, never landed.
+            let completed = self.record(context, &lane, &action, true, Some(&id))?;
+            if let Some(path) = worktree {
+                if let Some(removal) = self.projection(
+                    context,
+                    &completed,
+                    Subject::new(SubjectKind::Worktree, path.to_string_lossy()),
+                )? {
+                    removals.push(removal);
+                }
+            }
+            if let Some(reference) = reference {
+                if let Some(removal) = self.projection(
+                    context,
+                    &completed,
+                    Subject::new(SubjectKind::Branch, reference.as_str()),
+                )? {
+                    removals.push(removal);
+                }
+            }
+        }
+        Ok(removals)
     }
     fn pulls(&self, fresh: bool) -> Result<Vec<Pull>, String> {
         if fresh {
@@ -158,23 +330,6 @@ impl<'a> Owner<'a> {
         provenant_cli::fabric::Context::open_read_only(self.roots.clone(), self.home, self.project)
             .map_err(|e| e.to_string())
     }
-    pub(crate) fn branch(
-        &self,
-        context: &WorktreeContext<'_>,
-        reference: &provenant_confinement::repo::GitRefName,
-        tip: GitOid,
-    ) -> WorktreeInfo {
-        WorktreeInfo {
-            warnings: Vec::new(),
-            path: context.repo.root_path().into(),
-            branch: Some(reference.as_str().into()),
-            head: tip,
-            dirty: worktrees::WorktreeCondition::Clean,
-            owner: Ok(None),
-            primary: true,
-            occupancy: worktrees::Occupancy::Available,
-        }
-    }
     fn subjects(lane: &WorktreeInfo) -> Vec<Subject> {
         let mut subjects = if lane.primary {
             Vec::new()
@@ -246,6 +401,22 @@ impl RetirementOwner for Owner<'_> {
         Ok(())
     }
     fn forge(&self, branch: &provenant_confinement::repo::GitRefName) -> ForgeObservation {
+        if let Some(LandedEvidence {
+            source:
+                LandingSource::ForgeMerged {
+                    pr,
+                    head,
+                    merge_commit,
+                },
+            ..
+        }) = &self.observed_merge
+        {
+            return ForgeObservation::Merged {
+                pr: pr.clone(),
+                head: *head,
+                merge_commit: *merge_commit,
+            };
+        }
         let pulls = match self.pulls(false) {
             Ok(p) => p,
             Err(error) => return ForgeObservation::Unknown(error),
@@ -276,18 +447,16 @@ impl RetirementOwner for Owner<'_> {
             None => ForgeObservation::Absent,
         }
     }
-    fn integration_bases(&self) -> Vec<String> {
+    fn integration_bases(&self) -> Vec<(String, GitOid)> {
+        if self.observed_merge.is_some() {
+            return Vec::new();
+        }
         self.pulls(false)
             .map(|pulls| {
                 pulls
                     .into_iter()
                     .filter(|p| p.state == "open")
-                    .flat_map(|p| {
-                        [
-                            format!("refs/heads/{}", p.base.name),
-                            format!("refs/remotes/origin/{}", p.base.name),
-                        ]
-                    })
+                    .map(|p| (p.base.name, p.base.sha))
                     .collect()
             })
             .unwrap_or_default()
@@ -298,15 +467,75 @@ impl RetirementOwner for Owner<'_> {
         lane: &WorktreeInfo,
         action: &RetirementAction,
         completed: bool,
+        prior_id: Option<&str>,
     ) -> Result<String, WorktreeError> {
         // This function is the sole replaceable S2 persistence seam. Reports
         // and custody point to this frozen RetirementRecord; no second record.
         let project = context.binding.project_id();
-        let mut digest = Sha256::new();
-        digest.update(project.to_string());
-        digest.update(lane.path.as_os_str().as_encoded_bytes());
-        digest.update(lane.head.to_string());
-        let id = provenant_core::hex(&digest.finalize());
+        let ledger = worktrees::RefLedger::for_context(context)?;
+        let now = context
+            .clock
+            .wall_now()
+            .map_err(|_| WorktreeError::InvalidOutput)?;
+        let mut ownership = ledger.list()?.into_iter().find(|r| {
+            r.endpoint == worktrees::RefEndpoint::Local
+                && lane.branch.as_ref() == Some(&r.reference)
+        });
+        if prior_id.is_none() && ownership.is_none() {
+            if let Some(reference) = &lane.branch {
+                ownership = Some(
+                    ledger.record(
+                        worktrees::RefObservation {
+                            endpoint: worktrees::RefEndpoint::Local,
+                            reference: provenant_confinement::repo::GitRefName::new(reference)
+                                .map_err(|_| WorktreeError::InvalidRequest)?,
+                            origin: worktrees::RefOrigin::Adopted,
+                            tip: lane.head,
+                            recorded_at: now,
+                            attempt_id: None,
+                            operation_id: None,
+                        },
+                        context.clock,
+                        &CancelToken::new(),
+                    )?,
+                );
+            }
+        }
+        let generation = if let Some(owned) = &ownership {
+            owned.generation
+        } else if prior_id.is_none() {
+            provenant_confinement::verify_worktree(context.repo, &lane.path)?
+                .identity()
+                .inode
+        } else {
+            0
+        };
+        let reference = RetirementRef {
+            repository: project.to_string(),
+            endpoint: RetirementEndpoint::Local,
+            reference: lane
+                .branch
+                .clone()
+                .unwrap_or_else(|| format!("HEAD:{}", lane.path.display())),
+            generation,
+            origin: if ownership
+                .as_ref()
+                .is_some_and(|r| r.origin == worktrees::RefOrigin::Created)
+            {
+                RetirementOrigin::Created
+            } else {
+                RetirementOrigin::Adopted
+            },
+        };
+        let incarnation = ownership
+            .as_ref()
+            .map(|r| r.recorded_at.as_micros().to_string())
+            .unwrap_or_else(|| generation.to_string());
+        let id = if let Some(id) = prior_id {
+            id.to_owned()
+        } else {
+            retirement_id(&reference, &incarnation, &lane.path, lane.head)?
+        };
         match context
             .project_state
             .mkdir(OsStr::new("retirements"), 0o700)
@@ -327,43 +556,23 @@ impl RetirementOwner for Owner<'_> {
             Err(e) if e.is_not_found() => None,
             Err(e) => return Err(e.into()),
         };
-        let ledger = worktrees::RefLedger::for_context(context)?;
-        let ownership = ledger.list()?.into_iter().find(|r| {
-            r.endpoint == worktrees::RefEndpoint::Local
-                && lane.branch.as_ref() == Some(&r.reference)
-        });
-        let decided_at = context
-            .clock
-            .wall_now()
-            .map_err(|_| WorktreeError::InvalidOutput)?
-            .as_micros()
-            .to_string();
+        if prior_id.is_some() && current.is_none() {
+            return Err(WorktreeError::NotFound);
+        }
+        let decision_reason = match action {
+            RetirementAction::Idle => "idle clean worktree; preserve branch".to_owned(),
+            RetirementAction::Subsumed(evidence) => {
+                serde_json::to_string(evidence).map_err(|_| WorktreeError::InvalidOutput)?
+            }
+        };
         let mut record = current.unwrap_or_else(|| RetirementRecord {
             schema_version: 2,
             id: id.clone(),
-            reference: RetirementRef {
-                repository: project.to_string(),
-                endpoint: RetirementEndpoint::Local,
-                reference: lane.branch.clone().unwrap_or_else(|| "HEAD".into()),
-                generation: ownership.as_ref().map_or(1, |r| r.generation),
-                origin: if ownership
-                    .as_ref()
-                    .is_some_and(|r| r.origin == worktrees::RefOrigin::Created)
-                {
-                    RetirementOrigin::Created
-                } else {
-                    RetirementOrigin::Adopted
-                },
-            },
+            reference: reference.clone(),
             expected_tip: lane.head.to_string(),
             decision: RetirementDecision {
                 authority: "repository retention policy".into(),
-                reason: match action {
-                    RetirementAction::Idle => "idle clean worktree; preserve branch".into(),
-                    RetirementAction::Subsumed(evidence) => {
-                        serde_json::to_string(evidence).expect("typed evidence serialises")
-                    }
-                },
+                reason: decision_reason,
                 action: match action {
                     RetirementAction::Idle => {
                         provenant_records::landing::RetirementAction::Preserve
@@ -372,19 +581,43 @@ impl RetirementOwner for Owner<'_> {
                         provenant_records::landing::RetirementAction::Discard
                     }
                 },
-                decided_at: context
-                    .clock
-                    .wall_now()
-                    .map(|t| t.as_micros().to_string())
-                    .unwrap_or_default(),
+                decided_at: now.as_micros().to_string(),
             },
             recovery_reference: lane.branch.clone(),
             revision: 0,
             outcomes: Vec::new(),
         });
-        if record.expected_tip != lane.head.to_string() {
+        if record.id != id
+            || record.reference.repository != project.to_string()
+            || record.reference.reference != reference.reference
+            || record.expected_tip != lane.head.to_string()
+            || (prior_id.is_none() && record.reference != reference)
+        {
             return Err(WorktreeError::IdentityChanged);
         }
+        let reason = match action {
+            RetirementAction::Idle => "idle clean worktree; preserve branch".to_owned(),
+            RetirementAction::Subsumed(evidence) => {
+                serde_json::to_string(evidence).map_err(|_| WorktreeError::InvalidOutput)?
+            }
+        };
+        let stored_action = match action {
+            RetirementAction::Idle => provenant_records::landing::RetirementAction::Preserve,
+            RetirementAction::Subsumed(_) => provenant_records::landing::RetirementAction::Discard,
+        };
+        if record.decision.reason != reason || record.decision.action != stored_action {
+            record.decision.reason = reason;
+            record.decision.action = stored_action;
+            record.decision.decided_at = now.as_micros().to_string();
+        }
+        record.recovery_reference = match action {
+            RetirementAction::Idle => lane.branch.clone(),
+            RetirementAction::Subsumed(evidence) => match &evidence.source {
+                LandingSource::RetainedRef { reference, .. }
+                | LandingSource::IntegrationTarget { reference, .. } => Some(reference.clone()),
+                _ => None,
+            },
+        };
         record.revision = record.revision.saturating_add(1);
         let step = if lane.primary {
             format!("branch:{}", lane.branch.as_deref().unwrap_or("HEAD"))
@@ -402,6 +635,27 @@ impl RetirementOwner for Owner<'_> {
                 RetirementStepState::Pending
             },
         });
+        if completed && matches!(action, RetirementAction::Subsumed(_)) {
+            if let Some(branch) = &lane.branch {
+                let reference = provenant_confinement::repo::GitRefName::new(branch)
+                    .map_err(|_| WorktreeError::InvalidOutput)?;
+                let state = match worktrees::ref_tip(context, &reference, &CancelToken::new()) {
+                    Ok(None) => RetirementStepState::Completed {
+                        detail: Some("exact-tip branch removed".into()),
+                    },
+                    Ok(Some(tip)) if tip == lane.head => RetirementStepState::Pending,
+                    Ok(Some(_)) => RetirementStepState::Refused {
+                        reason: "branch tip changed; new work retained".into(),
+                    },
+                    Err(error) => RetirementStepState::Unknown {
+                        reason: error.to_string(),
+                    },
+                };
+                let step = format!("branch:{branch}");
+                record.outcomes.retain(|s| s.step != step);
+                record.outcomes.push(RetirementStepOutcome { step, state });
+            }
+        }
         let bytes = serde_json::to_vec(&record).map_err(|_| WorktreeError::InvalidOutput)?;
         directory
             .atomic_write(
@@ -430,6 +684,26 @@ impl RetirementOwner for Owner<'_> {
             chair: provenant_cli::fabric::current_chair(&host_context),
         };
         for subject in Self::subjects(lane) {
+            if completed
+                && subject.kind == SubjectKind::Branch
+                && matches!(action, RetirementAction::Subsumed(_))
+                && !record.outcomes.iter().any(|step| {
+                    step.step == format!("branch:{}", subject.id)
+                        && matches!(step.state, RetirementStepState::Completed { .. })
+                })
+            {
+                continue;
+            }
+            if completed {
+                if host
+                    .custody_item(project, &subject, &call)
+                    .map_err(|_| WorktreeError::UnknownWriter)?
+                    .is_some_and(|r| r.state == CustodyState::Active)
+                {
+                    continue;
+                }
+            }
+
             if host
                 .custody_item(project, &subject, &call)
                 .map_err(|_| WorktreeError::UnknownWriter)?
@@ -473,5 +747,118 @@ impl RetirementOwner for Owner<'_> {
             .map_err(|_| WorktreeError::UnknownWriter)?;
         }
         Ok(id)
+    }
+    fn remote_guard(
+        &self,
+        context: &WorktreeContext<'_>,
+        branch: &str,
+        tip: GitOid,
+        min_days: u64,
+    ) -> Result<(), String> {
+        self.remote_safe(branch, tip, min_days, context)
+    }
+    fn projection(
+        &self,
+        context: &WorktreeContext<'_>,
+        id: &str,
+        subject: Subject,
+    ) -> Result<Option<RemovalRecord>, WorktreeError> {
+        let directory = context
+            .project_state
+            .open_verified_directory(OsStr::new("retirements"))?;
+        let raw = directory.read_bounded(OsStr::new(&format!("{id}.json")), 64 * 1024)?;
+        let record: RetirementRecord =
+            serde_json::from_slice(&raw).map_err(|_| WorktreeError::InvalidOutput)?;
+        if record.id != id
+            || record.reference.repository != context.binding.project_id().to_string()
+        {
+            return Err(WorktreeError::IdentityChanged);
+        }
+        if record.decision.action == provenant_records::landing::RetirementAction::Preserve {
+            return Ok(None);
+        }
+        let step = format!(
+            "{}:{}",
+            if subject.kind == SubjectKind::Branch {
+                "branch"
+            } else {
+                "worktree"
+            },
+            subject.id
+        );
+        if !record
+            .outcomes
+            .iter()
+            .any(|s| s.step == step && matches!(s.state, RetirementStepState::Completed { .. }))
+        {
+            return Ok(None);
+        }
+        let evidence: LandedEvidence = serde_json::from_str(&record.decision.reason)
+            .map_err(|_| WorktreeError::InvalidOutput)?;
+        let tip = record
+            .expected_tip
+            .parse()
+            .map_err(|_| WorktreeError::InvalidOutput)?;
+        Ok(Some(RemovalRecord {
+            project: context.binding.project_id(),
+            subject,
+            tip,
+            outcome: RemovalOutcome::Removed { evidence },
+        }))
+    }
+}
+
+fn retirement_id(
+    reference: &RetirementRef,
+    incarnation: &str,
+    path: &Path,
+    tip: GitOid,
+) -> Result<String, WorktreeError> {
+    let encoded = serde_json::to_vec(reference).map_err(|_| WorktreeError::InvalidOutput)?;
+    let mut hash = Sha256::new();
+    hash.update(b"retirement-v2");
+    let tip = tip.to_string();
+    for bytes in [
+        encoded.as_slice(),
+        incarnation.as_bytes(),
+        path.as_os_str().as_encoded_bytes(),
+        tip.as_bytes(),
+    ] {
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    }
+    Ok(provenant_core::hex(&hash.finalize()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn retirement_identity_includes_ref_generation_and_incarnation() {
+        let tip = GitOid::parse(&"ab".repeat(20)).unwrap();
+        let reference = RetirementRef {
+            repository: "fixture".into(),
+            endpoint: RetirementEndpoint::Local,
+            reference: "refs/heads/one".into(),
+            generation: 1,
+            origin: RetirementOrigin::Adopted,
+        };
+        let first = retirement_id(&reference, "first", Path::new("/fixture"), tip).unwrap();
+        let mut changed = reference.clone();
+        changed.reference = "refs/heads/two".into();
+        assert_ne!(
+            first,
+            retirement_id(&changed, "first", Path::new("/fixture"), tip).unwrap()
+        );
+        changed = reference.clone();
+        changed.generation += 1;
+        assert_ne!(
+            first,
+            retirement_id(&changed, "first", Path::new("/fixture"), tip).unwrap()
+        );
+        assert_ne!(
+            first,
+            retirement_id(&reference, "recreated", Path::new("/fixture"), tip).unwrap()
+        );
     }
 }

@@ -1,7 +1,7 @@
 //! Repository-scoped linked-worktree lifecycle and merged-ref pruning.
 
 mod archive;
-pub use archive::{ArchiveError, ArchiveInfo, ArchiveReport, collect_archives};
+pub use archive::{ArchiveError, ArchiveInfo, ArchiveIssue, ArchiveReport, collect_archives};
 mod census;
 mod context;
 mod custody;
@@ -12,6 +12,7 @@ mod evidence;
 mod gc;
 pub use evidence::{
     EvidenceRef, RemovalEvidence, matches_pattern, removal_evidence, retained_refs,
+    validate_removal_evidence,
 };
 mod inventory;
 mod landed;
@@ -28,8 +29,9 @@ pub use context::{
 pub use custody::*;
 pub use doctor::{WorktreeDiagnosis, WorktreeDiagnosisState, doctor};
 pub use gc::{
-    CandidateReport, ForgeObservation, OutputEntry, RetirementAction, RetirementOwner,
-    WorktreeGcPolicy, WorktreeGcReport, collect, collect_lazy,
+    CandidateReport, CollectionMode, ForgeObservation, OutputEntry, RetirementAction,
+    RetirementOwner, WorktreeGcPolicy, WorktreeGcReport, acknowledge_foreign_preview,
+    branch_candidate, collect, collect_lazy, first_foreign_pass,
 };
 pub use inventory::*;
 pub use landed::{
@@ -43,8 +45,9 @@ pub use owner::{
 };
 pub use refs::{RefEndpoint, RefLedger, RefObservation, RefOrigin, RefOwnership, RefRecord};
 pub use removal::{
-    Artefact, ArtefactOutcome, ArtefactState, RefDeletion, branch_checked_out, created_branch,
-    delete_ref_leased, has_commit, landing_in_repo, ref_tip,
+    Artefact, ArtefactClass, ArtefactOutcome, ArtefactState, RefDeletion, branch_checked_out,
+    created_branch, delete_ref_leased, delete_ref_leased_when, has_commit, landing_in_repo,
+    ref_tip,
 };
 
 use crate::repo::{

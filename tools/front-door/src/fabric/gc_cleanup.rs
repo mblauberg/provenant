@@ -802,6 +802,8 @@ fn collect_owned_worktree_with(
                     written_before_ns: i128::MAX,
                     include_foreign: false,
                     retirement: None,
+                    mode: provenant_confinement::worktrees::CollectionMode::Outputs,
+                    proof: None,
                     upstream_reference: None,
                     integration_patterns: &[],
                     excluded_paths: &[],
@@ -912,6 +914,7 @@ fn collect_owned_worktree_with(
                     return Ok(None);
                 }
                 let policy = WorktreeGcPolicy {
+                    proof: Some(&evidence),
                     // Retained lane refs prove subsumption, but only an exact
                     // integration target permits deleting the local branch.
                     upstream: delivery_request
@@ -955,10 +958,22 @@ fn collect_owned_worktree_with(
                 if let Some(warning) = tracking_ref_warning.as_ref() {
                     intent["tracking_ref_warning"] = serde_json::json!(warning);
                 }
+                use worktrees::RetirementOwner;
+                let lifecycle =
+                    crate::retention_owner::Owner::new(roots, &settled.roots.home, &writer.project);
+                let lane = worktrees::list_for_gc_matching(context, cancel, |path, _| {
+                    path == writer.worktree
+                })?
+                .into_iter()
+                .find(|lane| lane.path == writer.worktree)
+                .ok_or(worktrees::WorktreeError::NotFound)?;
+                let action = worktrees::RetirementAction::Subsumed(evidence.clone());
+                let retirement_id = lifecycle.record(context, &lane, &action, false, None)?;
+                intent["retirement_id"] = serde_json::json!(retirement_id);
                 record_worktree_settlement(&store, record.attempt_id, &intent)
                     .map_err(|_| worktrees::WorktreeError::RegistrationUnconfirmed)?;
                 pruning_intent = Some(intent);
-                Ok(Some(worktrees::prune_owned(
+                let result = worktrees::prune_owned(
                     context,
                     &writer.worktree,
                     owner_attempt,
@@ -966,7 +981,9 @@ fn collect_owned_worktree_with(
                     pinned,
                     &policy,
                     cancel,
-                )?))
+                )?;
+                lifecycle.record(context, &lane, &action, true, Some(&retirement_id))?;
+                Ok(Some(result))
             },
         )?)
     })();
@@ -1075,7 +1092,14 @@ fn collect_owned_worktree_with(
             .and_then(|branch| provenant_confinement::repo::GitRefName::new(branch).ok())
     {
         {
-            let sweep = crate::lane_cleanup::Sweep::new(false);
+            let retention_config = provenant_cli::config_reads::read_for(roots, "gc")?;
+            let settings = retention_config
+                .gc
+                .project_settings(&settled.project_id.to_string(), &writer.project);
+            let retention_owner =
+                crate::retention_owner::Owner::new(roots, &settled.roots.home, &writer.project);
+            let sweep =
+                crate::lane_cleanup::Sweep::new(false).with_retention(&retention_owner, &settings);
             let outcomes = crate::worktrees::with_context_using_facts(
                 roots,
                 &settled.roots.home,

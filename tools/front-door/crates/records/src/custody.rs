@@ -132,6 +132,7 @@ pub enum LandingSource {
         commit: provenant_core::GitOid,
     },
     TreeEquivalent {
+        reference: String,
         head: provenant_core::GitOid,
         target: provenant_core::GitOid,
         tree: provenant_core::GitOid,
@@ -170,6 +171,13 @@ removal_uncertainties! {
     RewrittenDefaultBranch => "rewritten_default_branch",
     UnprovenLanding => "unproven_landing",
     MissingCommit => "missing_commit",
+    CustodyUnknown => "custody_unknown",
+    CensusUnknown => "census_unknown",
+    RunRecordsUnknown => "run_records_unknown",
+    Busy => "busy",
+    DirtyWorktree => "dirty_worktree",
+    LockedOrUnavailable => "locked_or_unavailable",
+    ObservationFailed => "observation_failed",
 }
 
 /// The outcome of considering one subject and tip for removal.
@@ -314,6 +322,7 @@ mod tests {
                 commit: oid,
             },
             LandingSource::TreeEquivalent {
+                reference: "refs/heads/retained".into(),
                 head: oid,
                 target,
                 tree: oid,

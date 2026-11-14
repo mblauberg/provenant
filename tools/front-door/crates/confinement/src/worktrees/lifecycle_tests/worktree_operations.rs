@@ -904,6 +904,8 @@ fn first_foreign_pass_previews_then_subsumed_detached_tree_can_go() -> Result<()
         dry_run: false,
         include_foreign: true,
         retirement: None,
+        mode: CollectionMode::Worktrees,
+        proof: None,
         integration_patterns: &[],
         excluded_paths: &[],
     };
@@ -911,5 +913,197 @@ fn first_foreign_pass_previews_then_subsumed_detached_tree_can_go() -> Result<()
     assert!(first.first_foreign_preview && first.dry_run && path.exists());
     let second = collect(&context, &list(&context, &cancel())?, &policy, &cancel())?;
     assert!(!second.first_foreign_preview && !second.dry_run && !path.exists());
+    Ok(())
+}
+
+#[test]
+fn retirement_preserves_work_and_unknown_feeds_keep_the_candidate() -> Result<(), Box<dyn Error>> {
+    struct Owner {
+        custody_clear: bool,
+        forge: ForgeObservation,
+        complete: std::cell::Cell<bool>,
+    }
+    impl RetirementOwner for Owner {
+        fn custody(&self, _: &WorktreeInfo) -> Result<(), String> {
+            if self.custody_clear {
+                Ok(())
+            } else {
+                Err("custody feed unreadable".into())
+            }
+        }
+        fn forge(&self, _: &GitRefName) -> ForgeObservation {
+            self.forge.clone()
+        }
+        fn integration_bases(&self) -> Vec<(String, GitOid)> {
+            Vec::new()
+        }
+        fn record(
+            &self,
+            _: &WorktreeContext<'_>,
+            _: &WorktreeInfo,
+            action: &RetirementAction,
+            completed: bool,
+            _: Option<&str>,
+        ) -> Result<String, WorktreeError> {
+            assert!(matches!(action, RetirementAction::Idle));
+            self.complete.set(completed);
+            Ok("fixture-retirement".into())
+        }
+        fn remote_guard(
+            &self,
+            _: &WorktreeContext<'_>,
+            _: &str,
+            _: GitOid,
+            _: u64,
+        ) -> Result<(), String> {
+            Err("remote feed not configured in worktree fixture".into())
+        }
+        fn projection(
+            &self,
+            _: &WorktreeContext<'_>,
+            _: &str,
+            _: provenant_records::custody::Subject,
+        ) -> Result<Option<provenant_records::custody::RemovalRecord>, WorktreeError> {
+            Ok(None)
+        }
+    }
+    for class in ["managed", "foreign"] {
+        for feed in [
+            "clear",
+            "custody",
+            "forge",
+            "run",
+            "census",
+            "moved_after_close",
+        ] {
+            let fixture = Fixture::new()?;
+            let host = TestContext::new(&fixture)?;
+            let mut context = host.context();
+            let created = if class == "managed" {
+                create(
+                    &context,
+                    WorktreeCreate {
+                        branch: "idle-work".into(),
+                        base: None,
+                    },
+                    &cancel(),
+                )?
+                .path
+            } else {
+                let path = fixture._temp.path().join("foreign-idle");
+                fixture.run(&[
+                    "worktree",
+                    "add",
+                    "-b",
+                    "idle-work",
+                    path.to_str().ok_or("path")?,
+                ])?;
+                path
+            };
+            fs::write(created.join("unique"), b"unsubsumed work")?;
+            run_in_worktree(&fixture, &created, &["add", "unique"])?;
+            run_in_worktree(&fixture, &created, &["commit", "-m", "unsubsumed work"])?;
+            let owner = Owner {
+                custody_clear: feed != "custody",
+                forge: if feed == "forge" {
+                    ForgeObservation::Unknown("offline fixture".into())
+                } else if feed == "moved_after_close" {
+                    ForgeObservation::Closed {
+                        head: fixture.head()?,
+                    }
+                } else {
+                    ForgeObservation::Absent
+                },
+                complete: std::cell::Cell::new(false),
+            };
+            let unknown = UnknownWorkers;
+            if feed == "census" {
+                context.workers = &unknown;
+            }
+            let policy = WorktreeGcPolicy {
+                upstream: None,
+                upstream_reference: None,
+                terminal: &|_| true,
+                no_live_lanes: &|_| feed != "run",
+                regenerable: &[],
+                keep: &[],
+                written_before_ns: i128::MAX,
+                dry_run: false,
+                include_foreign: true,
+                retirement: Some(&owner),
+                mode: CollectionMode::Worktrees,
+                proof: None,
+                integration_patterns: &[],
+                excluded_paths: &[],
+            };
+            let _ = collect(&context, &list(&context, &cancel())?, &policy, &cancel())?;
+            assert!(branch_exists(&fixture, "idle-work"));
+            assert_eq!(created.exists(), feed != "clear");
+            assert_eq!(owner.complete.get(), feed == "clear");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn cleanup_respects_nested_roots_aliases_and_harness_locks() -> Result<(), Box<dyn Error>> {
+    for shape in ["nested", "alias", "locked"] {
+        let fixture = Fixture::new()?;
+        let owner = TestContext::new(&fixture)?;
+        let context = owner.context();
+        let path = fixture._temp.path().join("outer");
+        fixture.run(&[
+            "worktree",
+            "add",
+            "-b",
+            "outer",
+            path.to_str().ok_or("path")?,
+        ])?;
+        if shape == "nested" {
+            fixture.run(&[
+                "worktree",
+                "add",
+                "--detach",
+                path.join("inner").to_str().ok_or("path")?,
+                "HEAD",
+            ])?;
+        }
+        if shape == "locked" {
+            fixture.run(&[
+                "worktree",
+                "lock",
+                "--reason",
+                "harness pid:12345",
+                path.to_str().ok_or("path")?,
+            ])?;
+        }
+        let mut lanes = list(&context, &cancel())?;
+        if shape == "alias" {
+            let alias = fixture._temp.path().join("alias");
+            std::os::unix::fs::symlink(&path, &alias)?;
+            for lane in lanes.iter_mut().filter(|lane| lane.path == path) {
+                lane.path = alias.clone();
+            }
+        }
+        let policy = WorktreeGcPolicy {
+            upstream: None,
+            upstream_reference: None,
+            terminal: &|_| true,
+            no_live_lanes: &|_| true,
+            regenerable: &[],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: false,
+            include_foreign: true,
+            retirement: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
+        };
+        let _ = collect(&context, &lanes, &policy, &cancel())?;
+        assert!(path.is_dir());
+        assert!(branch_exists(&fixture, "outer"));
+    }
     Ok(())
 }

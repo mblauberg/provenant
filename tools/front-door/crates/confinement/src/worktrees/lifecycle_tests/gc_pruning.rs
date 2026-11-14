@@ -346,6 +346,8 @@ fn foreign_gc_session_requires_fresh_complete_census() -> Result<(), Box<dyn Err
         &WorktreeGcPolicy {
             include_foreign: true,
             retirement: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
             upstream_reference: None,
             integration_patterns: &[],
             excluded_paths: &[],
@@ -400,6 +402,8 @@ fn gc_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> {
         &WorktreeGcPolicy {
             include_foreign: false,
             retirement: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
             upstream_reference: None,
             integration_patterns: &[],
             excluded_paths: &[],
@@ -437,6 +441,8 @@ fn gc_managed_removal_needs_a_fresh_free_census_under_custody() -> Result<(), Bo
                 &WorktreeGcPolicy {
                     include_foreign: false,
                     retirement: None,
+                    mode: CollectionMode::Worktrees,
+                    proof: None,
                     upstream_reference: None,
                     integration_patterns: &[],
                     excluded_paths: &[],
@@ -506,6 +512,8 @@ fn gc_preview_and_apply_both_retain_a_managed_tree_with_an_unknown_census()
             &WorktreeGcPolicy {
                 include_foreign: false,
                 retirement: None,
+                mode: CollectionMode::Worktrees,
+                proof: None,
                 upstream_reference: None,
                 integration_patterns: &[],
                 excluded_paths: &[],
@@ -546,6 +554,8 @@ fn gc_dry_run_retains_merged_worktree_with_unknown_writer() -> Result<(), Box<dy
         &WorktreeGcPolicy {
             include_foreign: false,
             retirement: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
             upstream_reference: None,
             integration_patterns: &[],
             excluded_paths: &[],
@@ -588,6 +598,8 @@ fn gc_dry_run_retains_preview_dirty_worktree() -> Result<(), Box<dyn Error>> {
         &WorktreeGcPolicy {
             include_foreign: false,
             retirement: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
             upstream_reference: None,
             integration_patterns: &[],
             excluded_paths: &[],
@@ -627,6 +639,8 @@ fn gc_settlement_error_retains_ref_and_continues() -> Result<(), Box<dyn Error>>
         &WorktreeGcPolicy {
             include_foreign: false,
             retirement: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
             upstream_reference: None,
             integration_patterns: &[],
             excluded_paths: &[],

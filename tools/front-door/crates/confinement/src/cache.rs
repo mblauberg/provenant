@@ -358,10 +358,28 @@ fn gc_caches_with_free_space(
     report.bytes_estimated = measurement.limited;
     match sweep {
         Ok(()) => Ok(report),
-        Err(source) => Err(CacheGcError {
-            report,
-            source: Box::new(source),
-        }),
+        Err(source) => {
+            if report.errors.is_empty() {
+                let root = home.join("Library/Caches/provenant-lane-cargo");
+                let (path, operation, cause) = match &source {
+                    PermissionError::CacheSweepFilesystem {
+                        operation,
+                        path,
+                        source,
+                    } => (root.join(path), (*operation).to_owned(), source.to_string()),
+                    error => (root, "collect cache class".into(), error.to_string()),
+                };
+                report.errors.push(CacheGcIssue {
+                    path,
+                    operation,
+                    cause,
+                });
+            }
+            Err(CacheGcError {
+                report,
+                source: Box::new(source),
+            })
+        }
     }
 }
 
@@ -837,6 +855,7 @@ fn prune_worktree_cache(
             root.rmdir(removal_name)
         })
         .map_err(cache_fs_error("rmdir", Path::new(removal_name)))?;
+        report.bytes_freed = report.bytes_freed.saturating_add(opened.allocated);
     }
     report.removed.push(CacheGcEntry {
         path: cache_root.join(name),
@@ -1049,7 +1068,14 @@ fn measure_cache(
     if budget.exhausted() {
         return Ok((0, i128::MAX));
     }
-    let mut bytes = 0_u64;
+    let mut bytes = if depth == 0 {
+        directory
+            .metadata()
+            .map_err(cache_fs_error("fstat", relative))?
+            .allocated
+    } else {
+        0
+    };
     let mut newest = directory
         .metadata()
         .map_err(cache_fs_error("fstat", relative))?
@@ -1507,6 +1533,18 @@ mod tests {
             let path = cache(home.path(), &"a".repeat(64), &owner)?;
             std::fs::create_dir_all(path.join("nested/deeper"))?;
             std::fs::write(path.join("nested/deeper/payload"), vec![0; 128 * 1024])?;
+            fn whole_tree(path: &Path) -> std::io::Result<u64> {
+                use std::os::unix::fs::MetadataExt;
+                let metadata = std::fs::symlink_metadata(path)?;
+                let mut bytes = metadata.blocks() * 512;
+                if metadata.is_dir() {
+                    for entry in std::fs::read_dir(path)? {
+                        bytes = bytes.saturating_add(whole_tree(&entry?.path())?);
+                    }
+                }
+                Ok(bytes)
+            }
+            let expected = whole_tree(&path)?;
             let preview = gc_worktree_cargo_caches(
                 home.path(),
                 &CacheGcPolicy {
@@ -1515,6 +1553,7 @@ mod tests {
                 },
             )?;
             let apply = gc_worktree_cargo_caches(home.path(), &CacheGcPolicy::default())?;
+            assert_eq!(preview.bytes_freed, expected);
             assert_eq!(preview.bytes_freed, apply.bytes_freed);
             assert!(!path.exists());
             Ok(())

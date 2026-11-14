@@ -620,7 +620,7 @@ fn submit_with_launcher(
                             let path = provenant_records::diagnostic::safe_path(path, provenant_records::diagnostic::Destination::Local)
                                 .unwrap_or_else(|| "the limiting volume".into());
                             Some(provenant_records::diagnostic::Diagnostic::new(kind.code()).category(kind.category())
-                                .detail(format!("insufficient disk space on {path}: {available} bytes available, floor {floor} bytes; gc.free_floor from {}; bounded GC reported {reclaimed} bytes reclaimed", origin.description()))
+                                .detail(format!("insufficient disk space on {path}: {available} bytes available, floor {floor} bytes; gc.critical_free from {}; bounded GC reported {reclaimed} bytes reclaimed", origin.description()))
                                 .next(format!("run `provenant gc --free-floor {floor}B` before dispatching a writer"))
                                 .fact(provenant_records::diagnostic::DiagnosticFact::DiskPressure { available: *available, floor: *floor, reclaimed: *reclaimed, origin: *origin }))
                         }

@@ -169,6 +169,8 @@ fn gc_idle_output_requires_ignored_idle_and_free_writer() -> Result<(), Box<dyn 
             &WorktreeGcPolicy {
                 include_foreign: false,
                 retirement: None,
+                mode: CollectionMode::Worktrees,
+                proof: None,
                 upstream_reference: None,
                 integration_patterns: &[],
                 excluded_paths: &[],
@@ -256,6 +258,8 @@ fn gc_protects_nested_repositories_under_ignored_directories() -> Result<(), Box
                     dry_run: false,
                     include_foreign: false,
                     retirement: None,
+                    mode: CollectionMode::Worktrees,
+                    proof: None,
                     upstream_reference: None,
                     integration_patterns: &[],
                     excluded_paths: &[],
@@ -405,6 +409,8 @@ fn gc_foreign_cleanup_respects_exclusions_and_requires_complete_census()
             &WorktreeGcPolicy {
                 include_foreign: scenario != "default",
                 retirement: None,
+                mode: CollectionMode::Worktrees,
+                proof: None,
                 upstream_reference: None,
                 integration_patterns: &[],
                 excluded_paths: &[],
@@ -506,6 +512,8 @@ fn gc_output_pruning_holds_writer_but_not_repository_lock() -> Result<(), Box<dy
         &WorktreeGcPolicy {
             include_foreign: false,
             retirement: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
             upstream_reference: None,
             integration_patterns: &[],
             excluded_paths: &[],
@@ -584,6 +592,8 @@ fn gc_foreign_rechecks_changes_before_removal() -> Result<(), Box<dyn Error>> {
                 dry_run: false,
                 include_foreign: true,
                 retirement: None,
+                mode: CollectionMode::Worktrees,
+                proof: None,
                 upstream_reference: None,
                 integration_patterns: &[],
                 excluded_paths: &[],
@@ -657,6 +667,8 @@ fn gc_foreign_prunes_under_writer_then_locks_repository() -> Result<(), Box<dyn 
             dry_run: false,
             include_foreign: true,
             retirement: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
             upstream_reference: None,
             integration_patterns: &[],
             excluded_paths: &[],
@@ -692,6 +704,8 @@ fn gc_failed_prune_retains_once_and_continues() -> Result<(), Box<dyn Error>> {
         &WorktreeGcPolicy {
             include_foreign: false,
             retirement: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
             upstream_reference: None,
             integration_patterns: &[],
             excluded_paths: &[],
@@ -757,6 +771,8 @@ fn gc_reclaims_unmanaged_output_but_keeps_worktree() -> Result<(), Box<dyn Error
         &WorktreeGcPolicy {
             include_foreign: false,
             retirement: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
             upstream_reference: None,
             integration_patterns: &[],
             excluded_paths: &[],
@@ -804,6 +820,8 @@ fn gc_merged_tree_previews_and_removes_recent_declared_output() -> Result<(), Bo
         dry_run: true,
         include_foreign: false,
         retirement: None,
+        mode: CollectionMode::Worktrees,
+        proof: None,
         upstream_reference: None,
         integration_patterns: &[],
         excluded_paths: &[],
@@ -825,19 +843,6 @@ fn gc_merged_tree_previews_and_removes_recent_declared_output() -> Result<(), Bo
     assert!(!lane.path.exists());
     assert!(!branch_exists(&fixture, "gc-recent-merged"));
     Ok(())
-}
-
-#[test]
-fn gc_merge_proof_requires_containment_in_the_pinned_default() -> Result<(), Box<dyn Error>> {
-    // A concurrent test's fork can briefly inherit a just-released lock
-    // descriptor; rebuild the whole fixture rather than weaken zero-wait locks.
-    for _ in 0..5 {
-        match merge_proof_scenario() {
-            Err(error) if format!("{error:?}").contains("LockTimeout") => {}
-            result => return result,
-        }
-    }
-    merge_proof_scenario()
 }
 
 #[test]
@@ -863,6 +868,8 @@ fn gc_census_never_runs_under_the_repository_lock() -> Result<(), Box<dyn Error>
             &WorktreeGcPolicy {
                 include_foreign: foreign,
                 retirement: None,
+                mode: CollectionMode::Worktrees,
+                proof: None,
                 upstream_reference: None,
                 integration_patterns: &[],
                 excluded_paths: &[],

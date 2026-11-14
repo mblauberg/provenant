@@ -1508,6 +1508,8 @@ mod lineage_tests {
                     written_before_ns: i128::MAX,
                     include_foreign: false,
                     retirement: None,
+                    mode: provenant_confinement::worktrees::CollectionMode::Outputs,
+                    proof: None,
                     upstream_reference: None,
                     integration_patterns: &[],
                     excluded_paths: &[],

@@ -381,8 +381,9 @@ fn measure(directory: &PayloadTree, depth: usize) -> io::Result<(u64, i128)> {
     if depth >= MAX_DEPTH {
         return Err(io::Error::other("directory nesting too deep"));
     }
-    let mut bytes = 0_u64;
-    let mut newest = directory.metadata().map_err(io::Error::other)?.modified_ns;
+    let metadata = directory.metadata().map_err(io::Error::other)?;
+    let mut bytes = if depth == 0 { metadata.allocated } else { 0 };
+    let mut newest = metadata.modified_ns;
     for name in directory_names(directory)? {
         let metadata = directory.metadata_at(&name).map_err(io::Error::other)?;
         bytes = bytes.saturating_add(metadata.allocated);
