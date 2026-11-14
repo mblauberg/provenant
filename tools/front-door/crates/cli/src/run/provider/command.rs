@@ -271,6 +271,7 @@ pub(super) fn prepare_command(
     scratch_cargo_output(&mut spec.env, &scratch);
     let process_tree_read = configure_process_tree(&mut spec, paths)?;
     let settings = config.domains.fabric.lanes.build_settings();
+    spec.configure_cargo_sources(settings.cargo_source_writes, plan.permissions().network);
     let coordination_reads = configure_build_slots(
         &mut spec,
         &settings,
@@ -331,6 +332,7 @@ pub(super) fn prepare_command(
         source: Some(format!("domains.fabric.commands.{name}")),
         extra: [
             ("name".into(), serde_json::Value::String(name.into())),
+            ("cargo_home".into(), spec.cargo_home_receipt()),
             ("applied_access".into(), applied_access),
             ("tool_closure".into(), tool_closure),
             ("discovery_warnings".into(), serde_json::json!(warnings)),
@@ -341,6 +343,7 @@ pub(super) fn prepare_command(
         ..Default::default()
     };
     apply_sandbox_mode(task, sandbox.clone(), &mut spec.env, &mut route);
+    let cargo_home = spec.cargo_home().clone();
     Ok(run::PreparedLaunch {
         limits,
         skipped_routes: Vec::new(),
@@ -357,7 +360,8 @@ pub(super) fn prepare_command(
             profile: spec.profile,
             writer: None,
             home,
-            cargo_registry_seed: false,
+            cargo_home,
+            cargo_target_seed: false,
             state_root: roots.state.as_path().to_owned(),
             sandbox,
             backend: None,

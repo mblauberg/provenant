@@ -105,15 +105,14 @@ impl MandatoryRoots {
             .map(|relative| subtree(&home.join(relative)))
             .collect();
         credentials.extend(
-            [
-                ".cargo/credentials",
-                ".cargo/credentials.toml",
-                ".claude.json",
-            ]
-            .map(|relative| PathGrant {
-                path: home.join(relative),
-                scope: PathScope::Exact,
-            }),
+            crate::cargo::CREDENTIAL_FILES
+                .iter()
+                .map(|name| home.join(".cargo").join(name))
+                .chain([home.join(".claude.json")])
+                .map(|path| PathGrant {
+                    path,
+                    scope: PathScope::Exact,
+                }),
         );
         let roots = Self {
             non_exempt: [

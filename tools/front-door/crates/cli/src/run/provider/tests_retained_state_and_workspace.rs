@@ -919,17 +919,17 @@ fn setup_stays_below_run_owned_roots_without_following_links()
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         apply_setup(
             &[
-                SetupStep::CreateDir(scratch.join("cargo-home/nested")),
-                SetupStep::CreateDir(scratch.join("cargo-home/nested")),
+                SetupStep::CreateDir(scratch.join("private-config/nested")),
+                SetupStep::CreateDir(scratch.join("private-config/nested")),
                 SetupStep::Symlink {
-                    link: scratch.join("cargo-home/registry"),
+                    link: scratch.join("private-config/packages"),
                     target: outside.clone(),
                 },
             ],
             &roots,
             None,
         )?;
-        assert!(scratch.join("cargo-home/nested").is_dir());
+        assert!(scratch.join("private-config/nested").is_dir());
         apply_setup(
             &[SetupStep::CreateDir(outside.join("projects/session"))],
             &roots,
@@ -962,7 +962,7 @@ fn setup_stays_below_run_owned_roots_without_following_links()
             SetupStep::CreateDir(scratch.clone()),
             SetupStep::CreateDir(scratch.join("escape/x")),
             SetupStep::Symlink {
-                link: scratch.join("cargo-home/registry/x"),
+                link: scratch.join("private-config/packages/x"),
                 target: outside.clone(),
             },
         ] {

@@ -16,7 +16,7 @@ lane_port_blocks = -1 # blocks in the range, 0-1024, the base plus blocks times 
 max_project_writer_lanes = -1 # writer lanes live at once per project, 1-32 and at most max_writer_lanes; automatic: unlimited
 cargo_build_jobs = -1 # automatic: half the available cores, at least 1
 [lanes.cargo_seed]
-enabled = true # macOS only; clones host Cargo registry, Git and target seeds, and falls back where the volume cannot clone
+enabled = true # macOS only; clones host-built target seeds, and falls back where the volume cannot clone
 max_generations = 3
 max_bytes = 21474836480
 [lanes.settlement]

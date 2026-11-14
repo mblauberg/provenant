@@ -3780,6 +3780,10 @@ pub(super) fn prepare_candidates(
         )?;
         let process_tree_read = configure_process_tree(&mut spec, paths)?;
         let build_settings = config.domains.fabric.lanes.build_settings();
+        spec.configure_cargo_sources(
+            build_settings.cargo_source_writes,
+            plan.permissions().network,
+        );
         let coordination_reads = configure_build_slots(
             &mut spec,
             &build_settings,
@@ -4173,6 +4177,9 @@ pub(super) fn prepare_candidates(
             "key": "domains.lanes.skill_stage_max_bytes",
         });
         provider.extra.insert("user_skills".into(), skills);
+        provider
+            .extra
+            .insert("cargo_home".into(), spec.cargo_home_receipt());
         provider.extra.insert(
             "tool_closure".into(),
             serde_json::Value::Array(
@@ -4190,6 +4197,7 @@ pub(super) fn prepare_candidates(
             "discovery_warnings".into(),
             serde_json::json!(discovery_warnings(&spec.omitted_discovery, &home, false)),
         );
+        let cargo_home = spec.cargo_home().clone();
         let stdin = match spec.stdin {
             Stdin::Bytes(bytes) => bytes,
             Stdin::Null => Vec::new(),
@@ -4270,7 +4278,8 @@ pub(super) fn prepare_candidates(
                 profile: spec.profile,
                 writer,
                 home: home.clone(),
-                cargo_registry_seed: config.domains.fabric.lanes.cargo_seed.enabled,
+                cargo_home,
+                cargo_target_seed: config.domains.fabric.lanes.cargo_seed.enabled,
                 state_root: roots.state.as_path().to_path_buf(),
                 sandbox,
                 backend: None,

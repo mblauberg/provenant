@@ -1,31 +1,99 @@
 #[test]
-fn read_only_cargo_offline_tracks_network() -> Result<(), ProviderError> {
+fn cargo_source_setting_controls_host_binding_grants_and_offline_mode() -> Result<(), ProviderError>
+{
     use provenant_confinement::permissions::NetworkAccess;
     let prompt = Prompt::new("fixture".into());
-    let repo = Path::new("/fixture/repo");
-    let mut route = route("codex", "fixture-model");
-    route.account_key = None;
+    let route = route("codex", "fixture-model");
     for network in [
         NetworkAccess::Provider,
         NetworkAccess::Local,
         NetworkAccess::Open,
     ] {
         let plan = fixture_network_plan(Access::ReadOnly, Some("login"), network);
-        let spec =
-            crate::codex::Codex.prepare(fixture_input(&route, &plan, &prompt, repo, None))?;
-        assert_eq!(
+        let spec = crate::codex::Codex.prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            None,
+        ))?;
+        assert_read_only_cargo_access(&spec);
+        assert!(
             spec.env
                 .iter()
                 .any(|(key, value)| key == "CARGO_NET_OFFLINE" && value == "true"),
-            network != NetworkAccess::Open,
             "{network:?}"
         );
     }
+    let plan = fixture_network_plan(Access::WorktreeWrite, Some("login"), NetworkAccess::Open);
+    let host_cargo = |name: &str| (name == "CARGO_HOME").then(|| "/fixture/custom-cargo".into());
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.host_var = &host_cargo;
+    let mut spec = crate::codex::Codex.prepare(input)?;
+    let home = cargo_home_path(&spec);
+    assert_eq!(home, Path::new("/fixture/custom-cargo"));
+    let receipt = spec.cargo_home_receipt();
+    assert_eq!(receipt["source"], "host CARGO_HOME");
+    assert_read_only_cargo_access(&spec);
+    assert!(
+        spec.env
+            .iter()
+            .any(|(key, value)| key == "CARGO_NET_OFFLINE" && value == "true")
+    );
+
+    for (network, offline) in [
+        (NetworkAccess::Provider, true),
+        (NetworkAccess::Local, true),
+        (NetworkAccess::Open, false),
+    ] {
+        spec.configure_cargo_sources(Some(true), network);
+        let receipt = spec.cargo_home_receipt();
+        assert_eq!(receipt["path"], "/fixture/custom-cargo");
+        assert_eq!(receipt["source_writes"], true);
+        assert_eq!(receipt["source_writes_source"], "host configuration");
+        assert_eq!(
+            spec.env
+                .iter()
+                .find(|(key, _)| key == "CARGO_NET_OFFLINE")
+                .unwrap()
+                .1
+                == "true",
+            offline
+        );
+        for grant in spec.cargo_home().source_writes() {
+            assert!(
+                spec.profile.spec.tool_writes.contains(&grant),
+                "configured source grant: {grant:?}"
+            );
+        }
+        assert_cargo_credentials_ungranted(&spec);
+    }
+    // Later environment additions and host lookups cannot replace the sealed identity.
+    spec.env
+        .push(("CARGO_HOME".into(), "/launch/override".into()));
+    let changed_host = |name: &str| (name == "CARGO_HOME").then(|| "/host/changed".into());
+    let mut later_input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    later_input.host_var = &changed_host;
+    crate::launch::finalise_provider_env(&later_input, &mut spec)?;
+    assert_eq!(cargo_home_path(&spec), home);
+    assert_eq!(spec.cargo_home_receipt()["source_writes"], true);
+    spec.configure_cargo_sources(Some(false), NetworkAccess::Open);
+    assert_eq!(spec.cargo_home_receipt()["source_writes"], false);
+    assert_eq!(
+        spec.cargo_home_receipt()["source_writes_source"],
+        "host configuration"
+    );
+    assert!(
+        spec.env
+            .iter()
+            .any(|(key, value)| key == "CARGO_NET_OFFLINE" && value == "true")
+    );
+    assert_read_only_cargo_access(&spec);
     Ok(())
 }
 
 #[test]
-fn codex_read_only_toolchain_uses_private_build_and_cargo_home_linked_to_shared_stores() {
+fn codex_uses_host_cargo_home_with_private_build_outputs() {
     let mut route = route("codex", "fixture-model");
     route.account_key = None;
     let plan = read_only_plan("/fixture", Some("login"));
@@ -52,28 +120,14 @@ fn codex_read_only_toolchain_uses_private_build_and_cargo_home_linked_to_shared_
             .collect::<Vec<_>>()
     };
     let reads = paths(&spec.profile.spec.runtime_reads);
-    for dir in ["/fixture/home/.cargo", "/fixture/home/.rustup"] {
+    for dir in ["/fixture/home/.cargo/bin", "/fixture/home/.rustup"] {
         assert!(reads.iter().any(|path| path == dir), "{dir}");
     }
     // Cargo downloads over TLS, so the system trust roots are readable.
     #[cfg(target_os = "macos")]
     assert!(reads.iter().any(|path| path == "/private/etc/ssl"));
-    // Shared Cargo stores are never writable; Cargo downloads into its own
-    // lane-private home. Installed binaries and toolchains stay read-only.
-    assert!(spec.profile.spec.tool_writes.is_empty());
-    assert_eq!(env("CARGO_HOME"), "/fixture/scratch/cargo-home");
-    // The registry and Git checkouts are linked read-only, never granted.
-    for name in ["registry", "git"] {
-        assert!(
-            spec.setup.iter().any(|step| matches!(
-                step,
-                crate::launch::SetupStep::Symlink { link, target }
-                    if link == &std::path::Path::new("/fixture/scratch/cargo-home").join(name)
-                        && target == &std::path::Path::new("/fixture/home/.cargo").join(name)
-            )),
-            "{name}"
-        );
-    }
+    assert_eq!(cargo_home_path(&spec), Path::new("/fixture/home/.cargo"));
+    assert_read_only_cargo_access(&spec);
     for dir in [
         "/fixture/home/.cargo/bin",
         "/fixture/home/.rustup/toolchains",
@@ -322,15 +376,9 @@ fn writer_lint_target_is_a_lane_cache_sibling_of_the_build_target() -> Result<()
 }
 
 #[test]
-fn no_lane_can_write_shared_toolchain_stores() -> Result<(), ProviderError> {
+fn node_tool_stores_are_read_only() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let shared = [
-        ".cargo/registry",
-        ".cargo/registry/src/index/crate-1.0/build.rs",
-        ".cargo/git",
-        ".cargo/git/checkouts/repo/build.rs",
-        ".cargo/.package-cache",
-        ".cargo/.global-cache",
         "Library/pnpm",
         "Library/pnpm/pnpm",
         "Library/Caches/pnpm",
@@ -386,11 +434,11 @@ fn no_lane_can_write_shared_toolchain_stores() -> Result<(), ProviderError> {
                     .find(|(k, _)| k == key)
                     .map(|(_, v)| std::path::PathBuf::from(v))
             };
+            assert_read_only_cargo_access(&launch);
             let cache = match access {
                 Access::ReadOnly => std::path::PathBuf::from("/fixture/scratch"),
                 _ => "/fixture/home/Library/Caches/provenant-lane-cargo/fixture".into(),
             };
-            assert_eq!(env("CARGO_HOME"), Some(cache.join("cargo-home")));
             // Node variables appear only where a Homebrew Node exists. The
             // store stays at the host setting, so a native install's recorded
             // configuration matches; only the caches move into the lane.
@@ -1279,11 +1327,11 @@ fn native_and_confined_writers_receive_the_same_seed_environment() -> Result<(),
             input.host_var = &native;
         }
         let launch = crate::codex::Codex.prepare(input)?;
+        assert_eq!(cargo_home_path(&launch), Path::new("/fixture/home/.cargo"));
+        if sandboxed {
+            assert_read_only_cargo_access(&launch);
+        }
         for (key, expected) in [
-            (
-                "CARGO_HOME",
-                "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/cargo-home",
-            ),
             (
                 "CARGO_TARGET_DIR",
                 "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target",
@@ -1295,17 +1343,6 @@ fn native_and_confined_writers_receive_the_same_seed_environment() -> Result<(),
             let values: Vec<_> = launch.env.iter().filter(|(name, _)| name == key).collect();
             assert_eq!(values.len(), 1, "{key} sandboxed={sandboxed}");
             assert_eq!(values[0].1, expected);
-        }
-        if sandboxed {
-            assert!(
-                launch
-                    .profile
-                    .spec
-                    .tool_writes
-                    .iter()
-                    .any(|grant| grant.path
-                        == Path::new("/fixture/home/Library/Caches/provenant-cargo-downloads"))
-            );
         }
     }
     Ok(())
@@ -1379,11 +1416,8 @@ fn native_adapter_finalisation_supplies_cargo_environment_without_tool_discovery
         Path::new("/fixture/home"),
         Path::new("/fixture/repo"),
     )?;
+    assert_eq!(cargo_home_path(&launch), Path::new("/fixture/home/.cargo"));
     for (name, expected) in [
-        (
-            "CARGO_HOME",
-            "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/cargo-home",
-        ),
         ("RUSTUP_HOME", "/fixture/home/.rustup"),
         (
             "PROVENANT_LANE_CARGO_LINT_TARGET",

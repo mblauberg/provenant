@@ -170,6 +170,7 @@ pub struct HostLaunchContext {
 impl HostLaunchContext {
     pub fn provider_path_environment() -> std::collections::BTreeMap<String, std::ffi::OsString> {
         [
+            "CARGO_HOME",
             "CODEX_HOME",
             "CLAUDE_CONFIG_DIR",
             "GH_CONFIG_DIR",
@@ -177,7 +178,18 @@ impl HostLaunchContext {
             "XDG_DATA_HOME",
         ]
         .into_iter()
-        .filter_map(|name| std::env::var_os(name).map(|value| (name.into(), value)))
+        .filter_map(|name| {
+            std::env::var_os(name).map(|value| {
+                let value = if name == "CARGO_HOME" && !value.is_empty() {
+                    std::path::absolute(PathBuf::from(value))
+                        .expect("host cwd resolves CARGO_HOME")
+                        .into_os_string()
+                } else {
+                    value
+                };
+                (name.into(), value)
+            })
+        })
         .collect()
     }
     pub fn github_roots() -> Vec<PathBuf> {

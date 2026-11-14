@@ -1,3 +1,100 @@
+fn cargo_home_path(spec: &LaunchSpec) -> std::path::PathBuf {
+    let receipt = spec.cargo_home_receipt();
+    let path = std::path::PathBuf::from(receipt["path"].as_str().expect("Cargo home receipt path"));
+    let values: Vec<_> = spec
+        .env
+        .iter()
+        .filter(|(key, _)| key == "CARGO_HOME")
+        .collect();
+    assert_eq!(values.len(), 1, "one host Cargo home selector");
+    assert_eq!(std::path::Path::new(&values[0].1), path);
+    path
+}
+
+fn assert_cargo_credentials_ungranted(spec: &LaunchSpec) {
+    use provenant_confinement::permissions::{PathGrant, PathScope};
+    let home = cargo_home_path(spec);
+    let reads: Vec<_> = spec
+        .profile
+        .spec
+        .runtime_reads
+        .iter()
+        .chain(
+            spec.profile
+                .spec
+                .authentication
+                .iter()
+                .flat_map(|grant| &grant.roots),
+        )
+        .collect();
+    let writes: Vec<_> = spec
+        .profile
+        .spec
+        .tool_writes
+        .iter()
+        .chain(&spec.profile.spec.state_writes)
+        .chain(
+            spec.profile
+                .spec
+                .authentication
+                .iter()
+                .flat_map(|grant| &grant.in_place_writes),
+        )
+        .collect();
+    for name in provenant_confinement::cargo::CREDENTIAL_FILES {
+        let credential = PathGrant {
+            path: home.join(name),
+            scope: PathScope::Exact,
+        };
+        assert!(
+            reads.iter().all(|grant| !grant.overlaps(&credential)),
+            "Cargo credential read grant: {credential:?}"
+        );
+        assert!(
+            writes.iter().all(|grant| !grant.overlaps(&credential)),
+            "Cargo credential write grant: {credential:?}"
+        );
+    }
+}
+
+fn assert_read_only_cargo_access(spec: &LaunchSpec) {
+    use provenant_confinement::permissions::{PathGrant, PathScope};
+    let home = cargo_home_path(spec);
+    let receipt = spec.cargo_home_receipt();
+    assert_eq!(receipt["source_writes"], false);
+    let writes = &spec.profile.spec.tool_writes;
+    let tracking: Vec<_> = provenant_confinement::cargo::TRACKING_FILES
+        .iter()
+        .map(|name| PathGrant {
+            path: home.join(name),
+            scope: PathScope::Exact,
+        })
+        .collect();
+    for grant in &tracking {
+        assert!(
+            writes.contains(grant),
+            "Cargo tracking write grant missing: {grant:?}"
+        );
+    }
+    for grant in writes.iter().filter(|grant| grant.path.starts_with(&home)) {
+        assert!(
+            tracking.contains(grant),
+            "undeclared Cargo home write grant: {grant:?}"
+        );
+    }
+    for name in provenant_confinement::cargo::SOURCE_DIRECTORIES {
+        let source = PathGrant {
+            path: home.join(name),
+            scope: PathScope::Subtree,
+        };
+        assert!(
+            writes.iter().all(|grant| !grant.overlaps(&source)),
+            "default Cargo source write grant: {source:?}"
+        );
+    }
+    assert_cargo_credentials_ungranted(spec);
+}
+
 #[test]
 fn agy_individual_quota_is_quota_limited_until_its_stated_reset() -> Result<(), ProviderError> {
     let exit = ExitObservation {
@@ -978,8 +1075,11 @@ fn claude_network_on_enables_web_tools_and_codex_toolchain_without_writer_grants
     let home = temp.path().canonicalize().unwrap();
     for path in [
         ".cargo/bin",
-        ".cargo/registry",
-        ".cargo/git",
+        ".cargo/registry/index",
+        ".cargo/registry/cache",
+        ".cargo/registry/src",
+        ".cargo/git/db",
+        ".cargo/git/checkouts",
         ".rustup/toolchains",
     ] {
         std::fs::create_dir_all(home.join(path)).unwrap();
@@ -1026,19 +1126,17 @@ fn claude_network_on_enables_web_tools_and_codex_toolchain_without_writer_grants
             }
             assert!(launch.profile.spec.authentication.is_empty());
             assert!(launch.profile.spec.deny_keychain_access);
-            // Writers share only lane downloads. Trusted host sources,
-            // installed binaries and read-only lanes remain unwritable.
-            if access == Access::ReadOnly {
-                assert!(launch.profile.spec.tool_writes.is_empty());
-            } else {
-                let shared = home.join("Library/Caches/provenant-cargo-downloads");
+            // Sources stay read-only by default; Cargo can update only the
+            // declared tracking files. The credentials boundary remains active.
+            assert_read_only_cargo_access(&launch);
+            let cargo_home = cargo_home_path(&launch);
+            for name in provenant_confinement::cargo::SOURCE_DIRECTORIES {
                 assert!(
                     launch
                         .profile
                         .spec
-                        .tool_writes
-                        .iter()
-                        .all(|grant| grant.path == shared)
+                        .runtime_reads
+                        .contains(&crate::launch::subtree(cargo_home.join(name)))
                 );
             }
             let rendered = provenant_confinement::permissions::snapshot::render(
@@ -1073,14 +1171,7 @@ fn claude_network_on_enables_web_tools_and_codex_toolchain_without_writer_grants
                 }
             }
             if access == Access::ReadOnly && network != NetworkAccess::Open {
-                assert_eq!(
-                    launch
-                        .env
-                        .iter()
-                        .find(|(key, _)| key == "CARGO_HOME")
-                        .map(|(_, value)| value.as_os_str()),
-                    Some(std::ffi::OsStr::new("/fixture/scratch/cargo-home"))
-                );
+                assert_eq!(cargo_home_path(&launch), home.join(".cargo"));
                 assert_eq!(
                     launch.env.iter().find(|(key, _)| key == "PATH").unwrap().1,
                     "/fixture/scratch/read-only-git:/fixture/scratch/bin:/usr/bin:/bin"
@@ -1173,14 +1264,8 @@ fn claude_network_on_without_complete_rust_keeps_public_system_tools()
                 Some(&token),
             )
         })?;
-        assert_eq!(
-            launch
-                .env
-                .iter()
-                .find(|(key, _)| key == "CARGO_HOME")
-                .map(|(_, value)| value.as_os_str()),
-            Some(std::ffi::OsStr::new("/fixture/scratch/cargo-home"))
-        );
+        assert_eq!(cargo_home_path(&launch), home.join(".cargo"));
+        assert_read_only_cargo_access(&launch);
         assert!(
             launch
                 .profile
@@ -1251,20 +1336,8 @@ fn rust_less_hosts_keep_repository_execution_in_the_rendered_profile()
             "claude" => claude::Claude.prepare(input)?,
             _ => crate::codex::Codex.prepare(input)?,
         };
-        let expected_cargo_home = match access {
-            Access::ReadOnly => std::path::PathBuf::from("/fixture/scratch/cargo-home"),
-            Access::WorktreeWrite => std::path::PathBuf::from(
-                "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/cargo-home",
-            ),
-        };
-        assert_eq!(
-            launch
-                .env
-                .iter()
-                .find(|(key, _)| key == "CARGO_HOME")
-                .map(|(_, value)| std::path::PathBuf::from(value)),
-            Some(expected_cargo_home)
-        );
+        assert_eq!(cargo_home_path(&launch), home.join(".cargo"));
+        assert_read_only_cargo_access(&launch);
         let spec = &launch.profile.spec;
         assert!(
             spec.runtime_reads

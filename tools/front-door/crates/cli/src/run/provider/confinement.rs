@@ -716,7 +716,8 @@ pub(super) fn host_provider_var(registry: &Registry<'_>, name: &str) -> Option<s
     if let Some(host) = registry.host
         && matches!(
             name,
-            "CODEX_HOME"
+            "CARGO_HOME"
+                | "CODEX_HOME"
                 | "CLAUDE_CONFIG_DIR"
                 | "GH_CONFIG_DIR"
                 | "XDG_CONFIG_HOME"

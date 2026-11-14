@@ -172,21 +172,24 @@ compare-and-swap.
 
 Unsandboxed lanes inherit the host environment, PATH, tool caches and
 credentials in place. Provider account selectors still choose the registered
-account and its required credentials. Environment
+account and its required credentials. Credential
 values stay in the live launch, never in prompts or receipts. Native launches
 skip skill copies, tool dependency discovery, credential symlink inventory and
-the private Cargo home, target directory and build-slot shim.
+the build-slot shim. Every lane still binds the host Cargo home and private
+target/build directories before seed validation.
 
 Sandboxed lanes use the minimal environment and staged skills, discover tool
 dependencies and credential aliases, and report inventory omissions in one
-actionable warning. They cannot write the Cargo registry, Git, pnpm, npm or
-Node caches the host later runs unconfined; writers get a private per-worktree
-cache.
+actionable warning. Cargo registry and Git sources are read-only unless
+`domains.fabric.lanes.cargo_source_writes` is enabled. Cargo lock and cache-use
+tracking files have exact write grants; Cargo credentials are always denied.
+The pnpm, npm and Node caches the host later runs unconfined stay read-only;
+build output and tool configuration use private lane caches.
 - Why: native lanes use ordinary tools and login state; sandboxed lanes keep
-  packages they can change out of the host's later builds.
+  source sharing explicit while keeping credentials and build output isolated.
 - Test: `crates/providers/src/tests_launch_access.rs::native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation`;
   `crates/confinement/src/permissions/policy/host.rs::credential_alias_inventory_runs_only_for_sandboxed_lanes`;
-  `crates/providers/src/tests_lane_toolchains.rs::no_lane_can_write_shared_toolchain_stores`;
+  `crates/providers/src/tests_lane_toolchains.rs::node_tool_stores_are_read_only`;
   `crates/confinement/src/permissions/tests/grants.rs::writer_cache_is_private_and_bound_to_repository_and_worktree_identity`
 
 ### Network, IPC and process information

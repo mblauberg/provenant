@@ -5,6 +5,7 @@
 //! `PROVENANT_UPDATE_SNAPSHOTS=1 cargo test -p provenant-providers seatbelt_profiles`.
 use super::tests::{fixture_access_plan, fixture_input, fixture_token, route};
 use super::*;
+use provenant_confinement::cargo::CargoHome;
 use provenant_confinement::permissions::snapshot::render;
 use provenant_confinement::permissions::{
     NetworkAccess, PathGrant, PathScope, PlanPermissions, ProviderProfile,
@@ -121,6 +122,27 @@ fn prepared(
         socket.path = "/fixture/host/fabric-relay.sock".into();
     }
     Ok((confined.permissions().clone(), profile))
+}
+
+/// Project all Cargo-owned roots out of provider snapshots; their policy is
+/// asserted from the Cargo declaration and writer authority below.
+fn cargo_snapshot_text(rendered: &str, cargo_home: &CargoHome, plan: &PlanPermissions) -> String {
+    let mut roots = vec![cargo_home.path.clone()];
+    if let provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) = &plan.mode {
+        roots.push(authority.cargo_cache().path.clone());
+    }
+    let mut snapshot = String::new();
+    for line in rendered.split_inclusive('\n') {
+        let cargo_owned = line
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .any(|path| roots.iter().any(|root| Path::new(path).starts_with(root)));
+        if !cargo_owned {
+            snapshot.push_str(line);
+        }
+    }
+    snapshot
 }
 
 /// The credential mechanism each adapter's fixture plan selects.
@@ -411,6 +433,66 @@ fn fabric_profiles_only_read_database_and_allow_only_the_attempt_socket()
 }
 
 #[test]
+fn cargo_permissions_follow_the_declared_access_for_each_profile_case()
+-> Result<(), Box<dyn std::error::Error>> {
+    let cargo = CargoHome::resolve(Path::new(HOME), |_| None)?;
+    assert!(!cargo.source_writes);
+    let tracking: Vec<_> = cargo.tracking().collect();
+    assert!(tracking.iter().all(|grant| grant.scope == PathScope::Exact));
+    let expected_writes: BTreeSet<_> = tracking
+        .iter()
+        .map(|grant| format!("(allow file-write* (literal \"{}\"))", grant.path.display()))
+        .collect();
+    assert!(
+        cargo
+            .sources()
+            .all(|source| { !cargo.writes().any(|write| write.overlaps(&source)) })
+    );
+
+    for case in cases()? {
+        let rendered = render(&case.plan, &case.profile, Path::new(HOME))?;
+        let cargo_home_path = cargo.path.to_string_lossy();
+        let writes: BTreeSet<_> = rendered
+            .lines()
+            .filter(|line| {
+                line.starts_with("(allow file-write") && line.contains(cargo_home_path.as_ref())
+            })
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(writes, expected_writes, "{}: Cargo write rules", case.name);
+        for credential in cargo.credentials() {
+            let path = credential.path.display();
+            assert!(
+                rendered.contains(&format!("(deny file-read* (literal \"{path}\"))")),
+                "{}: Cargo credential read: {path}",
+                case.name
+            );
+            assert!(
+                rendered.contains(&format!("(deny file-write* (literal \"{path}\"))")),
+                "{}: Cargo credential write: {path}",
+                case.name
+            );
+        }
+        if let provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) =
+            &case.plan.mode
+        {
+            let cache = authority.cargo_cache().path.display();
+            assert!(
+                rendered.contains(&format!("(allow file-read* (subpath \"{cache}\"))")),
+                "{}: private Cargo cache read: {cache}",
+                case.name
+            );
+            assert!(
+                rendered.contains(&format!("(allow file-write* (subpath \"{cache}\"))")),
+                "{}: private Cargo cache write: {cache}",
+                case.name
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn seatbelt_profiles_match_snapshots() -> Result<(), Box<dyn std::error::Error>> {
     let update = std::env::var(UPDATE_ENV).is_ok_and(|value| value == "1");
     let dir = snapshot_dir();
@@ -422,7 +504,12 @@ fn seatbelt_profiles_match_snapshots() -> Result<(), Box<dyn std::error::Error>>
             "duplicate case {}",
             case.name
         );
-        let rendered = render(&case.plan, &case.profile, Path::new(HOME))?;
+        let cargo_home = CargoHome::resolve(Path::new(HOME), |_| None)?;
+        let rendered = cargo_snapshot_text(
+            &render(&case.plan, &case.profile, Path::new(HOME))?,
+            &cargo_home,
+            &case.plan,
+        );
         let snapshot_name = if case.name == "claude-continuation-read-only" {
             "claude-read-only"
         } else {

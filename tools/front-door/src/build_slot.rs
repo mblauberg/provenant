@@ -336,6 +336,21 @@ fn run_with(
         Err(error) => report(&format!("cannot start cargo: {error}")),
     };
     drop(held);
+    if code != 0
+        && env
+            .iter()
+            .any(|(key, value)| key == "PROVENANT_CARGO_SOURCE_WRITES" && value == "false")
+    {
+        let source = env
+            .iter()
+            .find(|(key, _)| key == "PROVENANT_CARGO_SOURCE_WRITES_SOURCE")
+            .and_then(|(_, value)| value.to_str())
+            .unwrap_or("compiled default");
+        warning(&format!(
+            "Cargo sources are read-only ({} = false; source: {source}). If a dependency is missing offline, fetch it on the host or enable this setting with network access for the lane.",
+            provenant_confinement::cargo::SOURCE_WRITES_KNOB
+        ));
+    }
     code
 }
 
@@ -441,6 +456,46 @@ mod tests {
     use super::*;
     use provenant_supervisor::census::{ProcessFact, ProcessIdentity};
     use std::collections::HashMap;
+
+    #[test]
+    fn cargo_failures_keep_exit_codes_and_explain_read_only_sources() {
+        let mut binding =
+            provenant_confinement::cargo::CargoHome::resolve(Path::new("/fixture/home"), |_| None)
+                .unwrap();
+        for setting in [None, Some(false), Some(true)] {
+            binding.configure_source_writes(setting);
+            for exit in [0, 101] {
+                let command = [OsString::from("cargo"), OsString::from("metadata")];
+                let gate = Gate {
+                    settings: None,
+                    local: Local::All,
+                    command: &command,
+                };
+                let mut env = Vec::new();
+                binding.source_environment(
+                    provenant_confinement::permissions::NetworkAccess::Open,
+                    &mut env,
+                );
+                let mut warnings = Vec::new();
+                let actual = run_with(
+                    gate,
+                    env,
+                    false,
+                    |_| unreachable!(),
+                    |_, _, _| Ok(exit),
+                    |message| warnings.push(message.to_owned()),
+                );
+                assert_eq!(actual, exit);
+                let diagnostic = warnings.iter().find(|message| {
+                    message.contains(provenant_confinement::cargo::SOURCE_WRITES_KNOB)
+                });
+                assert_eq!(diagnostic.is_some(), exit != 0 && !binding.source_writes);
+                if let Some(diagnostic) = diagnostic {
+                    assert!(diagnostic.contains(binding.source_writes_source));
+                }
+            }
+        }
+    }
 
     #[test]
     fn all_busy_build_slots_warn_once_and_still_run_the_child() {

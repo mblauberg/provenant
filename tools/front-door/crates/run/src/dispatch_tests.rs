@@ -167,7 +167,12 @@ impl Providers for Confined {
             },
             writer: None,
             home: "/fixture/home".into(),
-            cargo_registry_seed: false,
+            cargo_home: provenant_confinement::cargo::CargoHome::resolve(
+                std::path::Path::new("/fixture/home"),
+                |_| None,
+            )
+            .unwrap(),
+            cargo_target_seed: false,
             state_root: std::path::PathBuf::from("/fixture/state"),
             sandbox: provenant_confinement::run_config::SandboxMode {
                 requested: true,

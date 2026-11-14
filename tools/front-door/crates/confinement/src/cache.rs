@@ -1827,7 +1827,7 @@ mod tests {
         }
 
         #[test]
-        fn lane_cache_gc_removes_large_cargo_registry_tree()
+        fn lane_cache_gc_removes_large_private_payload_tree()
         -> Result<(), Box<dyn std::error::Error>> {
             let temporary = tempfile::tempdir()?;
             let home = temporary.path();
@@ -1837,7 +1837,7 @@ mod tests {
             std::fs::write(outside.join("keep"), b"must survive")?;
             std::os::unix::fs::symlink(&outside, path.join("outside.lock"))?;
             std::fs::create_dir(path.join("directory.lock"))?;
-            let registry = path.join("cargo-home/registry/src/index.crates.io-example");
+            let registry = path.join("private-config/packages");
             let target = path.join("target/debug");
             std::fs::create_dir_all(&target)?;
             for index in 0..2048 {

@@ -464,6 +464,8 @@ pub struct Lanes {
     pub memory_pressure_threshold: provenant_config::MemoryPressureThreshold,
     pub priority: LanePriority,
     pub cargo_seed: CargoSeed,
+    /// Source directories in host CARGO_HOME are read-only unless enabled.
+    pub cargo_source_writes: Option<bool>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub max_concurrent_builds: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
@@ -525,6 +527,7 @@ impl Lanes {
             memory_pressure_threshold: Some(self.memory_pressure_threshold),
             max_concurrent_builds: self.max_concurrent_builds,
             cargo_build_jobs: self.cargo_build_jobs,
+            cargo_source_writes: self.cargo_source_writes,
             cargo_incremental: self.cargo_incremental,
             cargo_debug: self.cargo_debug.clone(),
             build_dir_max_bytes: self.build_dir_max_bytes,
@@ -1089,6 +1092,17 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn cargo_source_write_setting_reaches_the_launch_settings() {
+        for setting in [None, Some(false), Some(true)] {
+            let value = setting
+                .map(|value| serde_json::json!({"cargo_source_writes": value}))
+                .unwrap_or_else(|| serde_json::json!({}));
+            let lanes: Lanes = serde_json::from_value(value).unwrap();
+            assert_eq!(lanes.build_settings().cargo_source_writes, setting);
+        }
     }
 
     #[test]
