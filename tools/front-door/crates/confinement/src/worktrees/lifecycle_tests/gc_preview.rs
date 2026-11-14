@@ -1,47 +1,6 @@
 use super::*;
 
 #[test]
-fn gc_lazy_inventory_still_refuses_a_dirty_candidate() -> Result<(), Box<dyn Error>> {
-    let fixture = Fixture::new()?;
-    let test = TestContext::new(&fixture)?;
-    let context = test.context();
-    let lane = gc_owned_lane(&test, &context, "dirty-candidate")?;
-    fs::write(lane.path.join("untracked"), "keep")?;
-    let lanes = list_for_gc(&context, &cancel())?;
-    let report = collect(
-        &context,
-        &lanes,
-        &WorktreeGcPolicy {
-            upstream: None,
-            terminal: &|_| true,
-            no_live_lanes: &|_| true,
-            regenerable: &[],
-            keep: &[],
-            written_before_ns: i128::MAX,
-            dry_run: true,
-            include_foreign: false,
-            retirement_port: None,
-            retirement_feeds: None,
-            mode: CollectionMode::Worktrees,
-            proof: None,
-            upstream_reference: None,
-            integration_patterns: &[],
-            excluded_paths: &[],
-        },
-        &cancel(),
-    )?;
-    assert!(
-        report
-            .worktrees
-            .retained
-            .iter()
-            .any(|entry| entry.branch == "dirty-candidate" && entry.reason == RetainReason::Dirty)
-    );
-    assert!(lane.path.join("untracked").exists());
-    Ok(())
-}
-
-#[test]
 fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dyn Error>> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct RejectConfig<'a> {
@@ -114,45 +73,101 @@ fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dy
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum GcVerdict {
+    Removed,
+    Retained(RetainReason),
+    Absent,
+}
+
+fn gc_verdict(report: &WorktreeGcReport, lane: &WorktreeInfo) -> GcVerdict {
+    if report
+        .worktrees
+        .removed
+        .iter()
+        .any(|entry| entry.path == lane.path)
+    {
+        return GcVerdict::Removed;
+    }
+    let branch = lane
+        .branch
+        .as_deref()
+        .and_then(|name| name.strip_prefix("refs/heads/"))
+        .unwrap_or_default();
+    report
+        .worktrees
+        .retained
+        .iter()
+        .find(|entry| entry.branch == branch)
+        .map_or(GcVerdict::Absent, |entry| GcVerdict::Retained(entry.reason))
+}
+
+/// Preview and apply reach one verdict for every worktree state, and neither
+/// runs a nested repository's Git filters.
 #[test]
-fn gc_lazy_candidate_never_runs_nested_git_filters() -> Result<(), Box<dyn Error>> {
-    let fixture = Fixture::new()?;
-    let test = TestContext::new(&fixture)?;
-    let context = test.context();
-    let lane = gc_owned_lane(&test, &context, "lazy-gitlink")?;
-    let marker = fixture._temp.path().join("lazy-filter-ran");
-    let poison = add_poisoned_gitlink(&fixture, &lane.path, "sub", &marker)?;
-    assert_raw_git_runs_poison_filter(&fixture, &poison)?;
-    poison.arm()?;
-    let retirement = HostRetirementFixture::new(&test)?;
-    retirement.seed_lane(&context, &lane)?;
-    let lanes = list_for_gc(&context, &cancel())?;
-    let report = collect(
-        &context,
-        &lanes,
-        &WorktreeGcPolicy {
-            upstream: None,
-            terminal: &|_| true,
-            no_live_lanes: &|_| true,
-            regenerable: &[],
-            keep: &[],
-            written_before_ns: i128::MAX,
-            dry_run: true,
-            include_foreign: false,
-            retirement_port: Some(&retirement),
-            retirement_feeds: Some(&retirement),
-            mode: CollectionMode::Worktrees,
-            proof: None,
-            upstream_reference: None,
-            integration_patterns: &[],
-            excluded_paths: &[],
-        },
-        &cancel(),
-    )?;
-    // The invariant is the filter never running; a preview deletes nothing.
-    assert!(!marker.exists());
-    assert!(report.worktrees.removed.len() <= 1);
-    assert!(lane.path.exists());
+fn gc_preview_verdict_matches_apply_for_every_worktree_state() -> Result<(), Box<dyn Error>> {
+    for state in ["clean", "untracked", "poisoned-gitlink"] {
+        let fixture = Fixture::new()?;
+        let test = TestContext::new(&fixture)?;
+        let context = test.context();
+        let lane = gc_owned_lane(&test, &context, &format!("verdict-{state}"))?;
+        let marker = fixture._temp.path().join("verdict-filter-ran");
+        let poison = match state {
+            "untracked" => {
+                fs::write(lane.path.join("untracked"), "keep")?;
+                None
+            }
+            "poisoned-gitlink" => {
+                let poison = add_poisoned_gitlink(&fixture, &lane.path, "sub", &marker)?;
+                assert_raw_git_runs_poison_filter(&fixture, &poison)?;
+                Some(poison)
+            }
+            _ => None,
+        };
+        let retirement = HostRetirementFixture::new(&test)?;
+        retirement.seed_lane(&context, &lane)?;
+        let run = |dry_run: bool| -> Result<WorktreeGcReport, Box<dyn Error>> {
+            if let Some(poison) = &poison {
+                poison.arm()?;
+            }
+            let lanes = list_for_gc(&context, &cancel())?;
+            Ok(collect(
+                &context,
+                &lanes,
+                &WorktreeGcPolicy {
+                    upstream: None,
+                    terminal: &|_| true,
+                    no_live_lanes: &|_| true,
+                    regenerable: &[],
+                    keep: &[],
+                    written_before_ns: i128::MAX,
+                    dry_run,
+                    include_foreign: false,
+                    retirement_port: Some(&retirement),
+                    retirement_feeds: Some(&retirement),
+                    mode: CollectionMode::Worktrees,
+                    proof: None,
+                    upstream_reference: None,
+                    integration_patterns: &[],
+                    excluded_paths: &[],
+                },
+                &cancel(),
+            )?)
+        };
+        let preview = gc_verdict(&run(true)?, &lane);
+        assert!(lane.path.exists(), "{state}: a preview deleted the tree");
+        let applied = gc_verdict(&run(false)?, &lane);
+        assert_eq!(preview, applied, "{state}: preview and apply disagree");
+        assert_ne!(preview, GcVerdict::Absent, "{state}: no verdict reported");
+        if state != "clean" {
+            assert!(
+                matches!(preview, GcVerdict::Retained(_)),
+                "{state}: {preview:?}"
+            );
+            assert!(lane.path.exists(), "{state}: retained tree was removed");
+        }
+        assert!(!marker.exists(), "{state}: a nested Git filter ran");
+    }
     Ok(())
 }
 

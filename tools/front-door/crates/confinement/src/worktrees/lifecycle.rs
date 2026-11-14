@@ -1092,16 +1092,7 @@ pub(super) fn remove_tree_when_before_delete(
     let (_submodule_guards, submodules) = hold_submodules(context, locked.verified.repo(), cancel)?;
     let cleanliness = worktree_cleanliness_at(context, locked.verified.repo(), cancel)?;
     let discard = matches!(repository, Repository::Discard);
-    match &cleanliness {
-        WorktreeCleanliness::Clean => {}
-        WorktreeCleanliness::Dirty(_) | WorktreeCleanliness::Ignored if discard => {}
-        WorktreeCleanliness::Dirty(paths) => return Err(WorktreeError::Dirty(paths.clone())),
-        WorktreeCleanliness::Ignored => return Err(WorktreeError::Dirty(String::new())),
-        WorktreeCleanliness::GitOperationInProgress => {
-            return Err(WorktreeError::GitOperationInProgress);
-        }
-        WorktreeCleanliness::Unknown => return Err(WorktreeError::UnknownWriter),
-    }
+    removal_verdict(&cleanliness, discard, false)?;
     // Explicit discard always has a durable archive before its retirement intent
     // and Git mutation; the archive id and exact tip become the S2 proof.
     let archive = if discard {
@@ -1287,6 +1278,26 @@ pub(super) fn pin_branch_ref(
         .facts
         .resolve_commit(context, reference.clone(), cancel)?;
     Ok((reference, oid))
+}
+
+/// The one removal cleanliness verdict, shared by applied removal and GC
+/// preview so a preview never promises a removal that applying refuses. A
+/// preview accepts ignored paths because `precheck_removal` separately proves
+/// they are all outputs its plan removes first.
+pub(super) fn removal_verdict(
+    cleanliness: &WorktreeCleanliness,
+    discard: bool,
+    preview: bool,
+) -> Result<(), WorktreeError> {
+    match cleanliness {
+        WorktreeCleanliness::Clean => Ok(()),
+        WorktreeCleanliness::Dirty(_) | WorktreeCleanliness::Ignored if discard => Ok(()),
+        WorktreeCleanliness::Ignored if preview => Ok(()),
+        WorktreeCleanliness::Dirty(paths) => Err(WorktreeError::Dirty(paths.clone())),
+        WorktreeCleanliness::Ignored => Err(WorktreeError::Dirty(String::new())),
+        WorktreeCleanliness::GitOperationInProgress => Err(WorktreeError::GitOperationInProgress),
+        WorktreeCleanliness::Unknown => Err(WorktreeError::UnknownWriter),
+    }
 }
 
 pub(super) fn retain_reason(error: &WorktreeError) -> RetainReason {

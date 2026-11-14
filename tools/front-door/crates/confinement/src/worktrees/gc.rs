@@ -1440,6 +1440,13 @@ fn collect_impl(
                     policy.keep,
                     cancel,
                 )?;
+                // The same verdict, submodule evidence included, that applying
+                // reaches before it removes the tree.
+                super::lifecycle::removal_verdict(
+                    &worktree_cleanliness_at(context, locked.verified.repo(), cancel)?,
+                    false,
+                    true,
+                )?;
             }
             let decision = if dry {
                 None
