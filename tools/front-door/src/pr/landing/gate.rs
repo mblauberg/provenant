@@ -523,7 +523,7 @@ mod tests {
             number,
             head: head.into(),
             approval: "a".into(),
-            carried_paths: Vec::new(),
+            approval_evidence: None,
             accepted: None,
             base_branch: "main".into(),
         }

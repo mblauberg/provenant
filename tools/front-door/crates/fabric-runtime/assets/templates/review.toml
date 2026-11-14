@@ -11,7 +11,7 @@ VERDICT: PASS
 """
 tier = "senior"
 access = "read_only"
-outputs = ["result", "findings"]
+outputs = ["result", "findings", "verdict"]
 
 [node.extensions]
 review_lens = "${lens}"

@@ -1005,6 +1005,17 @@ pub struct NodeOutputs {
     pub remaining: Option<Vec<String>>,
 }
 
+/// Typed review evidence retained when a read-only review lane settles.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewSettlement {
+    pub attempt_id: provenant_core::AttemptId,
+    pub head: provenant_core::GitOid,
+    pub base: Option<provenant_core::GitOid>,
+    pub verdict: provenant_records::workflow::ReviewVerdict,
+    /// The reviewer is a separate read-only lane, not a writer continuation.
+    pub independent: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanOutput {
     #[serde(flatten)]
@@ -1378,6 +1389,9 @@ pub struct NodeProgress {
     pub last_launch_retry: Option<LaunchRetry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outputs: Option<NodeOutputs>,
+    /// Machine-readable review verdict and the exact subject reviewed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_settlement: Option<ReviewSettlement>,
     /// Immutable evidence from redos and continuations, included in budgets.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub previous_attempts: Vec<GraphAttempt>,

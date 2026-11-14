@@ -237,6 +237,7 @@ fn node_bound(
         handoff: None,
         blocked: false,
         decisions: Vec::new(),
+        review_settlement: None,
         expansion_pause: expands.then(String::new),
         expansion_cause: expands.then_some(NodeDecisionCause::PlanExpansionPaused {
             active: false,
@@ -382,6 +383,13 @@ fn node_bound(
         + 64 // source commit
         + MAX_ADVANCE_ERROR_BYTES // advance error
         + if correction { MAX_ADVANCE_ERROR_BYTES } else { 0 };
+    if template::review_node(node) {
+        bytes += canonical_len(&serde_json::json!({"review_settlement": {
+            "attempt_id": "1".repeat(32),
+            "head": "1".repeat(64), "base": "2".repeat(64),
+            "verdict": "approve_with_nits", "independent": false,
+        }}));
+    }
     if node
         .plan
         .as_ref()

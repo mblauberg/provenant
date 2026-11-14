@@ -117,16 +117,20 @@ Sharp edges:
 - Changing `candidate_ref_prefix` needs a matching CI trigger (the bundled one
   covers `land/**`). A command gate runs without `GH_TOKEN`, `GITHUB_TOKEN` and
   `GH_ENTERPRISE_TOKEN` unless `gate.env_passthrough` names them.
-- Approval. `approval = "forge"` (default) needs an approving forge review at
-  the head; `receipt` takes an accepted delivery receipt instead. This
-  repository's host uses `receipt`: save it before landing, with a `pr` subject
-  naming `number` and the reviewed `head`. A merge-in from the target, or a
-  rebase with an unchanged delta, keeps the review; an unchanged head retargeted
-  past the branch below does not. Any other change needs a receipt whose
-  `subject` adds `delta_from` (the reviewed head), or
-  `land N --accept-delta REASON`, which warns and records the reason.
+- Approval. `approval_sources = ["provenant_review", "forge"]` is the compiled
+  default under `[domains.pr.land]`; the first satisfied source approves.
+  `provenant_review` reads a passing, independent review-lane settlement on the
+  exact PR head. The review execution must be separate from the writer; sharing
+  a GitHub account does not make those executions the same reviewer.
+  `forge` reads an approving GitHub review on that head from a different login
+  to the PR author. Any head change invalidates the old approval.
+  Override the list for a project or tier with the same `approval_sources` key;
+  `land --explain --json` shows the effective list and configuration source.
+  The landing receipt records the approving source, record ID or reviewer, and
+  covered head. `land N --accept-delta REASON` remains the explicit owner override.
   `approval_tier = "auto"` needs no review for changes touching only tests,
-  docs or review-exempt paths.
+  docs or review-exempt paths; `none` is CI only, while `carry` and `delta`
+  require approval on the exact head.
 - `LAND_PENDING` and `LAND_BUSY` exit as `pending`; rerun the same `land`.
   `LAND_CONFLICT`: the PR conflicts with the target; rebase or merge, then push.
   `LAND_PUBLICATION_UNKNOWN`: rerun `land` (see below).

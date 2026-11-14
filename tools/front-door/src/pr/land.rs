@@ -1068,10 +1068,8 @@ pub(crate) fn graph_land(
             pr: number,
             head: Some(head.to_string()),
             base: None,
-            // The graph proved review coverage of this head before landing.
-            review_proof: owner::ReviewProof::Proved {
-                reference: format!("graph:{}/{}", request.graph_id, request.node_id),
-            },
+            // The landing policy reads the graph's typed exact-head review record.
+            review_proof: owner::ReviewProof::Policy,
         }],
         authority,
         policy: owner::PolicyChoice::default(),
