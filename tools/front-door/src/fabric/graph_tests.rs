@@ -1067,6 +1067,10 @@ mod graph_ask_inbox_tests {
     impl provenant_fabric_runtime::graph::AttemptOwner for InboxOwner<'_> {
         type Error = FacadeError;
 
+        fn wall_now(&self) -> Option<provenant_core::WallTime> {
+            self.clock.wall_now().ok()
+        }
+
         fn actor(&self) -> String {
             self.actor.clone()
         }
@@ -2514,7 +2518,7 @@ mod result_tests {
                 "resolved_route": {"provider":"p", "model":model, "effort":null, "account_label":null},
                 "authority_digest": Digest::from_bytes([5; 32]), "queued_at": now,
                 "state": {"state":"terminal", "outcome":"lost", "exit_code":null, "finished_at":now, "reason":null},
-                "provider_ms": provider_ms, "usage": usage,
+                "provider_ms": provider_ms, "usage": usage, "read_only_writable": [],
                 "prompt": {"path":{"encoding":"utf8", "path":"prompt.txt"},
                     "digest": provenant_records::CanonicalV1::file_digest(b""), "bytes":0, "complete":true, "redacted":false}
             })).unwrap()

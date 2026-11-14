@@ -308,6 +308,7 @@ mod tests {
             "queued_at": WallTime::from_micros(1).unwrap(),
             "state": {"state":"running"},
             "usage": {},
+            "read_only_writable": [],
             "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"},"digest":CanonicalV1::file_digest(b""),"bytes":0,"complete":true,"redacted":false}
         }))
         .unwrap()

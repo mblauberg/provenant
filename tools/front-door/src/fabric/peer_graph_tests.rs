@@ -46,7 +46,7 @@ fn submit_parent(
         "task":{"prompt":"Launch a child and collect its answer", "access":"read_only",
             "route":{"kind":"model","provider":"fixture","model":"fixture/model"},
             "timeout_seconds":30,
-            "context":{"graph_id":"origin-graph", "node_id":"parent", "attempt":1}}
+            "context":{"graph_id":"origin-graph", "node_id":"parent", "attempt":1, "graph_template_launch":true}}
     }))?;
     Ok(provenant_cli::run::with_deferred_provider_launch(|| {
         super::super::peer::peer_submit_graph(
@@ -152,7 +152,7 @@ fn peer_hosted_lane_launches_a_local_child_and_collects_its_result() -> TestResu
         "task":{"prompt":"A changed brief must not reuse the accepted operation", "access":"read_only",
             "route":{"kind":"model","provider":"fixture","model":"fixture/model"},
             "timeout_seconds":30,
-            "context":{"graph_id":"origin-graph", "node_id":"parent", "attempt":1}}
+            "context":{"graph_id":"origin-graph", "node_id":"parent", "attempt":1, "graph_template_launch":true}}
     }))?;
     assert!(matches!(
         super::super::peer::peer_submit_graph(

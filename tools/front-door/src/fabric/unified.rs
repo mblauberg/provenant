@@ -2567,7 +2567,7 @@ mod tests {
             "key":{"project":id,"graph":"graph","node":"node","attempt":1},"attempt_number":1,"revision":1,"generation":1,
             "requested_route":{"kind":"named","name":"senior"},
             "authority_digest":digest,"queued_at":"2026-10-29T00:00:00.000000Z",
-            "state":{"state":"starting"},"usage":{},
+            "state":{"state":"starting"},"usage":{},"read_only_writable":[],
             "prompt":{"path":{"encoding":"utf8","path":"prompt.md"},
                 "digest":digest,"bytes":0,"complete":true,"redacted":false}
         }))?;

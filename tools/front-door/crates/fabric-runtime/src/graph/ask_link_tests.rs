@@ -92,8 +92,7 @@ impl AttemptOwner for InboxOwner {
 #[derive(Default)]
 struct FlakyJournal {
     saved: Option<GraphCheckpoint>,
-    saves: usize,
-    fail_save: Option<usize>,
+    fail_after_ask: bool,
 }
 
 impl GraphJournal for FlakyJournal {
@@ -103,9 +102,11 @@ impl GraphJournal for FlakyJournal {
         Ok(self.saved.clone())
     }
     fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
-        self.saves += 1;
-        if self.fail_save == Some(self.saves) {
-            return Err(std::io::Error::other("crash before the save"));
+        if self.fail_after_ask && !checkpoint.asks.is_empty() {
+            self.fail_after_ask = false;
+            return Err(std::io::Error::other(
+                "crash after filing, before the checkpoint save",
+            ));
         }
         self.saved = Some(checkpoint.clone());
         Ok(())
@@ -145,9 +146,9 @@ fn saving_a_checkpoint_with_an_ask_files_one_request_and_saving_again_files_none
 fn a_crash_after_filing_replays_to_the_same_request() {
     let document = question();
     let mut owner = InboxOwner::default();
-    // The first save holds the graph identity, the second the link.
+    // Fail the first checkpoint that carries the newly filed ask.
     let mut journal = FlakyJournal {
-        fail_save: Some(2),
+        fail_after_ask: true,
         ..Default::default()
     };
     assert!(advance(&document, &mut owner, &mut journal).is_err());
