@@ -147,7 +147,17 @@ Reset follows source verification, every account preview and release smoke
 checks. Intermediate install batches publish a format-1 receipt until removal
 succeeds and the final batch publishes format 2; there is no separate reset
 marker. The plan is rechecked before removal. Old peer and tick agents are
-stopped before deletion and restarted after a successful install. Failures
+stopped and re-queried before any deletion or archive move; each eligible
+service must be confirmed absent (including retired peer/tick service labels).
+A loaded service, even an idle scheduled job, is Running; only an explicit
+missing-service response is Absent. Query timeout, launchctl error or parse
+failure is Indeterminate. The initial shutdown check precedes install writes;
+Running or Indeterminate refuses reset, naming the service and its exact manual
+stop command on one line. Shutdown is checked again at removal: a failed final
+check leaves reset sources unmoved, though preparatory install writes may have
+completed. On Linux, both the tick timer and any already dispatched tick service
+must be stopped and confirmed inactive. Agents restart after a successful
+install. Failures
 name stopped agents and agents whose shutdown failed as "may still be running",
 print the quoted state directory and direct the user to rerun their original
 install command, preserving source and destination options (runbook: Upgrade).
