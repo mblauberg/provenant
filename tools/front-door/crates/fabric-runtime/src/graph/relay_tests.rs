@@ -433,17 +433,25 @@ fn a_waiting_parent_yields_its_slot_to_its_child() {
         concurrency: Some(1),
         ..Default::default()
     };
-    let run = |checkpoint: &GraphCheckpoint| {
+    let refusing_policy = || {
+        use provenant_records::policy::{Policy, Source, Strength};
+        let mut policy = Policy::default();
+        policy.overlay(
+            &[("GRAPH_CONCURRENCY_CAP".to_owned(), Strength::Refuse)].into(),
+            Source::Project,
+        );
+        policy
+    };
+    let run = |checkpoint: &GraphCheckpoint, child_attempt: bool| {
         let mut owner = FakeOwner {
-            observations: [
-                AttemptObservation::Pending {
-                    attempt_ref: Some("attempt-a".into()),
-                },
-                AttemptObservation::Pending {
-                    attempt_ref: Some("attempt-fix".into()),
-                },
-            ]
-            .into(),
+            admission_policy: Some(refusing_policy()),
+            observations: std::iter::once(AttemptObservation::Pending {
+                attempt_ref: Some("attempt-a".into()),
+            })
+            .chain(child_attempt.then_some(AttemptObservation::Pending {
+                attempt_ref: Some("attempt-fix".into()),
+            }))
+            .collect(),
             ..Default::default()
         };
         let mut journal = MemoryJournal(Some(checkpoint.clone()));
@@ -466,22 +474,28 @@ fn a_waiting_parent_yields_its_slot_to_its_child() {
                     .contains(&(AccessMode::WorktreeWrite, Some(binding.worktree.clone())))
             );
         }
-        (run.checkpoint, owner.calls.len())
+        run.checkpoint
     };
-    // The parent holds the only slot while it works.
-    let (held, _) = run(&checkpoint);
-    assert_eq!(progress(&held, "a--fix").state, NodeState::Pending);
+    // Explicit refusal makes the occupied-slot invariant observable without
+    // recreating the removed queue state.
+    let held = run(&checkpoint, false);
+    assert_eq!(progress(&held, "a--fix").state, NodeState::Blocked);
+    assert_eq!(
+        progress(&held, "a--fix").advance_error_code.as_deref(),
+        Some("concurrency_cap")
+    );
 
-    assert!(set_waiting(&mut checkpoint, "a", true));
-    assert!(relay::yields_slot(progress(&checkpoint, "a")));
-    let (yielded, _) = run(&checkpoint);
+    let mut yielded_checkpoint = checkpoint.clone();
+    assert!(set_waiting(&mut yielded_checkpoint, "a", true));
+    assert!(relay::yields_slot(progress(&yielded_checkpoint, "a")));
+    let yielded = run(&yielded_checkpoint, true);
     assert_eq!(progress(&yielded, "a--fix").state, NodeState::Running);
     assert_eq!(progress(&yielded, "a").state, NodeState::Running);
     // Spawning is not completion: the parent's dependant waits for the child.
     assert_eq!(progress(&yielded, "b").state, NodeState::Pending);
 
-    set_waiting(&mut checkpoint, "a", false);
-    assert!(!relay::yields_slot(progress(&checkpoint, "a")));
+    set_waiting(&mut yielded_checkpoint, "a", false);
+    assert!(!relay::yields_slot(progress(&yielded_checkpoint, "a")));
 }
 
 #[test]
@@ -1174,19 +1188,26 @@ fn yielded_writer_parent_drains_more_children_than_the_slot_limit() {
     let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
         .unwrap()
         .checkpoint;
-    for index in 0..4 {
-        let mut request = child(&format!("c{index}"), &format!("slot{index}"));
-        request.writer = true;
-        request.write_scope = vec!["src".into()];
-        add(&document, &mut checkpoint, "a", &request).unwrap();
-    }
     set_waiting(&mut checkpoint, "a", true);
     let limits = crate::config::GraphLimits {
         concurrency: Some(1),
         ..Default::default()
     };
     for index in 0..4 {
+        let mut request = child(&format!("c{index}"), &format!("slot{index}"));
+        request.writer = true;
+        request.write_scope = vec!["src".into()];
+        add(&document, &mut checkpoint, "a", &request).unwrap();
         let mut owner = FakeOwner {
+            admission_policy: Some({
+                use provenant_records::policy::{Policy, Source, Strength};
+                let mut policy = Policy::default();
+                policy.overlay(
+                    &[("GRAPH_CONCURRENCY_CAP".to_owned(), Strength::Refuse)].into(),
+                    Source::Project,
+                );
+                policy
+            }),
             observations: [
                 AttemptObservation::Pending {
                     attempt_ref: Some("attempt-a".into()),
@@ -1218,6 +1239,8 @@ fn yielded_writer_parent_drains_more_children_than_the_slot_limit() {
             .find(|node| node.id == format!("a--c{index}"))
             .unwrap();
         completed.state = NodeState::Succeeded;
+        completed.advance_error_code = None;
+        completed.advance_error = None;
         for attempt in &mut completed.attempts {
             attempt.state = AttemptState::Terminal;
             attempt.outcome = Some(AttemptOutcome::Succeeded);

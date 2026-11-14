@@ -1186,38 +1186,53 @@ fn node_redo_can_launch_a_leaf_of_a_settled_composite() {
 
 #[test]
 fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncertain_attempts() {
+    let mut sibling_node = node("sibling", route("first"));
+    sibling_node.depends_on = vec!["holder".into()];
     let document = graph(vec![
         node("work", route("first")),
-        node("sibling", route("first")),
+        node("holder", route("first")),
+        sibling_node,
     ]);
-    let limits = crate::config::GraphLimits {
-        concurrency: Some(1),
-        ..Default::default()
-    };
     let mut owner = FakeOwner {
-        observations: [AttemptObservation::Pending { attempt_ref: None }].into(),
+        observations: [
+            AttemptObservation::Pending { attempt_ref: None },
+            AttemptObservation::Pending {
+                attempt_ref: Some("holder-attempt".into()),
+            },
+        ]
+        .into(),
         ..Default::default()
     };
-    let mut checkpoint = advance_with_budget(
-        &document,
-        &mut owner,
-        &mut MemoryJournal::default(),
-        &limits,
-        &Default::default(),
-    )
-    .unwrap()
-    .checkpoint;
-    assert_eq!(checkpoint.nodes[1].state, NodeState::Pending);
+    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
+        .unwrap()
+        .checkpoint;
+    let work_index = checkpoint
+        .nodes
+        .iter()
+        .position(|node| node.id == "work")
+        .unwrap();
+    let holder_index = checkpoint
+        .nodes
+        .iter()
+        .position(|node| node.id == "holder")
+        .unwrap();
+    let sibling_index = checkpoint
+        .nodes
+        .iter()
+        .position(|node| node.id == "sibling")
+        .unwrap();
+    assert_eq!(checkpoint.nodes[holder_index].state, NodeState::Running);
+    assert_eq!(checkpoint.nodes[sibling_index].state, NodeState::Pending);
     // Recreate the durable checkpoint before the synthetic submission returned.
     // Acceptance is deliberately checked through the owner, not these stale flags.
-    checkpoint.nodes[0].attempts[0].state = AttemptState::Starting;
-    checkpoint.nodes[0].attempts[0].launched = false;
+    checkpoint.nodes[work_index].attempts[0].state = AttemptState::Starting;
+    checkpoint.nodes[work_index].attempts[0].launched = false;
     let seeded = checkpoint.clone();
     let mut refusing_owner = ErrorLauncher::default();
     launch_disposition::<ErrorLauncher, MemoryJournal>(
         &mut refusing_owner,
         &mut checkpoint,
-        0,
+        work_index,
         &crate::coordination::facade::FacadeError::InvalidInput { detail: None },
         LaunchTiming {
             clock: Some(at(0)),
@@ -1230,11 +1245,11 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
     let mut checkpoint: GraphCheckpoint =
         serde_json::from_value(serde_json::to_value(checkpoint).unwrap()).unwrap();
     assert_eq!(
-        checkpoint.nodes[0].advance_error_code.as_deref(),
+        checkpoint.nodes[work_index].advance_error_code.as_deref(),
         Some("launch_refused")
     );
     assert_eq!(
-        checkpoint.nodes[0].advance_owner_code.as_deref(),
+        checkpoint.nodes[work_index].advance_owner_code.as_deref(),
         Some("invalid_input")
     );
     let wait = graph_waits(&checkpoint)
@@ -1244,7 +1259,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
     assert_eq!(wait.code, "invalid_input");
     assert_eq!(wait.cause.as_deref(), Some("invalid_input"));
     assert_eq!(
-        checkpoint.nodes[0].attempts[0]
+        checkpoint.nodes[work_index].attempts[0]
             .extra
             .get(PRELAUNCH_REFUSAL_PROOF),
         Some(&json!(true))
@@ -1267,7 +1282,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
         launch_disposition::<ErrorLauncher, MemoryJournal>(
             &mut accepted_owner,
             &mut candidate,
-            0,
+            work_index,
             &error,
             LaunchTiming {
                 clock: Some(at(0)),
@@ -1278,7 +1293,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
         )
         .unwrap();
         assert!(
-            !candidate.nodes[0].attempts[0]
+            !candidate.nodes[work_index].attempts[0]
                 .extra
                 .contains_key(PRELAUNCH_REFUSAL_PROOF)
         );
@@ -1294,7 +1309,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
     launch_disposition::<ErrorLauncher, MemoryJournal>(
         &mut unavailable_owner,
         &mut lookup_failed,
-        0,
+        work_index,
         &crate::coordination::facade::FacadeError::StateCorrupt,
         LaunchTiming {
             clock: Some(at(0)),
@@ -1305,7 +1320,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
     )
     .unwrap();
     assert!(
-        !lookup_failed.nodes[0].attempts[0]
+        !lookup_failed.nodes[work_index].attempts[0]
             .extra
             .contains_key(PRELAUNCH_REFUSAL_PROOF)
     );
@@ -1316,7 +1331,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
     launch_disposition::<ErrorLauncher, MemoryJournal>(
         &mut refusing_owner,
         &mut unknown,
-        0,
+        work_index,
         &crate::coordination::facade::FacadeError::LaunchUnknown {
             operation_id: provenant_core::OperationId::parse("unknown-operation").unwrap(),
         },
@@ -1332,28 +1347,33 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
     )
     .unwrap();
     assert!(
-        !unknown.nodes[0].attempts[0]
+        !unknown.nodes[work_index].attempts[0]
             .extra
             .contains_key(PRELAUNCH_REFUSAL_PROOF)
     );
     let before = unknown.clone();
     assert!(retry(&document, &mut unknown, None, &|_| Ok(()), None).is_err());
     assert_eq!(unknown, before);
-    let prior = checkpoint.nodes[0].attempts[0].clone();
+    let prior = checkpoint.nodes[work_index].attempts[0].clone();
     assert_eq!(prior.state, AttemptState::Starting);
     assert!(!prior.launched);
     assert!(prior.attempt_ref.is_none());
-    let sibling = checkpoint.nodes[1].clone();
+    let sibling = checkpoint.nodes[sibling_index].clone();
     // The launch flag is set before dispatch; explicit host proof overrides it.
     for unsafe_case in 1..6 {
         let mut candidate = checkpoint.clone();
         match unsafe_case {
-            1 => candidate.nodes[0].attempts[0].attempt_ref = Some("host/uncertain".into()),
-            2 => candidate.nodes[0].advance_error_code = Some("launch_retry_exhausted".into()),
-            3 => candidate.nodes[0].state = NodeState::Running,
-            4 => candidate.nodes[0].attempts[0].state = AttemptState::Running,
+            1 => {
+                candidate.nodes[work_index].attempts[0].attempt_ref = Some("host/uncertain".into())
+            }
+            2 => {
+                candidate.nodes[work_index].advance_error_code =
+                    Some("launch_retry_exhausted".into())
+            }
+            3 => candidate.nodes[work_index].state = NodeState::Running,
+            4 => candidate.nodes[work_index].attempts[0].state = AttemptState::Running,
             _ => {
-                candidate.nodes[0].attempts[0]
+                candidate.nodes[work_index].attempts[0]
                     .extra
                     .remove(PRELAUNCH_REFUSAL_PROOF);
             }
@@ -1364,12 +1384,17 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
     }
     retry(&document, &mut checkpoint, None, &|_| Ok(()), None).unwrap();
     assert!(!checkpoint.cancelled);
-    assert_eq!(checkpoint.nodes[0].state, NodeState::Pending);
-    assert_eq!(checkpoint.nodes[0].advance_owner_code, None);
-    assert_eq!(checkpoint.nodes[0].previous_attempts, vec![prior]);
-    assert_eq!(checkpoint.nodes[1], sibling);
+    assert_eq!(checkpoint.nodes[work_index].state, NodeState::Pending);
+    assert_eq!(checkpoint.nodes[work_index].advance_owner_code, None);
+    assert_eq!(checkpoint.nodes[work_index].previous_attempts, vec![prior]);
+    assert_eq!(checkpoint.nodes[sibling_index], sibling);
     let mut owner = FakeOwner {
-        observations: [done_as("retried-work"), done_as("pending-sibling")].into(),
+        observations: [
+            done_as("retried-work"),
+            done_as("holder-attempt"),
+            done_as("pending-sibling"),
+        ]
+        .into(),
         ..Default::default()
     };
     let completed = advance(&document, &mut owner, &mut MemoryJournal(Some(checkpoint))).unwrap();
@@ -1381,7 +1406,6 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
             .iter()
             .all(|node| node.state == NodeState::Succeeded)
     );
-    assert_eq!(owner.calls.len(), 2);
 }
 
 #[test]

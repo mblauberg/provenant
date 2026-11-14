@@ -653,39 +653,39 @@ fn composite_running_status_does_not_consume_an_attempt_slot() {
         ..Default::default()
     };
     let mut owner = FakeOwner {
-        observations: [
-            AttemptObservation::Pending { attempt_ref: None },
-            terminal(AttemptOutcome::Succeeded),
-            terminal(AttemptOutcome::Succeeded),
-        ]
-        .into(),
+        admission_policy: Some({
+            use provenant_records::policy::{Policy, Source, Strength};
+            let mut policy = Policy::default();
+            policy.overlay(
+                &[("GRAPH_CONCURRENCY_CAP".to_owned(), Strength::Refuse)].into(),
+                Source::Project,
+            );
+            policy
+        }),
+        observations: [AttemptObservation::Pending { attempt_ref: None }].into(),
         ..Default::default()
     };
-    let mut journal = MemoryJournal::default();
-    let pending = advance_with_budget(
+    let run = advance_with_budget(
         &document,
         &mut owner,
-        &mut journal,
+        &mut MemoryJournal::default(),
         &limits,
         &Default::default(),
     )
     .unwrap();
-    assert_eq!(owner.calls.len(), 1);
+    let member = |id: &str| {
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == format!("group--{id}"))
+            .unwrap()
+    };
+    assert_eq!(member("a").state, NodeState::Running);
+    assert_eq!(member("b").state, NodeState::Blocked);
     assert_eq!(
-        pending.checkpoint.nodes.last().unwrap().state,
-        NodeState::Running
+        member("b").advance_error_code.as_deref(),
+        Some("concurrency_cap")
     );
-    let complete = advance_with_budget(
-        &document,
-        &mut owner,
-        &mut journal,
-        &limits,
-        &Default::default(),
-    )
-    .unwrap();
-    assert_eq!(complete.status, GraphStatus::Complete);
-    assert!(complete.checkpoint.successful());
-    assert_eq!(owner.calls.len(), 3);
 }
 
 #[test]
