@@ -138,8 +138,9 @@ read/wait work; `domains.fabric.graph.writer_provision_seconds` gives each write
 provisioning its independent allowance. Both default to 55 seconds, validate in
 1..=14400, and report their effective configuration source. Changing a reader's
 wait does not change a writer's provisioning allowance. An explicit request wait
-of zero observes once without waiting; positive subsecond transport budgets
-retain their requested duration. The retired
+of zero observes local state once without waiting. A remote observation whose
+transport cannot complete inside that budget reports timeout without extending
+it. Positive subsecond transport budgets retain their requested duration. The retired
 `graph.writer_launch_seconds` is refused by config validation with both new keys
 named in its diagnostic; it is never an alias.
 

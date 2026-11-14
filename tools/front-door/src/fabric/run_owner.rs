@@ -1518,6 +1518,7 @@ impl BinaryRunOwner<'_> {
                                         satisfied: false,
                                         timed_out: true,
                                     }),
+                                    None if expired => Err(FacadeError::Timeout),
                                     _ => Err(error),
                                 };
                             }

@@ -259,7 +259,8 @@ impl RunStore {
             Ok((admitted, warnings))
         })?;
         for warning in warnings {
-            eprintln!("warning: {warning}");
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
         }
         Ok(admitted)
     }
@@ -818,7 +819,8 @@ impl RunStore {
             Ok((Some(next), warnings))
         })?;
         for warning in warnings {
-            eprintln!("warning: {warning}");
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
         }
         Ok(record)
     }
