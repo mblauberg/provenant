@@ -155,9 +155,13 @@ pub struct LandedEvidence {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum CustodyState {
     Active,
-    Landed { evidence: LandedEvidence },
+    Landed {
+        evidence: LandedEvidence,
+    },
     /// Points at `landing::RetirementRecord::id`, which owns the decision and step outcomes.
-    Retired { retirement_id: String },
+    Retired {
+        retirement_id: String,
+    },
     Released,
 }
 impl CustodyState {
