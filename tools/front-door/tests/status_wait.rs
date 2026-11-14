@@ -56,7 +56,10 @@ fn assert_digest_fields(digest: &Value) {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "CLI boundary fixture owns child process I/O")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "CLI boundary fixture owns child process I/O"
+)]
 fn fixture_cli(rig: &TestRig, args: &[&str]) -> Result<Output> {
     let binary = option_env!("CARGO_BIN_EXE_provenant")
         .ok_or("production binary path is only available to integration targets")?;
@@ -291,7 +294,15 @@ fn wait_any_wakes_on_node_settlement_and_wait_reports_early_events() -> Result {
     let mut wait_any = Command::new(binary)
         .arg("--state-dir")
         .arg(&rig.state)
-        .args(["wait", graph, "--any", "--follow", "--timeout", "30s", "--json"])
+        .args([
+            "wait",
+            graph,
+            "--any",
+            "--follow",
+            "--timeout",
+            "30s",
+            "--json",
+        ])
         .current_dir(&rig.project)
         .envs(rig.env.iter().cloned())
         .stdout(Stdio::piped())
@@ -302,16 +313,31 @@ fn wait_any_wakes_on_node_settlement_and_wait_reports_early_events() -> Result {
     // so journal changes cannot race a slow process start on a loaded host.
     let mut any_stdout = std::io::BufReader::new(wait_any.stdout.take().ok_or("any wait stdout")?);
     let mut initial = String::new();
-    assert!(any_stdout.read_line(&mut initial)? > 0, "missing initial snapshot");
+    assert!(
+        any_stdout.read_line(&mut initial)? > 0,
+        "missing initial snapshot"
+    );
     let initial: Value = serde_json::from_str(&initial)?;
     assert_eq!(initial["event"], "transition", "{initial}");
     set_node_states(&rig, graph, &[("slow", "running")])?;
     let mut running = String::new();
-    assert!(any_stdout.read_line(&mut running)? > 0, "missing running snapshot");
+    assert!(
+        any_stdout.read_line(&mut running)? > 0,
+        "missing running snapshot"
+    );
     let running: Value = serde_json::from_str(&running)?;
-    assert_eq!(running["event"], "transition", "progress did not settle: {running}");
-    assert!(running["digests"].as_array().ok_or("running digests")?.iter()
-        .any(|digest| digest["key"]["node"] == "slow" && digest["state"] == "running"), "{running}");
+    assert_eq!(
+        running["event"], "transition",
+        "progress did not settle: {running}"
+    );
+    assert!(
+        running["digests"]
+            .as_array()
+            .ok_or("running digests")?
+            .iter()
+            .any(|digest| digest["key"]["node"] == "slow" && digest["state"] == "running"),
+        "{running}"
+    );
     assert!(wait_any.try_wait()?.is_none(), "running is not settled");
     set_node_states(&rig, graph, &[("fast", "succeeded")])?;
     let mut settled_records = String::new();
