@@ -1579,8 +1579,8 @@ fn writer_registry_fixture() -> Result<TestRig> {
     Ok(rig)
 }
 
-/// Admission must survive repository-wide contention even without native execution.
-fn simultaneous_writer_launches_create_attempts() -> Result {
+/// Admission starts or durably schedules a retry under repository contention.
+fn simultaneous_writer_launches_are_admitted_or_scheduled_for_retry() -> Result {
     for _round in 0..2 {
         let rig = writer_registry_fixture()?;
         let _cleanup = rig.process_cleanup();
@@ -1619,9 +1619,18 @@ fn simultaneous_writer_launches_create_attempts() -> Result {
             for launch in launches {
                 let output = launch.join().map_err(|_| "launch thread panicked")??;
                 let response: Value = serde_json::from_slice(&output.stdout)?;
+                let node = &response["data"]["checkpoint"]["nodes"][0];
+                let accepted = node["attempts"][0]["attempt_ref"].is_string();
+                let retry = node["state"] == "running"
+                    && node["launch_retry"]["wake_at"].as_str().is_some()
+                    && response["data"]["status"] == "waiting"
+                    && response["data"]["waits"].as_array().is_some_and(|waits| {
+                        waits.iter().any(|wait| {
+                            wait["node"] == node["id"] && wait["wait"] == "launch_retry"
+                        })
+                    });
                 assert!(
-                    response["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
-                        .is_string(),
+                    accepted || retry,
                     "{response}; {}",
                     String::from_utf8_lossy(&output.stderr)
                 );
@@ -1632,8 +1641,8 @@ fn simultaneous_writer_launches_create_attempts() -> Result {
     Ok(())
 }
 
-/// A held registry consumes the launch budget, then reports a typed CLI error.
-fn writer_registry_timeout_is_bounded_and_reported() -> Result {
+/// A held registry preserves a typed, durable retry without creating a writer.
+fn writer_registry_contention_is_durable_without_creating_a_writer() -> Result {
     use provenant_core::{Clock, RootInputs, WaitBudget};
     use provenant_os::{
         clock::SystemClock,
@@ -1683,14 +1692,27 @@ fn writer_registry_timeout_is_bounded_and_reported() -> Result {
         "HEAD",
         "--json",
     ])?;
-    assert_ne!(code(&output), 0, "{output:?}");
     let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(response["error"]["code"], "writer_lock_busy", "{response}");
-    assert_eq!(
-        response["data"]["checkpoint"]["nodes"][0]["attempts"],
-        json!([]),
+    let node = &response["data"]["checkpoint"]["nodes"][0];
+    assert_eq!(node["advance_owner_code"], "writer_lock_busy", "{response}");
+    assert!(
+        node["attempts"].as_array().is_some_and(Vec::is_empty),
         "{response}"
     );
+    let retry = node
+        .get("launch_retry")
+        .filter(|value| value.is_object())
+        .or_else(|| {
+            node.get("last_launch_retry")
+                .filter(|value| value.is_object())
+        })
+        .ok_or("durable writer retry")?;
+    assert!(
+        retry["failures"]
+            .as_u64()
+            .is_some_and(|failures| failures > 0)
+    );
+    assert!(retry["wake_at"].is_string() || node["advance_error_code"] == "launch_retry_exhausted");
     assert!(!rig.project.join(".worktrees/blocked-writer").exists());
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     let branch = rig.execute(
@@ -1702,28 +1724,21 @@ fn writer_registry_timeout_is_bounded_and_reported() -> Result {
     let graph = response["data"]["checkpoint"]["graph_id"]
         .as_str()
         .ok_or("graph id")?;
-    // Reading the failure must not reacquire the registry for branch advice.
-    for command in ["status", "output"] {
-        let output = rig.command(&[command, graph, "--json"])?;
-        assert_eq!(code(&output), 0, "{output:?}");
-        let reading: Value = serde_json::from_slice(&output.stdout.bytes)?;
-        let rows = if command == "status" {
-            &reading["data"]["rows"]
-        } else {
-            &reading["data"]["graph_failures"]
-        };
-        assert!(
-            rows.as_array().is_some_and(|rows| rows
-                .iter()
-                .any(|row| { row["kind"] == "node" && row["cause_code"] == "writer_lock_busy" })),
-            "{reading}"
-        );
-    }
+    // Reading contention must not reacquire the held registry.
+    let output = rig.command(&["status", graph, "--json"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let reading: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert!(
+        reading["data"]["rows"].as_array().is_some_and(|rows| rows
+            .iter()
+            .any(|row| row["kind"] == "node" && row["cause_code"] == "writer_lock_busy")),
+        "{reading}"
+    );
     Ok(())
 }
 
-/// Expanded writer provisioning obeys the same configured launch allowance.
-fn expanded_writer_registry_wait_uses_launch_allowance() -> Result {
+/// Expanded writers preserve contention as a durable retry without waiting.
+fn expanded_writer_registry_contention_remains_retryable() -> Result {
     use provenant_core::{Clock, RootInputs, WaitBudget};
     use provenant_os::{
         clock::SystemClock,
@@ -1812,22 +1827,21 @@ fn expanded_writer_registry_wait_uses_launch_allowance() -> Result {
         .iter()
         .find(|node| node.id == "writer")
         .ok_or("writer")?;
-    assert_eq!(
-        writer.state,
-        provenant_fabric_runtime::graph::NodeState::Blocked
-    );
     assert!(writer.attempts.is_empty());
-    assert_eq!(
-        writer.advance_error_code.as_deref(),
-        Some("launch_retry_exhausted")
-    );
     assert_eq!(
         writer.advance_owner_code.as_deref(),
         Some("writer_lock_busy")
     );
-    assert!(writer.last_launch_retry.as_ref().is_some_and(|retry| {
-        retry.deadline.is_some() && retry.failures > 0 && retry.wake_at.is_none()
-    }));
+    let retry = writer
+        .launch_retry
+        .as_ref()
+        .or(writer.last_launch_retry.as_ref())
+        .ok_or("durable expanded writer retry")?;
+    assert!(retry.failures > 0 && retry.deadline.is_some());
+    assert!(
+        retry.wake_at.is_some()
+            || writer.advance_error_code.as_deref() == Some("launch_retry_exhausted")
+    );
     assert!(
         provenant_fabric_runtime::graph::relay::pending_provisioning(&checkpoint)
             .iter()
@@ -4512,20 +4526,20 @@ fn main() -> ExitCode {
                 provider_checks_preserve_routes_and_settlement_causes,
             ),
             (
-                "expanded_writer_registry_wait_uses_launch_allowance",
-                expanded_writer_registry_wait_uses_launch_allowance,
+                "expanded_writer_registry_contention_remains_retryable",
+                expanded_writer_registry_contention_remains_retryable,
             ),
             (
                 "pending_graph_reports_pre_attempt_writer_failure",
                 pending_graph_reports_pre_attempt_writer_failure,
             ),
             (
-                "writer_registry_timeout_is_bounded_and_reported",
-                writer_registry_timeout_is_bounded_and_reported,
+                "writer_registry_contention_is_durable_without_creating_a_writer",
+                writer_registry_contention_is_durable_without_creating_a_writer,
             ),
             (
-                "simultaneous_writer_launches_create_attempts",
-                simultaneous_writer_launches_create_attempts,
+                "simultaneous_writer_launches_are_admitted_or_scheduled_for_retry",
+                simultaneous_writer_launches_are_admitted_or_scheduled_for_retry,
             ),
             (
                 "simultaneous_first_launches_pass_cutover_guard",

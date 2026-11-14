@@ -140,17 +140,11 @@ pub(super) fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> R
             format!("{}:/usr/bin:/bin", bin.display()).into(),
         ));
         let account = rig.root.join("codex");
-        fs::write(
-            account.join("auth.json"),
-            br#"{"tokens":{"account_id":"fixture-preparation"}}"#,
-        )?;
-        support::register_account(
-            &rig,
-            "codex",
-            "preparation",
-            "fixture-preparation",
-            &account,
-        )?;
+        let auth = br#"{"tokens":{"account_id":"fixture-preparation"}}"#;
+        fs::write(account.join("auth.json"), auth)?;
+        let account_key =
+            provenant_providers::identity::codex_account(auth).ok_or("Codex fixture key")?;
+        support::register_account(&rig, "codex", "preparation", &account_key, &account)?;
         if phase == "delivery" {
             let wrapper = bin.join("git");
             fs::write(

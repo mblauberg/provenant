@@ -762,12 +762,25 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
     assert!(merged.is_dir());
     assert!(cache.is_dir());
     assert!(dry["data"]["worktree_cleanup"][0]["dry_run"] == true);
+    let target = merged.join("target");
+    let cleanup = dry["data"]["worktree_cleanup"]
+        .as_array()
+        .ok_or("worktree cleanup")?;
     assert!(
-        dry["data"]["worktree_cleanup"][0]["output"]
-            .as_array()
-            .ok_or("output")?
+        cleanup
             .iter()
-            .any(|entry| entry["reason"] == "would_remove" && entry["removed"] == false)
+            .flat_map(|report| ["output", "idle_output"])
+            .flat_map(|field| report[field].as_array().into_iter().flatten())
+            .any(|entry| {
+                entry["reason"] == "would_remove"
+                    && entry["removed"] == false
+                    && entry["path"]
+                        .as_str()
+                        .is_some_and(|path| Path::new(path).starts_with(&target))
+            }),
+        "preview should find regenerable output below {}: {}",
+        target.display(),
+        dry["data"]["worktree_cleanup"]
     );
     // Preview does not fetch the upstream proof needed to remove a tree.
     assert!(
@@ -1286,10 +1299,11 @@ pub(super) fn gc_collects_a_fast_forwarded_lane_its_settlement_missed() -> Resul
             assert_eq!(settlement_receipt(&fixture)?["cleanup_deferred"], true);
         }
         assert!(fixture.worktree.exists(), "busy={busy}");
-        ok(rig, &["gc", "--apply", "--json"])?;
+        let swept = ok(rig, &["gc", "--apply", "--json"])?;
         assert!(
             !fixture.worktree.exists(),
-            "the sweep must collect a fast-forwarded lane its settlement missed (busy={busy})"
+            "the sweep must collect a fast-forwarded lane its settlement missed (busy={busy}); gc={swept}; settlement={}",
+            settlement_receipt(&fixture)?
         );
         let receipt = settlement_receipt(&fixture)?;
         assert_eq!(receipt["state"], "pruned", "busy={busy}: {receipt}");
