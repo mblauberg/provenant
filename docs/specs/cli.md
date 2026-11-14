@@ -161,7 +161,7 @@ ID and typed alternatives without silently selecting another strategy.
 
 Landing CI, candidate gate, and post-merge waits use the forge observer's adaptive
 cadence when `poll_seconds` comes from the bundled default. Supplying `poll_seconds`
-at any configuration layer or using `land --poll` selects that fixed interval for
+at any supported configuration layer or using `land --poll` selects that fixed interval for
 all three waits. Source provenance decides this, so an explicit value is fixed even when it
 matches the bundled default.
 
