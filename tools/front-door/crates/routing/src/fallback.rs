@@ -152,5 +152,33 @@ mod tests {
                 "{reason:?}"
             );
         }
+        for (reason, expected) in [
+            (
+                provenant_records::RouteExclusionReason::ProviderUpdating,
+                FallbackOutcome::AdapterUnavailable,
+            ),
+            (
+                provenant_records::RouteExclusionReason::DisclosureDenied,
+                FallbackOutcome::Other,
+            ),
+        ] {
+            let outcome = FallbackOutcome::from_exclusion(&reason);
+            assert_eq!(outcome, expected, "{reason:?}");
+            let policy = FallbackPolicy {
+                outcome,
+                handoff: FallbackHandoff::Local,
+                custody_released: true,
+                budget_remaining: true,
+                pinned: false,
+            };
+            assert!(policy.allows_preparation_switch(), "{reason:?}");
+            assert!(
+                !FallbackPolicy {
+                    handoff: FallbackHandoff::UncertainOrLaunched,
+                    ..policy
+                }
+                .allows_preparation_switch()
+            );
+        }
     }
 }

@@ -2959,6 +2959,7 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
         "runs/r1/attempts/a1/tmp/scratch",
         "attempts/base/tmp/scratch",
         "children/c1/attempts/detached/tmp/scratch",
+        "children/c1/run.sqlite3",
         "admission.sqlite3",
         "fabric/fabric.sqlite3",
         "fabric/fabric.sqlite3-wal",
@@ -3032,6 +3033,7 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
         fs::create_dir_all(path.parent().ok_or("parent")?)?;
         match *name {
             "fabric/fabric.sqlite3" => old_sqlite_header(&path, 15)?,
+            "children/c1/run.sqlite3" => old_sqlite_header(&path, 10)?,
             "admission.sqlite3" => old_sqlite_header(&path, 6)?,
             "pr-contributions.sqlite3" => old_sqlite_header(&path, 4)?,
             _ => fs::write(&path, format!("format-1 {name}"))?,
@@ -3202,8 +3204,8 @@ fn reset_install(
     rig.command(&args)
 }
 
-#[test]
-fn install_identifies_state_only_from_receipts_or_positive_headers() -> Result {
+// Every receipt row exercises the install boundary and preserves bytes on refusal.
+fn check_receipt_header_decisions(receipt: Option<u64>) -> Result {
     for (store, old, intermediate, current) in [
         ("run.sqlite3", 10, 5, provenant_run::RUN_SCHEMA_VERSION),
         (
@@ -3233,95 +3235,213 @@ fn install_identifies_state_only_from_receipts_or_positive_headers() -> Result {
     ] {
         let (rig, stage) = reset_fixture()?;
         fs::remove_file(rig.state.join("run.sqlite3"))?;
-        let receipt_path = rig.state.join("install/receipt.json");
-        let receipt_bytes = fs::read(&receipt_path)?;
-        let store_path = rig.state.join(store);
-        fs::create_dir_all(store_path.parent().ok_or("store parent")?)?;
-        for receipt in [None, Some(1), Some(2)] {
-            if let Some(format) = receipt {
-                fs::write(&receipt_path, &receipt_bytes)?;
-                set_receipt_format(&rig, format)?;
-            } else if receipt_path.exists() {
-                fs::remove_file(&receipt_path)?;
+        match receipt {
+            Some(format) => set_receipt_format(&rig, format)?,
+            None => fs::remove_file(rig.state.join("install/receipt.json"))?,
+        }
+        let path = rig.state.join(store);
+        fs::create_dir_all(path.parent().ok_or("store parent")?)?;
+        for version in [0, old, intermediate, current, current + 1] {
+            old_sqlite_header(&path, version)?;
+            let before = snapshot(&rig.state)?;
+            let output = reset_install(&rig, &stage, &["--upgrade-preflight"])?;
+            let expected = match receipt {
+                Some(1) if version < current => Some(6),
+                Some(1) => None,
+                _ if version == old => Some(6),
+                _ if version == 0 => Some(0),
+                Some(2) if version >= current => Some(0),
+                _ => None,
+            };
+            if let Some(expected) = expected {
+                assert_eq!(
+                    code(&output),
+                    expected,
+                    "{store} {version} {receipt:?}: {output:?}"
+                );
+            } else {
+                let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+                assert_eq!(
+                    value["error"]["code"], "STATE_RESET_UNSAFE",
+                    "{store} {version} {receipt:?}: {output:?}"
+                );
             }
-            for version in [0, old, intermediate, current, current + 1] {
-                old_sqlite_header(&store_path, version)?;
-                let before = snapshot(&rig.state)?;
-                let output = reset_install(&rig, &stage, &["--upgrade-preflight"])?;
-                let expected = if receipt == Some(1) || version == old {
-                    6
-                } else if version == intermediate {
-                    2
-                } else {
-                    0
-                };
-                if expected == 2 {
-                    assert_ne!(
-                        code(&output),
-                        0,
-                        "{store} {version} {receipt:?}: {output:?}"
-                    );
-                    let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-                    assert_eq!(value["error"]["code"], "STATE_RESET_UNSAFE");
-                } else {
-                    assert_eq!(
-                        code(&output),
-                        expected,
-                        "{store} {version} {receipt:?}: {output:?}"
-                    );
-                }
-                assert_eq!(snapshot(&rig.state)?, before);
+            assert_eq!(snapshot(&rig.state)?, before);
+        }
+        old_sqlite_header(&path, 0)?;
+        let zero_header = fs::read(&path)?;
+        for (bytes, companion, unknown) in [
+            (Vec::new(), None, false),
+            (Vec::new(), Some("-wal"), false),
+            (vec![0; 12], Some("-wal"), true),
+            (vec![0; 12], Some("-shm"), true),
+            (zero_header.clone(), Some("-wal"), false),
+            (zero_header, Some("-shm"), false),
+            (b"not a database".to_vec(), None, true),
+        ] {
+            fs::write(&path, &bytes)?;
+            let companion_path = companion.map(|suffix| {
+                path.with_file_name(format!(
+                    "{}{suffix}",
+                    path.file_name().expect("store name").to_string_lossy()
+                ))
+            });
+            if let Some(companion) = &companion_path {
+                fs::write(companion, "uncheckpointed")?;
             }
-            old_sqlite_header(&store_path, 0)?;
-            let zero_header = fs::read(&store_path)?;
-            for (bytes, companion, unknown) in [
-                (Vec::new(), None, false),
-                (Vec::new(), Some("-wal"), false),
-                (vec![0; 12], Some("-wal"), false),
-                (vec![0; 12], Some("-shm"), false),
-                (zero_header.clone(), Some("-wal"), false),
-                (zero_header, Some("-shm"), false),
-                (b"not a database".to_vec(), None, true),
-            ] {
-                fs::write(&store_path, bytes)?;
-                let companion_path = companion.map(|suffix| {
-                    store_path.with_file_name(format!(
-                        "{}{suffix}",
-                        store_path
-                            .file_name()
-                            .expect("store name")
-                            .to_string_lossy()
-                    ))
-                });
-                if let Some(path) = &companion_path {
-                    fs::write(path, "uncheckpointed")?;
-                }
-                let before = snapshot(&rig.state)?;
-                let output = reset_install(&rig, &stage, &["--upgrade-preflight"])?;
-                if receipt == Some(1) {
-                    assert_eq!(code(&output), 6, "{output:?}");
-                } else if unknown {
-                    let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-                    assert_eq!(value["error"]["code"], "STATE_RESET_UNSAFE");
-                } else {
-                    assert_eq!(code(&output), 0, "{output:?}");
-                }
-                assert_eq!(snapshot(&rig.state)?, before);
-                if let Some(path) = companion_path {
-                    fs::remove_file(path)?;
-                }
+            let before = snapshot(&rig.state)?;
+            let output = reset_install(&rig, &stage, &["--upgrade-preflight"])?;
+            if unknown {
+                let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+                assert_eq!(value["error"]["code"], "STATE_RESET_UNSAFE", "{output:?}");
+            } else {
+                assert_eq!(
+                    code(&output),
+                    if receipt == Some(1) { 6 } else { 0 },
+                    "{output:?}"
+                );
+            }
+            assert_eq!(snapshot(&rig.state)?, before);
+            if let Some(companion) = companion_path {
+                fs::remove_file(companion)?;
             }
         }
+        // Each identified store can be removed without a sibling authorising it.
+        old_sqlite_header(
+            &path,
+            if receipt == Some(1) {
+                intermediate
+            } else {
+                old
+            },
+        )?;
+        let output = reset_install(&rig, &stage, &["--reset-state"])?;
+        assert_eq!(code(&output), 0, "{output:?}");
+        assert!(!path.exists());
     }
-    // A format-1 receipt also authorises the actual reset of intermediate stores.
+    Ok(())
+}
+
+#[test]
+fn reset_without_receipt_requires_shipped_headers_per_store() -> Result {
+    check_receipt_header_decisions(None)
+}
+
+#[test]
+fn reset_with_format_one_receipt_checks_each_store_against_its_current_version() -> Result {
+    check_receipt_header_decisions(Some(1))
+}
+
+#[test]
+fn reset_with_format_two_receipt_requires_shipped_headers_and_preserves_current_stores() -> Result {
+    check_receipt_header_decisions(Some(2))
+}
+
+#[test]
+fn reset_zero_version_header_is_fresh_only_with_at_most_one_page() -> Result {
     let (rig, stage) = reset_fixture()?;
-    fs::create_dir_all(rig.state.join("fabric"))?;
-    old_sqlite_header(&rig.state.join("fabric/fabric.sqlite3"), 8)?;
-    old_sqlite_header(&rig.state.join("pr-contributions.sqlite3"), 2)?;
-    let done = reset_install(&rig, &stage, &["--reset-state"])?;
-    assert_eq!(code(&done), 0, "{done:?}");
-    for name in ["fabric/fabric.sqlite3", "pr-contributions.sqlite3"] {
-        assert!(!rig.state.join(name).exists());
+    set_receipt_format(&rig, 2)?;
+    let path = rig.state.join("run.sqlite3");
+    for pages in [0_u32, 1, 2] {
+        old_sqlite_header(&path, 0)?;
+        let mut header = fs::read(&path)?;
+        header[28..32].copy_from_slice(&pages.to_be_bytes());
+        fs::write(&path, header)?;
+        let before = snapshot(&rig.state)?;
+        let output = reset_install(&rig, &stage, &["--upgrade-preflight"])?;
+        if pages <= 1 {
+            assert_eq!(code(&output), 0, "{output:?}");
+        } else {
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+            assert_eq!(value["error"]["code"], "STATE_RESET_UNSAFE");
+        }
+        assert_eq!(snapshot(&rig.state)?, before);
+    }
+    Ok(())
+}
+
+#[test]
+fn reset_selects_only_identified_stores_and_their_payloads() -> Result {
+    let (rig, stage) = reset_fixture()?;
+    set_receipt_format(&rig, 2)?;
+    // Root run and Fabric are live; only admission and a nested child are old.
+    old_sqlite_header(
+        &rig.state.join("run.sqlite3"),
+        provenant_run::RUN_SCHEMA_VERSION,
+    )?;
+    fs::create_dir_all(rig.state.join("fabric/graphs"))?;
+    old_sqlite_header(
+        &rig.state.join("fabric/fabric.sqlite3"),
+        provenant_fabric_store::CURRENT_SCHEMA_VERSION as u32,
+    )?;
+    fs::write(rig.state.join("fabric/graphs/live.json"), "live graph")?;
+    fs::create_dir_all(rig.state.join("attempts/live/provider-history"))?;
+    fs::write(
+        rig.state.join("attempts/live/provider-history/transcript"),
+        "live history",
+    )?;
+    old_sqlite_header(&rig.state.join("admission.sqlite3"), 6)?;
+    for (child, version) in [("old", 10), ("live", provenant_run::RUN_SCHEMA_VERSION)] {
+        let root = rig.state.join("children").join(child);
+        fs::create_dir_all(root.join("attempts/a1/tmp"))?;
+        old_sqlite_header(&root.join("run.sqlite3"), version)?;
+        fs::write(root.join("attempts/a1/tmp/marker"), child)?;
+    }
+    let before = snapshot(&rig.state)?;
+    let output = reset_install(&rig, &stage, &["--reset-state"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let after = snapshot(&rig.state)?;
+    for (path, bytes) in before.iter().filter(|(path, _)| {
+        ["run.sqlite3", "fabric", "attempts", "children/live"]
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
+    }) {
+        assert_eq!(after.get(path), Some(bytes), "{}", path.display());
+    }
+    assert!(!rig.state.join("admission.sqlite3").exists());
+    assert!(!rig.state.join("children/old/run.sqlite3").exists());
+    assert!(!rig.state.join("children/old/attempts").exists());
+    Ok(())
+}
+
+#[test]
+fn reset_archives_telemetry_only_without_a_format_two_receipt() -> Result {
+    for receipt in [None, Some(1), Some(2)] {
+        let (rig, stage) = reset_fixture()?;
+        match receipt {
+            Some(format) => set_receipt_format(&rig, format)?,
+            None => fs::remove_file(rig.state.join("install/receipt.json"))?,
+        }
+        let telemetry = [
+            (
+                "usage-ledger/segment.jsonl",
+                "usage-history/format-1/segment.jsonl",
+            ),
+            (
+                "ingest/schema-1.json",
+                "usage-history/format-1-ingest/schema-1.json",
+            ),
+            (
+                "ingest-cursors.json",
+                "usage-history/format-1-ingest-cursors.json",
+            ),
+        ];
+        for (source, _) in telemetry {
+            let path = rig.state.join(source);
+            fs::create_dir_all(path.parent().ok_or("telemetry parent")?)?;
+            fs::write(path, source)?;
+        }
+        let output = reset_install(&rig, &stage, &["--reset-state"])?;
+        assert_eq!(code(&output), 0, "{output:?}");
+        for (source, archive) in telemetry {
+            if receipt == Some(2) {
+                assert_eq!(fs::read_to_string(rig.state.join(source))?, source);
+                assert!(!rig.state.join(archive).exists());
+            } else {
+                assert!(!rig.state.join(source).exists());
+                assert_eq!(fs::read_to_string(rig.state.join(archive))?, source);
+            }
+        }
     }
     Ok(())
 }
@@ -3516,7 +3636,11 @@ fn reset_restores_readonly_payload_access_and_unlinks_only_dropped_links() -> Re
     let result = reset_install(&rig, &stage, &["--reset-state"])?;
     assert_eq!(code(&result), 0, "{result:?}");
     assert!(!rig.state.join("attempts").exists());
-    assert!(fs::symlink_metadata(rig.state.join("admission.sqlite3")).is_err());
+    assert!(
+        fs::symlink_metadata(rig.state.join("admission.sqlite3"))?
+            .file_type()
+            .is_symlink()
+    );
     assert_eq!(fs::read_to_string(outside)?, "keep target");
     Ok(())
 }
@@ -3716,7 +3840,7 @@ cp '{}' "$2/bin/provenant"
     assert!(!rig.home.join("installed").exists());
     let refusal = fs::read_to_string(&captured_stderr)?;
     assert!(!refusal.contains("Type reset"));
-    assert!(refusal.contains("install.sh --upgrade --reset-state"));
+    assert!(refusal.contains("original install command") && refusal.contains("--reset-state"));
     args.push("--reset-state".into());
     let accepted = rig.execute_os(Path::new("/bin/sh"), &args, None)?;
     assert_eq!(code(&accepted), 0, "{accepted:?}");

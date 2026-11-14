@@ -99,15 +99,23 @@ tombstones, never follows links and writes nothing on a dry run
 An install never opens an older-format store with SQLite. A format-1 receipt
 or positively identified format-1 stores trigger `STATE_FORMAT_BREAK`
 (exit 6). Without `--reset-state` the install changes nothing, even with `--yes`.
-A dry run describes the reset. A format-1 receipt identifies the old state without
-requiring release-current store headers; interrupted 1.x migration versions do
-not veto it. Receipt errors and newer formats refuse rather
-than guessing. The same header-only test applies with a format-2 receipt or no
-receipt, so old agents recreating stores can be detected without guessing from
-filenames. Without a receipt, positive format-1 evidence also requires an
-`install/` directory; otherwise repair the receipt before resetting.
-Retired work-index files and companions also trigger this recovery; no format-2
-writer creates them.
+A dry run describes the reset. Header classification happens separately for each
+store, including nested stores; one old database never authorises deletion of
+another store. Receipt errors and newer formats refuse rather than guessing.
+
+- No receipt: only a header in that store's shipped 1.x table identifies format
+  1. Empty/fresh stores supply no evidence; every other header refuses.
+- Receipt 1: SQLite versions below that store's current format-2 version identify
+  format 1, including interrupted 1.x migrations. A version at or above current,
+  garbage or a non-SQLite file refuses, since partial reset may have created
+  live format-2 state. Empty/fresh stores supply no evidence.
+- Receipt 2: only shipped 1.x versions identify stores recreated by an old agent.
+  Known format-2 versions (above the shipped 1.x maximum) are untouched;
+  unknown headers refuse.
+
+Without a receipt, positive evidence also requires an `install/` directory;
+otherwise repair the receipt before resetting. Retired work-index files and
+companions identify only that retired class: no format-2 writer creates them.
 
 `src/state_reset.rs::FORMAT_ONE_VERSIONS` is the single table of versions
 shipped by 1.x releases, audited across `v1.0.0` through `v1.11.1`:
@@ -122,36 +130,40 @@ shipped by 1.x releases, audited across `v1.0.0` through `v1.11.1`:
 
 These are release-current versions, not intermediate migration steps or a
 compatibility reader. Inspect bytes 0–15 for SQLite magic and 60–63 for the
-big-endian `user_version`; only membership in that store's table is format-1
-header evidence. Format-2 writers use versions above these sets, including
+big-endian `user_version`; without receipt 1, only membership in that store's
+table is format-1 header evidence. Format-2 writers use versions above these sets, including
 admission 7 and PR contributions 5, avoiding the old admission 6 collision and
 the PR version regression. Current versions come from the owning crates'
-schema constants. Later bumps and earlier format-2 versions are never reset
-evidence. An empty main file or SQLite header with version zero identifies
-neither format, with or without companions. A short main file with a `-wal`
-or `-shm` companion may await a checkpoint and is also not format-1 evidence.
-Without a format-1 receipt, other unknown non-empty or unreadable headers
-refuse with the file and repair/restore instructions, even with acknowledgement.
-Store symlinks supply no format evidence; an independently established reset
-unlinks them without following their targets.
+schema constants; every current version must exceed its store's last shipped
+1.x version. Under receipt 2, later bumps and earlier format-2 versions are never
+reset evidence. An empty main file or a complete SQLite header with version zero
+and page count 0 or 1 identifies neither format. A short non-empty main file
+refuses, including with a `-wal` or `-shm` companion: an incomplete header cannot identify the format. Other unknown
+non-empty or unreadable headers refuse with repair/restore instructions. Store
+symlinks supply no evidence and are left alone. Links inside positively identified
+payloads or their companions are unlinked without following their targets.
 
 Reset follows source verification, every account preview and release smoke
 checks. Intermediate install batches publish a format-1 receipt until removal
 succeeds and the final batch publishes format 2; there is no separate reset
 marker. The plan is rechecked before removal. Old peer and tick agents are
-stopped before deletion and restarted after a successful install; on failure
-the output names only current agents successfully stopped and prints
-`install.sh --upgrade --state-dir STATE --reset-state` to finish installation
-and restart them. Failures without a reset plan omit `--reset-state`. This also covers
+stopped before deletion and restarted after a successful install. Failures
+name stopped agents and agents whose shutdown failed as "may still be running",
+print the quoted state directory and direct the user to rerun their original
+install command, preserving source and destination options (runbook: Upgrade).
+Only failures with a reset plan request `--reset-state`. This also covers
 receipt publication and final-inspection failures after deletion. No other chair/harness
 session may be active during cut-over. Held custody locks in base, run-keyed and
 nested child stores block reset. Fleet upgrade preflights every host before
 installing any host; hosts remain quiescent until the operation completes.
 
-Reset removes the run database, base and run-keyed attempt trees, nested
-`children/` stores, both Fabric databases and graph journals, work index, PR
-contributions and `admission.sqlite3` (leases reference dropped runs), including
-SQLite companions. Owned macOS `pv-*` links to those attempts' tmp directories
+Reset removes only identified databases and their SQLite companions. An old
+run store selects its own attempt payloads, including run-keyed payloads;
+nested child stores are classified independently. An old Fabric database selects
+its graph journals; host Fabric, PR contributions and admission are independent
+stores. Containers of mixed stores are traversed rather than deleted wholesale.
+If an old payload tree contains a protected store, reset refuses before writes.
+Owned macOS `pv-*` links to those attempts' tmp directories
 are unlinked. All removals use a held state-root directory capability, restore
 owner access to read-only directories and treat absent entries as removed.
 Symlinked `fabric` refuses. Every dropped symlink, lock-named ones included, is
@@ -164,11 +176,16 @@ Before removing any dropped tree, provider archives from its actual
 are moved to `provider-history/format-1/<relative-attempt-path>/provider-history`
 with identity checks and no replacement. A symlink or non-directory at a source
 history or archive ancestor, or any existing archive destination, refuses
-at preflight before shutdown or moves. The format-1 `usage-ledger/` directory
-is moved without replacement to `usage-history/format-1/`; a non-directory
-source or ancestor and an existing destination also refuse during preflight.
-Format 2 starts a fresh usage ledger; there is no format-1 reader. Interrupted
-resets are rerunnable: an already moved source is absent and its archive stays.
+at preflight before shutdown or moves. Only with receipt none or 1 and
+positively identified format-1 state, telemetry is archived without replacement: `usage-ledger/` to `usage-history/format-1/`,
+schema-1 `ingest/` to `usage-history/format-1-ingest/`, and `ingest-cursors.json`
+to `usage-history/format-1-ingest-cursors.json`. Format 2 has no reader for any of
+these format-1 records. Unsafe source types or archive ancestors and existing
+destinations refuse during preflight. Under receipt 2 all telemetry stays
+untouched, even when an old agent has recreated another store: it is live
+format-2 data then. Provider history is moved only out of selected attempt
+payloads. Interrupted resets are rerunnable: absent sources stay absent and
+archives stay intact; no unidentified payload is deleted on a retry.
 Quota history, these archives, session checkpoints, chair logs, worktrees
 and branches stay.
 - Why: deleting state is irreversible and a lane may be running.

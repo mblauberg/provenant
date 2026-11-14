@@ -280,7 +280,7 @@ if "$upgrade"; then
             [ "$answer" = reset ] && reset=true
         fi
         if ! "$reset"; then
-            die 6 'Upgrade stopped by preflight; run: install.sh --upgrade --reset-state'
+            die 6 "Upgrade stopped by preflight for state directory '$state'. Rerun your original install command with --reset-state; see docs/runbooks/install.md, Upgrade section."
         fi
         if preflight; then
             :

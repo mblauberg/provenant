@@ -69,13 +69,20 @@ To cut over from 1.x to 2.0.0, on **each host, peers included**:
 The installer validates all account previews and release smoke checks before
 resetting, boots out the old tick and peer agents, then restarts them after
 successful installation. If installation fails after shutdown, the output names
-only current agents successfully stopped and prints
-`install.sh --upgrade --state-dir STATE --reset-state` to finish installation
-and restart them. Recovery without a reset plan omits `--reset-state`. Rerun it
-before opening sessions. Provider archives move
+stopped agents and agents whose shutdown failed as "may still be running",
+prints the quoted state directory and asks you to rerun your original install
+command, preserving `--source`, `--state-dir`, `--bin-dir` and other options.
+Add `--reset-state` only when the failed install had a reset plan. This Upgrade
+section is the recovery procedure; use the same installer path or invocation
+that you used originally. Rerun before opening sessions. Provider archives move
 out of the dropped tree to `provider-history/format-1/`, retaining their relative
 attempt paths. The format-1 usage ledger moves to `usage-history/format-1/`;
-format 2 starts a fresh `usage-ledger/` without reading old rows. Admission
+schema-1 `ingest/` and `ingest-cursors.json` move to
+`usage-history/format-1-ingest/` and
+`usage-history/format-1-ingest-cursors.json`. These telemetry archives are made
+only with receipt none or 1 and positively identified old state; receipt 2
+leaves live telemetry untouched even when old agents recreate stores. Format 2
+has no format-1 telemetry reader. Admission
 leases are dropped with the run stores. Read-only tmp
 directories and partial removal can be retried safely. Dropped symlinks,
 including lock-named links, are unlinked with an identity check; their targets
@@ -84,15 +91,19 @@ archive ancestor, or an existing archive destination, refuses during
 preflight, before shutdown or moves. The usage ledger source and archive
 ancestors must also be directories, and its archive destination must be absent.
 
-Only positively identified 1.x SQLite headers (or the retired work index) are
-reset evidence; filenames alone never establish the format when a receipt is
-missing. A format-1 receipt authorises reset even if stores were left at
-intermediate migration versions. Format-2 schema bumps cannot trigger a reset.
-An empty main file or a zero schema SQLite header identifies neither format,
-with or without companions. A short main file with WAL/shared-memory companions
-may await a checkpoint and is not format-1 evidence. Without a format-1 receipt,
-other unknown non-empty or unreadable headers refuse,
-name the file and require repair or restoration before retrying. See the
+Classify every store separately. Without a receipt, only shipped 1.x headers
+(or the retired work index) identify old state; other non-fresh headers refuse.
+With receipt 1, SQLite versions below that store's current format-2 version
+identify old state, including intermediate migrations. Current/newer versions
+and garbage refuse: they may be live data from a partial reset. With receipt 2,
+only shipped 1.x versions are reset; known format-2 stores and their payloads
+stay untouched, while unknown headers refuse. One old store never authorises
+removal of its siblings or live telemetry. A store symlink is left alone.
+An empty main file or a complete version-zero header with page count 0 or 1
+supplies no evidence. A short non-empty main file refuses even with WAL/shared-memory companions:
+its incomplete header cannot identify the format.
+Other unknown non-empty or unreadable headers refuse and require repair or
+restoration before retrying. See the
 [state format contract](../specs/state.md#a-format-break-needs-acknowledgement)
 for the shipped-version table and receipt rules.
 
