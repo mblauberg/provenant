@@ -11,7 +11,7 @@ use std::{collections::BTreeSet, path::Path};
 const FILE: &str = "pr-contributions.sqlite3";
 pub(crate) const SCHEMA: provenant_sqlite::Schema = provenant_sqlite::Schema {
     sql: include_str!("pr_contribution_schema.sql"),
-    version: 2,
+    version: 5,
 };
 /// Allocation is represented in millionths for exact validation.
 pub const WEIGHT_ONE: u32 = 1_000_000;

@@ -10,4 +10,4 @@ CREATE TABLE spacing (
  boot TEXT NOT NULL,
  last_start INTEGER NOT NULL CHECK(last_start>=0)
 ) STRICT;
-PRAGMA user_version=6;
+PRAGMA user_version=7;

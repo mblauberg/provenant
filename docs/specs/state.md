@@ -97,18 +97,47 @@ tombstones, never follows links and writes nothing on a dry run
 ### A format break needs acknowledgement
 
 An install never opens an older-format store with SQLite. A format-1 receipt
-or dropped stores in a root marked by `install/` trigger `STATE_FORMAT_BREAK`
+(also the pending-reset marker) or positively identified format-1 stores trigger `STATE_FORMAT_BREAK`
 (exit 6). Without `--reset-state` the install changes nothing, even with `--yes`.
 A dry run describes the reset. Receipt errors and newer formats refuse rather
-than guessing. Header-only `user_version` inspection also detects foreign stores
-recreated after a format-2 receipt, so an acknowledged reset can recover.
+than guessing. The same header-only test applies with a format-2 receipt or no
+receipt, so old agents recreating stores can be detected without guessing from
+filenames. Without a receipt, positive format-1 evidence also requires an
+`install/` directory; otherwise repair the receipt before resetting.
 Retired work-index files and companions also trigger this recovery; no format-2
 writer creates them.
+
+`src/state_reset.rs::FORMAT_ONE_VERSIONS` is the single table of versions
+shipped by 1.x releases, audited across `v1.0.0` through `v1.11.1`:
+
+| Store | Released 1.x current versions |
+| --- | --- |
+| `run.sqlite3` | 3, 4, 6, 7, 8, 9, 10 |
+| `fabric/fabric.sqlite3` | 7, 13, 15 |
+| `fabric/host.sqlite3` (introduced in v1.3.0) | 13, 15 |
+| `admission.sqlite3` | 1, 2, 5, 6 |
+| `pr-contributions.sqlite3` (introduced in v1.3.0) | 4 |
+
+These are release-current versions, not intermediate migration steps or a
+compatibility reader. Inspect bytes 0–15 for SQLite magic and 60–63 for the
+big-endian `user_version`; only membership in that store's table is format-1
+header evidence. Format-2 writers use versions above these sets, including
+admission 7 and PR contributions 5, avoiding the old admission 6 collision and
+the PR version regression. Current versions come from the owning crates'
+schema constants. Later bumps and earlier format-2 versions are never reset
+evidence. A short/empty main file or SQLite header with version zero and a
+`-wal` or `-shm` companion is unknown pending a possible checkpoint, not
+format-1 evidence. Other unknown or unreadable headers refuse with the file
+and repair/restore instructions, even with acknowledgement or an old receipt.
+Store symlinks supply no format evidence; an independently established reset
+unlinks them without following their targets.
 
 Reset follows source verification, every account preview and release smoke
 checks. The plan is rechecked before removal. Old peer and tick agents are
 stopped before deletion and restarted after a successful install; on failure
-rerun the acknowledged install with agents stopped. No other chair/harness
+the output names all stopped or potentially stopped agents and the exact
+acknowledged install command to restart the current agents. This also covers
+receipt publication and final-inspection failures after deletion. No other chair/harness
 session may be active during cut-over. Held custody locks in base, run-keyed and
 nested child stores block reset. Fleet upgrade preflights every host before
 installing any host; hosts remain quiescent until the operation completes.
@@ -127,7 +156,8 @@ target.
 Before removing any dropped tree, provider archives from its actual
 `attempts/<id>/provider-history` layout (including run-keyed and child stores)
 are moved to `provider-history/format-1/<relative-attempt-path>/provider-history`
-with identity checks and no replacement. Interrupted resets are rerunnable;
+with identity checks and no replacement. A symlink or non-directory at a source
+history or archive ancestor refuses at preflight. Interrupted resets are rerunnable;
 archive collisions refuse without overwriting either archive. Usage and quota
 ledgers, these provider archives, session checkpoints, chair logs, worktrees
 and branches stay.

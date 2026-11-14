@@ -3031,14 +3031,19 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
     {
         let path = state.join(name);
         fs::create_dir_all(path.parent().ok_or("parent")?)?;
-        fs::write(&path, format!("format-1 {name}"))?;
+        match *name {
+            "fabric/fabric.sqlite3" => old_sqlite_header(&path, 15)?,
+            "admission.sqlite3" => old_sqlite_header(&path, 6)?,
+            "pr-contributions.sqlite3" => old_sqlite_header(&path, 4)?,
+            _ => fs::write(&path, format!("format-1 {name}"))?,
+        }
     }
     // The old database has a dead queued row, with no attempt process or lock.
     {
         let database = rusqlite::Connection::open(state.join("run.sqlite3"))?;
         database.execute_batch(
             "CREATE TABLE attempts(state TEXT, started_at INTEGER);\
-             INSERT INTO attempts VALUES('queued', NULL);",
+             INSERT INTO attempts VALUES('queued', NULL); PRAGMA user_version=10;",
         )?;
     }
     // The old host index: Fabric schema 15, run-keyed chair bindings. Format 2
@@ -3150,12 +3155,20 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
     Ok(())
 }
 
+fn old_sqlite_header(path: &Path, version: u32) -> Result {
+    let mut header = vec![0; 64];
+    header[..16].copy_from_slice(b"SQLite format 3\0");
+    header[60..64].copy_from_slice(&version.to_be_bytes());
+    fs::write(path, header)?;
+    Ok(())
+}
+
 fn reset_fixture() -> Result<(TestRig, PathBuf)> {
     let rig = TestRig::new()?;
     let stage = staged(&rig)?;
     assert_eq!(code(&reset_install(&rig, &stage, &[])?), 0);
     set_receipt_format(&rig, 1)?;
-    fs::write(rig.state.join("run.sqlite3"), "old run store")?;
+    old_sqlite_header(&rig.state.join("run.sqlite3"), 10)?;
     Ok((rig, stage))
 }
 fn set_receipt_format(rig: &TestRig, format: u64) -> Result {
@@ -3327,6 +3340,37 @@ fn reset_restores_readonly_payload_access_and_unlinks_only_dropped_links() -> Re
 }
 
 #[test]
+fn reset_invalid_provider_history_refuses_during_preflight() -> Result {
+    for name in [
+        "attempts/a1/provider-history",
+        "provider-history",
+        "provider-history/format-1",
+    ] {
+        for link in [false, true] {
+            let (rig, stage) = reset_fixture()?;
+            let invalid = rig.state.join(name);
+            fs::create_dir_all(invalid.parent().ok_or("history parent")?)?;
+            let outside = rig.root.join("outside-history");
+            fs::create_dir(&outside)?;
+            fs::write(outside.join("transcript"), "keep")?;
+            if link {
+                std::os::unix::fs::symlink(&outside, &invalid)?;
+            } else {
+                fs::write(&invalid, "not a directory")?;
+            }
+            let before = snapshot(&rig.state)?;
+            let refused = reset_install(&rig, &stage, &["--upgrade-preflight", "--reset-state"])?;
+            assert_ne!(code(&refused), 0, "{refused:?}");
+            let value: serde_json::Value = serde_json::from_slice(&refused.stdout.bytes)?;
+            assert_eq!(value["error"]["code"], "STATE_RESET_UNSAFE");
+            assert_eq!(snapshot(&rig.state)?, before);
+            assert_eq!(fs::read_to_string(outside.join("transcript"))?, "keep");
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn reset_partial_archive_failure_is_rerunnable_without_overwriting_history() -> Result {
     let (rig, stage) = reset_fixture()?;
     // A current receipt can coexist with foreign stores recreated by an old agent.
@@ -3373,14 +3417,14 @@ fn reset_partial_archive_failure_is_rerunnable_without_overwriting_history() -> 
 }
 
 #[test]
-fn reset_recovers_foreign_store_after_format_two_receipt() -> Result {
+fn reset_recovers_shipped_store_after_format_two_receipt() -> Result {
     let (rig, stage) = reset_fixture()?;
     set_receipt_format(&rig, 2)?;
     fs::remove_file(rig.state.join("run.sqlite3"))?;
     let recreated = rig.state.join("children/c1/children/c2/run.sqlite3");
     fs::create_dir_all(recreated.parent().ok_or("child store")?)?;
     let database = rusqlite::Connection::open(&recreated)?;
-    database.execute_batch("PRAGMA user_version=11; CREATE TABLE old(value TEXT);")?;
+    database.execute_batch("PRAGMA user_version=10; CREATE TABLE old(value TEXT);")?;
     drop(database);
     let before = snapshot(&rig.state)?;
     let refused = reset_install(&rig, &stage, &[])?;
@@ -3391,7 +3435,8 @@ fn reset_recovers_foreign_store_after_format_two_receipt() -> Result {
     assert!(!recreated.exists());
     // A native format-2 header must not trigger another reset.
     let database = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
-    database.execute_batch("PRAGMA user_version=12; CREATE TABLE native(value TEXT);")?;
+    database.pragma_update(None, "user_version", provenant_run::RUN_SCHEMA_VERSION)?;
+    database.execute_batch("CREATE TABLE native(value TEXT);")?;
     drop(database);
     assert_eq!(code(&reset_install(&rig, &stage, &[])?), 0);
     assert!(rig.state.join("run.sqlite3").exists());
@@ -3409,7 +3454,7 @@ fn upgrade_refuses_format_break_before_any_captured_installer() -> Result {
 }
 
 #[test]
-fn bootstrap_prompts_only_for_the_format_acknowledgement_status() -> Result {
+fn bootstrap_captured_upgrade_refuses_without_reading_a_terminal() -> Result {
     let mut rig = TestRig::new()?;
     let source = rig.root.join("source");
     fs::create_dir_all(source.join("tools/front-door"))?;
@@ -3471,20 +3516,30 @@ cp '{}' "$2/bin/provenant"
     assert!(!String::from_utf8_lossy(&invalid.stderr.bytes).contains("Type reset"));
     rig.env.retain(|(key, _)| key != "PREFLIGHT_STATUS");
     rig.env.push(("PREFLIGHT_STATUS".into(), "6".into()));
-    let accepted = rig.execute_os(Path::new("/bin/sh"), &args, Some(b"reset\n"))?;
+    let captured_stderr = rig.root.join("captured-stderr");
+    rig.env
+        .push(("CAPTURE".into(), captured_stderr.clone().into_os_string()));
+    let mut redirected = vec![
+        "-c".into(),
+        "exec /bin/sh \"$@\" </dev/null 2>\"$CAPTURE\"".into(),
+        "bootstrap-test".into(),
+    ];
+    redirected.extend(args.clone());
+    let captured = rig.execute_os(Path::new("/bin/sh"), &redirected, None)?;
+    assert_eq!(code(&captured), 6, "{captured:?}");
+    assert!(!rig.home.join("installed").exists());
+    let refusal = fs::read_to_string(&captured_stderr)?;
+    assert!(!refusal.contains("Type reset"));
+    assert!(refusal.contains("install.sh --upgrade --reset-state"));
+    args.push("--reset-state".into());
+    let accepted = rig.execute_os(Path::new("/bin/sh"), &args, None)?;
     assert_eq!(code(&accepted), 0, "{accepted:?}");
     assert!(rig.home.join("installed").exists());
     fs::remove_file(rig.home.join("installed"))?;
     rig.env.push(("ACKNOWLEDGED_STATUS".into(), "2".into()));
-    let failed_validation = rig.execute_os(Path::new("/bin/sh"), &args, Some(b"reset\n"))?;
+    let failed_validation = rig.execute_os(Path::new("/bin/sh"), &args, None)?;
     assert_eq!(code(&failed_validation), 2);
     assert!(!rig.home.join("installed").exists());
-    rig.env.retain(|(key, _)| key != "ACKNOWLEDGED_STATUS");
-    args.push("--non-interactive".into());
-    let captured = rig.execute_os(Path::new("/bin/sh"), &args, Some(b"reset\n"))?;
-    assert_eq!(code(&captured), 6);
-    assert!(!rig.home.join("installed").exists());
-    assert!(!String::from_utf8_lossy(&captured.stderr.bytes).contains("Type reset"));
     Ok(())
 }
 
