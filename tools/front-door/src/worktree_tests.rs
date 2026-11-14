@@ -1221,7 +1221,12 @@ pub(crate) fn provider(args: &[OsString]) -> Result {
 }
 
 pub(super) fn json(output: &ExecOutcome) -> Result<Value> {
-    Ok(serde_json::from_slice(&output.stdout.bytes)?)
+    // Streaming commands emit event records before the final envelope.
+    serde_json::Deserializer::from_slice(&output.stdout.bytes)
+        .into_iter::<Value>()
+        .collect::<serde_json::Result<Vec<_>>>()?
+        .pop()
+        .ok_or_else(|| "command emitted no JSON result".into())
 }
 
 pub(super) fn ok(rig: &TestRig, args: &[&str]) -> Result<Value> {

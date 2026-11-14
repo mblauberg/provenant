@@ -230,6 +230,23 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
         }
     }
     for row in &mut rows {
+        // Checkpoint facts are projected for every row, including nodes that
+        // never launched an attempt (blocked, skipped and admission failures).
+        for field in [
+            "attempt_number",
+            "work_key",
+            "branch",
+            "pr",
+            "ci",
+            "result_path",
+            "provider_error",
+            "handoff",
+            "open_asks",
+            "result_summary",
+            "evidence_error",
+        ] {
+            row[field] = Value::Null;
+        }
         let node = row["node_id"]
             .as_str()
             .and_then(|id| run.checkpoint.nodes.iter().find(|node| node.id == id));
@@ -241,6 +258,50 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
                     .find(|attempt| attempt.attempt_ref.as_deref() == row["attempt_id"].as_str())
             }
         });
+        let latest = node.and_then(|node| node.recorded_attempts().next_back());
+        row["attempt_number"] = json!(attempt.map_or(1, |attempt| attempt.key.attempt));
+        let current =
+            row["kind"] == "node" || attempt.zip(latest).is_some_and(|(a, b)| std::ptr::eq(a, b));
+        if current {
+            row["branch"] = json!(
+                node.and_then(|node| node.outputs.as_ref())
+                    .and_then(|out| out.branch.as_ref())
+                    .or_else(|| node
+                        .and_then(|node| node.land.as_ref())
+                        .map(|land| &land.branch))
+            );
+            row["pr"] = node
+                .and_then(|node| node.land.as_ref())
+                .and_then(|land| land.pull_request)
+                .map_or_else(
+                    || json!(run.checkpoint.pull_request),
+                    |number| json!(number),
+                );
+            row["ci"] = json!(node.and_then(|node| node.ci.as_ref()));
+            row["handoff"] = json!(node.and_then(|node| node.handoff.as_ref()));
+            row["result_summary"] = json!(
+                node.and_then(|node| node.outputs.as_ref())
+                    .and_then(|out| out.result.as_ref())
+                    .map(|result| provenant_fabric_runtime::hosts::plain_text(
+                        &result.excerpt,
+                        200
+                    ))
+            );
+            row["result_path"] = json!(
+                node.and_then(|node| node.outputs.as_ref())
+                    .and_then(|out| out.result.as_ref())
+                    .and_then(|result| result.path.as_ref())
+            );
+            row["open_asks"] = json!(
+                run.checkpoint
+                    .asks
+                    .iter()
+                    .filter(
+                        |ask| ask.node.is_none() || ask.node.as_deref() == row["node_id"].as_str()
+                    )
+                    .collect::<Vec<_>>()
+            );
+        }
         row["outcome"] = if row["kind"] == "graph" {
             json!(run.outcome)
         } else {
@@ -363,16 +424,30 @@ pub(crate) fn render_graph_status(rows: &[Value]) -> String {
     for graph in &graphs {
         human.push_str(&status_line(&plain(&graph["id"]), graph, None));
     }
+    let digests = super::graph_status::node_digests(rows);
     for (node, attempt) in lines.iter().take(LISTING_ROWS) {
+        if let Some(digest) = digests
+            .iter()
+            .find(|digest| json!(digest.key) == node["work_key"])
+        {
+            human.push_str(&digest.line);
+            human.push('\n');
+            continue;
+        }
         let name = attempt.map_or_else(|| plain(&node["id"]), |attempt| plain(&attempt["id"]));
         let model = attempt.map_or_else(|| "-".to_owned(), row_model);
         human.push_str(&status_line(&name, node, Some(&model)));
     }
     if lines.len() > LISTING_ROWS {
-        human.push_str(&format!(
-            "{} more nodes; --json lists every row\n",
-            lines.len() - LISTING_ROWS
-        ));
+        let mut omitted = std::collections::BTreeMap::<String, usize>::new();
+        for (row, _) in lines.iter().skip(LISTING_ROWS) {
+            *omitted.entry(plain(&row["state"])).or_default() += 1;
+        }
+        for (state, count) in omitted {
+            human.push_str(&format!(
+                "{count} {state} nodes not shown; --json lists every row\n"
+            ));
+        }
     }
     if !next.is_empty() {
         human.push_str(&provenant_cli::bounded_text(
@@ -436,6 +511,27 @@ fn mark_unreadable_attempt(row: &mut Value, attempt: &str, error: &provenant_rec
     ));
 }
 
+fn status_keys(rows: &mut [Value], project: provenant_core::ProjectId) -> Result<(), FacadeError> {
+    for row in rows.iter_mut() {
+        if let (Some(graph), Some(node), Some(number)) = (
+            row["graph_id"].as_str(),
+            row["node_id"].as_str(),
+            row["attempt_number"].as_u64(),
+        ) {
+            row["work_key"] = json!(
+                provenant_records::WorkKey::new(
+                    project,
+                    graph,
+                    node,
+                    u32::try_from(number).map_err(|_| FacadeError::StateCorrupt)?
+                )
+                .map_err(|_| FacadeError::StateCorrupt)?
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Enrich graph attempt rows from identity-checked host records within the
 /// caller's budget. The run owner retains typed terminal causes.
 pub(crate) fn enrich_status_rows_within(
@@ -445,6 +541,7 @@ pub(crate) fn enrich_status_rows_within(
     cancel: &CancelToken,
     peer_budget: WaitBudget,
 ) -> Result<(), FacadeError> {
+    status_keys(rows, context.identity.project)?;
     let execution = provenant_run::ExecutionContext {
         state_root: context.roots.state.clone(),
         project_id: context.identity.project,
@@ -489,26 +586,34 @@ pub(crate) fn enrich_status_rows_within(
                         .map_err(|_| FacadeError::io("create peer status executor"))?,
                 ),
             };
-            let response = context
-                .peer_with(
-                    executor,
-                    clock,
-                    host,
-                    PeerAction::Run {
+            let response = context.peer_with(
+                executor,
+                clock,
+                host,
+                PeerAction::Run {
+                    extra: Default::default(),
+                    input: RunInput::Status {
                         extra: Default::default(),
-                        input: RunInput::Status {
+                        target: AttemptTarget {
                             extra: Default::default(),
-                            target: AttemptTarget {
-                                extra: Default::default(),
-                                host: Some(host),
-                                attempt,
-                            },
+                            host: Some(host),
+                            attempt,
                         },
                     },
-                    peer_budget,
-                    cancel,
-                )
-                .map_err(|failure| failure.error)?;
+                },
+                peer_budget,
+                cancel,
+            );
+            let response = match response {
+                Ok(response) => response,
+                Err(failure) => {
+                    row["evidence_error"] = json!(provenant_fabric_runtime::hosts::plain_text(
+                        &failure.error.to_string(),
+                        200
+                    ));
+                    continue;
+                }
+            };
             match response {
                 PeerResult::Run { data, .. } => match *data {
                     RunResult::Status {
@@ -565,20 +670,34 @@ pub(crate) fn enrich_status_rows_within(
                 row[field] = value.clone();
             }
         }
-        let projected = provenant_cli::run::project_lane(
+        let mut projected = provenant_cli::run::project_lane(
             &record,
             &waits,
             context.roots.state.as_path(),
             clock.wall_now().ok(),
             host == context.identity.host,
         );
+        if host == context.identity.host
+            && let Some(store) = &store
+        {
+            let evidence = provenant_cli::run::status_evidence(store, &execution, &record, &call);
+            projected.provider_error = evidence["provider_error"].as_str().map(str::to_owned);
+            projected.handoff =
+                (!evidence["handoff"].is_null()).then(|| evidence["handoff"].clone());
+        }
         let fields = serde_json::to_value(projected).map_err(|_| FacadeError::StateCorrupt)?;
         let reference = row["attempt_id"].clone();
         let graph_state = row["state"].clone();
+        let attempt_number = row["attempt_number"].clone();
+        let result_path = row["result_path"].clone();
         row.as_object_mut()
             .ok_or(FacadeError::StateCorrupt)?
             .extend(fields.as_object().ok_or(FacadeError::StateCorrupt)?.clone());
         row["attempt_id"] = reference;
+        row["attempt_number"] = attempt_number;
+        if row["result_path"].is_null() {
+            row["result_path"] = result_path;
+        }
         row["graph_state"] = graph_state;
         project_attempt_failure(row);
     }
@@ -944,9 +1063,10 @@ pub(crate) fn unified_graph_command(
                 }
             }
             let Some(factory) = &factory else {
-                let data = lane_graph_read(input)?;
+                let mut data = lane_graph_read(input)?;
                 let rows = data["rows"].as_array().ok_or(FacadeError::StateCorrupt)?;
                 human.push_str(&render_graph_status(rows));
+                data["digests"] = json!(super::graph_status::node_digests(rows));
                 documents.push(data);
                 continue;
             };
@@ -969,6 +1089,7 @@ pub(crate) fn unified_graph_command(
             }
             let rows = data["rows"].as_array().ok_or(FacadeError::StateCorrupt)?;
             human.push_str(&render_graph_status(rows));
+            data["digests"] = json!(super::graph_status::node_digests(rows));
             documents.push(data);
         }
         let data = match <[Value; 1]>::try_from(documents) {
@@ -1064,13 +1185,15 @@ pub(crate) struct ListedGraph {
     pub created_micros: Option<i64>,
     pub changed_micros: Option<i64>,
     pub reason: Option<String>,
+    pub digests: Vec<super::graph_status::NodeDigest>,
+    pub open_asks: Vec<Value>,
 }
 
 /// The rows a listing shows and how many settled rows it leaves out.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Listing {
     pub rows: Vec<ListedGraph>,
-    pub omitted: usize,
+    pub omitted: std::collections::BTreeMap<String, usize>,
     pub next: Option<u64>,
 }
 
@@ -1097,7 +1220,10 @@ pub(crate) fn select_listing(
             .cmp(&a.changed_micros)
             .then(a.name.cmp(&b.name))
     });
-    let total_settled = settled.len();
+    let mut omitted = std::collections::BTreeMap::<String, usize>::new();
+    for graph in &settled {
+        *omitted.entry(graph.state.clone()).or_default() += 1;
+    }
     let eligible: Vec<_> = if all {
         settled
     } else {
@@ -1110,7 +1236,13 @@ pub(crate) fn select_listing(
             })
             .collect()
     };
-    let room = limit.saturating_sub(active.len());
+    // Keep settled pages advancing even when active work alone fills the
+    // normal display allowance. Active graphs still appear on every page.
+    let room = if all {
+        limit.max(1)
+    } else {
+        limit.saturating_sub(active.len())
+    };
     let skip = if all {
         usize::try_from(cursor.unwrap_or(0)).unwrap_or(usize::MAX)
     } else {
@@ -1119,7 +1251,12 @@ pub(crate) fn select_listing(
     let shown: Vec<_> = eligible.iter().skip(skip).take(room).cloned().collect();
     let next = (all && skip.saturating_add(shown.len()) < eligible.len())
         .then(|| (skip + shown.len()) as u64);
-    let omitted = total_settled - shown.len();
+    for graph in &shown {
+        if let Some(count) = omitted.get_mut(&graph.state) {
+            *count -= 1;
+        }
+    }
+    omitted.retain(|_, count| *count > 0);
     let mut rows = active;
     rows.extend(shown);
     Listing {
@@ -1142,7 +1279,7 @@ pub(crate) fn graph_listing(
             Err(error) if missing_graph_context(error.as_ref()) => {
                 return Ok(Listing {
                     rows: Vec::new(),
-                    omitted: 0,
+                    omitted: Default::default(),
                     next: None,
                 });
             }
@@ -1186,7 +1323,11 @@ pub(crate) fn graph_listing(
                         nodes: run.checkpoint.nodes.len(),
                         created_micros: events.first().map(|event| event.timestamp_micros),
                         changed_micros: events.last().map(|event| event.timestamp_micros),
-                        reason,
+                        reason: reason.map(|reason| {
+                            provenant_fabric_runtime::hosts::plain_text(&reason, 1024)
+                        }),
+                        digests: Vec::new(),
+                        open_asks: run.checkpoint.asks.iter().map(|ask| json!(ask)).collect(),
                         name,
                     });
                 }
@@ -1200,6 +1341,8 @@ pub(crate) fn graph_listing(
                     name,
                     state: "unreadable".into(),
                     settled: false,
+                    digests: Vec::new(),
+                    open_asks: Vec::new(),
                     template: None,
                     nodes: 0,
                     created_micros: None,
@@ -1209,13 +1352,48 @@ pub(crate) fn graph_listing(
             }
         }
         let now = factory.clock.wall_now()?.as_micros();
-        Ok(select_listing(
+        let mut listing = select_listing(
             graphs,
             now,
             command.all,
             usize::try_from(command.limit).unwrap_or(usize::MAX),
             command.cursor,
-        ))
+        );
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
+        for graph in &mut listing.rows {
+            let Some(checkpoint) = FileJournal::read_status_checkpoint(root, project, &graph.name)
+                .ok()
+                .flatten()
+            else {
+                continue;
+            };
+            let target = GraphTarget {
+                graph: graph.name.clone(),
+                node: None,
+                attempt: None,
+            };
+            let mut rows = status_rows(&graph_snapshot(checkpoint), &target);
+            // Unavailable attempt/peer evidence must not hide the graph. The
+            // retained projection still explicitly marks external facts stale.
+            if let Err(error) = enrich_status_rows_within(
+                &mut rows,
+                &factory.context,
+                &factory.clock,
+                &cancel,
+                budget,
+            ) {
+                graph.reason = Some(provenant_fabric_runtime::hosts::plain_text(
+                    &format!(
+                        "{}; status evidence unavailable: {error}",
+                        graph.reason.as_deref().unwrap_or("")
+                    ),
+                    1024,
+                ));
+            }
+            graph.digests = super::graph_status::node_digests(&rows);
+        }
+        Ok(listing)
     })();
     match result {
         Ok(listing) => {
@@ -1234,6 +1412,33 @@ pub(crate) fn graph_listing(
                     graph.template.as_deref().unwrap_or("-"),
                     graph.nodes
                 ));
+                for digest in graph
+                    .digests
+                    .iter()
+                    .take(provenant_cli::limits::LISTING_ROWS)
+                {
+                    human.push_str(&format!("  {}\n", digest.line));
+                }
+                let mut omitted_nodes = std::collections::BTreeMap::<&str, usize>::new();
+                for digest in graph
+                    .digests
+                    .iter()
+                    .skip(provenant_cli::limits::LISTING_ROWS)
+                {
+                    *omitted_nodes.entry(&digest.state).or_default() += 1;
+                }
+                for (state, count) in omitted_nodes {
+                    human.push_str(&format!(
+                        "  {count} {state} nodes not shown; --json lists every digest\n"
+                    ));
+                }
+                for ask in &graph.open_asks {
+                    human.push_str(&format!(
+                        "  open_ask={} node={}\n",
+                        plain(&ask["ask_id"]),
+                        plain(&ask["node"])
+                    ));
+                }
                 if let Some(reason) = &graph.reason {
                     human.push_str(&format!(
                         "  {}\n",
@@ -1247,11 +1452,15 @@ pub(crate) fn graph_listing(
             if listing.rows.is_empty() {
                 human = "no graphs\n".into();
             }
-            if listing.omitted > 0 {
+            for (state, count) in &listing.omitted {
                 human.push_str(&format!(
-                    "{} settled graph{} not shown; --all lists them\n",
-                    listing.omitted,
-                    if listing.omitted == 1 { "" } else { "s" }
+                    "{count} {state} graphs not shown; --all lists them\n"
+                ));
+            }
+            if let Some(cursor) = listing.next {
+                human.push_str(&format!(
+                    "next: provenant status --all --limit {} --cursor {cursor}\n",
+                    command.limit
                 ));
             }
             let rows: Vec<_> = listing
@@ -1262,6 +1471,7 @@ pub(crate) fn graph_listing(
                         "name":graph.name,"state":graph.state,"template":graph.template,
                         "nodes":graph.nodes,"created_micros":graph.created_micros,
                         "changed_micros":graph.changed_micros,"reason":graph.reason,
+                        "digests":graph.digests,"open_asks":graph.open_asks,
                     })
                 })
                 .collect();
@@ -1844,6 +2054,7 @@ pub(crate) fn check_targets(
 pub(crate) struct WaitGraph {
     pub target: provenant_cli::Target,
     pub error: Option<String>,
+    pub rows: Vec<Value>,
 }
 
 /// The project's running graphs: what a wait with no target waits for. A
@@ -1864,17 +2075,23 @@ pub(crate) fn unsettled_graphs(
     let mut graphs = Vec::new();
     for name in FileJournal::graph_ids(root, project)? {
         wait_remaining(deadline, cancel)?;
-        let error = match FileJournal::read_status_checkpoint(root, project, &name) {
+        let (error, rows) = match FileJournal::read_status_checkpoint(root, project, &name) {
             Ok(Some(checkpoint)) => {
-                if graph_snapshot(checkpoint).status
-                    != provenant_fabric_runtime::graph::GraphStatus::Pending
-                {
+                let run = graph_snapshot(checkpoint);
+                if run.status != provenant_fabric_runtime::graph::GraphStatus::Pending {
                     continue;
                 }
-                None
+                let target = GraphTarget {
+                    graph: name.clone(),
+                    node: None,
+                    attempt: None,
+                };
+                let mut rows = status_rows(&run, &target);
+                status_keys(&mut rows, project)?;
+                (None, rows)
             }
             Ok(_) => continue,
-            Err(error) => Some(error.to_string()),
+            Err(error) => (Some(error.to_string()), Vec::new()),
         };
         graphs.push(WaitGraph {
             target: provenant_cli::Target {
@@ -1883,6 +2100,7 @@ pub(crate) fn unsettled_graphs(
                 attempt: None,
             },
             error,
+            rows,
         });
     }
     wait_remaining(deadline, cancel)?;
@@ -2188,6 +2406,8 @@ mod tests {
             created_micros: Some(changed_micros),
             changed_micros: Some(changed_micros),
             reason: None,
+            digests: Vec::new(),
+            open_asks: Vec::new(),
         }
     }
 
@@ -2218,13 +2438,13 @@ mod tests {
             let shown_settled = listing.rows.len() - shown_active;
             assert_eq!(shown_active, active, "every active graph is listed");
             assert_eq!(
-                listing.omitted,
+                listing.omitted.values().sum::<usize>(),
                 recent + old - shown_settled,
                 "the omission count is the settled rows not shown"
             );
             assert!(
-                shown_settled == 0 || listing.rows.len() <= limit,
-                "settled rows fill only the room under the limit"
+                if all { shown_settled <= limit } else { shown_settled == 0 || listing.rows.len() <= limit },
+                "settled rows respect the page allowance while every active graph stays visible"
             );
         }
         // `--all` pages through every settled graph, newest first.
@@ -2379,7 +2599,8 @@ mod tests {
             reading.ends_with("next: provenant retry g/parent\n"),
             "{reading}"
         );
-        assert!(reading.contains("more nodes; --json lists every row"));
+        // Per-state omission counts are checked at the CLI boundary; do not
+        // pin the human omission sentence here.
         assert_eq!(rows[1]["cause_code"], "AUTH_REQUIRED");
         assert_eq!(rows[1]["next"], "provenant retry g/parent");
     }

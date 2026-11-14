@@ -37,14 +37,15 @@ current lane field declarations.
 
 Ordinary human results default to a compact summary. The command's owner
 supplies a bounded typed summary: counts by state, action rows first, an explicit
-omission count and one typed `next` command. A command without an owner
+omission count and one typed `next` command. Node digest lines may use up to 4096 bytes to retain evidence and artifact
+paths on one line; causes and notes remain bounded. A command without an owner
 summary falls back to a generic truncator that shows text of up to 2 KiB whole
 and otherwise says how many lines it omitted. `next` is the only source of the
 next command: when a command has none, none is printed. Errors keep their
 repair command and are never compacted.
 
 The default `status` listing never omits an active or needs-attention graph;
-only settled graphs are left out, with their count. A launch refused before
+only settled graphs are left out, with counts per state. A launch refused before
 admission prints its recorded route and reason.
 
 Global `--full` means complete detail for the command and nothing else; it
@@ -216,12 +217,21 @@ target. `run --explain` and attempt status retain each field's winning source.
 
 `wait` with no target waits for the project's running graphs; a paused graph
 waits on its owner and is left out. Inside a lane, `wait` names its targets.
-`--any` returns at the first target to settle or need input; otherwise `wait`
-returns when every target has. `--pr NUMBER` is satisfied when the pull
+`--any` returns on a node settlement or a target settling (a graph paused for
+input or complete also settles); otherwise `wait` returns when every target
+has. Progress such as pending to running never satisfies `--any`. `--any` is
+the sole spelling; there is no `--until` alias. Already settled nodes in a
+partially running graph form the starting snapshot, so they do not satisfy a
+new wait on that graph. `--pr NUMBER` is satisfied when the pull
 request's required checks on its current head reach a verdict, or when it is
 merged or closed. `--timeout` takes a span, defaults to
 `domains.wait.timeout_seconds` and is at most four hours. `--follow` prints
-one line per transition before the result. Bare wait includes unreadable graphs
+one line per transition before the result. With or without `--follow`, each
+target emits a `settled` event as it settles, so early completion is visible
+while other targets continue. A graph's individual node settlements emit
+`node_settled` events. JSON output is newline-delimited events followed by the
+final command envelope; each event names its target and carries node digests.
+Bare wait includes unreadable graphs
 as unsuccessful targets. Other failed reads are retried until the shared
 deadline, which also bounds target validation, graph reads and peer enrichment.
 If a later read fails, the last successful data is retained and marked `stale`.
@@ -248,15 +258,33 @@ keeps the envelope and `--full` shows complete detail.
 - `status` with no target lists the project's graphs, one line each:
   `NAME STATE TEMPLATE NODES AGE`. It prints every unsettled graph, then
   graphs settled in the last 24 hours, newest first, up to 20 rows in all, and
-  says how many settled graphs it left out. Active rows are never left out,
-  even past the row limit. `--all` drops the age filter and pages with
-  `--limit` and `--cursor`. A stopped, paused or failed graph's line names its
+  counts omitted settled graphs per state. Active rows are never left out,
+  even past the row limit. `--all` drops the age filter and pages settled rows
+  with `--limit` and `--cursor`, in addition to active rows on every page.
+  A stopped, paused or failed graph's line names its
   cause, within `SUMMARY_ROW_BYTES`. `--json` returns
-  `{graphs, omitted, next_cursor}`.
-- `status TARGET` prints the graph line, then one line per node with its newest
-  attempt as `NAME/NODE#N STATE MODEL`.
-- `wait` prints one line per target when it returns: `TARGET STATE`, with the
-  settlement cause when it is not success.
+  `{graphs, omitted, next_cursor}`, where `omitted` maps each omitted state to
+  its count. Each graph includes `digests` and checkpoint `open_asks`.
+- `status TARGET` prints the graph line, then the shared node digest for each
+  node's newest attempt. A numbered target selects that attempt's digest.
+  Structured output keeps `rows` and adds `digests`.
+- `wait` returns one line per target and a shared digest per node. Structured
+  digests are in `targets[].data.digests`, including on timeout (retained data
+  is marked stale).
+
+Status and wait build the same `NodeDigest`: `key` (the typed WorkKey),
+`outcome`, bounded `cause`, `branch`, `pr`, `ci`, `result_path`,
+`provider_error` and `line`. Additional fields retain `state`, `settled`, `handoff_status`
+and checkpoint `open_asks`; `evidence_error` names an unavailable peer read
+without dropping the retained node. A node that has not launched uses its prospective
+attempt #1. PR and CI fields are always present: `state: unknown` when no
+observation exists, or `state: stale` beside the retained PR `reference` or CI
+`observation`. These views do not refresh the forge or certify that a retained
+head is current. The one-line digest names the key, outcome, cause, branch,
+PR, CI, result path and declared handoff status when recorded. Failed provider
+attempts include their bounded, redacted provider error and result artifact
+path in both targeted status and wait; settlement classification is unchanged.
+
 - `stop`, `retry`, `steer` and `edit` print one line with the target and its
   new state.
 
@@ -561,11 +589,13 @@ and its fallback receipt; account and quota guards still apply.
 Every wait has an explicit budget, and a timeout exits 124. A target needing
 input satisfies a wait (exit 5). Neither expiry nor cancelling a wait stops the
 work: `wait` only reads checkpoints and pull request state. `--any` returns at
-the first target to settle; otherwise the wait returns when every target has.
+a node to settle or a graph to pause or complete; otherwise the wait returns
+when every target has. Running transitions never settle a target.
 `provenant help --all` owns the accepted bounds.
 - Why (default): an impatient reader must never kill a healthy lane.
 - Test: `src/status_wait.rs::any_returns_at_the_first_settlement_and_takes_its_verdict`;
   `src/status_wait.rs::all_waits_for_every_target_and_a_timeout_is_124`;
+  `tests/status_wait.rs::wait_any_wakes_on_node_settlement_and_wait_reports_early_events`;
   `crates/cli/src/lib.rs::wait_and_output_bounds`;
   `crates/supervisor/tests/custody.rs::cancelled_reader_preserves_healthy_custody_and_cancel_escalates`
 - Owner: `src/status_wait.rs`
@@ -586,9 +616,10 @@ target takes the graphs running when it starts.
 
 ### Watch is one stable line per event
 
-`wait --follow` prints each observed transition once, as one line naming the
-target and its new state, then the result. Repeated reads of an unchanged
-target print nothing.
+`wait` emits each target settlement once as soon as observed, including while
+other targets remain pending. `--follow` additionally prints each observed
+progress transition, naming the target and its new state. Repeated reads of an
+unchanged target print nothing. JSON event records precede the final envelope.
 - Why (default): a chair must be told when work settles without polling for it.
 - Test: `src/status_wait.rs::any_returns_at_the_first_settlement_and_takes_its_verdict`
 - Owner: `src/status_wait.rs`
@@ -596,13 +627,13 @@ target print nothing.
 ### Status selection
 
 Status never leaves out active work: every unsettled graph is listed, and
-only settled graphs fall to the row limit and the 24-hour filter, with their
-count printed. A stopped or failed graph's line names its cause in one bounded
+only settled graphs fall to the row limit and the 24-hour filter, with counts per state printed. A stopped or failed graph's line names its cause in one bounded
 line. Human and structured output use the same selection; historical reads are
 paged.
 - Why (default): a chair acting on a listing must see everything still running.
 - Test: `src/fabric/unified.rs::the_listing_never_hides_active_work_and_counts_what_it_omits`;
-  `src/fabric/unified.rs::a_stop_cause_is_one_bounded_line_that_names_it`
+  `src/fabric/unified.rs::a_stop_cause_is_one_bounded_line_that_names_it`;
+  `tests/status_wait.rs::status_omissions_are_counted_per_state_and_paged`
 - Owner: `src/fabric/unified.rs`
 
 ## Guards

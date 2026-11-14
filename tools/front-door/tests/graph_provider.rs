@@ -2898,8 +2898,8 @@ fn output_names_the_attempt_it_reads_and_writes_or_locates_parts() -> Result {
     let result_path: provenant_records::StructuredPathWire =
         serde_json::from_value(data["data"]["result_path"].clone())?;
     assert!(result_path.to_path_buf()?.ends_with("result.md"));
-    // Status is the row contract: it names the failed attempt, and `output`
-    // (checked above) owns the provider error and result path.
+    // Targeted status repeats the failed attempt's provider error and result
+    // path through the same evidence projection as output.
     let listing = rig.command(&["status", &target])?;
     assert_eq!(code(&listing), 0, "{listing:?}");
     let human = String::from_utf8(listing.stdout.bytes)?;
@@ -2908,6 +2908,20 @@ fn output_names_the_attempt_it_reads_and_writes_or_locates_parts() -> Result {
         .find(|line| line.starts_with(target.as_str()))
         .ok_or_else(|| human.clone())?;
     assert!(line.contains("failed"), "{human}");
+    let machine = rig.command(&["status", &target, "--json"])?;
+    assert_eq!(code(&machine), 0, "{machine:?}");
+    let machine = support::last_json_record(&machine.stdout.bytes)?;
+    let digests = machine["data"]["digests"]
+        .as_array()
+        .ok_or("target status digests")?;
+    let digest = digests.first().ok_or("failed attempt digest")?;
+    assert_eq!(digest["provider_error"], data["data"]["provider_error"]);
+    assert!(
+        digest["result_path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("result.md")),
+        "{digest}"
+    );
     let path = rig.command(&["output", &target, "--part", "stderr", "--path", "--json"])?;
     let data: Value = serde_json::from_slice(&path.stdout.bytes)?;
     assert_eq!(code(&path), 0, "{data}");

@@ -11,6 +11,18 @@ use std::{
 
 pub type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+/// Parse every JSON record in a command stream and return its final envelope.
+/// Event-producing commands retain their summary as the last record.
+pub fn last_json_record(bytes: &[u8]) -> Result<serde_json::Value> {
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+        .map(serde_json::from_slice::<serde_json::Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .pop()
+        .ok_or_else(|| "command emitted no JSON records".into())
+}
+
 pub const FIXTURE_STDOUT_LIMIT: usize = 2 * 1024 * 1024;
 pub const FIXTURE_STDERR_LIMIT: usize = 64 * 1024;
 
@@ -313,7 +325,7 @@ impl TestRig {
             .ok_or_else(|| format!("launch named no graph: {launch_value}"))?
             .to_owned();
         let wait = self.command(&["wait", &graph, "--timeout", timeout, "--json"])?;
-        let wait_value = serde_json::from_slice(&wait.stdout.bytes)
+        let wait_value = last_json_record(&wait.stdout.bytes)
             .map_err(|error| format!("wait output: {error}: {wait:?}"))?;
         let checkpoint = self.checkpoint(&graph)?;
         Ok(Settled {

@@ -650,46 +650,39 @@ pub(super) fn provider_error_line(
     id: AttemptId,
     call: &run::Request<'_>,
 ) -> Option<String> {
+    provider_error_with(|part, range| session.service().output(id, part, range, call).ok())
+}
+
+/// Shared bounded, redacted provider evidence for output and status readers.
+pub(super) fn provider_error_with(
+    mut read: impl FnMut(run::ArtifactPart, run::ByteRange) -> Option<run::OutputChunk>,
+) -> Option<String> {
     const TAIL_BYTES: u64 = 8192;
-    // A structured provider error (the result's own message) outranks the
-    // last stderr line, which may be only the tail of a longer explanation.
-    if let Ok(chunk) = session.service().output(
-        id,
+    if let Some(chunk) = read(
         run::ArtifactPart::Result,
         run::ByteRange {
             offset: 0,
             max_bytes: PROVIDER_ERROR_BYTES as u64,
         },
-        call,
     ) && let Some(message) = provider_error_from_result(&chunk.bytes)
     {
         return Some(message);
     }
-    let length = session
-        .service()
-        .output(
-            id,
-            run::ArtifactPart::Stderr,
-            run::ByteRange {
-                offset: 0,
-                max_bytes: 1,
-            },
-            call,
-        )
-        .ok()?
-        .len;
-    let tail = session
-        .service()
-        .output(
-            id,
-            run::ArtifactPart::Stderr,
-            run::ByteRange {
-                offset: length.saturating_sub(TAIL_BYTES),
-                max_bytes: TAIL_BYTES,
-            },
-            call,
-        )
-        .ok()?;
+    let length = read(
+        run::ArtifactPart::Stderr,
+        run::ByteRange {
+            offset: 0,
+            max_bytes: 1,
+        },
+    )?
+    .len;
+    let tail = read(
+        run::ArtifactPart::Stderr,
+        run::ByteRange {
+            offset: length.saturating_sub(TAIL_BYTES),
+            max_bytes: TAIL_BYTES,
+        },
+    )?;
     provider_error_from_stderr(&tail.bytes)
 }
 
