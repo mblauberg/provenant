@@ -180,8 +180,8 @@ impl ToolCall {
         }
     }
 
-    /// Relay frames stay strict even when shared peer records retain fields
-    /// from newer writers: the typed inputs deny unknown fields.
+    /// Relay frames reserve sender identity for the host even when shared
+    /// record inputs accept extension fields.
     pub fn parse(name: &str, arguments: Value) -> Result<Self, InvalidInput> {
         let mut arguments = arguments;
         if !matches!(name, MAIL | EVENTS | CLAIM) {

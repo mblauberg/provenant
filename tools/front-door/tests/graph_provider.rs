@@ -1078,8 +1078,8 @@ fn write_opencode_session(args: &[String]) -> Result {
     let db = rusqlite::Connection::open(data.join("opencode.db"))?;
     db.execute_batch(
         "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
-        CREATE TABLE session (id TEXT PRIMARY KEY);
-        INSERT INTO session VALUES ('ses_x');
+        CREATE TABLE session_v2 (id TEXT PRIMARY KEY);
+        INSERT INTO session_v2 VALUES ('ses_x');
         CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT);",
     )?;
     db.execute(

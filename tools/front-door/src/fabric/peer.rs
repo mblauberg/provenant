@@ -1246,7 +1246,7 @@ pub(crate) fn peer_submit_graph(
             extra: [
                 (
                     "peer_origin_context".into(),
-                    serde_json::json!({"graph_id":origin.graph_id,"node_id":origin.node_id}),
+                    serde_json::to_value(&origin).map_err(|_| FacadeError::StateCorrupt)?,
                 ),
                 ("peer_operation_id".into(), serde_json::json!(operation_id)),
                 (

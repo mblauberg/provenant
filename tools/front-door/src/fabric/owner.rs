@@ -3119,6 +3119,12 @@ impl BoundGraphOwner<'_> {
                     == Some(key.node_id.as_str())
             });
             if peer_root && !accepted {
+                // The receiver's graph provenance was authenticated at peer
+                // ingress. Restamp its local attempt context for this graph.
+                context
+                    .as_mut()
+                    .ok_or(FacadeError::StateCorrupt)?
+                    .graph_template_launch = true;
                 source_head = route
                     .extra
                     .get("peer_source_head")

@@ -738,8 +738,10 @@ pub(super) fn settlement_fallback_decision(
         skipped_accounts,
     } = evidence;
     let route = node.routes.get(route_index);
-    // Preparation evidence proves custody; the shared stop rule chooses the
-    // step. A launched stop is handled by decide(), never by this path.
+    // Preparation evidence proves custody. A refusal before provider launch
+    // takes the cause default, while an explicit, non-pinned node override
+    // still controls the next step. Launched stops use the retry-aware rule
+    // in decide(); there is no same-route retry to spend before launch.
     let cause = match outcome {
         AttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
         AttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
@@ -753,13 +755,15 @@ pub(super) fn settlement_fallback_decision(
     };
     let custody_released = live_fallback_allowed(outcome, launched, fallback_evidence);
     let step = cause.map(|cause| {
-        cause.next_step(
-            &node.on_stop,
-            StopFacts {
-                retries: 0,
-                custody_released,
-            },
-        )
+        if !custody_released {
+            NextStep::Chair
+        } else if !cause.rule().pinned {
+            node.on_stop
+                .get(cause)
+                .unwrap_or_else(|| cause.default_next())
+        } else {
+            cause.default_next()
+        }
     });
     if custody_released && step != Some(NextStep::NewRoute) {
         return SettlementFallback::Fail {
