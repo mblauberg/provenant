@@ -125,7 +125,7 @@ fn format_one_header(
             Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => false,
             Err(error) => return Err(error),
         };
-        let version = u32::from_be_bytes(header[60..64].try_into().expect("four bytes"));
+        let version = u32::from_be_bytes([header[60], header[61], header[62], header[63]]);
         if !complete || (&header[..16] == b"SQLite format 3\0" && version == 0) {
             for suffix in ["-wal", "-shm"] {
                 if metadata(&parent, OsStr::new(&format!("{leaf}{suffix}")))?.is_some() {
@@ -522,6 +522,11 @@ pub(crate) fn remove(plan: &Plan, quiesce: impl FnOnce() -> io::Result<()>) -> i
 }
 
 #[cfg(test)]
+#[allow(
+    unused_imports,
+    dead_code,
+    reason = "the custom worktree driver includes this module without libtest"
+)]
 mod tests {
     use super::*;
     type TestResult = Result<(), Box<dyn std::error::Error>>;
