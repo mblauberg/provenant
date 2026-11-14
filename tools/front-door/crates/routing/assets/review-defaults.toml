@@ -5,6 +5,9 @@ capacity_retry_seconds = 30
 capacity_retry_max_seconds = 600
 retry_delay_ceiling_seconds = 3600
 pacing_overrides = []
+[outcome_priors]
+enabled = true
+exploration_percent = 10
 [review.size]
 small_lines = 150
 small_files = 3

@@ -274,6 +274,10 @@ pub struct RoutingConfig {
     /// Exact models excluded from every pool while their schedule is active.
     pub model_exclusions: ModelExclusions,
     pub model_choices: Vec<ModelChoiceOverride>,
+    #[serde(skip)]
+    pub preference_sources: BTreeMap<String, String>,
+    pub capability_preferences: crate::CapabilityPreferences,
+    pub outcome_priors: crate::OutcomePriorSettings,
     pub model_policy: crate::ModelPolicies,
     /// Override the bundled writer advice; omitted fields keep the bundled values.
     pub writer_advisory: Option<WriterAdvisoryOverride>,
@@ -340,6 +344,8 @@ pub const MAX_RETRY_WAIT_SECONDS: u64 = 7 * 24 * 3_600;
 struct BundledRoutingDefaults {
     model_exclusions: ModelExclusions,
     model_choices: Vec<ModelChoiceOverride>,
+    capability_preferences: crate::CapabilityPreferences,
+    outcome_priors: crate::OutcomePriorSettings,
     model_policy: crate::ModelPolicies,
     writer_advisory: Option<WriterAdvisoryOverride>,
     suppress_opus_writer_warning: bool,
@@ -370,6 +376,9 @@ impl Default for RoutingConfig {
                 Self {
                     model_exclusions: asset.model_exclusions,
                     model_choices: asset.model_choices,
+                    preference_sources: BTreeMap::new(),
+                    capability_preferences: asset.capability_preferences,
+                    outcome_priors: asset.outcome_priors,
                     model_policy: asset.model_policy,
                     writer_advisory: asset.writer_advisory,
                     suppress_opus_writer_warning: asset.suppress_opus_writer_warning,
@@ -637,6 +646,23 @@ impl DomainConfig for RoutingConfig {
     fn validate(&self) -> Vec<SectionError> {
         let mut errors = Vec::new();
         self.model_policy.validate(&mut errors);
+        if self.outcome_priors.exploration_percent > 100 {
+            errors.push(SectionError {
+                detail: None,
+                field: "outcome_priors.exploration_percent".into(),
+                code: "range",
+            });
+        }
+        for (selector, weights) in &self.capability_preferences {
+            if !identifier(selector) || weights.values().any(|weight| *weight == 0 || *weight > 100)
+            {
+                errors.push(SectionError {
+                    detail: None,
+                    field: format!("capability_preferences.{selector}"),
+                    code: "range",
+                });
+            }
+        }
         for (index, row) in self.model_choices.iter().enumerate() {
             if row.expires.is_none()
                 || row.dimension != "model"
@@ -1076,6 +1102,9 @@ fn defaults(_: Profile) -> &'static str {
 /// Enforced model policy restrictions, including a retired schedule key in a
 /// restricting rule, are a boundary; other routing input recovers.
 pub const FIELD_METADATA: &[FieldMetadata] = &[
+    FieldMetadata::new("outcome_priors.enabled", "bool"),
+    FieldMetadata::int("outcome_priors.exploration_percent", 0, 100),
+    FieldMetadata::int("capability_preferences.{selector}.{capability}", 1, 100),
     FieldMetadata::new("review.floors.{floor}.paths", "list"),
     FieldMetadata::enumeration(
         "review.floors.{floor}.tier",
@@ -1124,6 +1153,8 @@ fn validate_section(table: &toml_edit::Table) -> Vec<SectionError> {
 #[serde(deny_unknown_fields)]
 pub struct ModelEntry {
     #[serde(default)]
+    pub capability: crate::Capability,
+    #[serde(default)]
     pub free: bool,
     pub model: ModelId,
     /// Only exact controls with recording evidence. No guessed effort default.
@@ -1152,7 +1183,7 @@ pub enum UnlimitedAllowance {
     Unlimited,
 }
 
-/// Apply the Go plan floor to every dispatch candidate, including unknown models.
+/// Diagnose the Go allowance preference. An error is a ranking warning, never a refusal.
 pub fn check_go_allowance(
     model: &ModelId,
     config: &RoutingConfig,
@@ -1176,7 +1207,7 @@ pub fn check_go_allowance(
         None => "unknown".to_owned(),
     };
     Err(format!(
-        "{}: Go monthly allowance {description}; domains.routing.opencode_go.min_monthly_allowance_usd is {floor}; lower [domains.routing.opencode_go] min_monthly_allowance_usd or choose a model with a documented allowance of at least ${floor} (0 disables the floor)",
+        "{}: Go monthly allowance {description}; domains.routing.opencode_go.min_monthly_allowance_usd is {floor}; lower [domains.routing.opencode_go] min_monthly_allowance_usd to remove this ranking penalty (0 disables the preference)",
         model.as_str()
     ))
 }
@@ -1327,10 +1358,13 @@ pub struct Catalogue {
     pub(crate) pools: BTreeMap<String, Vec<RoutePoolMember>>,
     pub(crate) pacing: BTreeMap<String, PacingPolicy>,
     pub(crate) writer_advisory: WriterAdvisory,
+    pub(crate) capability_preferences: crate::CapabilityPreferences,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CatalogueAsset {
+    #[serde(default)]
+    capability_preferences: crate::CapabilityPreferences,
     schema_version: u64,
     revision: String,
     models: Vec<ModelEntry>,
@@ -1405,6 +1439,7 @@ impl Catalogue {
         )))
         .map_err(|_| RoutingError::Catalogue)?;
         let value = Self {
+            capability_preferences: asset.capability_preferences,
             schema_version: asset.schema_version,
             revision: asset.revision,
             models: asset.models,
@@ -1672,6 +1707,7 @@ mod tests {
         let context = RoutingContext {
             policy_account_hint: None,
             choice_context: None,
+            selection_evidence: None,
             catalogue: &catalogue,
             config: &config,
             registry: REGISTRY,
@@ -1742,6 +1778,7 @@ mod tests {
         let context = RoutingContext {
             policy_account_hint: None,
             choice_context: None,
+            selection_evidence: None,
             catalogue: &catalogue,
             config: &config,
             registry: REGISTRY,
@@ -1808,6 +1845,7 @@ mod tests {
         let context = RoutingContext {
             policy_account_hint: None,
             choice_context: None,
+            selection_evidence: None,
             catalogue: &catalogue,
             config: &base,
             registry: REGISTRY,
@@ -1971,6 +2009,7 @@ mod tests {
         let context = RoutingContext {
             policy_account_hint: None,
             choice_context: None,
+            selection_evidence: None,
             catalogue: &catalogue,
             config: &config,
             registry: REGISTRY,

@@ -50,6 +50,48 @@ preference always expires.
   `crates/routing/src/policy.rs::bundled_fields_and_peak_schedule_can_be_overridden_per_account`;
   `crates/routing/src/tests/preferences.rs::model_choice_selects_only_eligible_pool_members_before_expiry`
 
+## Capability, account load and outcome preferences
+
+Senior pools and review work prefer catalogue capability classes through positive
+weights. `[domains.routing.capability_preferences.senior]` and `.review` override
+the catalogue's `general`, `strong` and `frontier` weights; an empty selector
+table disables that preference. The receipt records the class, effective weight
+and catalogue or config source. Capability never removes a member: Terra and
+below-preference models remain eligible, including when they are the only choice.
+
+For each exact model, account selection ranks ready accounts by usable headroom
+per second until reset, divided by one plus their live lane count. The limiting
+applicable fresh quota window supplies headroom and reset time. Missing inputs
+stay unknown in the receipt and use neutral ranking defaults. Authentication,
+identity and measured exhaustion still refuse; reserve levels, unknown partial
+headroom and the Go allowance floor apply positive ranking penalties with sourced
+warnings. They also pass the pre-launch admission check. Account keys break ties,
+so registration order cannot decide the chosen identity. The route and pool
+receipts expose `account_load`, its availability source, input sources and warnings;
+`ranking_factor_basis_points` records the combined pool factor separately from
+its pacing factor.
+
+Production dispatch reads host live lanes across registered projects and at most
+the latest 1,000 retained attempts in the caller's project. Pool/role-local priors
+count attributed successful completions, partial completions and quality failures;
+missing attribution and infrastructure stops are not quality observations. A
+Beta(1,1) prior shrinks low-sample estimates towards neutral. Receipts show counts,
+role, pool and evidence source; no evidence stays neutral. An independent seeded
+hash reserves a default 10% uniform exploration share among positive-weight ready
+members. Configured model-choice overrides still take precedence.
+`[domains.routing.outcome_priors] enabled = false` disables both outcome weighting
+and exploration; `exploration_percent` configures the share from 0 through 100.
+Store absence or unreadable evidence supplies unknown load and neutral priors,
+never a routing gate. The established read-only SQLite API may update WAL/SHM
+companions, but does not create a store or initialise its schema.
+- Why (default): D8 (#3271) and features 5 and 6 of #3207 prefer stronger reviews,
+  use capacity before reset and learn from outcomes without starving alternatives.
+- Test: `crates/routing/src/tests/quality.rs::capability_priors_and_exploration_are_preferences_on_nonempty_draws`;
+  `crates/routing/src/tests/quality.rs::account_ranking_uses_reset_adjusted_headroom_and_live_load_independent_of_order`;
+  `crates/routing/src/tests/availability.rs::pacing_reserve_warns_without_excluding_accounts`;
+  `crates/telemetry/src/tests.rs::route_priors_count_only_attributed_comparable_quality_outcomes`;
+  `crates/cli/src/route/tests_2.rs::go_allowance_preference_never_refuses_a_ready_dispatch`
+
 ## Capacity is not quota
 
 Capacity (`model_unavailable`) and account allowance (`quota_limited`) are
@@ -128,6 +170,12 @@ with a remedy, without copying arbitrary provider messages or bodies.
   `crates/providers/src/tests_accounts_and_limits.rs::selected_accounts_control_provider_environment_and_exact_authentication_grants`
 
 ## Accounts and credentials
+
+Go and Zen each have one account identity across their model namespace. An
+explicit Zen registration wins; otherwise the Go login directory supplies a single
+Zen credential view, without inheriting Go quota, limits or pacing. Repeated model
+entries never create additional account rows. Free-model pacing stays separate.
+- Test: `crates/providers/src/accounts.rs::account_pool_tests::go_and_zen_share_one_account_row_per_identity_across_models`
 
 An account identity is detected, never guessed; an undetectable one is
 `unknown`, and a changed identity around a probe refuses. A pin filters

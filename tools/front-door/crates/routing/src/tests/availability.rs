@@ -76,7 +76,7 @@ fn past_deadline_account_stands_by_for_an_available_account()
 }
 
 #[test]
-fn pace_reserves_account_headroom_across_windows() -> Result<(), Box<dyn std::error::Error>> {
+fn pacing_reserve_warns_without_excluding_accounts() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_quota::{QuotaStatus, QuotaWindow};
     use provenant_records::diagnostic::PacingReserveSetting;
     let catalogue = Catalogue::bundled()?;
@@ -126,15 +126,15 @@ fn pace_reserves_account_headroom_across_windows() -> Result<(), Box<dyn std::er
             ctx.access = &access;
             ctx.quota = &observations;
             let route = resolve(&request("codex/test")?, &ctx)?;
+            assert!(reason(&route).is_none());
             assert_eq!(
-                reason(&route) == Some(&RouteExclusionReason::PacingReserve),
+                route.extra["account_load"]["warnings"]
+                    .as_array()
+                    .is_some_and(|warnings| !warnings.is_empty()),
                 expected_setting.is_some() && policy == "pace"
             );
             if expected_setting.is_some() && policy == "pace" {
-                assert_eq!(
-                    route.exclusions[0].reason,
-                    RouteExclusionReason::PacingReserve
-                );
+                assert!(route.exclusions.is_empty());
                 assert!(serde_json::to_string(&route)?.contains("pacing_reserve"));
                 let fact: provenant_records::diagnostic::ResourceFact =
                     serde_json::from_value(route.extra["pacing_reserve_fact"].clone())?;
@@ -553,6 +553,7 @@ fn account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks()
     let mut catalogue = Catalogue::bundled()?;
     for id in ["codex/test", "claude/test"] {
         catalogue.models.push(ModelEntry {
+            capability: Default::default(),
             free: false,
             model: ModelId::parse(id)?,
             efforts: vec![],

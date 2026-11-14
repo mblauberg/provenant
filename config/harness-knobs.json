@@ -411,8 +411,8 @@
     "routing.allow_unknown_partial_headroom": {
       "type": "bool", "default": false, "strict": true, "safe": false, "host_only": true, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/route.rs",
-      "effect": "Allow uncalibrated partial quota headroom below the limit.",
-      "trade_off": "Partial coverage cannot prove remaining allowance; exhausted lower bounds still block selection."
+      "effect": "Remove the ranking penalty for uncalibrated partial quota headroom below the limit.",
+      "trade_off": "Unknown coverage warns and stays eligible by default. Accepting it removes the preference penalty; measured exhausted lower bounds still refuse."
     },
     "routing.workload": {
       "type": "enum", "values": ["general", "read_heavy", "edit_heavy", "review"], "default": "general", "status": "wired",

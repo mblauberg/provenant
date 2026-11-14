@@ -344,7 +344,12 @@ impl AdapterSpec {
     }
     pub fn account_serves_model(&self, account: &str, model: &str) -> bool {
         self.free_account.is_none_or(|(free_account, prefix)| {
-            (account == free_account) == model.starts_with(prefix)
+            if account == free_account {
+                model.starts_with(prefix)
+            } else {
+                self.quota_model_prefix
+                    .is_some_and(|prefix| model.starts_with(prefix))
+            }
         })
     }
     /// Whether a quota window governs a model drawing on `model_pool`. Only
@@ -1189,6 +1194,7 @@ mod free_account_tests {
         assert!(!spec.account_serves_model("go", "opencode/beam-free"));
         assert!(spec.account_serves_model("go", "opencode-go/mimo-v2.6-flash"));
         assert!(!spec.account_serves_model("zen", "opencode-go/mimo-v2.6-flash"));
+        assert!(!spec.account_serves_model("go", "other-provider/model"));
     }
 }
 

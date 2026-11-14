@@ -4,6 +4,7 @@ fn synthetic_catalogue() -> Result<Catalogue, Box<dyn std::error::Error>> {
     let mut catalogue = Catalogue::bundled()?;
     catalogue.models = vec![
         ModelEntry {
+            capability: Default::default(),
             model: ModelId::parse("alpha/unique-model")?,
             free: false,
             evidence_ref: "evidence".into(),
@@ -14,6 +15,7 @@ fn synthetic_catalogue() -> Result<Catalogue, Box<dyn std::error::Error>> {
             quota_pool: None,
         },
         ModelEntry {
+            capability: Default::default(),
             model: ModelId::parse("alpha/shared-model")?,
             free: false,
             evidence_ref: "evidence".into(),
@@ -24,6 +26,7 @@ fn synthetic_catalogue() -> Result<Catalogue, Box<dyn std::error::Error>> {
             quota_pool: None,
         },
         ModelEntry {
+            capability: Default::default(),
             model: ModelId::parse("beta/shared-model")?,
             free: false,
             evidence_ref: "evidence".into(),
