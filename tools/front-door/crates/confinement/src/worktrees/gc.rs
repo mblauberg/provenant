@@ -174,7 +174,11 @@ fn collect_impl(
         context.workers.observe_roots(&roots);
     }
     let primary = canonicalize(context.repo.root_path())?;
-    let managed = primary.join(WORKTREE_ROOT);
+    let ports = provenant_config::PortTable::read_project(&primary)
+        .map_err(WorktreeError::PortConfiguration)?;
+    let managed_roots = ports.worktree_roots_under(&primary);
+    let layout_roots = ports.worktree_layout.roots;
+    let is_managed = |path: &Path| managed_roots.iter().any(|root| path.starts_with(root));
     let mut report = WorktreeGcReport {
         dry_run: policy.dry_run,
         ..Default::default()
@@ -201,7 +205,7 @@ fn collect_impl(
         // a complete free census and writer exclusion before considering it.
         // This is independent of the policy for removing foreign worktrees.
         let unknown_output = matches!(&lane.occupancy, Occupancy::Unknown { .. })
-            || (!lane.path.starts_with(&managed)
+            || (!is_managed(&lane.path)
                 && lane.is_unowned()
                 && lane.occupancy.is_available());
         if unknown_output && policy.regenerable.is_empty() {
@@ -224,6 +228,7 @@ fn collect_impl(
                 policy,
                 cancel,
                 &mut report.idle_output,
+                &layout_roots,
                 &preview_walk,
             );
             match result {
@@ -242,7 +247,7 @@ fn collect_impl(
                 Ok(()) => {}
             }
         }
-        if !lane.path.starts_with(&managed) && !policy.foreign_merged_clean {
+        if !is_managed(&lane.path) && !policy.foreign_merged_clean {
             continue;
         }
         let Some(branch) = lane
@@ -275,7 +280,7 @@ fn collect_impl(
         {
             // The fallback proves ancestry and a free census, not that a managed
             // lane is finished: keep a fresh tree at the tip or on its first parent.
-            if lane.path.starts_with(&managed)
+            if is_managed(&lane.path)
                 && let Some(upstream) = policy.upstream
             {
                 match integration_protection(context, lane, upstream, cancel) {
@@ -301,6 +306,7 @@ fn collect_impl(
                 cancel,
                 &mut report.worktrees,
                 &mut report.removals,
+                &layout_roots,
                 &preview_walk,
             ) {
                 Ok(Some(info)) if policy.dry_run => {
@@ -403,6 +409,7 @@ fn collect_impl(
                     &lane.path,
                     Path::new(""),
                     policy,
+                    &layout_roots,
                     &protected,
                     output,
                     0,
@@ -541,6 +548,7 @@ fn prune_unknown_output(
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
     output: &mut Vec<OutputEntry>,
+    layout_roots: &[PathBuf],
     preview_walk: &PreviewWalk,
 ) -> Result<(), WorktreeError> {
     if !(policy.no_live_lanes)(&lane.path) {
@@ -602,6 +610,7 @@ fn prune_unknown_output(
         &lane.path,
         Path::new(""),
         policy,
+        layout_roots,
         &protected,
         output,
         0,
@@ -911,6 +920,7 @@ fn walk_output(
     root: &Path,
     relative: &Path,
     policy: &WorktreeGcPolicy<'_>,
+    layout_roots: &[PathBuf],
     protected: &ProtectedPaths,
     report: &mut Vec<OutputEntry>,
     depth: usize,
@@ -929,11 +939,11 @@ fn walk_output(
         },
     )? {
         preview_walk.step()?;
-        if name == ".git" || name == WORKTREE_ROOT {
+        if name == ".git" {
             continue;
         }
         let path = relative.join(&name);
-        if protected.covers(&path) {
+        if layout_roots.iter().any(|root| path.as_path() == root.as_path()) || protected.covers(&path) {
             continue;
         }
         let mut prune = || -> Result<bool, FsError> {
@@ -945,11 +955,13 @@ fn walk_output(
             if contains_repository(&child)? {
                 return Ok(false);
             }
-            if (policy
-                .regenerable
-                .iter()
-                .any(|configured| name == OsStr::new(configured))
-                || is_default_regenerable(&path))
+            let contains_layout_root = layout_roots.iter().any(|root| root.starts_with(&path));
+            if !contains_layout_root
+                && (policy
+                    .regenerable
+                    .iter()
+                    .any(|configured| name == OsStr::new(configured))
+                    || is_default_regenerable(&path))
                 && !protected.ancestors.contains(&path)
                 && path
                     .ancestors()
@@ -963,6 +975,7 @@ fn walk_output(
                     root,
                     &path,
                     policy,
+                    layout_roots,
                     protected,
                     report,
                     depth + 1,
@@ -1181,6 +1194,9 @@ fn prepare_removal_before(
     preview_only: bool,
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
+    let ports = provenant_config::PortTable::read_project(context.repo.root_path())
+        .map_err(WorktreeError::PortConfiguration)?;
+    let layout_roots = ports.worktree_layout.roots;
     let protected = output_protection(context, repo, keep, cancel)?;
     let mut policy = WorktreeGcPolicy {
         upstream: None,
@@ -1199,6 +1215,7 @@ fn prepare_removal_before(
         repo.root_path(),
         Path::new(""),
         &policy,
+        &layout_roots,
         &protected,
         &mut output,
         0,
@@ -1242,6 +1259,7 @@ fn prepare_removal_before(
         repo.root_path(),
         Path::new(""),
         &policy,
+        &layout_roots,
         &protected,
         &mut output,
         0,
@@ -1325,6 +1343,7 @@ fn collect_foreign(
     cancel: &CancelToken,
     outcome: &mut RemoveOutcome,
     removals: &mut Vec<RemovalRecord>,
+    layout_roots: &[PathBuf],
     preview_walk: &PreviewWalk,
 ) -> Result<Option<WorktreeInfo>, WorktreeError> {
     if !(policy.no_live_lanes)(&lane.path) {
@@ -1366,6 +1385,7 @@ fn collect_foreign(
             branch,
             policy,
             cancel,
+            layout_roots,
             preview_walk,
         )?;
         if info.dirty == WorktreeCondition::Unknown {
@@ -1409,6 +1429,7 @@ fn preview_foreign(
     branch: &GitRefName,
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
+    layout_roots: &[PathBuf],
     preview_walk: &PreviewWalk,
 ) -> Result<WorktreeCondition, WorktreeError> {
     let verified = verify_probed_worktree(context, &lane.path, cancel)?;
@@ -1444,6 +1465,7 @@ fn preview_foreign(
         &lane.path,
         Path::new(""),
         &preview,
+        layout_roots,
         &protected,
         &mut output,
         0,

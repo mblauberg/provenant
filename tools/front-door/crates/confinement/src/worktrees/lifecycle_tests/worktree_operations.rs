@@ -92,9 +92,9 @@ fn prune_treats_a_prunable_branch_as_not_checked_out() -> Result<(), Box<dyn Err
 #[test]
 fn creation_refuses_a_shared_writable_worktree_parent() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
-    fs::create_dir(fixture.root.join(WORKTREE_ROOT))?;
+    fs::create_dir(fixture.root.join(".worktrees"))?;
     fs::set_permissions(
-        fixture.root.join(WORKTREE_ROOT),
+        fixture.root.join(".worktrees"),
         fs::Permissions::from_mode(0o777),
     )?;
     let test_context = TestContext::new(&fixture)?;
@@ -112,7 +112,7 @@ fn creation_refuses_a_shared_writable_worktree_parent() -> Result<(), Box<dyn Er
     assert!(
         !fixture
             .root
-            .join(WORKTREE_ROOT)
+            .join(".worktrees")
             .join("feature-refused")
             .exists()
     );

@@ -651,6 +651,8 @@ struct Projects {
     common_dirs: Vec<PathBuf>,
     /// The `<state>/worktrees/<project>` registry directories.
     registries: Vec<PathBuf>,
+    /// Worktree layout roots read from registered project declarations.
+    worktree_roots: Vec<PathBuf>,
     /// The worktree owner's registry entry name for a canonical worktree.
     registry_name: RegistryName,
 }
@@ -661,30 +663,40 @@ pub type RegistryName = fn(&Path) -> OsString;
 
 impl Projects {
     #[allow(clippy::print_stderr)]
-    fn registered(roots: &Roots, registry_name: RegistryName) -> Self {
-        let common_dirs = match provenant_config::registered_projects(roots) {
-            Ok(bindings) => bindings
-                .iter()
-                .map(|binding| binding.common_dir().to_path_buf())
-                .collect(),
+    fn registered(roots: &Roots, registry_name: RegistryName) -> Result<Self, AgentError> {
+        let mut common_dirs = Vec::new();
+        let mut worktree_roots = Vec::new();
+        match provenant_config::registered_projects(roots) {
+            Ok(bindings) => {
+                for binding in bindings {
+                    let common = binding.common_dir();
+                    common_dirs.push(common.to_path_buf());
+                    if common.file_name() == Some(OsStr::new(".git"))
+                        && let Some(project) = common.parent()
+                    {
+                        let ports = provenant_config::PortTable::read_project(project)?;
+                        worktree_roots.extend(ports.worktree_roots_under(project));
+                    }
+                }
+            }
             Err(error) => {
                 eprintln!(
                     "note: peer agent PATH skips only Provenant worktrees: project bindings are unreadable: {error}"
                 );
-                Vec::new()
             }
-        };
+        }
         let registries = fs::read_dir(roots.state.as_path().join("worktrees"))
             .into_iter()
             .flatten()
             .flatten()
             .map(|entry| entry.path())
             .collect();
-        Self {
+        Ok(Self {
             common_dirs,
             registries,
+            worktree_roots,
             registry_name,
-        }
+        })
     }
 
     /// Whether the worktree at `top`, with Git common directory `common` when
@@ -695,9 +707,7 @@ impl Projects {
             common == Some(dir.as_path())
                 || *dir == top.join(".git")
                 || (dir.file_name() == Some(OsStr::new(".git"))
-                    && dir
-                        .parent()
-                        .is_some_and(|root| top.starts_with(root.join(".worktrees"))))
+                    && self.worktree_roots.iter().any(|root| top.starts_with(root)))
         }) || self
             .registries
             .iter()
@@ -783,7 +793,7 @@ pub fn scheduler_path(
     registry_name: RegistryName,
 ) -> Result<OsString, AgentError> {
     let search = std::env::var_os("PATH").unwrap_or_default();
-    let projects = Projects::registered(roots, registry_name);
+    let projects = Projects::registered(roots, registry_name)?;
     let mut executables = scheduler_executables(&search, &projects);
     executables.extend(provenant_os::git::git_executable());
     let bin = program
@@ -812,7 +822,7 @@ pub fn install_plist(
 ) -> Result<Vec<u8>, AgentError> {
     let state = roots.state.as_path();
     let search = std::env::var_os("PATH").unwrap_or_default();
-    let projects = Projects::registered(roots, registry_name);
+    let projects = Projects::registered(roots, registry_name)?;
     let mut executables = provider_executables(&search, &projects);
     executables.extend(provenant_os::git::git_executable());
     let bin = program
@@ -1193,6 +1203,7 @@ mod tests {
         let projects = Projects {
             common_dirs: Vec::new(),
             registries: Vec::new(),
+            worktree_roots: Vec::new(),
             registry_name: name,
         };
         let tools = provider_executables(&search, &projects);
@@ -1260,7 +1271,7 @@ mod tests {
             github.clone(),
         ])
         .unwrap();
-        let projects = Projects::registered(&roots, name);
+        let projects = Projects::registered(&roots, name).unwrap();
         let executables = scheduler_executables(&search, &projects);
         assert_eq!(
             executables,
@@ -1293,7 +1304,7 @@ mod tests {
         ] {
             provider(&path);
         }
-        let projects = Projects::registered(&roots, name);
+        let projects = Projects::registered(&roots, name).unwrap();
         assert_eq!(
             project_worktree(&project.join("bin"), &projects),
             Some(project.clone())
@@ -1321,7 +1332,7 @@ mod tests {
         fs::create_dir_all(nvm.join(".git")).unwrap();
         fs::create_dir_all(home.join(".git")).unwrap();
         provider(&bin.join("codex"));
-        let projects = Projects::registered(&roots, name);
+        let projects = Projects::registered(&roots, name).unwrap();
         assert_eq!(project_worktree(&bin, &projects), None);
         let search = std::env::join_paths([&bin]).unwrap();
         assert_eq!(
@@ -1331,6 +1342,7 @@ mod tests {
         let unreadable = Projects {
             common_dirs: Vec::new(),
             registries: Vec::new(),
+            worktree_roots: Vec::new(),
             registry_name: name,
         };
         assert_eq!(
@@ -1344,9 +1356,18 @@ mod tests {
         use super::*;
         let (_temp, base, roots) = project_roots();
         let project = base.join("project");
-        let worktree = project.join(".worktrees/feat-x");
+        let worktree = project.join("trees/feat-x");
         let private = project.join(".git/worktrees/feat-x");
         bind(&roots, &project);
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.worktree_layout.roots = vec![PathBuf::from("trees")];
+        ports.worktree_layout.default = PathBuf::from("trees/<branch>");
+        fs::create_dir_all(project.join(".provenant")).unwrap();
+        fs::write(
+            project.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports).unwrap(),
+        )
+        .unwrap();
         fs::create_dir_all(&private).unwrap();
         fs::write(private.join("commondir"), b"../..\n").unwrap();
         fs::create_dir_all(&worktree).unwrap();
@@ -1356,7 +1377,7 @@ mod tests {
         )
         .unwrap();
         provider(&worktree.join("bin/claude"));
-        let projects = Projects::registered(&roots, name);
+        let projects = Projects::registered(&roots, name).unwrap();
         assert_eq!(
             provenant_os::git::repository_marker(&worktree)
                 .and_then(|marker| marker.common_dir)
@@ -1369,14 +1390,15 @@ mod tests {
         );
         let search = std::env::join_paths([worktree.join("bin")]).unwrap();
         assert!(provider_executables(&search, &projects).is_empty());
-        // Without a resolvable marker, the `.worktrees` location or a
-        // registry entry still identifies a Provenant worktree.
+        // Without a resolvable marker, the declared location or a registry
+        // entry still identifies a Provenant worktree.
         assert!(projects.own(&worktree, None));
+        assert!(!projects.own(&project.join(".worktrees/feat-x"), None));
         let elsewhere = base.join("elsewhere");
         assert!(!projects.own(&elsewhere, None));
         let registry = roots.state.as_path().join("worktrees/project");
         fs::create_dir_all(registry.join(name(&elsewhere))).unwrap();
-        assert!(Projects::registered(&roots, name).own(&elsewhere, None));
+        assert!(Projects::registered(&roots, name).unwrap().own(&elsewhere, None));
     }
 
     #[test]

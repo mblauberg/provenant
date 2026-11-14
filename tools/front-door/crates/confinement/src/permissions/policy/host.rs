@@ -1449,7 +1449,13 @@ mod tests {
                 &roots,
                 provenant_config::ProjectLocation::new(common)?,
             )?;
-            allocations.push(primary.join(".worktrees"));
+            let config = primary.join(".provenant");
+            std::fs::create_dir_all(&config)?;
+            let mut ports = provenant_config::PortTable::builtin();
+            ports.worktree_layout.roots = vec![PathBuf::from(".claude/worktrees")];
+            ports.worktree_layout.default = PathBuf::from(".claude/worktrees/<branch>");
+            std::fs::write(config.join("ports.json"), serde_json::to_vec(&ports)?)?;
+            allocations.push(primary.join(".claude/worktrees"));
         }
         let separate = root.join("separate-project");
         let common = separate.join("git-meta");
@@ -1457,7 +1463,13 @@ mod tests {
         std::fs::write(common.join("HEAD"), b"ref: refs/heads/main\n")?;
         std::fs::write(separate.join(".git"), b"gitdir: git-meta\n")?;
         provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(common)?)?;
-        allocations.push(separate.join(".worktrees"));
+        let config = separate.join(".provenant");
+        std::fs::create_dir_all(&config)?;
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.worktree_layout.roots = vec![PathBuf::from(".claude/worktrees")];
+        ports.worktree_layout.default = PathBuf::from(".claude/worktrees/<branch>");
+        std::fs::write(config.join("ports.json"), serde_json::to_vec(&ports)?)?;
+        allocations.push(separate.join(".claude/worktrees"));
         let inventory = MandatoryRoots::for_host(
             &roots,
             &root.join("home"),

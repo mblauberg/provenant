@@ -4,7 +4,7 @@ use provenant_confinement::utility::{GitObjectKind, GitRead};
 use provenant_core::GitOid;
 use provenant_os::exec::Termination;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const MAX_FILE: u64 = 5 * 1024 * 1024;
 const PUBLIC: &[&str] = &[
@@ -24,6 +24,9 @@ pub(super) fn inspect(
         findings: Vec::new(),
         evidence: Vec::new(),
     };
+    let ports = provenant_config::PortTable::read_project(git.repo.root_path())
+        .map_err(|_| CheckError::Evidence("worktree layout configuration is unreadable"))?;
+    let worktree_roots = ports.worktree_layout.roots;
     let head_bytes = release_read(git, GitRead::RevParseHead)?;
     let head = oid_line(&head_bytes)?;
     scan.note("release:head", &head_bytes);
@@ -91,7 +94,7 @@ pub(super) fn inspect(
         }
     }
     for (path, mode) in tracked {
-        path_rules(&mut scan, &path)?;
+        path_rules(&mut scan, &path, &worktree_roots)?;
         let mut symlink = mode == "120000";
         match read_file(git.repo.root_dir(), Path::new(&path), MAX_FILE)? {
             WorkingFile::Bytes(bytes) => {
@@ -159,7 +162,7 @@ pub(super) fn inspect(
             }
         }
         for entry in entries {
-            path_rules(&mut scan, &entry.path)?;
+            path_rules(&mut scan, &entry.path, &worktree_roots)?;
             if entry.mode == "120000" {
                 scan.finding(
                     "release.symlink",
@@ -306,13 +309,16 @@ fn tree_entries(bytes: &[u8]) -> Result<Vec<Entry>, CheckError> {
     Ok(entries)
 }
 
-fn path_rules(scan: &mut Scan, path: &str) -> Result<(), CheckError> {
-    let private = path.split('/').any(|part| {
-        matches!(
-            part,
-            ".agent-run" | ".worktrees" | ".pytest_cache" | ".DS_Store" | ".ssh" | ".aws"
-        )
-    }) || path == ".claude/settings.local.json"
+fn path_rules(
+    scan: &mut Scan,
+    path: &str,
+    worktree_roots: &[PathBuf],
+) -> Result<(), CheckError> {
+    let relative = Path::new(path);
+    let private = worktree_roots.iter().any(|root| relative.starts_with(root))
+        || path.split('/').any(|part| {
+            matches!(part, ".agent-run" | ".pytest_cache" | ".DS_Store" | ".ssh" | ".aws")
+        }) || path == ".claude/settings.local.json"
         || path == "plugins/marketplace.json"
         || path.split('/').any(|part| {
             part == ".env"

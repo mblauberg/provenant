@@ -647,11 +647,13 @@ pub enum ForeignWorktrees {
 
 impl ProjectGcSettings {
     fn validate(&self) -> Result<(), &'static str> {
+        let worktree_roots = crate::PortTable::builtin().worktree_layout.roots;
         for name in &self.regenerable {
+            let path = Path::new(name);
             if !safe_relative(name)
-                || Path::new(name).components().count() != 1
+                || path.components().count() != 1
                 || name == ".git"
-                || name == ".worktrees"
+                || worktree_roots.iter().any(|root| root.starts_with(path))
             {
                 return Err("regenerable_directory_name");
             }

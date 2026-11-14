@@ -1067,13 +1067,12 @@ impl HostDeliveryContext {
     fn host_environment(&mut self, writer: &WriterRequest) -> Result<()> {
         // A graph delivery runs in the project checkout itself, which is not a
         // lane.
-        self.lane_roots = (writer.worktree != writer.project)
-            .then(|| writer.worktree.clone())
-            .into_iter()
-            .collect();
-        self.lane_roots.extend(
-            [".worktrees", ".provenant", ".agent-run"].map(|name| writer.project.join(name)),
-        );
+        self.lane_roots = provenant_confinement::transport::LaneRoots::project(&writer.project)
+            .map_err(|error| prepare_error("lane roots", error))?
+            .into_paths();
+        if writer.worktree != writer.project {
+            self.lane_roots.push(writer.worktree.clone());
+        }
         if let Some(run_state) = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV) {
             self.lane_roots.push(PathBuf::from(run_state));
         }

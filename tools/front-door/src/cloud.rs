@@ -243,7 +243,7 @@ fn collect_result(project: &Path, collect: &cloud::Collect) -> Result<(Value, St
         None,
     )?);
     let main = common.parent().map(Path::to_path_buf).unwrap_or(common);
-    let worktree = cloud::collect_path(project, &main, collect.path.as_deref(), &branch);
+    let worktree = cloud::collect_path(project, &main, collect.path.as_deref(), &branch)?;
     let target = worktree.display().to_string();
     match record.provider {
         Provider::Claude => {

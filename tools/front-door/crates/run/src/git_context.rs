@@ -232,7 +232,10 @@ fn transport_environment(env: &[(OsString, OsString)]) -> Vec<(OsString, OsStrin
 
 /// Where a lane can write: its linked worktree, the project's worktree and
 /// scratch areas, and the run state directory when one is set.
-fn lane_roots(cwd: &Path, env: &[(OsString, OsString)]) -> transport::LaneRoots {
+fn lane_roots(
+    cwd: &Path,
+    env: &[(OsString, OsString)],
+) -> std::result::Result<transport::LaneRoots, transport::TransportError> {
     let get = |name: &str| {
         env.iter()
             .find(|(key, _)| key == name)
@@ -274,7 +277,7 @@ fn check_transport(
         reason: error.to_string(),
     };
     let entries = transport::parse_listing(&listing.bytes).map_err(refusal)?;
-    let roots = lane_roots(cwd, env);
+    let roots = lane_roots(cwd, env).map_err(refusal)?;
     transport::check_environment(transport_env, cwd, &roots).map_err(refusal)?;
     transport::check_listing(&entries, cwd, &roots).map_err(refusal)
 }

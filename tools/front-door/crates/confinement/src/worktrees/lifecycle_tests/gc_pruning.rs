@@ -653,7 +653,7 @@ fn timed_out_add_rolls_back_its_checkout_and_new_branch() -> Result<(), Box<dyn 
     assert!(
         !fixture
             .root
-            .join(WORKTREE_ROOT)
+            .join(".worktrees")
             .join("feature-slow")
             .exists()
     );
@@ -693,7 +693,7 @@ fn timed_out_add_keeps_a_branch_it_did_not_create() -> Result<(), Box<dyn Error>
     assert!(
         !fixture
             .root
-            .join(WORKTREE_ROOT)
+            .join(".worktrees")
             .join("feature-existing")
             .exists()
     );
