@@ -389,6 +389,7 @@ impl StopCause {
     }
 
     /// The declaration is complete; the invariant test covers every cause.
+    #[allow(clippy::expect_used)] // Compiled table; completeness is a tested invariant.
     pub fn rule(self) -> StopRule {
         STOP_TABLE
             .iter()

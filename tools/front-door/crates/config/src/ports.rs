@@ -274,15 +274,6 @@ pub struct Port {
     pub backend: PortBackend,
 }
 
-impl Port {
-    fn builtin() -> Self {
-        Self {
-            source: PortSource::Builtin,
-            backend: PortBackend::Builtin,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VerifyPort {
@@ -479,7 +470,7 @@ impl PortEntry for VerifyPort {
             && !self.remote.is_empty()
             && self.load_per_cpu.is_finite()
             && self.load_per_cpu > 0.0
-            && self.test_threads.map_or(true, |threads| threads > 0)
+            && self.test_threads.is_none_or(|threads| threads > 0)
             && self.tiers.contains_key(&self.default_tier)
             && self
                 .tiers
@@ -658,6 +649,7 @@ fn apply_layer(
 }
 
 impl PortTable {
+    #[allow(clippy::expect_used)] // Compiled asset; its schema is a tested invariant.
     pub fn builtin() -> Self {
         let mut table: Self = serde_json::from_str(include_str!("../assets/ports.json"))
             .expect("compiled port table asset must match its schema");

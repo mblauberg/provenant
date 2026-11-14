@@ -572,7 +572,7 @@ fn retirement_decisions_preserve_archive_proof_and_reference_custody() {
             repository: project,
             endpoint: if detached {
                 RefEndpoint::Worktree {
-                    path: worktree.id.clone().into(),
+                    path: worktree.id.clone(),
                 }
             } else {
                 RefEndpoint::Local

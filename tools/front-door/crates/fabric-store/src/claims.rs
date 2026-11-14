@@ -375,7 +375,7 @@ impl HostStore {
             if !can_resume && !can_finish {
                 return Err(Error::Conflict);
             }
-            *current = next;
+            *current = next.clone();
             record.revision = record
                 .revision
                 .checked_add(1)

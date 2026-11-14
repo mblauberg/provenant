@@ -123,7 +123,7 @@ impl provenant_core::PathResolver for SystemPathResolver {
 /// release assets need not be checkouts; a pathname alone implies no live state.
 pub fn bind_roots(
     inputs: &provenant_core::RootInputs,
-) -> Result<provenant_core::Roots, provenant_core::RootError> {
+) -> std::result::Result<provenant_core::Roots, provenant_core::RootError> {
     let mut inputs = inputs.clone();
     for top in std::iter::once(&inputs.checkout).chain(&inputs.workspaces) {
         let metadata = (|| -> io::Result<Vec<PathBuf>> {

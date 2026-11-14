@@ -577,7 +577,6 @@ impl RouteRecord {
             account_key: route.account_key.clone(),
             pool_selection: route.pool_selection.clone(),
             source: Some(source.into()),
-            ..Default::default()
         }
     }
 }

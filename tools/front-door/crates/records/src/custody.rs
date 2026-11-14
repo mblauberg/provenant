@@ -1069,11 +1069,11 @@ mod tests {
         let RefEndpoint::Remote { push_url, .. } = &remote.endpoint else {
             unreachable!()
         };
-        assert!(!remote_subject.id.contains(&push_url));
+        assert!(!remote_subject.id.contains(push_url.as_str()));
         assert!(
             !serde_json::to_string(&remote.generation_identity().unwrap())
                 .unwrap()
-                .contains(&push_url)
+                .contains(push_url.as_str())
         );
         let detached = RefOwnership {
             endpoint: RefEndpoint::Worktree {
@@ -1128,7 +1128,7 @@ mod tests {
         assert_eq!(record.outcomes.len(), 1);
         assert_eq!(
             record.subjects().cloned().collect::<Vec<_>>(),
-            [worktree.clone()]
+            std::slice::from_ref(&worktree)
         );
         assert_eq!(record.removals().len(), 1);
         assert_eq!(record.removal().subject, worktree);

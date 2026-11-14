@@ -134,6 +134,7 @@ retention_classes! {
     },
     RetirementRecords => {
         owner: "fabric-store/custody",
+        measure: OwnerDefined,
         eligibility: Declared,
         detail: "durable retirement intent and step outcomes for audit and recovery",
         settings: [],
@@ -141,6 +142,7 @@ retention_classes! {
     },
     RefGenerationSequences => {
         owner: "confinement/worktrees/ref-ledger",
+        measure: OwnerDefined,
         eligibility: Declared,
         detail: "permanent repository ref generation high-water marks",
         settings: [],
@@ -876,7 +878,11 @@ mod tests {
             let decoded: RetentionBytes = serde_json::from_slice(&encoded).unwrap();
             assert_eq!(decoded, bytes);
         }
-        for kind in [RetentionKind::ObservationLedgers] {
+        for kind in [
+            RetentionKind::ObservationLedgers,
+            RetentionKind::RetirementRecords,
+            RetentionKind::RefGenerationSequences,
+        ] {
             assert!(!retention_schedule(RetentionTrigger::FullGc).any(|entry| entry.class == kind));
         }
         for class in retention_schedule(RetentionTrigger::Gc) {

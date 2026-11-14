@@ -107,14 +107,15 @@ mod tests {
         let mut watcher =
             Watcher::subscribe(&[log]).map_err(|error| io::Error::other(error.to_string()))?;
         let wake = watcher.wake_handle();
-        let result = std::thread::scope(|scope| {
+        let result = std::thread::scope(|scope| -> io::Result<WaitOutcome> {
             let waiting = scope.spawn(move || watcher.wait(Duration::from_secs(60)));
             wake.wake()?;
             waiting
                 .join()
                 .map_err(|_| io::Error::other("event waiter panicked"))?
+                .map_err(|error| io::Error::other(error.to_string()))
         })?;
-        assert_eq!(result?, WaitOutcome::Woken);
+        assert_eq!(result, WaitOutcome::Woken);
         Ok(())
     }
 }

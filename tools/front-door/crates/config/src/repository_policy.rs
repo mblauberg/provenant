@@ -139,8 +139,8 @@ fn path_candidates(token: &str) -> impl Iterator<Item = &str> {
         }
         // An ellipsis is a prose wrapper as a unit. It may expose `./`, `../`,
         // or an absolute path, whose marker must then remain intact.
-        if path.starts_with("...") {
-            return Some(&path[3..]);
+        if let Some(rest) = path.strip_prefix("...") {
+            return Some(rest);
         }
         let first = path.chars().next()?;
         (first != '.' && sentence_punctuation(first)).then_some(&path[first.len_utf8()..])

@@ -26,7 +26,7 @@ pub enum PortEvidenceError {
     Publish(#[source] provenant_os::fs::FsError),
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Copy, Serialize)]
 #[serde(transparent)]
 struct PortName(&'static str);
 
@@ -339,17 +339,17 @@ mod tests {
     #[test]
     fn success_proof_uses_declared_exit_even_when_capture_is_incomplete() {
         let state = tempfile::tempdir().unwrap();
-        let execution = execution(b"partial", true);
+        let partial = execution(b"partial", true);
         record_port_command(
             state.path(),
             "admission",
             PortSource::Project,
             "release",
             "attempt:epoch-1",
-            &execution,
+            &partial,
         )
         .unwrap();
-        assert!(!execution.capture_complete());
+        assert!(!partial.capture_complete());
         assert!(
             port_command_receipt_proof(
                 state.path(),
@@ -357,7 +357,7 @@ mod tests {
                 PortSource::Project,
                 "release",
                 "attempt:epoch-1",
-                execution.command_digest,
+                partial.command_digest,
                 &[0],
             )
             .unwrap()
@@ -370,7 +370,7 @@ mod tests {
                 PortSource::Host,
                 "release",
                 "attempt:epoch-1",
-                execution.command_digest,
+                partial.command_digest,
                 &[0],
             )
             .unwrap()

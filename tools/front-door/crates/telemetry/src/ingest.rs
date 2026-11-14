@@ -474,13 +474,14 @@ fn expired(deadline: Option<Instant>) -> bool {
 
 fn read_transcript(
     transcript: &Transcript,
-    since: Option<jiff::Timestamp>,
-    deadline: Option<Instant>,
+    request: &Request<'_>,
     messages: &mut BTreeMap<(String, String), Pending>,
     report: &mut Report,
     cursor: Option<&Cursor>,
-    incremental: bool,
 ) -> Result<Cursor, ()> {
+    let incremental = request.incremental;
+    let deadline = request.deadline;
+    let since = if incremental { None } else { request.since };
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -794,16 +795,10 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
         let key = cursor_key(transcript);
         match read_transcript(
             transcript,
-            if request.incremental {
-                None
-            } else {
-                request.since
-            },
-            request.deadline,
+            request,
             &mut messages,
             &mut report,
             cursors.get(&key),
-            request.incremental,
         ) {
             Ok(cursor) if request.incremental => {
                 cursors.insert(key, cursor);
