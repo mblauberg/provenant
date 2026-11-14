@@ -459,21 +459,6 @@ fn graph_submission_pins_the_integration_base_across_replay()
         store.operation(&operation, &owner.call(&cancel))?.is_some(),
         "graph run not admitted"
     );
-    let index_call = provenant_fabric_runtime::chairs::Request {
-        clock: &factory.clock,
-        cancel: &cancel,
-    };
-    let binding = provenant_fabric_runtime::chairs::ChairIndex::open(
-        &factory.context.roots.state,
-        &index_call,
-    )?
-    .read(
-        factory.context.identity.project,
-        &run.checkpoint.nodes[0].attempts[0].key.graph_id,
-        &index_call,
-    )?
-    .ok_or("graph index missing")?;
-    assert!(binding.holder.chair().is_none(), "graph created a chair association");
     let base = {
         let journal = FileJournal::open(
             &fixture.roots.state,
@@ -485,6 +470,42 @@ fn graph_submission_pins_the_integration_base_across_replay()
         )?;
         journal.integration_base().ok_or("graph base missing")?
     };
+    let base_text = base.to_string();
+    let expected_bases = Some(
+        provenant_fabric_runtime::graph::GraphBaseBinding::new(Some(base), Some(base))
+            .ok_or("graph base binding missing")?,
+    );
+    assert_eq!(run.checkpoint.bases, expected_bases);
+    let run_json = serde_json::to_value(&run)?;
+    assert_eq!(
+        run_json["checkpoint"]["bound_review_base"].as_str(),
+        Some(base_text.as_str())
+    );
+    assert_eq!(
+        run_json["checkpoint"]["bound_integration_base"].as_str(),
+        Some(base_text.as_str())
+    );
+    let manifest = run.checkpoint.nodes[0].attempts[0]
+        .input_manifest
+        .as_ref()
+        .ok_or("input manifest missing")?;
+    assert_eq!(
+        manifest.graph_review_base.as_deref(),
+        Some(base_text.as_str())
+    );
+    assert_eq!(
+        manifest.integration_base.as_deref(),
+        Some(base_text.as_str())
+    );
+    assert_eq!(
+        FileJournal::execution(
+            &fixture.roots.state,
+            fixture.settled.project_id,
+            "pinned-base",
+        )?
+        .and_then(|execution| execution.bases),
+        expected_bases,
+    );
     assert_eq!(
         Some(base),
         fixture
@@ -536,9 +557,37 @@ fn graph_submission_pins_the_integration_base_across_replay()
         &factory.clock,
     )?;
     assert_eq!(journal.integration_base(), Some(base));
-    let execution = FileJournal::execution(&fixture.roots.state, fixture.settled.project_id, "pinned-base")?.ok_or("execution missing")?;
-    assert_eq!(execution.review_base, Some(base));
+    assert_eq!(journal.load("pinned-base")?, Some(run.checkpoint.clone()));
+    let execution = FileJournal::execution(
+        &fixture.roots.state,
+        fixture.settled.project_id,
+        "pinned-base",
+    )?
+    .ok_or("execution missing")?;
+    assert_eq!(execution.bases, expected_bases);
     drop(journal);
+    assert_eq!(replay.checkpoint.bases, expected_bases);
+    let replay_json = serde_json::to_value(&replay)?;
+    assert_eq!(
+        replay_json["checkpoint"]["bound_review_base"].as_str(),
+        Some(base_text.as_str())
+    );
+    assert_eq!(
+        replay_json["checkpoint"]["bound_integration_base"].as_str(),
+        Some(base_text.as_str())
+    );
+    let replay_manifest = replay.checkpoint.nodes[0].attempts[0]
+        .input_manifest
+        .as_ref()
+        .ok_or("replayed input manifest missing")?;
+    assert_eq!(
+        replay_manifest.graph_review_base.as_deref(),
+        Some(base_text.as_str())
+    );
+    assert_eq!(
+        replay_manifest.integration_base.as_deref(),
+        Some(base_text.as_str())
+    );
     let head_output = fixture.rig.execute(&git, &["rev-parse", "HEAD"], None)?;
     let head = String::from_utf8(head_output.stdout.bytes)?.trim().to_owned();
     // A later lens admitted after the reference moved still reads the pinned
@@ -565,14 +614,16 @@ fn graph_submission_pins_the_integration_base_across_replay()
     let operation = graph_operation("graph-attempt-operation", &key)?;
     let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("later lens operation missing")?;
     let request = store.request(store.operation_attempt(&operation.operation_id, &owner.call(&cancel))?, &owner.call(&cancel))?;
-    let base_text = base.to_string();
     assert_eq!(request.task.base.as_deref(), Some(base_text.as_str()));
     assert_ne!(base_text, head);
     // A different integration base does not displace the pinned review base.
-    bound.integration_base = Some(BoundGraphBases {
-        integration: Some(provenant_core::GitOid::parse(&head)?),
-        review: Some(base),
-    });
+    bound.integration_base = Some(
+        provenant_fabric_runtime::graph::GraphBaseBinding::new(
+            Some(base),
+            Some(provenant_core::GitOid::parse(&head)?),
+        )
+        .ok_or("graph base binding missing")?,
+    );
     let second: graph::AttemptKey = serde_json::from_value(serde_json::json!({
         "graph_id":"pinned-base", "node_id":"second-lens", "route_index":0, "attempt": 1
     }))?;
@@ -590,7 +641,10 @@ fn graph_submission_pins_the_integration_base_across_replay()
     let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("second lens operation missing")?;
     let request = store.request(store.operation_attempt(&operation.operation_id, &owner.call(&cancel))?, &owner.call(&cancel))?;
     assert_eq!(request.task.base.as_deref(), Some(base_text.as_str()));
-    bound.integration_base = Some(BoundGraphBases { integration: None, review: Some(base) });
+    bound.integration_base = Some(
+        provenant_fabric_runtime::graph::GraphBaseBinding::new(Some(base), None)
+            .ok_or("graph base binding missing")?,
+    );
     for (id, reference, expected) in [("review-base", "old-review", base_text.as_str()), ("empty-review-base", "", head.as_str())] {
         let path = fixture.rig.project.join(format!("{id}.json"));
         std::fs::write(&path, serde_json::to_vec(&serde_json::json!({

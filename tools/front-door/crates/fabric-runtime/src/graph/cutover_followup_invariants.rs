@@ -460,9 +460,8 @@ fn a_cancel_after_checkpoint_reload_closes_every_linked_inbox_request() {
             FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
         journal
             .bind(GraphExecution {
-                review_base: None,
                 extra: Default::default(),
-                integration_base: None,
+                bases: None,
                 directory: base.clone(),
                 document: document.clone(),
             })

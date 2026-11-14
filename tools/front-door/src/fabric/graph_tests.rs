@@ -691,8 +691,7 @@ mod graph_writer_admission_tests {
         )?;
         journal.bind(graph::GraphExecution {
             extra: Default::default(),
-            review_base: None,
-            integration_base: None,
+            bases: None,
             directory: rig.project.clone(),
             document: document.clone(),
         })?;
@@ -1990,8 +1989,10 @@ mod result_tests {
         let mut run = graph_status_fixture();
         let first = "1".repeat(40);
         let second = "2".repeat(40);
-        run.checkpoint.bound_review_base = Some(first.clone());
-        run.checkpoint.bound_integration_base = Some(second.clone());
+        run.checkpoint.bases = GraphBaseBinding::new(
+            Some(provenant_core::GitOid::parse(&first).unwrap()),
+            Some(provenant_core::GitOid::parse(&second).unwrap()),
+        );
         run.checkpoint.nodes[1].source_commit = Some(first.clone());
         run.checkpoint.nodes[1].review_base = Some(second.clone());
         run.checkpoint.nodes[2].source_commit = Some(second.clone());
@@ -2019,8 +2020,7 @@ mod result_tests {
                 .any(|row| row.starts_with("  loop-member:") && row.contains("source=pending"))
         );
         let json = serde_json::to_value(&run).unwrap();
-        assert_eq!(json["checkpoint"]["bound_review_base"], first);
-        assert_eq!(json["checkpoint"]["bound_integration_base"], second);
+        assert!(json["checkpoint"].get("bases").is_none());
         assert_eq!(
             json["checkpoint"]["nodes"][3]["source_binding"]["node"],
             "member"
@@ -2345,9 +2345,8 @@ mod result_tests {
             &factory.clock,
         )?;
         journal.bind(GraphExecution {
-            review_base: None,
             extra: Default::default(),
-            integration_base: None,
+            bases: None,
             directory: rig.project.clone(),
             document,
         })?;

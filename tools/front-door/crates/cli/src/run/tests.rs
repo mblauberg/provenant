@@ -759,13 +759,12 @@ fn keyed(
     let mut journal =
         FileJournal::open(&edge.roots.state, project, graph, budget, &cancel, &clock)?;
     let document: GraphDocument = serde_json::from_value(json!({
-        "schema_version":2, "graph_id":graph, "integration_branch":"main",
+        "schema_version":2, "graph_id":graph,
         "nodes":[{"id":node, "access":"read_only", "prompt":"Go", "route":{"alias":"senior"}}]
     }))?;
     journal.bind(GraphExecution {
-        review_base: None,
         extra: Default::default(),
-        integration_base: None,
+        bases: None,
         directory: edge.cwd.to_path_buf(),
         document,
     })?;

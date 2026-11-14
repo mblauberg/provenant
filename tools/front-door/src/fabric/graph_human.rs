@@ -290,20 +290,12 @@ mod test_presentation {
             .flat_map(|node| node.children.iter())
             .collect();
         let mut human = format!("Graph {}: {:?}\n", run.checkpoint.graph_id, run.status);
-        if full
-            && (run.checkpoint.bound_review_base.is_some()
-                || run.checkpoint.bound_integration_base.is_some())
-        {
+        if full && run.checkpoint.bases.is_some() {
+            let bases = run.checkpoint.bases.unwrap_or_default();
             human.push_str(&format!(
                 "Graph bases: review={} integration={}\n",
-                run.checkpoint
-                    .bound_review_base
-                    .as_deref()
-                    .unwrap_or("unavailable"),
-                run.checkpoint
-                    .bound_integration_base
-                    .as_deref()
-                    .unwrap_or("unavailable")
+                bases.review.map(|base| base.to_string()).as_deref().unwrap_or("unavailable"),
+                bases.integration.map(|base| base.to_string()).as_deref().unwrap_or("unavailable")
             ));
         }
         if let Some(outcome) = run.outcome {

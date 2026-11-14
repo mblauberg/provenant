@@ -127,9 +127,8 @@ fn capture(root: &Path, churn: bool) -> Result {
         serde_json::json!({"schema_version":2,"graph_id":"cpu","nodes":[{"id":"parent","access":"read_only","prompt":"fixture","route":{"alias":"junior"}}]}),
     )?;
     journal.bind(GraphExecution {
-        review_base: None,
         extra: Default::default(),
-        integration_base: None,
+        bases: None,
         directory: project,
         document,
     })?;

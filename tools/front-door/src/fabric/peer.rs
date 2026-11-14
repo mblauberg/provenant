@@ -1241,8 +1241,7 @@ pub(crate) fn peer_submit_graph(
     }
     journal
         .bind(GraphExecution {
-            review_base,
-            integration_base: None,
+            bases: GraphBaseBinding::new(review_base, None),
             directory: factory.cwd.clone(),
             extra: [
                 (
@@ -1265,7 +1264,7 @@ pub(crate) fn peer_submit_graph(
         repo_facts: facts,
         launch_warnings: Vec::new(),
         factory,
-        integration_base: None,
+        integration_base: GraphBaseBinding::new(review_base, None),
         integration_branch: None,
         network,
         capability_overrides: Default::default(),

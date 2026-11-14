@@ -2377,8 +2377,7 @@ fn seed_graph_checkpoint(
     let mut journal = FileJournal::open(state, project, PERSISTED_GRAPH, budget, &cancel, &clock)?;
     journal.bind(GraphExecution {
         extra: Default::default(),
-        integration_base: None,
-        review_base: None,
+        bases: None,
         directory: directory.to_owned(),
         document: document.clone(),
     })?;

@@ -24,6 +24,7 @@ mod steer;
 
 pub(crate) use git_facts::*;
 pub(crate) use owner::*;
+pub(crate) use provenant_fabric_runtime::graph::GraphBaseBinding;
 pub(crate) use run_owner::*;
 pub(crate) use settlement::*;
 

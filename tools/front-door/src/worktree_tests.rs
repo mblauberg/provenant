@@ -735,8 +735,7 @@ pub(super) fn seed_graph_checkpoint(
     )?;
     journal.bind(GraphExecution {
         extra: Default::default(),
-        integration_base: None,
-        review_base: None,
+        bases: None,
         directory: rig.project.clone(),
         document: document.clone(),
     })?;

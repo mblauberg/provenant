@@ -1193,18 +1193,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
     plan: &PlannedGraph,
     digest: &str,
 ) -> Result<(), GraphError<R, J>> {
-    if checkpoint
-        .bound_review_base
-        .iter()
-        .chain(checkpoint.bound_integration_base.iter())
-        .any(|base| base.parse::<provenant_core::GitOid>().is_err())
-    {
-        return Err(GraphError::BadCheckpoint {
-            node: plan.graph_id.clone(),
-            invariant: "graph bases must be full object IDs",
-        });
-    }
-    if checkpoint.schema_version != 1
+    if checkpoint.schema_version != 2
         || checkpoint.graph_id != plan.graph_id
         || checkpoint.delivery_required
             != (plan.delivery == Some(provenant_records::run::DeliveryMode::Pr))

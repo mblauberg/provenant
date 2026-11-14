@@ -895,9 +895,8 @@ fn loop_delivery_retry_reopens_failed_wrapper_and_dependants() {
             FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
         journal
             .bind(GraphExecution {
-                review_base: None,
                 extra: Default::default(),
-                integration_base: None,
+                bases: None,
                 directory: base.clone(),
                 document: document.clone(),
             })
@@ -1724,9 +1723,8 @@ fn loop_cancelled_ask_cleanup_replays_after_failure_and_crash() {
             FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
         journal
             .bind(GraphExecution {
-                review_base: None,
                 extra: Default::default(),
-                integration_base: None,
+                bases: None,
                 directory: base.clone(),
                 document: document.clone(),
             })

@@ -1782,8 +1782,14 @@ pub(super) fn attempt_input_manifest(
             .as_ref()
             .map(|binding| binding.head.clone()),
         review_base: progress.review_base.clone(),
-        graph_review_base: checkpoint.bound_review_base.clone(),
-        integration_base: checkpoint.bound_integration_base.clone(),
+        graph_review_base: checkpoint
+            .bases
+            .and_then(|bases| bases.review)
+            .map(|base| base.to_string()),
+        integration_base: checkpoint
+            .bases
+            .and_then(|bases| bases.integration)
+            .map(|base| base.to_string()),
         integration_source: checkpoint.integration_pin.clone(),
         applied_route: None,
         dependencies: Some(

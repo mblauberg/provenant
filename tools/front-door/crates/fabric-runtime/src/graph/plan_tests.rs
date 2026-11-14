@@ -1009,9 +1009,8 @@ fn refused_planner_fragment_retries_after_file_journal_reopen() {
                 FileJournal::open(&root, project, &doc.graph_id, budget, &cancel, &clock).unwrap();
             journal
                 .bind(GraphExecution {
-                    review_base: None,
                     extra: Default::default(),
-                    integration_base: None,
+                    bases: None,
                     directory: base.clone(),
                     document: doc.clone(),
                 })

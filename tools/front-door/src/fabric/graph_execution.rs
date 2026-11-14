@@ -178,10 +178,7 @@ pub(crate) fn tick_graphs(
                     launch_warnings: Vec::new(),
                     repo_facts: Default::default(),
                     factory: &factory,
-                    integration_base: Some(BoundGraphBases {
-                        integration: execution.integration_base,
-                        review: execution.review_base,
-                    }),
+                    integration_base: checkpoint.bases,
                     integration_branch: execution.document.integration_branch.clone(),
                     network: graph_network(&execution.document)?,
                     capability_overrides: graph_capability_overrides(&execution.document)?,
@@ -649,8 +646,7 @@ impl Factory {
                 status: GraphStatus::Paused,
                 outcome: None,
                 checkpoint: GraphCheckpoint {
-                    bound_review_base: None,
-                    bound_integration_base: None,
+                    bases: None,
                     extra: Default::default(),
                     expansions: Vec::new(),
                     remaining: None,
@@ -673,7 +669,7 @@ impl Factory {
                     wake_at: None,
                     pause_asks: 0,
                     limit_notes: Vec::new(),
-                    schema_version: 1,
+                    schema_version: 2,
                     graph_id: id.to_owned(),
                     plan_digest: String::new(),
                     nodes: Vec::new(),
@@ -911,7 +907,10 @@ impl Factory {
             }
             let mut ledger_warning = None;
             let integration_base = if existing {
-                journal.integration_base()
+                checkpoint
+                    .as_ref()
+                    .and_then(|checkpoint| checkpoint.bases)
+                    .and_then(|bases| bases.integration)
             } else if let Some(branch) = &document.integration_branch {
                 let reference = match branch.strip_prefix("origin/") {
                     Some(branch) => format!("refs/remotes/origin/{branch}"),
@@ -960,9 +959,10 @@ impl Factory {
                 None
             };
             let review_base = if existing {
-                bound_execution
+                checkpoint
                     .as_ref()
-                    .and_then(|execution| execution.review_base)
+                    .and_then(|checkpoint| checkpoint.bases)
+                    .and_then(|bases| bases.review)
             } else if let Some(reference) = document
                 .review_base
                 .as_deref()
@@ -974,9 +974,8 @@ impl Factory {
             };
             journal
                 .bind(provenant_fabric_runtime::graph::GraphExecution {
-                    review_base,
                     extra: Default::default(),
-                    integration_base,
+                    bases: GraphBaseBinding::new(review_base, integration_base),
                     directory: self.cwd.clone(),
                     document: document.clone(),
                 })
@@ -1001,10 +1000,7 @@ impl Factory {
                 launch_warnings: ledger_warning.into_iter().collect(),
                 repo_facts: facts.clone(),
                 factory: rebound.as_ref().unwrap_or(self),
-                integration_base: Some(BoundGraphBases {
-                    integration: integration_base,
-                    review: review_base,
-                }),
+                integration_base: GraphBaseBinding::new(review_base, integration_base),
                 integration_branch: document.integration_branch.clone(),
                 network: graph_network(document)?,
                 capability_overrides: graph_capability_overrides(document)?,

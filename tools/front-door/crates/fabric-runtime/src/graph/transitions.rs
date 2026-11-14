@@ -611,6 +611,11 @@ pub(super) fn apply_attempt_observation(
                                     .and_then(|h| GitOid::parse(h).ok())
                             });
                             if let Some(head) = head_oid {
+                                let graph_review_base = checkpoint
+                                    .bases
+                                    .as_ref()
+                                    .and_then(|bases| bases.review)
+                                    .map(|base| base.to_string());
                                 let base_oid = match &review_range {
                                     ReviewRange::Resolved { base, .. } => GitOid::parse(base).ok(),
                                     _ => None,
@@ -619,7 +624,7 @@ pub(super) fn apply_attempt_observation(
                                     progress
                                         .review_base
                                         .as_deref()
-                                        .or(checkpoint.bound_review_base.as_deref())
+                                        .or(graph_review_base.as_deref())
                                         .or_else(|| {
                                             node.extra
                                                 .get("review_base")
@@ -778,14 +783,12 @@ pub(super) fn initial_checkpoint(
     document: &GraphDocument,
     plan: &PlannedGraph,
     plan_digest: String,
-    bound_review_base: Option<String>,
-    bound_integration_base: Option<String>,
+    bases: Option<GraphBaseBinding>,
     instance_id: Option<String>,
     ask_actor: Option<String>,
 ) -> GraphCheckpoint {
     GraphCheckpoint {
-        bound_review_base: bound_review_base.map(|base| base.to_string()),
-        bound_integration_base: bound_integration_base.map(|base| base.to_string()),
+        bases,
         extra: Default::default(),
         expansions: Vec::new(),
         remaining: None,
@@ -797,7 +800,7 @@ pub(super) fn initial_checkpoint(
         delivery_required: document.delivery == Some(provenant_records::run::DeliveryMode::Pr),
         delivered: false,
         pull_request: None,
-        schema_version: 1,
+        schema_version: 2,
         cancelled: false,
         cancel_reason: None,
         integration_pin: None,

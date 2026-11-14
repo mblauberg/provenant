@@ -1,15 +1,16 @@
 //! Worst-case checkpoint size for a plan.
 //!
-//! A checkpoint holds the submitted document, its admitted expansions and
-//! extensions, its asks and one progress row per expanded node. Every runtime string a row can gain is cut
-//! to a fixed canonical-byte share when it is stored, and every list it can
-//! grow is either bounded by the plan or capped with an omitted count. The sum
-//! below is therefore an upper bound for every checkpoint the plan can
-//! produce, and a plan whose bound exceeds the envelope is refused before its
-//! first save rather than stopping later on an oversized checkpoint.
+//! A stored graph record holds the submitted document, its admitted expansions
+//! and extensions, its asks and one progress row per expanded node. Every runtime
+//! string a row can gain is cut to a fixed canonical-byte share when it is stored,
+//! and every list it can grow is either bounded by the plan or capped with an
+//! omitted count. The sum below is therefore an upper bound for every stored
+//! record the plan can produce, and a plan whose bound exceeds the envelope is
+//! refused before its first save rather than stopping later on an oversized
+//! record.
 use super::*;
 
-/// Envelope keys, digest and pinned integration base around the checkpoint.
+/// Envelope keys and digest around the checkpoint.
 const ENVELOPE_KEYS_BYTES: usize = 512;
 /// Host working directory, escaped in the worst case.
 const DIRECTORY_BYTES: usize = 6 * 4096;
@@ -80,9 +81,12 @@ pub(super) fn checkpoint_bound(
     extensions: &[String],
     plan: &PlannedGraph,
 ) -> usize {
+    let max_base = provenant_core::GitOid::parse(&"f".repeat(64))
+        .unwrap_or_else(|_| unreachable!("the fixed graph base is a valid object ID"));
+    let graph_bases = GraphBaseBinding::new(Some(max_base), Some(max_base))
+        .unwrap_or_else(|| unreachable!("nonempty graph bases produce a binding"));
     let skeleton = GraphCheckpoint {
-        bound_review_base: Some("f".repeat(64)),
-        bound_integration_base: Some("f".repeat(64)),
+        bases: None,
         extra: Default::default(),
         expansions: expansions.to_vec(),
         remaining: Some(RemainingBudgets {
@@ -137,6 +141,8 @@ pub(super) fn checkpoint_bound(
     };
     let fixed = [
         ENVELOPE_KEYS_BYTES,
+        // GraphExecution stores the configured graph-wide bases beside the checkpoint.
+        canonical_len(&serde_json::json!({"bases": graph_bases})),
         DIRECTORY_BYTES,
         prompt_store::compacted_len(document),
         prompt_store::compacted_len(&skeleton),

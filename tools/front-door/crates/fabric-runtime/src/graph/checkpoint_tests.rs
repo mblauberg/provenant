@@ -40,11 +40,14 @@ fn review_schema_versions_and_stored_digests() {
 }
 
 #[test]
-fn journal_accepts_v2_and_rejects_v1_review_fields() {
+fn journal_requires_and_projects_execution_bases_for_review_documents() {
     let mut record: StoredCheckpoint = serde_json::from_value(stored()).unwrap();
     record.execution.document.review_base = Some("base".into());
     record.execution.document.schema_version = 2;
-    record.execution.review_base = Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap());
+    record.execution.bases = GraphBaseBinding::new(
+        Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap()),
+        None,
+    );
     record.digest = CanonicalV1::record_digest(
         "fabric-graph-checkpoint",
         2,
@@ -53,8 +56,9 @@ fn journal_accepts_v2_and_rejects_v1_review_fields() {
     .unwrap()
     .to_string();
     let bytes = serde_json::to_vec(&record).unwrap();
-    assert!(decode_checkpoint(&bytes, "g-test").is_ok());
-    record.execution.review_base = None;
+    let decoded = decode_checkpoint(&bytes, "g-test").unwrap();
+    assert_eq!(decoded.checkpoint.bases, record.execution.bases);
+    record.execution.bases = None;
     record.digest = CanonicalV1::record_digest(
         "fabric-graph-checkpoint",
         2,
@@ -89,8 +93,10 @@ fn admission_recovery_capability() {
     let seed = || -> StoredCheckpoint { serde_json::from_value(stored()).unwrap() };
 
     let mut execution_base = seed();
-    execution_base.execution.review_base =
-        Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap());
+    execution_base.execution.bases = GraphBaseBinding::new(
+        Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap()),
+        None,
+    );
     assert!(matches!(
         decode_checkpoint(&bytes(execution_base), "g-test"),
         Err(JournalError::BadEnvelope)

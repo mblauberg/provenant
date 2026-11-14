@@ -2793,10 +2793,9 @@ mod tests {
         )?;
         journal.bind(provenant_fabric_runtime::graph::GraphExecution {
             extra: Default::default(),
+            bases: None,
             directory: PathBuf::from("/legacy/project"),
             document: execution,
-            review_base: None,
-            integration_base: None,
         })?;
         journal.save(&checkpoint)?;
         drop(journal);
@@ -2852,10 +2851,9 @@ mod tests {
         )?;
         journal.bind(provenant_fabric_runtime::graph::GraphExecution {
             extra: Default::default(),
+            bases: None,
             directory: PathBuf::from("/legacy/project"),
             document: execution,
-            review_base: None,
-            integration_base: None,
         })?;
         journal.save(&checkpoint)?;
 
@@ -3202,10 +3200,9 @@ mod tests {
             )?;
             journal.bind(GraphExecution {
                 extra: Default::default(),
+                bases: None,
                 directory: factory.cwd.clone(),
                 document: document.clone(),
-                review_base: None,
-                integration_base: None,
             })?;
             graph::advance_with_budget(
                 &document,
@@ -3820,10 +3817,9 @@ mod tests {
         let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
         let execution = GraphExecution {
             extra: Default::default(),
+            bases: None,
             directory: factory.cwd.clone(),
             document: document.clone(),
-            review_base: None,
-            integration_base: None,
         };
         // The recovery tests cover publication at each transition. Here the
         // property is the size and round trip of the fully populated snapshot;
@@ -4247,13 +4243,25 @@ mod tests {
             "nodes":[{"id":"parent", "access":"read_only", "prompt":"Go", "route":{"alias":"senior"}}]
         }))?;
         let reference = format!("{}/caller", factory.context.identity.host);
-        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-            "schema_version":1, "graph_id":"g-child-e2e", "plan_digest":"fixture", "bound_integration_base":if explicit_checkout { None } else { Some(&source) },
+        let bases = if explicit_checkout {
+            None
+        } else {
+            Some(
+                provenant_fabric_runtime::graph::GraphBaseBinding::new(
+                    None,
+                    Some(provenant_core::GitOid::parse(&source)?),
+                )
+                .ok_or("integration base")?,
+            )
+        };
+        let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            "schema_version":2, "graph_id":"g-child-e2e", "plan_digest":"fixture",
             "nodes":[{"id":"parent", "state":"running", "attempts":[{
                 "launched":true, "key":{"graph_id":"g-child-e2e", "node_id":"parent", "route_index":0, "attempt": 1},
                 "route":{"alias":"senior"}, "state":"running", "attempt_ref":reference, "outcome":null, "launch_actor":"fixture"
             }]}]
         }))?;
+        checkpoint.bases = bases;
         {
             let mut journal = FileJournal::open(
                 &factory.context.roots.state,
@@ -4264,9 +4272,8 @@ mod tests {
                 &factory.clock,
             )?;
             journal.bind(GraphExecution {
-                review_base: None,
                 extra: Default::default(),
-                integration_base: Some(source.parse()?),
+                bases,
                 directory: rig.project.clone(),
                 document: document.clone(),
             })?;
@@ -4921,10 +4928,9 @@ mod tests {
         )?;
         journal.bind(provenant_fabric_runtime::graph::GraphExecution {
             extra: Default::default(),
+            bases: None,
             directory: factory.cwd.clone(),
             document,
-            review_base: None,
-            integration_base: None,
         })?;
         journal.save(&checkpoint)?;
         drop(journal);
@@ -4999,10 +5005,9 @@ mod tests {
         )?;
         journal.bind(provenant_fabric_runtime::graph::GraphExecution {
             extra: Default::default(),
+            bases: None,
             directory: factory.cwd.clone(),
             document,
-            review_base: None,
-            integration_base: None,
         })?;
         let mut reserved = checkpoint.clone();
         reserved.nodes[1].attempts[0].attempt_ref = None;

@@ -78,8 +78,7 @@ fn missing_graph_worktree_warns_once_and_scheduled_gc_completes() -> Result {
         let mut journal = FileJournal::open(&state, project, id, budget, &cancel, &clock)?;
         journal.bind(GraphExecution {
             extra: Default::default(),
-            integration_base: None,
-            review_base: None,
+            bases: None,
             directory: if id == "missing" {
                 rig.root.join("removed")
             } else {
@@ -257,8 +256,7 @@ fn deadline_free_graph_tick_launches_waiting_fake_provider() -> Result {
     let mut journal = FileJournal::open(&state, project, "waiter", budget, &cancel, &clock)?;
     journal.bind(GraphExecution {
         extra: Default::default(),
-        integration_base: None,
-        review_base: None,
+        bases: None,
         directory: rig.project.clone(),
         document: document.clone(),
     })?;

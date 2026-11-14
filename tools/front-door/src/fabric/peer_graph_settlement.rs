@@ -604,10 +604,7 @@ fn integrating_graph_writer_refuses_a_source_outside_the_pinned_base()
         repo_facts: Default::default(),
         factory: &factory,
         capability_overrides: (Vec::new(), Vec::new()),
-        integration_base: Some(BoundGraphBases {
-            integration: Some(base.parse()?),
-            review: None,
-        }),
+        integration_base: GraphBaseBinding::new(None, Some(base.parse()?)),
         integration_branch: Some("batch".into()),
         network: None,
         exclude: Vec::new(),
@@ -839,8 +836,7 @@ fn graph_hint_requires_a_matching_attempt() -> Result<(), Box<dyn std::error::Er
     )?;
     journal.bind(provenant_fabric_runtime::graph::GraphExecution {
         extra: Default::default(),
-        integration_base: None,
-        review_base: None,
+        bases: None,
         directory: fixture.rig.project.clone(),
         document,
     })?;
@@ -957,9 +953,8 @@ fn settlement_advances_only_matching_graph_and_retains_writer()
             &clock,
         )?;
         journal.bind(graph::GraphExecution {
-            review_base: None,
             extra: Default::default(),
-            integration_base: None,
+            bases: None,
             directory: fixture.rig.project.clone(),
             document: document.clone(),
         })?;
@@ -1103,9 +1098,8 @@ fn settlement_and_tick_read_no_terminal_graphs_at_scale() -> Result<(), Box<dyn 
             &clock,
         )?;
         journal.bind(graph::GraphExecution {
-            review_base: None,
             extra: Default::default(),
-            integration_base: None,
+            bases: None,
             directory: fixture.rig.project.clone(),
             document: document.clone(),
         })?;
@@ -1134,6 +1128,12 @@ fn settlement_and_tick_read_no_terminal_graphs_at_scale() -> Result<(), Box<dyn 
         .as_path()
         .join("fabric/graphs")
         .join(fixture.settled.project_id.to_string());
+    let stored_owner: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        directory.join(format!("graph-{}.json", terminal.graph_id)),
+    )?)?;
+    let stored_version = stored_owner["schema_version"]
+        .as_u64()
+        .ok_or("stored owner schema")?;
     for number in 0..5000 {
         let id = format!("terminal-{number:04}");
         terminal.graph_id = id.clone();
@@ -1144,7 +1144,7 @@ fn settlement_and_tick_read_no_terminal_graphs_at_scale() -> Result<(), Box<dyn 
             &(&terminal, &execution),
         )?
         .to_string();
-        let envelope = serde_json::json!({"schema_version":1,"digest":digest,"checkpoint":terminal,"execution":execution});
+        let envelope = serde_json::json!({"schema_version":stored_version,"digest":digest,"checkpoint":terminal,"execution":execution});
         std::fs::write(
             directory.join(format!("graph-{id}.json")),
             serde_json::to_vec(&envelope)?,
@@ -1258,9 +1258,8 @@ fn an_attempt_keyed_to_another_graph_is_refused_not_adopted()
         &clock,
     )?;
     journal.bind(graph::GraphExecution {
-        review_base: None,
         extra: Default::default(),
-        integration_base: None,
+        bases: None,
         directory: fixture.rig.project.clone(),
         document: document.clone(),
     })?;

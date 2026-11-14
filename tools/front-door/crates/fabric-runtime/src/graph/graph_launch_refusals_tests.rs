@@ -567,8 +567,7 @@ fn launched_reader_stop_restart_replays_file_checkpoint_without_new_work() {
     journal
         .bind(GraphExecution {
             extra: Default::default(),
-            review_base: None,
-            integration_base: None,
+            bases: None,
             directory: base,
             document: document.clone(),
         })

@@ -239,10 +239,7 @@ fn advance_attempt_graph(
         launch_warnings: Vec::new(),
         repo_facts: Default::default(),
         factory: &factory,
-        integration_base: Some(BoundGraphBases {
-            integration: execution.integration_base,
-            review: execution.review_base,
-        }),
+        integration_base: checkpoint.bases,
         integration_branch: execution.document.integration_branch.clone(),
         network: graph_network(&execution.document)?,
         capability_overrides: graph_capability_overrides(&execution.document)?,

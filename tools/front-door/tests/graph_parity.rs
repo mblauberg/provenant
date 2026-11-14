@@ -201,8 +201,7 @@ impl Harness {
         // Binding is per handle: a new supervisor rebinds the same execution.
         journal.bind(GraphExecution {
             extra: Default::default(),
-            integration_base: None,
-            review_base: None,
+            bases: None,
             directory: self.rig.project.clone(),
             document: self.document.clone(),
         })?;

@@ -769,13 +769,12 @@ mod tests {
         let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 5)?;
         let mut journal = FileJournal::open(state, project, "custody", budget, &cancel, &clock)?;
         let document: GraphDocument = serde_json::from_value(json!({
-            "schema_version":2,"graph_id":"custody","integration_branch":"main",
+            "schema_version":2,"graph_id":"custody",
             "nodes":[{"id":"parent","access":"read_only","prompt":"Go","route":{"alias":"senior"}}]
         }))?;
         journal.bind(GraphExecution {
-            review_base: None,
             extra: Default::default(),
-            integration_base: None,
+            bases: None,
             directory: temp.path().to_path_buf(),
             document,
         })?;

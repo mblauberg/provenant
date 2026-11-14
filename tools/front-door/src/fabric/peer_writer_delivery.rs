@@ -148,8 +148,11 @@ fn resumed_lane_settlement_ignores_terminal_graph()
     }))?;
     let mut journal = graph::FileJournal::open(&fixture.roots.state, fixture.settled.project_id,
         "terminal-unrelated", WaitBudget::cli(clock.mono_now(), 10)?, &cancel, &clock)?;
-    journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(), integration_base: None,
-        directory: fixture.rig.project.clone(), document })?;
+    journal.bind(graph::GraphExecution {
+        bases: None,
+        directory: fixture.rig.project.clone(),
+        document,
+    })?;
     journal.save(&checkpoint)?;
     drop(journal);
     graph::take_checkpoint_read_ids();

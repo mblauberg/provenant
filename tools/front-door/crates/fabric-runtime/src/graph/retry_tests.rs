@@ -217,9 +217,8 @@ fn redo_container_after_checkpoint_crash(
     let mut journal = open();
     journal
         .bind(GraphExecution {
-            review_base: None,
             extra: Default::default(),
-            integration_base: None,
+            bases: None,
             directory: base,
             document: document.clone(),
         })
@@ -1424,9 +1423,8 @@ fn retry_node_and_dependants_resets_consumers_and_preserves_unrelated_work() {
     let mut journal = open();
     journal
         .bind(GraphExecution {
-            review_base: None,
             extra: Default::default(),
-            integration_base: None,
+            bases: None,
             directory: base,
             document: document.clone(),
         })
@@ -2048,9 +2046,8 @@ fn no_work_continuation_recovers_after_checkpoint_failure_before_launch() {
     let mut saved = open();
     saved
         .bind(GraphExecution {
-            review_base: None,
             extra: Default::default(),
-            integration_base: None,
+            bases: None,
             directory: base,
             document: document.clone(),
         })
@@ -2146,9 +2143,8 @@ fn stopping_settled_no_work_fences_failed_checkpoint_recovery() {
     let mut saved = open();
     saved
         .bind(GraphExecution {
-            review_base: None,
             extra: Default::default(),
-            integration_base: None,
+            bases: None,
             directory: base,
             document: document.clone(),
         })

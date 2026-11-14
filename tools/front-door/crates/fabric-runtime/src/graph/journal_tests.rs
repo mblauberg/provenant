@@ -4,6 +4,58 @@ use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
 use std::{convert::Infallible, os::unix::fs::PermissionsExt};
 struct Owner;
 
+fn stored_fixture() -> StoredCheckpoint {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2,
+        "graph_id": "g-test",
+        "nodes": [{
+            "id": "reader",
+            "prompt": "work for reader",
+            "access": "read_only",
+            "route": {"adapter": "fixture", "model": "fixture/model"}
+        }]
+    }))
+    .unwrap();
+    let execution = GraphExecution {
+        extra: Default::default(),
+        bases: None,
+        directory: base.clone(),
+        document: document.clone(),
+    };
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    journal.bind(execution).unwrap();
+    let mut checkpoint = advance(&document, &mut Owner, &mut journal)
+        .unwrap()
+        .checkpoint;
+    checkpoint.nodes[0].state = NodeState::Succeeded;
+    let attempt = &mut checkpoint.nodes[0].attempts[0];
+    attempt.state = AttemptState::Terminal;
+    attempt.outcome = Some(AttemptOutcome::Succeeded);
+    attempt.launched = true;
+    attempt.attempt_ref = Some(format!(
+        "{}/{}",
+        "11111111111111111111111111111111", "22222222222222222222222222222222"
+    ));
+    attempt.launch_actor = "33333333333333333333333333333333".into();
+    attempt.settled = 1;
+    journal.save(&checkpoint).unwrap();
+    let path = base
+        .join("fabric/graphs")
+        .join(project.to_string())
+        .join("graph-g-test.json");
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
 #[test]
 fn landing_review_query_reads_typed_settlement_on_only_the_exact_head() {
     let temp = crate::test_support::tempdir().unwrap();
@@ -16,8 +68,7 @@ fn landing_review_query_reads_typed_settlement_on_only_the_exact_head() {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
-    let mut fixture: StoredCheckpoint =
-        serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
+    let mut fixture: StoredCheckpoint = stored_fixture();
     let head = provenant_core::GitOid::parse(&"a".repeat(40)).unwrap();
     let review = ReviewSettlement {
         attempt_id: provenant_core::AttemptId::from_bytes([7; 16]),
@@ -54,8 +105,7 @@ fn interrupted_peer_origin_publication_never_reuses_the_launch_name() {
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
     let origin = provenant_records::WorkKey::new(project, "origin", "writer", 1).unwrap();
-    let mut fixture: StoredCheckpoint =
-        serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
+    let mut fixture: StoredCheckpoint = stored_fixture();
     fixture
         .execution
         .document
@@ -85,7 +135,7 @@ fn interrupted_peer_origin_publication_never_reuses_the_launch_name() {
 }
 
 #[test]
-fn terminal_legacy_checkpoint_is_decoded_or_retired() {
+fn terminal_checkpoint_with_superseded_header_is_retired() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
@@ -101,26 +151,31 @@ fn terminal_legacy_checkpoint_is_decoded_or_retired() {
         .join("fabric/graphs")
         .join(project.to_string())
         .join("graph-g-test.json");
-    std::fs::write(&path, include_bytes!("../fixtures/graph-checkpoint.json")).unwrap();
+    let mut stored = stored_fixture();
+    stored.schema_version = super::journal::CHECKPOINT_SCHEMA_VERSION - 1;
+    std::fs::write(&path, CanonicalV1::bytes(&stored).unwrap().as_bytes()).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    match FileJournal::read_status_checkpoint(&root, project, "g-test") {
-        Ok(Some(checkpoint)) => assert_eq!(checkpoint.nodes[0].state, NodeState::Succeeded),
-        Err(error) if error.is_unreadable() => {
-            assert!(
-                FileJournal::retire_unreadable(
-                    &root,
-                    project,
-                    "g-test",
-                    budget,
-                    &cancel,
-                    &clock,
-                    |_| Ok(())
-                )
-                .unwrap()
-            );
-        }
-        other => panic!("legacy checkpoint was neither decoded nor retired: {other:?}"),
-    }
+    assert!(
+        FileJournal::read_status_checkpoint(&root, project, "g-test")
+            .unwrap_err()
+            .is_unreadable()
+    );
+    assert!(
+        FileJournal::retire_unreadable(
+            &root,
+            project,
+            "g-test",
+            budget,
+            &cancel,
+            &clock,
+            |checkpoint| {
+                assert!(checkpoint.is_none());
+                Ok(())
+            }
+        )
+        .unwrap()
+    );
+    assert!(!path.exists());
 }
 
 #[test]
@@ -137,8 +192,7 @@ fn interrupted_marker_and_sentinel_publications_converge() {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
-    let mut fixture: StoredCheckpoint =
-        serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
+    let mut fixture: StoredCheckpoint = stored_fixture();
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
     journal.bind(fixture.execution.clone()).unwrap();
     journal.save(&fixture.checkpoint).unwrap();
@@ -224,9 +278,8 @@ fn manual_resume_publishes_marker_before_reopened_checkpoint() {
         FileJournal::open(&root, project, "resume-test", budget, &cancel, &clock).unwrap();
     journal
         .bind(GraphExecution {
-            review_base: None,
             extra: Default::default(),
-            integration_base: None,
+            bases: None,
             directory: base.clone(),
             document: document.clone(),
         })
@@ -295,8 +348,7 @@ fn an_ask_link_publishes_marker_before_pending_checkpoint() {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
-    let mut fixture: StoredCheckpoint =
-        serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
+    let mut fixture: StoredCheckpoint = stored_fixture();
     fixture.checkpoint.nodes[0].state = NodeState::Succeeded;
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
     journal.bind(fixture.execution).unwrap();
@@ -360,8 +412,7 @@ fn checkpoint_scale_fixture() -> (tempfile::TempDir, StateRoot, ProjectId) {
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
     drop(FileJournal::open(&root, project, "initial", budget, &cancel, &clock).unwrap());
     let directory = base.join("fabric/graphs").join(project.to_string());
-    let mut stored: StoredCheckpoint =
-        serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
+    let mut stored: StoredCheckpoint = stored_fixture();
     for number in 0..5020 {
         let id = format!("graph-{number:04}");
         stored.checkpoint.graph_id = id.clone();
@@ -468,8 +519,7 @@ fn checkpoint_collection_keeps_pending_graphs_and_reserves_collected_names() {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
-    let mut fixture: StoredCheckpoint =
-        serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
+    let mut fixture: StoredCheckpoint = stored_fixture();
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
     journal.bind(fixture.execution.clone()).unwrap();
     fixture.checkpoint.nodes[0].state = NodeState::Running;
@@ -573,8 +623,7 @@ fn checkpoint_collection_removes_matching_scratch_documents() {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
-    let mut fixture: StoredCheckpoint =
-        serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
+    let mut fixture: StoredCheckpoint = stored_fixture();
     fixture.execution.directory = base.join("checkout");
     fixture.checkpoint.nodes[0].state = NodeState::Running;
     let scratch = fixture
@@ -642,8 +691,7 @@ fn rebuild_keeps_healthy_graph_pending_beside_oversized_checkpoint() {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
-    let mut fixture: StoredCheckpoint =
-        serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
+    let mut fixture: StoredCheckpoint = stored_fixture();
     fixture.checkpoint.nodes[0].state = NodeState::Running;
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
     journal.bind(fixture.execution).unwrap();
@@ -685,8 +733,7 @@ fn pending_markers_follow_saves_and_rebuild_after_loss() {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
-    let mut fixture: StoredCheckpoint =
-        serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
+    let mut fixture: StoredCheckpoint = stored_fixture();
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
     journal.bind(fixture.execution).unwrap();
     journal.save(&fixture.checkpoint).unwrap();
@@ -772,10 +819,47 @@ impl AttemptOwner for Owner {
         })
     }
 }
+
+struct PinnedOwner(GraphBaseBinding);
+
+impl AttemptOwner for PinnedOwner {
+    type Error = Infallible;
+
+    fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+        provenant_config::PortTable::builtin().worktree_layout
+    }
+
+    fn actor(&self) -> String {
+        "pinned-fixture-actor".into()
+    }
+
+    fn bound_graph_bases(
+        &self,
+    ) -> (
+        Option<provenant_core::GitOid>,
+        Option<provenant_core::GitOid>,
+    ) {
+        (self.0.review, self.0.integration)
+    }
+
+    fn observe_or_start(
+        &mut self,
+        _: &AttemptKey,
+        _: NodeInput<'_>,
+        _: &GraphRoute,
+        _: AccessMode,
+        _: Option<&str>,
+        _: Replay<'_>,
+    ) -> Result<AttemptObservation, Infallible> {
+        Ok(AttemptObservation::Pending {
+            attempt_ref: Some("fixture-attempt".into()),
+        })
+    }
+}
+
 #[test]
 fn launched_route_fallback_history_is_readable() {
-    let mut stored: StoredCheckpoint =
-        serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
+    let mut stored: StoredCheckpoint = stored_fixture();
     let node = &mut stored.checkpoint.nodes[0];
     node.attempts[0].launched = true;
     node.attempts[0].outcome = Some(AttemptOutcome::UsageLimited);
@@ -811,9 +895,7 @@ fn assert_delivery_retry_reopens_matching_attempt(outcome: AttemptOutcome) {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).expect("budget");
-    let mut legacy: StoredCheckpoint =
-        serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json"))
-            .expect("legacy fixture");
+    let mut legacy: StoredCheckpoint = stored_fixture();
     let node = &mut legacy.checkpoint.nodes[0];
     node.state = NodeState::Failed;
     node.attempts[0].outcome = Some(outcome);
@@ -882,8 +964,7 @@ fn tick_reports_undecodable_checkpoint_once_and_recovers() {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
-    let mut fixture: StoredCheckpoint =
-        serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
+    let mut fixture: StoredCheckpoint = stored_fixture();
     fixture.checkpoint.nodes[0].state = NodeState::Running;
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
     journal.bind(fixture.execution).unwrap();
@@ -946,8 +1027,7 @@ fn tick_reports_undecodable_undelivered_pr_with_skipped_node() {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
-    let mut fixture: StoredCheckpoint =
-        serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
+    let mut fixture: StoredCheckpoint = stored_fixture();
     fixture.execution.document.delivery = Some(provenant_records::run::DeliveryMode::Pr);
     fixture.checkpoint.nodes[0].state = NodeState::Skipped;
     fixture.checkpoint.delivered = false;
@@ -984,16 +1064,25 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
-    let document:GraphDocument=serde_json::from_value(serde_json::json!({"schema_version":1,"graph_id":"errors","nodes":[{"id":"one","prompt":"test","access":"read_only","route":{"adapter":"fixture","model":"fixture"}}]})).unwrap();
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "graph_id": "errors",
+        "nodes": [{
+            "id": "one",
+            "prompt": "test",
+            "access": "read_only",
+            "route": {"adapter": "fixture", "model": "fixture"}
+        }]
+    }))
+    .unwrap();
     let read = || FileJournal::read_advance_error(&root, project, "errors").unwrap();
     assert_eq!(read(), None);
     let mut journal = FileJournal::open(&root, project, "errors", budget, &cancel, &clock).unwrap();
     for directory in [base.clone(), base.join("state")] {
         journal
             .bind(GraphExecution {
-                review_base: None,
                 extra: Default::default(),
-                integration_base: None,
+                bases: None,
                 directory,
                 document: document.clone(),
             })
@@ -1020,9 +1109,8 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
     let mut journal = FileJournal::open(&root, project, "errors", budget, &cancel, &clock).unwrap();
     journal
         .bind(GraphExecution {
-            review_base: None,
             extra: Default::default(),
-            integration_base: None,
+            bases: None,
             directory: base.join("state"),
             document: document.clone(),
         })
@@ -1037,7 +1125,7 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
     );
 }
 #[test]
-fn version_two_checkpoint_without_v2_fields_reloads() {
+fn schema_two_document_with_optional_fields_absent_reloads() {
     let root = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(root.path()).unwrap();
@@ -1050,16 +1138,24 @@ fn version_two_checkpoint_without_v2_fields_reloads() {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
-    // Version 2 is a superset of version 1, so a plain document saves and reloads.
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({"schema_version":2,"graph_id":"plain-v2","nodes":[{"id":"one","prompt":"test","access":"read_only","route":{"adapter":"fixture","model":"fixture"}}]})).unwrap();
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2,
+        "graph_id": "plain-v2",
+        "nodes": [{
+            "id": "one",
+            "prompt": "test",
+            "access": "read_only",
+            "route": {"adapter": "fixture", "model": "fixture"}
+        }]
+    }))
+    .unwrap();
     let checkpoint = {
         let mut journal =
             FileJournal::open(&root, project, "plain-v2", budget, &cancel, &clock).unwrap();
         journal
             .bind(GraphExecution {
-                review_base: None,
                 extra: Default::default(),
-                integration_base: None,
+                bases: None,
                 directory: base.clone(),
                 document: document.clone(),
             })
@@ -1090,7 +1186,26 @@ fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
-    let document:GraphDocument=serde_json::from_value(serde_json::json!({"schema_version":1,"graph_id":"reopen","nodes":[{"id":"one","prompt":"test","access":"read_only","route":{"adapter":"fixture","model":"fixture"}}]})).unwrap();
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2,
+        "graph_id": "reopen",
+        "integration_branch": "integration",
+        "nodes": [{
+            "id": "one",
+            "prompt": "test",
+            "access": "read_only",
+            "route": {"adapter": "fixture", "model": "fixture"}
+        }]
+    }))
+    .unwrap();
+    let integration = provenant_core::GitOid::parse(&"a".repeat(40)).unwrap();
+    let bases = GraphBaseBinding::new(None, Some(integration)).unwrap();
+    let execution = GraphExecution {
+        extra: Default::default(),
+        bases: Some(bases),
+        directory: base.clone(),
+        document: document.clone(),
+    };
     assert!(
         FileJournal::read_checkpoint(&root, project, "reopen")
             .unwrap()
@@ -1100,18 +1215,11 @@ fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
     let checkpoint = {
         let mut journal =
             FileJournal::open(&root, project, "reopen", budget, &cancel, &clock).unwrap();
-        journal
-            .bind(GraphExecution {
-                review_base: None,
-                extra: Default::default(),
-                integration_base: Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap()),
-                directory: base.clone(),
-                document: document.clone(),
-            })
-            .unwrap();
-        let checkpoint = advance(&document, &mut Owner, &mut journal)
+        journal.bind(execution.clone()).unwrap();
+        let checkpoint = advance(&document, &mut PinnedOwner(bases), &mut journal)
             .unwrap()
             .checkpoint;
+        assert_eq!(checkpoint.bases, Some(bases));
         // Status must remain available while the writer holds its lock.
         assert_eq!(
             FileJournal::read_checkpoint(&root, project, "reopen").unwrap(),
@@ -1125,29 +1233,33 @@ fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
     );
     assert_eq!(
         FileJournal::pending_execution(&root, project, "reopen").unwrap(),
-        Some(GraphExecution {
-            review_base: None,
-            extra: Default::default(),
-            integration_base: Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap()),
-            directory: base.clone(),
-            document: document.clone()
-        })
+        Some(execution.clone())
+    );
+    let stored: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            root.as_path()
+                .join(format!("fabric/graphs/{project}/graph-reopen.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(stored["checkpoint"].get("bases").is_none());
+    let integration_text = integration.to_string();
+    assert_eq!(
+        stored["execution"]["bases"]["integration"].as_str(),
+        Some(integration_text.as_str())
     );
     {
         let mut journal =
             FileJournal::open(&root, project, "reopen", budget, &cancel, &clock).unwrap();
-        assert_eq!(journal.load("reopen").unwrap(), Some(checkpoint));
-        assert_eq!(
-            journal.integration_base(),
-            Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap())
-        );
+        let hydrated = journal.load("reopen").unwrap().unwrap();
+        assert_eq!(hydrated, checkpoint);
+        assert_eq!(hydrated.bases, Some(bases));
+        assert_eq!(journal.integration_base(), Some(integration));
         assert!(matches!(
             journal.bind(GraphExecution {
-                review_base: None,
-                extra: Default::default(),
-                integration_base: None,
-                directory: base.clone(),
-                document: document.clone()
+                bases: None,
+                ..execution.clone()
             }),
             Err(JournalError::GraphMismatch)
         ));
@@ -1262,10 +1374,9 @@ fn bound_attempt_manifest_survives_file_journal_reopen_and_reattachment() {
     .unwrap();
     let execution = GraphExecution {
         extra: Default::default(),
+        bases: None,
         directory: base_dir.clone(),
         document: document.clone(),
-        review_base: None,
-        integration_base: None,
     };
     let mut owner = RecordingOwner::default();
     let first = {
@@ -1385,10 +1496,9 @@ fn implicit_writer_binding_reattaches_without_resolving_the_moved_head() {
     .unwrap();
     let execution = GraphExecution {
         extra: Default::default(),
+        bases: None,
         directory: directory.clone(),
         document: document.clone(),
-        review_base: None,
-        integration_base: None,
     };
     let first_head = "1".repeat(40);
     let mut owner = BoundOwner {
@@ -1444,8 +1554,7 @@ fn retired_checkpoint_cleanup_is_verified_and_failure_keeps_record() {
         .join("fabric/graphs")
         .join(project.to_string())
         .join("graph-g-test.json");
-    let mut stored: StoredCheckpoint =
-        serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
+    let mut stored: StoredCheckpoint = stored_fixture();
     stored.digest =
         "sha256:0000000000000000000000000000000000000000000000000000000000000000".into();
     std::fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
@@ -1493,8 +1602,7 @@ fn prompts_are_stored_by_digest_and_collected_with_the_graph() {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
-    let mut fixture: StoredCheckpoint =
-        serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
+    let mut fixture: StoredCheckpoint = stored_fixture();
     fixture.execution.directory = base.clone();
     let node = fixture.execution.document.nodes[0].clone();
     let state = fixture.checkpoint.nodes[0].clone();
@@ -1551,8 +1659,7 @@ fn prompts_are_stored_by_digest_and_collected_with_the_graph() {
 
 #[test]
 fn inline_prompt_checkpoints_still_decode() {
-    let fixture: StoredCheckpoint =
-        serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
+    let fixture: StoredCheckpoint = stored_fixture();
     let temp = crate::test_support::tempdir().unwrap();
     let directory = Directory::open_anchor(temp.path()).unwrap();
     let bytes = CanonicalV1::bytes(&fixture).unwrap();
@@ -1591,8 +1698,7 @@ mod launch_recovery {
                 project: ProjectId::from_bytes([1; 16]),
                 execution: GraphExecution {
                     extra: Default::default(),
-                    integration_base: None,
-                    review_base: None,
+                    bases: None,
                     directory: base,
                     document: serde_json::from_value(serde_json::json!({
                         "schema_version":2, "graph_id":"launch-recovery", "nodes":nodes

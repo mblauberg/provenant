@@ -86,11 +86,10 @@ fn advance(
         json!({"schema_version":1,"graph_id":"relay-crash","template_library":{},"nodes":[{"id":"parent","access":"read_only","prompt":"Parent","route":{"alias":"senior"}}]}),
     )?;
     journal.bind(GraphExecution {
-        document: document.clone(),
-        directory: directory.to_path_buf(),
-        review_base: None,
-        integration_base: None,
         extra: Default::default(),
+        bases: None,
+        directory: directory.to_path_buf(),
+        document: document.clone(),
     })?;
     graph::advance_with_budget(
         &document,

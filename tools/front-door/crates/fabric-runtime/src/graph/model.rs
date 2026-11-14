@@ -123,15 +123,57 @@ impl GraphRoute {
 /// Host-only inputs retained for advancement after the submitting process exits.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphExecution {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review_base: Option<provenant_core::GitOid>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
-    /// Integration head pinned before the graph's first node is admitted.
+    /// One stored authority for graph-wide bases; checkpoint and output
+    /// fields are projections derived from this binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub integration_base: Option<provenant_core::GitOid>,
+    pub bases: Option<GraphBaseBinding>,
     pub directory: std::path::PathBuf,
     pub document: GraphDocument,
+}
+
+/// Typed graph-wide bases pinned at admission. Checkpoint and its consumers
+/// share this one durable binding; strings in manifests and land records are
+/// projections of these object IDs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphBaseBinding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<provenant_core::GitOid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration: Option<provenant_core::GitOid>,
+}
+
+impl GraphBaseBinding {
+    /// The sole representation of an execution without configured bases is `None`.
+    pub fn new(
+        review: Option<provenant_core::GitOid>,
+        integration: Option<provenant_core::GitOid>,
+    ) -> Option<Self> {
+        (review.is_some() || integration.is_some()).then_some(Self {
+            review,
+            integration,
+        })
+    }
+}
+
+impl GraphExecution {
+    pub(super) fn valid_bases(&self) -> bool {
+        let (review, integration) = self
+            .bases
+            .map_or((None, None), |bases| (bases.review, bases.integration));
+        self.bases == GraphBaseBinding::new(review, integration)
+            && self
+                .document
+                .review_base
+                .as_deref()
+                .is_none_or(|reference| reference.is_empty() || review.is_some())
+            && self
+                .document
+                .integration_branch
+                .as_deref()
+                .is_none_or(|reference| reference.is_empty() || integration.is_some())
+    }
 }
 
 /// `route` remains the one-route form. A node may instead provide ordered
@@ -1185,11 +1227,10 @@ pub struct GraphCheckpoint {
     pub delivered: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request: Option<String>,
-    /// Graph-wide review and integration bases fixed at admission.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bound_review_base: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bound_integration_base: Option<String>,
+    /// Runtime projection of the execution binding. It is hydrated from
+    /// GraphExecution and never stored in the checkpoint.
+    #[serde(skip)]
+    pub bases: Option<GraphBaseBinding>,
     /// Integration head pinned when the first integration source was resolved.
     /// Synthesis and writers that start from that commit stop if it moves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1843,12 +1884,41 @@ impl Serialize for GraphRun {
         if let Some(outcome) = &self.outcome {
             state.serialize_field("outcome", outcome)?;
         }
-        state.serialize_field("checkpoint", &self.checkpoint)?;
+        state.serialize_field(
+            "checkpoint",
+            &GraphCheckpointProjection::from(&self.checkpoint),
+        )?;
         if let Some(error) = &self.advance_error {
             state.serialize_field("advance_error", error)?;
         }
         state.serialize_field("waits", &super::graph_waits(&self.checkpoint))?;
         state.end()
+    }
+}
+
+#[derive(Serialize)]
+struct GraphCheckpointProjection<'a> {
+    #[serde(flatten)]
+    checkpoint: &'a GraphCheckpoint,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bound_review_base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bound_integration_base: Option<String>,
+}
+
+impl<'a> From<&'a GraphCheckpoint> for GraphCheckpointProjection<'a> {
+    fn from(checkpoint: &'a GraphCheckpoint) -> Self {
+        Self {
+            checkpoint,
+            bound_review_base: checkpoint
+                .bases
+                .and_then(|bases| bases.review)
+                .map(|base| base.to_string()),
+            bound_integration_base: checkpoint
+                .bases
+                .and_then(|bases| bases.integration)
+                .map(|base| base.to_string()),
+        }
     }
 }
 

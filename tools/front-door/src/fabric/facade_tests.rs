@@ -1319,8 +1319,7 @@ pub(crate) mod peer_tests {
         )?;
         journal.bind(graph::GraphExecution {
             extra: Default::default(),
-            integration_base: Some(node_source),
-            review_base: None,
+            bases: None,
             directory: fixture.rig.project.clone(),
             document: document.clone(),
         })?;
@@ -1342,10 +1341,7 @@ pub(crate) mod peer_tests {
             launch_warnings: Vec::new(),
             repo_facts: Default::default(),
             factory: &factory,
-            integration_base: Some(BoundGraphBases {
-                integration: Some(node_source),
-                review: None,
-            }),
+            integration_base: GraphBaseBinding::new(None, Some(node_source)),
             integration_branch: None,
             network: None,
             capability_overrides: Default::default(),

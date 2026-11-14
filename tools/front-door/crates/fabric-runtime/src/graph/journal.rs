@@ -1,5 +1,8 @@
 use super::*;
 
+/// Stored execution/checkpoint contract; older duplicate-pin records are rejected.
+pub(super) const CHECKPOINT_SCHEMA_VERSION: u64 = 2;
+
 #[path = "events.rs"]
 mod events;
 pub use events::{GraphEvent, GraphEventKind};
@@ -331,19 +334,11 @@ impl FileJournal {
         if self.execution.is_none() && self.has_retained_identity()? {
             return Err(JournalError::NameReserved);
         }
-        if execution
-            .document
-            .review_base
-            .as_deref()
-            .is_some_and(|base| !base.is_empty())
-            && execution.review_base.is_none()
-        {
+        if !execution.valid_bases() {
             return Err(JournalError::BadEnvelope);
         }
         if let Some(bound) = &self.execution {
-            if bound.integration_base != execution.integration_base
-                || bound.review_base != execution.review_base
-            {
+            if bound.bases != execution.bases {
                 return Err(JournalError::GraphMismatch);
             }
             // The original host execution is part of the checkpoint. A caller
@@ -358,7 +353,8 @@ impl FileJournal {
     pub fn integration_base(&self) -> Option<provenant_core::GitOid> {
         self.execution
             .as_ref()
-            .and_then(|execution| execution.integration_base)
+            .and_then(|execution| execution.bases)
+            .and_then(|bases| bases.integration)
     }
 
     /// Discover journals without creating directories. Each is read separately
@@ -997,9 +993,12 @@ impl GraphJournal for FileJournal {
             return Err(JournalError::GraphMismatch);
         }
         let execution = self.execution.as_ref().ok_or(JournalError::BadEnvelope)?;
+        if execution.bases != checkpoint.bases {
+            return Err(JournalError::GraphMismatch);
+        }
         let stored = StoredCheckpoint {
             extra: self.extra.clone(),
-            schema_version: 1,
+            schema_version: CHECKPOINT_SCHEMA_VERSION,
             digest: CanonicalV1::record_digest(
                 "fabric-graph-checkpoint",
                 2,
@@ -1303,7 +1302,7 @@ fn decode_verified_checkpoint(
     graph_id: &str,
     max_bytes: u64,
 ) -> Result<StoredCheckpoint, JournalError> {
-    let stored: StoredCheckpoint = decode_v1(
+    let stored: StoredCheckpoint = provenant_records::decode(
         bytes,
         Limits {
             max_bytes,
@@ -1311,11 +1310,16 @@ fn decode_verified_checkpoint(
             max_members: MAX_CHECKPOINT_MEMBERS,
         },
     )?;
-    if stored.schema_version != 1 {
-        return Err(JournalError::BadEnvelope);
+    if stored.schema_version != CHECKPOINT_SCHEMA_VERSION {
+        return Err(DecodeError::UnsupportedVersion {
+            found: stored.schema_version,
+            line: 1,
+            column: 1,
+        }
+        .into());
     }
     for (found, supported) in [
-        (stored.checkpoint.schema_version, 1),
+        (stored.checkpoint.schema_version, 2),
         (stored.execution.document.schema_version, 2),
     ] {
         if found > supported {
@@ -1327,9 +1331,15 @@ fn decode_verified_checkpoint(
             .into());
         }
     }
+    if stored.checkpoint.schema_version != 2 {
+        return Err(JournalError::BadEnvelope);
+    }
     let document = &stored.execution.document;
     let has_v2 = document_requires_review_fields(document)
-        || stored.execution.review_base.is_some()
+        || stored
+            .execution
+            .bases
+            .is_some_and(|bases| bases.review.is_some())
         || stored
             .checkpoint
             .expansions
@@ -1350,14 +1360,7 @@ fn decode_verified_checkpoint(
     if digest.to_string() != stored.digest {
         return Err(JournalError::BadDigest);
     }
-    if stored
-        .execution
-        .document
-        .review_base
-        .as_deref()
-        .is_some_and(|base| !base.is_empty())
-        && stored.execution.review_base.is_none()
-    {
+    if !stored.execution.valid_bases() {
         return Err(JournalError::BadEnvelope);
     }
     if stored.checkpoint.graph_id != graph_id
@@ -1367,11 +1370,13 @@ fn decode_verified_checkpoint(
         return Err(JournalError::GraphMismatch);
     }
 
+    let mut stored = stored;
+    stored.checkpoint.bases = stored.execution.bases;
     Ok(stored)
 }
 
 #[derive(Serialize, Deserialize)]
-// Bump STATE_FORMAT_VERSION for changes an older or newer binary cannot read.
+// CHECKPOINT_SCHEMA_VERSION owns stored layout changes; older records are rejected.
 pub(super) struct StoredCheckpoint {
     /// Envelope extensions sit outside the checkpoint digest.
     #[serde(flatten)]

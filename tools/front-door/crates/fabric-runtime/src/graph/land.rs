@@ -362,10 +362,14 @@ fn reviewed_head(
         Some(commit) => commit.clone(),
         None => chain_head(plan, checkpoint, positions, reviewer, writer)?,
     };
+    let graph_review_base = checkpoint
+        .bases
+        .and_then(|bases| bases.review)
+        .map(|base| base.to_string());
     let review_base = progress
         .review_base
         .as_deref()
-        .or(checkpoint.bound_review_base.as_deref())
+        .or(graph_review_base.as_deref())
         .or_else(|| {
             node.extra
                 .get("review_base")
@@ -383,7 +387,12 @@ fn reviewed_head(
     }
     let base = review_base
         .map(str::to_owned)
-        .or_else(|| checkpoint.bound_integration_base.clone());
+        .or_else(|| {
+            checkpoint
+                .bases
+                .and_then(|bases| bases.integration)
+                .map(|base| base.to_string())
+        });
     Some(ReviewedSubject { head, base })
 }
 

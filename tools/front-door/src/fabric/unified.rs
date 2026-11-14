@@ -2984,8 +2984,7 @@ mod tests {
             FileJournal::open(&roots.state, project, "g", budget, &cancel, &factory.clock)?;
         journal.bind(GraphExecution {
             extra: Default::default(),
-            review_base: None,
-            integration_base: None,
+            bases: None,
             directory: rig.project.clone(),
             document: document("g"),
         })?;
@@ -3187,8 +3186,7 @@ mod tests {
                 FileJournal::open(&roots.state, project, graph, budget, &cancel, &clock)?;
             journal.bind(GraphExecution {
                 extra: Default::default(),
-                review_base: None,
-                integration_base: None,
+                bases: None,
                 directory: base.clone(),
                 document: document(graph),
             })?;

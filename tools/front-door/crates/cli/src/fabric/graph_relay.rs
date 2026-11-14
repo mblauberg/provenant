@@ -254,7 +254,10 @@ pub fn serve_with_read(
                 if let (None, Some(branch), Some(source)) = (
                     &parent_path,
                     &document.integration_branch,
-                    &checkpoint.bound_integration_base,
+                    &checkpoint
+                        .bases
+                        .and_then(|bases| bases.integration)
+                        .map(|base| base.to_string()),
                 ) {
                     Some((branch.clone(), source.clone()))
                 } else {
@@ -288,7 +291,10 @@ pub fn serve_with_read(
                             .to_owned()
                     });
                     let source = if parent_path.is_none() {
-                        checkpoint.bound_integration_base.clone()
+                        checkpoint
+                            .bases
+                            .and_then(|bases| bases.integration)
+                            .map(|base| base.to_string())
                     } else {
                         None
                     }
@@ -545,7 +551,11 @@ fn provision_added_writers(
                 Some(SourceBinding::Commit { commit }) => commit,
                 // These sources become available only when dependencies settle.
                 Some(_) => continue,
-                None => match checkpoint.bound_integration_base.clone() {
+                None => match checkpoint
+                    .bases
+                    .and_then(|bases| bases.integration)
+                    .map(|base| base.to_string())
+                {
                     Some(source) => source,
                     None => {
                         let request = provenant_run::resolve_writer(
@@ -1677,9 +1687,8 @@ mod provisioning_tests {
             &clock,
         )?;
         journal.bind(GraphExecution {
-            review_base: None,
             extra: Default::default(),
-            integration_base: None,
+            bases: None,
             directory: project.clone(),
             document,
         })?;
@@ -1994,13 +2003,19 @@ mod provisioning_tests {
             "nodes":[{"id":"parent","access":"read_only","prompt":"Go","route":{"alias":"senior"}}]
         }))?;
         let reference = format!("{}/caller", context.identity.host);
-        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-            "schema_version":1,"graph_id":"g-writers","plan_digest":"fixture","bound_integration_base":source,
+        let bases = provenant_fabric_runtime::graph::GraphBaseBinding::new(
+            None,
+            Some(provenant_core::GitOid::parse(&source)?),
+        )
+        .ok_or("integration base")?;
+        let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            "schema_version":2,"graph_id":"g-writers","plan_digest":"fixture",
             "nodes":[{"id":"parent","state":"running","worktree":null,"attempts":[{
                 "launched":true,"key":{"graph_id":"g-writers","node_id":"parent","route_index":0, "attempt": 1},
                 "route":{"alias":"senior"},"state":"running","attempt_ref":reference,"outcome":null,"launch_actor":"fixture"
             }]}]
         }))?;
+        checkpoint.bases = Some(bases);
         {
             let mut journal = FileJournal::open(
                 &context.roots.state,
@@ -2011,9 +2026,8 @@ mod provisioning_tests {
                 &clock,
             )?;
             journal.bind(GraphExecution {
-                review_base: None,
                 extra: Default::default(),
-                integration_base: Some(source.parse()?),
+                bases: Some(bases),
                 directory: project.clone(),
                 document,
             })?;
@@ -2108,9 +2122,8 @@ mod provisioning_tests {
             {
                 let mut journal = open()?;
                 journal.bind(GraphExecution {
-                    review_base: None,
                     extra: Default::default(),
-                    integration_base: None,
+                    bases: None,
                     directory: project.clone(),
                     document: serde_json::from_value(json!({
                         "schema_version":1,"graph_id":"g-lost-receipt","template_library":{},
@@ -2205,9 +2218,8 @@ mod provisioning_tests {
                 &clock,
             )?;
             journal.bind(GraphExecution {
-                review_base: None,
                 extra: Default::default(),
-                integration_base: None,
+                bases: None,
                 directory: project.clone(),
                 document,
             })?;
@@ -2289,9 +2301,8 @@ mod provisioning_tests {
             ]
         }))?;
         journal.bind(GraphExecution {
-            review_base: None,
             extra: Default::default(),
-            integration_base: None,
+            bases: None,
             directory: project.clone(),
             document: document.clone(),
         })?;

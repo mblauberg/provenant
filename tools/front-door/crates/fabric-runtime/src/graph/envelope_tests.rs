@@ -248,6 +248,19 @@ fn filled_land(tier: provenant_records::workflow::RiskTier) -> LandRecord {
 }
 
 fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphCheckpoint {
+    let placeholder_base = provenant_core::GitOid::parse(&"f".repeat(64)).unwrap();
+    let bases = GraphBaseBinding::new(
+        document
+            .review_base
+            .as_deref()
+            .filter(|reference| !reference.is_empty())
+            .map(|_| placeholder_base),
+        document
+            .integration_branch
+            .as_deref()
+            .filter(|branch| !branch.is_empty())
+            .map(|_| placeholder_base),
+    );
     let longest = plan
         .nodes
         .iter()
@@ -417,8 +430,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
         })
         .collect();
     GraphCheckpoint {
-        bound_review_base: Some("f".repeat(64)),
-        bound_integration_base: Some("f".repeat(64)),
+        bases,
         extra: Default::default(),
         expansions: Vec::new(),
         remaining: Some(RemainingBudgets {
@@ -571,9 +583,8 @@ fn assert_fits_with_repair_metadata(document: GraphDocument, tier: &str, grew: b
         }
     }
     let execution = GraphExecution {
-        review_base: None,
         extra: Default::default(),
-        integration_base: Some("1".repeat(40).parse().unwrap()),
+        bases: checkpoint.bases,
         directory: format!("/{}", "\u{1}".repeat(4095)).into(),
         document: document.clone(),
     };
@@ -830,9 +841,8 @@ fn a_checkpoint_within_the_byte_limit_loads_past_the_old_member_limit() {
         FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
     journal
         .bind(GraphExecution {
-            review_base: None,
             extra: Default::default(),
-            integration_base: None,
+            bases: None,
             directory: base.clone(),
             document: document.clone(),
         })
@@ -923,9 +933,8 @@ fn a_delivery_retry_takes_a_fresh_settlement_order() {
             FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
         journal
             .bind(GraphExecution {
-                review_base: None,
                 extra: Default::default(),
-                integration_base: None,
+                bases: None,
                 directory: base.clone(),
                 document: document.clone(),
             })
@@ -1026,9 +1035,8 @@ fn ci_failed_checks_and_findings_fit_the_configured_envelope() {
                 }
             }
             let execution = GraphExecution {
-                review_base: None,
                 extra: Default::default(),
-                integration_base: Some("1".repeat(40).parse().unwrap()),
+                bases: checkpoint.bases,
                 directory: "/fixture".into(),
                 document: document.clone(),
             };
@@ -1084,9 +1092,8 @@ fn disposition_checkpoint_fits_its_reduced_bound() {
     }
     let bound = graph_envelope_bound(&document, &[], &checkpoint.extensions, &plan);
     let execution = GraphExecution {
-        review_base: None,
         extra: Default::default(),
-        integration_base: Some("1".repeat(40).parse().unwrap()),
+        bases: checkpoint.bases,
         directory: format!("/{}", "\u{1}".repeat(4095)).into(),
         document: document.clone(),
     };

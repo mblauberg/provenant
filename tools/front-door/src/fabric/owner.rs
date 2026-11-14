@@ -1,12 +1,6 @@
 use super::*;
 use std::io::Write as _;
 
-#[derive(Clone, Copy)]
-pub(crate) struct BoundGraphBases {
-    pub(crate) integration: Option<provenant_core::GitOid>,
-    pub(crate) review: Option<provenant_core::GitOid>,
-}
-
 pub(crate) struct BoundGraphOwner<'a> {
     /// Active node's sealed launch allowance, independent of settlement observation.
     pub(crate) writer_launch_budget: Option<WaitBudget>,
@@ -16,7 +10,7 @@ pub(crate) struct BoundGraphOwner<'a> {
     pub(crate) repo_facts: provenant_confinement::worktrees::RepoFacts,
     pub(crate) launch_warnings: Vec<String>,
     // Both immutable graph bases travel together through every host owner.
-    pub(crate) integration_base: Option<BoundGraphBases>,
+    pub(crate) integration_base: Option<GraphBaseBinding>,
     pub(crate) integration_branch: Option<String>,
     /// The graph's explicit network reach for every node lane, such as
     /// `run --network off` bound before automatic preset selection.
@@ -3068,9 +3062,14 @@ impl BoundGraphOwner<'_> {
                     == Some(true)
             });
             let review_launch = node.review_launch;
-            let review_base = execution
-                .as_ref()
-                .and_then(|execution| execution.review_base);
+            let review_base = provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
+                &self.factory.context.roots.state,
+                self.factory.context.identity.project,
+                &key.graph_id,
+            )
+            .map_err(graph_journal_error)?
+            .and_then(|checkpoint| checkpoint.bases)
+            .and_then(|bases| bases.review);
             // Writer separation is mandatory; sibling diversity remains a preference.
             let enforced = node.require_distinct && !excluded_families.is_empty();
             let mut avoided_families = excluded_families;
@@ -4132,10 +4131,8 @@ mod journal_error_tests {
         }
         let document: graph::GraphDocument = serde_json::from_value(document)?;
         let integration = (scenario == "repair").then(|| fork.parse()).transpose()?;
-        let bound = BoundGraphBases {
-            integration,
-            review: graph_base.then(|| tip.parse()).transpose()?,
-        };
+        let bound =
+            GraphBaseBinding::new(graph_base.then(|| tip.parse()).transpose()?, integration);
         let mut journal = graph::FileJournal::open(
             &factory.context.roots.state,
             factory.context.identity.project,
@@ -4145,8 +4142,7 @@ mod journal_error_tests {
             &factory.clock,
         )?;
         journal.bind(graph::GraphExecution {
-            review_base: bound.review,
-            integration_base: integration,
+            bases: bound,
             directory: factory.cwd.clone(),
             extra: Default::default(),
             document: document.clone(),
@@ -4157,7 +4153,7 @@ mod journal_error_tests {
             factory: &factory,
             repo_facts: Default::default(),
             launch_warnings: Vec::new(),
-            integration_base: Some(bound),
+            integration_base: bound,
             integration_branch: None,
             network: None,
             capability_overrides: Default::default(),

@@ -46,8 +46,7 @@ fn submission_cancellation_drains_only_attached_work() -> TestResult {
             )?;
             journal.bind(graph::GraphExecution {
                 extra: Default::default(),
-                integration_base: None,
-                review_base: None,
+                bases: None,
                 directory: rig.project.clone(),
                 document: serde_json::from_value(json!({
                     "schema_version":1, "graph_id":graph,

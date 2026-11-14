@@ -1,8 +1,8 @@
 {
-  "schema_version": 1,
-  "digest": "sha256:9e994e5d129d7cd5f80eb598cd748ac468015209ddb59bb08c5398d16ddc3ba6",
+  "schema_version": 2,
+  "digest": "sha256:4a22767337c7bc114a7899015dd69d868778b92800b47b0f49c3b40ddf538620",
   "checkpoint": {
-    "schema_version": 1,
+    "schema_version": 2,
     "graph_id": "g-test",
     "plan_digest": "sha256:2f7f01c7804da30a4f2c2f8ed9dc458e8b239bf79ad491babe15c9c82bb9b014",
     "cancelled": false,

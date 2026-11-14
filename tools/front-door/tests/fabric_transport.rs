@@ -2314,8 +2314,7 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
             json!({"graph_id":"remote-graph","node_id":"one"}),
         )]
         .into(),
-        integration_base: None,
-        review_base: None,
+        bases: None,
         directory: rig.project.clone(),
         document: receiver_document.clone(),
     })?;
@@ -2348,8 +2347,7 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
     let mut journal = FileJournal::open(&state, project, "remote-graph", budget, &cancel, &clock)?;
     journal.bind(GraphExecution {
         extra: Default::default(),
-        integration_base: None,
-        review_base: None,
+        bases: None,
         directory: rig.project.clone(),
         document: document.clone(),
     })?;

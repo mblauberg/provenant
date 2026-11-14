@@ -328,10 +328,9 @@ fn lane_edit_admits_revision_through_host_relay() -> Result {
     )?;
     journal.bind(GraphExecution {
         extra: Default::default(),
+        bases: None,
         directory: rig.project.clone(),
         document,
-        review_base: None,
-        integration_base: None,
     })?;
     journal.save(&checkpoint)?;
     drop(journal);

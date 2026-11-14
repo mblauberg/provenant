@@ -528,9 +528,8 @@ fn status_and_replay_agree_on_persisted_partial_composite() {
         FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
     journal
         .bind(GraphExecution {
-            review_base: None,
             extra: Default::default(),
-            integration_base: None,
+            bases: None,
             directory: base,
             document: document.clone(),
         })

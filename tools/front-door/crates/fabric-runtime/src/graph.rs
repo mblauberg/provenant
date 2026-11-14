@@ -8,7 +8,7 @@
 use provenant_core::{CancelToken, Clock, DurationMicros, ProjectId, StateRoot, WaitBudget};
 use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, PublishMode};
 use provenant_records::pause::PauseCause;
-use provenant_records::{CanonicalError, CanonicalV1, DecodeError, Limits, decode_v1};
+use provenant_records::{CanonicalError, CanonicalV1, DecodeError, Limits};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
@@ -1411,7 +1411,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 return Err(GraphError::Invalid(reason));
             }
             let asks = may_ask(&plan);
-            let (bound_review_base, bound_integration_base) = owner.bound_graph_bases();
+            let (review, integration) = owner.bound_graph_bases();
+            let bases = GraphBaseBinding::new(review, integration);
             let instance_id = if asks {
                 Some(provenant_core::hex(
                     &provenant_os::fs::entropy_128().map_err(GraphError::Instance)?,
@@ -1424,8 +1425,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 document,
                 &plan,
                 plan_digest,
-                bound_review_base.map(|base| base.to_string()),
-                bound_integration_base.map(|base| base.to_string()),
+                bases,
                 instance_id,
                 ask_actor,
             );
@@ -2409,7 +2409,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                         owner.integration_head().map_err(GraphError::Run)?
                                     }
                                     None => {
-                                        let bound = checkpoint.bound_integration_base.clone();
+                                        let bound = checkpoint
+                                            .bases
+                                            .and_then(|bases| bases.integration)
+                                            .map(|base| base.to_string());
                                         match bound {
                                             Some(source) => Some(source),
                                             None => {
@@ -2623,10 +2626,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                     if node.access == AccessMode::ReadOnly && template::review_node(node) {
                         let progress = &checkpoint.nodes[node_index];
-                        let base = progress
-                            .review_base
-                            .as_ref()
-                            .or(checkpoint.bound_review_base.as_ref());
+                        let graph_review_base = checkpoint
+                            .bases
+                            .and_then(|bases| bases.review)
+                            .map(|base| base.to_string());
+                        let base = progress.review_base.as_ref().or(graph_review_base.as_ref());
                         if base
                             .zip(progress.source_commit.as_ref())
                             .is_some_and(|(base, head)| base == head)

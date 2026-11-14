@@ -94,9 +94,8 @@ fn tick_reports_unreadable_once_and_advances_another_graph()
     let mut journal =
         graph::FileJournal::open(&roots.state, project, "b-good", budget, &cancel, &clock)?;
     journal.bind(graph::GraphExecution {
-        review_base: None,
         extra: Default::default(),
-        integration_base: None,
+        bases: None,
         directory: rig.project.clone(),
         document: document.clone(),
     })?;
@@ -183,9 +182,8 @@ fn tick_dispatches_waiting_node_without_a_deadline() -> Result<(), Box<dyn std::
     let mut journal =
         graph::FileJournal::open(&roots.state, project, "waiter", budget, &cancel, &clock)?;
     journal.bind(graph::GraphExecution {
-        review_base: None,
         extra: Default::default(),
-        integration_base: None,
+        bases: None,
         directory: rig.project.clone(),
         document: document.clone(),
     })?;
@@ -286,9 +284,8 @@ fn tick_dispatches_capacity_waiter_with_future_decision() -> Result<(), Box<dyn 
     let mut journal =
         graph::FileJournal::open(&roots.state, project, "waiter", budget, &cancel, &clock)?;
     journal.bind(graph::GraphExecution {
-        review_base: None,
         extra: Default::default(),
-        integration_base: None,
+        bases: None,
         directory: rig.project.clone(),
         document: document.clone(),
     })?;
@@ -450,9 +447,8 @@ fn tick_warns_once_for_missing_worktree_and_advances_another_graph()
         let mut journal =
             graph::FileJournal::open(&roots.state, project, id, budget, &cancel, &clock)?;
         journal.bind(graph::GraphExecution {
-            review_base: None,
             extra: Default::default(),
-            integration_base: None,
+            bases: None,
             directory: if id == "a-missing" {
                 rig.root.join("removed-worktree")
             } else {
@@ -568,8 +564,7 @@ fn graph_wait_observes_settlement_and_budget() -> Result<(), Box<dyn std::error:
     )?;
     journal.bind(GraphExecution {
         extra: Default::default(),
-        integration_base: None,
-        review_base: None,
+        bases: None,
         directory: rig.project.clone(),
         document,
     })?;
@@ -695,8 +690,7 @@ fn graph_cancel_persists_reason_and_skips_pending_node() -> Result<(), Box<dyn s
     )?;
     journal.bind(GraphExecution {
         extra: Default::default(),
-        integration_base: None,
-        review_base: None,
+        bases: None,
         directory: rig.project.clone(),
         document,
     })?;
