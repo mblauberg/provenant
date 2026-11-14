@@ -121,14 +121,8 @@ fn gc_idle_output_requires_ignored_idle_and_free_writer() -> Result<(), Box<dyn 
         fixture.run(&["commit", "-m", "output rules"])?;
         let test_context = TestContext::new(&fixture)?;
         let context = test_context.context();
-        let created = create(
-            &context,
-            WorktreeCreate {
-                branch: "idle-output".into(),
-                base: None,
-            },
-            &cancel(),
-        )?;
+        let created = gc_owned_lane(&test_context, &context, "idle-output")?;
+        let retirement = HostRetirementFixture::new(&test_context)?;
         fs::create_dir_all(created.path.join("target"))?;
         fs::write(created.path.join("target/cache"), "output")?;
         let lanes = list(&context, &cancel())?;
@@ -169,9 +163,10 @@ fn gc_idle_output_requires_ignored_idle_and_free_writer() -> Result<(), Box<dyn 
             &lanes,
             &WorktreeGcPolicy {
                 include_foreign: false,
-                retirement_port: None,
-                retirement_feeds: None,
-                mode: CollectionMode::Worktrees,
+                retirement_port: Some(&retirement),
+                retirement_feeds: Some(&retirement),
+                // Output retention alone: the lane itself is never retired.
+                mode: CollectionMode::Outputs,
                 proof: None,
                 upstream_reference: None,
                 integration_patterns: &[],
