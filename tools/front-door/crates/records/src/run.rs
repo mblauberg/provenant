@@ -941,6 +941,20 @@ pub enum AttemptState {
         reason: Option<String>,
     },
 }
+impl AttemptState {
+    /// Read the sealed terminal decision without treating malformed evidence as
+    /// an absent stop. Record validation and every projection share this path.
+    pub fn stop(&self) -> Result<Option<crate::Stop>, serde_json::Error> {
+        match self {
+            Self::Terminal { extra, .. } => extra
+                .get("stop")
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose(),
+            _ => Ok(None),
+        }
+    }
+}
+
 /// A typed refusal made during local provider preparation, before custody.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

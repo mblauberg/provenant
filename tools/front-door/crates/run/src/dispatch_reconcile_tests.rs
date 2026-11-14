@@ -292,6 +292,18 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
             (!mixed).then_some(provenant_records::run::PreparationFailure::AuthRequired)
         );
         assert!(store.custody_released(&record, &call)?);
+        let mut corrupt_stop = record.clone();
+        if let AttemptState::Terminal { extra, .. } = &mut corrupt_stop.state {
+            extra.insert("stop".into(), serde_json::json!({"cause": false}));
+        }
+        assert!(matches!(
+            crate::reader::validate_attempt(&corrupt_stop),
+            Err(RunError::Validation(_))
+        ));
+        assert!(matches!(
+            crate::reader::fact(corrupt_stop),
+            Err(RunError::Validation(_))
+        ));
         if !mixed {
             let mut corrupt = record.clone();
             corrupt.provider_launched = None;

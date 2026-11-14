@@ -142,6 +142,10 @@ fn slot_wait_ms(queued_at: WallTime, started_at: Option<WallTime>) -> Option<u64
 /// The published fact for a terminal record. A record read from a peer takes the
 /// same path as one read here.
 pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
+    let stop = r
+        .state
+        .stop()
+        .map_err(|_| RunError::Validation("terminal stop evidence"))?;
     let account_identity = usage_identity(
         r.resolved_route.as_ref(),
         r.applied_route.as_ref(),
@@ -149,7 +153,6 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
     );
     let usage = r.effective_usage().into();
     let AttemptState::Terminal {
-        extra: terminal_extra,
         outcome,
         exit_code,
         finished_at,
@@ -177,11 +180,8 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         .map(|(adapter, session)| provenant_records::TranscriptRef { adapter, session });
     let (tier, template, parent_node) = graph_labels(r.context.as_ref());
     let slot_wait_ms = slot_wait_ms(r.queued_at, r.started_at);
-    let cause_source = match terminal_extra.get("stop") {
-        Some(value) => serde_json::from_value::<provenant_records::Stop>(value.clone())
-            .ok()
-            .map(|stop| stop.cause().source())
-            .unwrap_or(provenant_records::run::CauseSource::Unavailable),
+    let cause_source = match stop {
+        Some(stop) => stop.cause().source(),
         None => r
             .settlement_reason
             .map(|reason| reason.rule().source)
@@ -1293,6 +1293,9 @@ pub(crate) fn valid_write_grants(grants: &[WriteGrantRecord]) -> bool {
 }
 
 pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
+    r.state
+        .stop()
+        .map_err(|_| RunError::Validation("terminal stop evidence"))?;
     if r.preparation_failure.is_some()
         && (r.provider_launched != Some(false)
             || !matches!(
