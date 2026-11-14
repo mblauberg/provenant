@@ -1,4 +1,4 @@
-//! Local human inbox service, shared by CLI and MCP. No provider or app dependency.
+//! Local human inbox service, used by the CLI. No provider or app dependency.
 use crate::{
     coordination::{
         CoordinationError,
@@ -560,7 +560,7 @@ impl InboxInput {
             _ => None,
         }
     }
-    /// Structural bounds are shared with MCP's schema. Relationships are checked
+    /// Structural bounds are shared with the CLI grammar. Relationships are checked
     /// by the service, where the authoritative request is available.
     fn validate_fields(&self) -> Result<(), InboxError> {
         match self {

@@ -3,7 +3,7 @@ use crate::metadata::CatalogueArg;
 mod context;
 pub mod graph_relay;
 
-/// Shared identity/config setup for CLI leaves and the binary MCP transport.
+/// Shared identity/config setup for CLI leaves and the binary's fabric edges.
 pub use context::{Context, PeerFailure, current_session, facade_outcome, in_lane, publish};
 
 /// Trusted project and actor identity for sibling leaves such as workflow.
@@ -31,12 +31,6 @@ use std::{io, path::PathBuf, str::FromStr};
 
 #[derive(Debug, Subcommand)]
 pub enum Fabric {
-    /// Serve the Fabric MCP transport on standard input and output
-    Mcp {
-        /// Harness the client is
-        #[arg(long, value_parser = crate::install::harness_parser())]
-        client: Option<provenant_records::Harness>,
-    },
     /// Show this agent's project and inbox identity
     Identity,
     #[command(hide = true)]
@@ -266,7 +260,7 @@ pub enum Claim {
 #[derive(Debug, thiserror::Error)]
 pub enum EdgeError {
     #[error(transparent)]
-    Relay(#[from] provenant_fabric_mcp::tools::ServiceError),
+    Relay(#[from] provenant_fabric_runtime::relay::ServiceError),
     #[error(transparent)]
     Exec(#[from] provenant_os::exec::ExecError),
     #[error(transparent)]
@@ -307,10 +301,10 @@ pub fn edge_diagnostic(error: &EdgeError) -> Option<provenant_records::diagnosti
             ))
         }
         EdgeError::Coordination(error) => Some(FacadeError::from(error).diagnostic()),
-        EdgeError::Relay(provenant_fabric_mcp::tools::ServiceError::Facade(error)) => {
+        EdgeError::Relay(provenant_fabric_runtime::relay::ServiceError::Facade(error)) => {
             Some(error.diagnostic())
         }
-        EdgeError::Relay(provenant_fabric_mcp::tools::ServiceError::Coordination(error)) => {
+        EdgeError::Relay(provenant_fabric_runtime::relay::ServiceError::Coordination(error)) => {
             Some(FacadeError::from(error).diagnostic())
         }
         _ => None,
@@ -333,7 +327,6 @@ fn recipient(value: &str, host: provenant_core::HostId) -> Result<ActorId, EdgeE
 impl Fabric {
     fn path(&self) -> String {
         let (domain, verb) = match self {
-            Self::Mcp { .. } => return "fabric mcp".into(),
             Self::Identity => return "fabric identity".into(),
             Self::Peer { .. } => return "fabric peer".into(),
             Self::PeerAgent => return "fabric peer-agent".into(),
@@ -440,7 +433,7 @@ fn execute(
     };
     let observe = |input: Mutation| -> Result<Value, EdgeError> {
         if ctx.in_lane && ctx.remote_home() {
-            use provenant_fabric_mcp::tools::ToolCall;
+            use provenant_fabric_runtime::relay::ToolCall;
             let waiting = matches!(
                 &input,
                 Mutation::Events(EventsInput::Read {
@@ -486,7 +479,7 @@ fn execute(
         }
     };
     let value = match cmd {
-        Fabric::Identity | Fabric::Mcp { .. } | Fabric::Peer { .. } | Fabric::PeerAgent => {
+        Fabric::Identity | Fabric::Peer { .. } | Fabric::PeerAgent => {
             return Err(EdgeError::InvalidField("command"));
         }
         Fabric::Mail(Mail::Send {

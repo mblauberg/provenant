@@ -289,7 +289,7 @@ pub(crate) fn dispatch_refused(fail: provenant_cli::run::Fail) -> FacadeError {
         },
     }
 }
-/// Translate a typed run category at the MCP edge. `ErrorKind` is the one
+/// Translate a typed run category at the command edge. `ErrorKind` is the one
 /// categorisation of run errors; this only renders it.
 pub(crate) fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeError {
     use provenant_run::ErrorKind as E;

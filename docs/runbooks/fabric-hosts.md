@@ -28,14 +28,14 @@ the peer entrypoint works:
 `provenant config schema` lists the other `domains.fabric` keys.
 
 `provenant hosts doctor [NAME]` probes Claude identities under `~/.claude` and
-`~/.claude-*` and reports whether managed skills, MCP entry and hooks match the
+`~/.claude-*` and reports whether managed skills and hooks match the
 release (`provenant accounts sync` repairs drift). With `NAME` it runs the same
 read-only probe on the peer; an unknown name is `UNKNOWN_HOST`.
 
 Peers must be upgraded together: every request carries a protocol number and a
 mismatch fails with `PEER_VERSION` (for example "peer workshop speaks protocol
 1, this host speaks 6"). Upgrade each host with `provenant upgrade`, then
-restart peer agents, MCP servers and workers. A peer too old or unable to
+restart peer agents and workers. A peer too old or unable to
 submit is refused before launch.
 
 ## macOS peers and the login keychain

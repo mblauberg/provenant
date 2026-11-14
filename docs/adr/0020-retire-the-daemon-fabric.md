@@ -13,7 +13,7 @@ isolation while obstructing normal use.
 
 ## Decision
 
-Fabric is a project-scoped SQLite coordination store with CLI and MCP surfaces,
+Fabric is a project-scoped SQLite coordination store with a CLI surface,
 not a provider daemon. The fabric-store crate owns mail, tasks and events;
 fabric-runtime owns identity and host coordination. SQLite serialises writes.
 
@@ -22,7 +22,7 @@ primary checkout's project identity; other Git or non-Git roots stand alone.
 The agent label can split inboxes. Mail uses per-recipient read cursors, with no
 claim, acknowledgement token or redelivery.
 
-Provider execution belongs to run, providers and supervisor. Fabric's thin MCP
+Provider execution belongs to run, providers and supervisor. Fabric's thin CLI
 surface delegates to those owners under
 [ADR 0021](0021-configured-workspace-dispatch-boundaries.md). Delivery acceptance belongs
 to workflow, separately from execution evidence. There is no daemon capability

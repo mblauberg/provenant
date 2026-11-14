@@ -651,7 +651,7 @@ fn refresh_account(
 /// and passes it through an inherited pipe. Sandboxed lanes deny keychain
 /// services and use attempt-private configuration; native lanes keep the
 /// ordinary configuration unless an account selects another directory.
-/// Provenant and its hook helpers are added explicitly for lane MCP use.
+/// Provenant and its hook helpers are added explicitly for lane use.
 fn prepare(
     input: &PrepareInput<'_>,
     access: Access,
@@ -724,7 +724,7 @@ fn prepare(
         argv.extend(["--effort".into(), effort.into()]);
     }
     if !shell && let Some(read_only) = &plan.read_only {
-        // The following MCP flags terminate --add-dir's variadic paths.
+        // The flags that follow terminate --add-dir's variadic paths.
         add_git_dirs(&mut argv, read_only.git_read_paths(), input.cwd);
     }
     if access == Access::ReadOnly {
@@ -749,9 +749,9 @@ fn prepare(
     // Filesystem confinement owns writer path access; native permission prompts
     // would refuse tools that cannot ask for approval in a headless lane.
     let allowed_tools = if web {
-        "Bash,Skill,mcp__fabric__*,WebFetch,WebSearch"
+        "Bash,Skill,WebFetch,WebSearch"
     } else {
-        "Bash,Skill,mcp__fabric__*"
+        "Bash,Skill"
     };
     let image_rules = if shell {
         Vec::new()

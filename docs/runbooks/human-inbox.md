@@ -1,6 +1,6 @@
 # Human inbox
 
-Owner: `crates/fabric-runtime`, `crates/cli`, `crates/fabric-mcp`
+Owner: `crates/fabric-runtime`, `crates/cli`
 Anchor: [`tests/inbox.rs`](../../tools/front-door/tests/inbox.rs), [`inbox/tests.rs`](../../tools/front-door/crates/fabric-runtime/src/inbox/tests.rs)
 
 How a chair asks the owner for a decision and consumes the answer. Only a chair
@@ -44,9 +44,9 @@ provenant inbox acknowledge REQUEST_ID --answer ANSWER_ID \
   `phone_remote`, `cli`, `unknown`); phone use is never inferred.
 - Use the explicit originating session ID: posting does not discover or
   authenticate a live session. Acknowledgement needs the request's original
-  actor as well as its exact host, project and session. MCP and the terminal
-  may use different agent labels; read `inbox.agent` from `fabric_context`
-  (`op: inspect`), keep it with the checkpoint, and set
+  actor as well as its exact host, project and session. Hooks and the terminal
+  may use different agent labels; read `inbox.agent` from
+  `provenant fabric identity --json`, keep it with the checkpoint, and set
   `PROVENANT_AGENT_LABEL` to it for CLI acknowledgement.
 - Preserve the operation ID, input and viewed revision when retrying after an
   uncertain reply; a changed operation conflicts. To replace a viewed item add

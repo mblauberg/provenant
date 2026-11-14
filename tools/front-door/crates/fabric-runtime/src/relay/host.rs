@@ -1,6 +1,6 @@
 //! Attempt-bound host coordination relay. Sender authority stays in the host.
 #![allow(clippy::disallowed_methods)] // Native socket I/O uses real deadlines.
-use crate::tools::{FacadeError, ServiceError, ToolCall};
+use super::call::{FacadeError, ServiceError, ToolCall};
 use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Parallel host owners per attempt, matching the MCP worker bound.
+/// Parallel host owners per attempt, bounded per attempt.
 pub const WORKERS: usize = 4;
 
 /// Reserve response delivery time without extending a caller's deadline.
@@ -34,19 +34,19 @@ pub fn host_budget(
     ))
 }
 
-// Graph launch is internal CLI transport; public MCP observations retain their cap.
+// Graph launch is internal CLI transport; relayed observations retain their cap.
 const GRAPH_LAUNCH_MAX_SECONDS: u64 = provenant_core::WaitTransport::Cli.maximum_seconds() + 1;
 
 fn request_max_seconds(request: &Request) -> u64 {
     if request.tool == GRAPH_TOOL && request.arguments["op"] == "add" {
         GRAPH_LAUNCH_MAX_SECONDS
     } else {
-        crate::MAX_WAIT_SECONDS
+        super::MAX_WAIT_SECONDS
     }
 }
 
-/// Relay frame for a lane adding to its own graph. It is not an MCP tool:
-/// the host resolves the parent node from the attempt the relay serves.
+/// Relay frame for a lane adding to its own graph. It is not a coordination
+/// tool: the host resolves the parent node from the attempt the relay serves.
 pub const GRAPH_TOOL: &str = "graph";
 
 /// Host handler for graph frames: arguments, cancellation, caller budget.
@@ -119,7 +119,7 @@ fn service_cause(error: &ServiceError) -> Option<FacadeError> {
         ServiceError::Facade(cause) => Some(relay_cause(cause)),
         ServiceError::Coordination(cause) => Some(relay_cause(&FacadeError::from(cause))),
         ServiceError::Invalid(cause) => Some(FacadeError::from(
-            &provenant_fabric_runtime::coordination::CoordinationError::Input(cause.clone()),
+            &crate::coordination::CoordinationError::Input(cause.clone()),
         )),
         ServiceError::Mutation { source, .. } => service_cause(source),
         _ => None,
@@ -439,14 +439,14 @@ pub(crate) fn serve_one_with(
     } else {
         match ToolCall::parse(&request.tool, request.arguments) {
             Ok(call) => {
-                let within = confirm_budget(stream, deadline, cancel, crate::MAX_WAIT_SECONDS)?;
+                let within = confirm_budget(stream, deadline, cancel, super::MAX_WAIT_SECONDS)?;
                 reply(handler(call, cancel, within))
             }
-            Err(crate::tools::InvalidInput::Validated(error)) => Reply::Error {
+            Err(super::call::InvalidInput::Validated(error)) => Reply::Error {
                 code: "invalid_input".into(),
                 detail: ServiceError::Invalid(error.clone()).structured_error(),
                 cause: Some(FacadeError::from(
-                    &provenant_fabric_runtime::coordination::CoordinationError::Input(error),
+                    &crate::coordination::CoordinationError::Input(error),
                 )),
                 operation_id: None,
             },
@@ -531,7 +531,7 @@ pub(crate) fn exchange(
         stream,
         request,
         cancel,
-        Duration::from_secs(crate::MAX_WAIT_SECONDS),
+        Duration::from_secs(super::MAX_WAIT_SECONDS),
     )
 }
 
@@ -781,9 +781,7 @@ mod tests {
     #[test]
     fn lost_child_add_reply_replays_the_durable_receipt_over_the_relay()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::{
-            GraphCheckpoint, GraphDocument, patch, relay, template,
-        };
+        use crate::graph::{GraphCheckpoint, GraphDocument, patch, relay, template};
         use serde_json::json;
         let document: GraphDocument = serde_json::from_value(json!({
             "schema_version":1,"graph_id":"relay-replay","nodes":[{
@@ -1020,14 +1018,12 @@ mod tests {
                     &mut server,
                     provenant_records::Limits::CONFIG,
                     &|_, _, _| {
-                        Err(
-                            provenant_fabric_runtime::coordination::CoordinationError::Peer(
-                                provenant_fabric_runtime::hosts::PeerError::Unknown {
-                                    operation_id: operation_id.clone(),
-                                },
-                            )
-                            .into(),
+                        Err(crate::coordination::CoordinationError::Peer(
+                            crate::hosts::PeerError::Unknown {
+                                operation_id: operation_id.clone(),
+                            },
                         )
+                        .into())
                     },
                     &CancelToken::new(),
                 )

@@ -282,7 +282,6 @@ fn home_rename_with_flag_or_config_bin_preserves_old_paths() -> Result {
         } else {
             install_args.extend(["--bin-dir".into(), bin_dir.into_os_string()]);
         }
-        enable_fabric_mcp(&rig)?;
         let binary = Path::new(env!("CARGO_BIN_EXE_provenant"));
         let installed = rig.execute_os(binary, &install_args, None)?;
         assert_eq!(
@@ -341,9 +340,6 @@ fn home_rename_with_flag_or_config_bin_preserves_old_paths() -> Result {
                 *value = alias.clone().into_os_string();
             }
         }
-        let old_mcp = old_home.join(".codex/config.toml");
-        let mcp_bytes = fs::read(&old_mcp)?;
-        fs::write(&old_mcp, b"invalid TOML\0")?;
         let checked = rig.execute(binary, &["check", "install", "--json"], None)?;
         let checked: serde_json::Value = serde_json::from_slice(&checked.stdout.bytes)?;
         assert!(checked["error"].is_null(), "{bin_setting}: {checked}");
@@ -355,7 +351,6 @@ fn home_rename_with_flag_or_config_bin_preserves_old_paths() -> Result {
                 .any(|row| row["rule"] == "install.invalid"),
             "{bin_setting}: {checked}"
         );
-        fs::write(&old_mcp, mcp_bytes)?;
         // Uninstall has no --bin-dir flag; the config path still names old HOME.
         let uninstall_args = if state_in_home {
             vec!["uninstall", "--harness", "codex", "--json"]
@@ -504,7 +499,6 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
     let human_stdout = String::from_utf8_lossy(&human.stdout.bytes);
     assert!(human_stdout.contains("links"));
     assert!(human_stdout.contains("hooks"));
-    assert!(human_stdout.contains("MCP"));
     assert!(!human_stdout.contains("findings"));
     assert!(!human_stdout.trim_start().starts_with('{'));
     assert!(!String::from_utf8_lossy(&human.stderr.bytes).contains("\"kind\":\"actions\""));
@@ -512,7 +506,7 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
     fs::write(
         rig.state.join("config.toml"),
         // Sections other commands write must not block installation.
-        "schema_version=1\n[domains.fabric]\nclient_label=\"install-fixture\"\n[domains.accounts]\n[knobs]\n'fabric.mcp_server'=true\n",
+        "schema_version=1\n[domains.fabric]\nclient_label=\"install-fixture\"\n[domains.accounts]\n",
     )?;
     let installed = rig.execute_os(binary, &args(&stage, false), None)?;
     assert_eq!(
@@ -538,12 +532,9 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
     assert_eq!(code(&human_reapply), 0);
     let human_reapply = String::from_utf8_lossy(&human_reapply.stdout.bytes);
     assert!(
-        human_reapply.contains("0 changes (0 links, 0 hooks, 0 MCP)"),
+        human_reapply.contains("0 changes (0 links, 0 hooks)"),
         "{human_reapply}"
     );
-    let config = rig.root.join("codex/config.toml");
-    let text = fs::read_to_string(&config)?;
-    assert!(text.contains("--state-dir"));
     let removed = rig.command(&["uninstall", "--harness", "codex", "--json"])?;
     assert_eq!(
         code(&removed),
@@ -553,13 +544,6 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
     );
     assert!(!rig.root.join("codex/skills/example").exists());
     assert!(rig.home.join(".local/bin/provenant").is_symlink());
-    let config: serde_json::Value = toml_edit::de::from_str(&fs::read_to_string(config)?)?;
-    assert!(
-        config
-            .get("mcp_servers")
-            .and_then(|v| v.get("fabric"))
-            .is_none()
-    );
     rig.assert_legacy_unchanged()
 }
 
@@ -571,7 +555,6 @@ fn external_claude_config_without_home_move_keeps_ownership() -> Result {
     let second = staged_named(&rig, "new-release", b"new release")?;
     let config = rig.root.join("claude");
     assert!(!config.starts_with(&rig.home));
-    enable_fabric_mcp(&rig)?;
     for (stage, hooks) in [(&first, true), (&second, false)] {
         let mut args = vec![
             "install",
@@ -599,15 +582,12 @@ fn external_claude_config_without_home_move_keeps_ownership() -> Result {
             fs::read(rig.state.join("install/receipt.json"))?.as_slice(),
             provenant_records::Limits::CONFIG,
         )?;
-        for selector in ["skill", "json:/mcpServers/fabric", "hook:"] {
+        for selector in ["skill", "hook:"] {
             assert!(receipt.entries.iter().any(|entry| {
                 entry.harness == Some(provenant_records::Harness::Claude)
                     && entry.selector.starts_with(selector)
             }));
         }
-        let mcp: serde_json::Value =
-            serde_json::from_slice(&fs::read(config.join(".claude.json"))?)?;
-        assert!(mcp["mcpServers"]["fabric"].is_object());
         assert!(config.join("skills/example").is_symlink());
         assert!(fs::read_to_string(config.join("settings.json"))?.contains("'hook' 'claude'"));
     }
@@ -616,8 +596,6 @@ fn external_claude_config_without_home_move_keeps_ownership() -> Result {
     let report: serde_json::Value = serde_json::from_slice(&removed.stdout.bytes)?;
     assert_eq!(report["data"]["outcome"]["findings"], serde_json::json!([]));
     assert!(fs::symlink_metadata(config.join("skills/example")).is_err());
-    let mcp: serde_json::Value = serde_json::from_slice(&fs::read(config.join(".claude.json"))?)?;
-    assert!(mcp["mcpServers"]["fabric"].is_null());
     assert!(!fs::read_to_string(config.join("settings.json"))?.contains("'hook' 'claude'"));
     rig.assert_legacy_unchanged()
 }
@@ -2376,7 +2354,6 @@ fn install_and_upgrade_leave_every_registered_account_identical() -> Result {
     support::register_account(&rig, "claude", "work", "work-key", &claude[1])?;
     support::register_account(&rig, "claude", "pro", "pro-key", &claude[2])?;
     support::register_account(&rig, "codex", "alt", "alt-key", &codex[1])?;
-    enable_fabric_mcp(&rig)?;
     // User-owned content and credentials sit beside the managed entries.
     fs::write(
         claude[2].join("settings.json"),
@@ -2404,13 +2381,9 @@ fn install_and_upgrade_leave_every_registered_account_identical() -> Result {
             let link = fs::read_link(directory.join("skills/example"))?;
             assert!(link.starts_with(release), "{directory:?}: {link:?}");
             assert_eq!(managed_hooks(&directory.join("settings.json"))?, reference);
-            let mcp: serde_json::Value =
-                serde_json::from_slice(&fs::read(directory.join(".claude.json"))?)?;
-            assert_eq!(mcp["mcpServers"]["fabric"]["type"], "stdio");
         }
         for directory in &codex {
             assert!(fs::read_link(directory.join("skills/example"))?.starts_with(release));
-            assert!(fs::read_to_string(directory.join("config.toml"))?.contains("fabric"));
         }
         Ok(())
     };
@@ -2643,19 +2616,6 @@ fn registering_an_account_installs_managed_content_when_an_install_exists() -> R
     Ok(())
 }
 
-/// Opt the Fabric MCP server in, keeping whatever the config already holds.
-fn enable_fabric_mcp(rig: &TestRig) -> Result {
-    fs::create_dir_all(&rig.state)?;
-    let config = rig.state.join("config.toml");
-    let mut doc: toml_edit::DocumentMut = match fs::read_to_string(&config) {
-        Ok(text) => text.parse()?,
-        Err(_) => "schema_version = 1\n".parse()?,
-    };
-    doc["knobs"]["fabric.mcp_server"] = toml_edit::value(true);
-    fs::write(config, doc.to_string())?;
-    Ok(())
-}
-
 fn write_accounts_section(rig: &TestRig, edit: impl FnOnce(&mut toml_edit::Table)) -> Result {
     let config = rig.state.join("config.toml");
     let mut doc: toml_edit::DocumentMut = fs::read_to_string(&config)?.parse()?;
@@ -2689,7 +2649,6 @@ fn shared_settings_sync_conflict_adopt_force_and_refusal() -> Result {
     }
     support::register_account(&rig, "claude", "work", "work-key", &work)?;
     support::register_account(&rig, "claude", "pro", "pro-key", &pro)?;
-    enable_fabric_mcp(&rig)?;
     let source = rig.root.join("source-settings.json");
     let write_source = |style: &str| -> Result {
         fs::write(
@@ -2734,10 +2693,8 @@ fn shared_settings_sync_conflict_adopt_force_and_refusal() -> Result {
             "unlisted keys are not synced"
         );
     }
-    // Only the MCP entry is added to `.claude.json`.
-    let identity: serde_json::Value = serde_json::from_slice(&fs::read(pro.join(".claude.json"))?)?;
-    assert_eq!(identity["oauthAccount"]["emailAddress"], "x@example.test");
-    assert_ne!(fs::read(pro.join(".claude.json"))?, identity_before);
+    // Identity fields are never synced: `.claude.json` is left as it was.
+    assert_eq!(fs::read(pro.join(".claude.json"))?, identity_before);
     let (status, checked) = run_json(&rig, &["check", "install"])?;
     assert_eq!(status, 0, "{checked}");
 

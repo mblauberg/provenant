@@ -31,7 +31,7 @@ an unreachable home refuses message writes. Git objects move directly over SSH; 
 The versioned peer protocol accepts typed requests and fixed operations, never
 a caller-built shell command. Each host authenticates its own providers. The
 executing host's confinement and protected paths still apply. Federation is
-provider-neutral and exposed through the same CLI and MCP owners.
+provider-neutral and exposed through the same CLI owners.
 
 ## Consequences
 

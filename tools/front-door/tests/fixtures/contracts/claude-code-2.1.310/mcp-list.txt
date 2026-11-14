@@ -1,3 +1,0 @@
-Checking MCP server health…
-
-fabric: /FIXTURE_ROOT/bin/mcp-probe --state-dir /FIXTURE_ROOT/state fabric mcp --client claude - ✔ Connected

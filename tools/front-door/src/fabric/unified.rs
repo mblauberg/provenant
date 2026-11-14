@@ -757,9 +757,9 @@ fn is_target_not_found(error: &(dyn std::error::Error + 'static)) -> bool {
     ) {
         return true;
     }
-    if let Some(service) = error.downcast_ref::<provenant_fabric_mcp::tools::ServiceError>() {
+    if let Some(service) = error.downcast_ref::<provenant_fabric_runtime::relay::ServiceError>() {
         return match service {
-            provenant_fabric_mcp::tools::ServiceError::Facade(error) => {
+            provenant_fabric_runtime::relay::ServiceError::Facade(error) => {
                 matches!(error, FacadeError::NotFound)
                     || matches!(
                         error,
@@ -767,10 +767,10 @@ fn is_target_not_found(error: &(dyn std::error::Error + 'static)) -> bool {
                             if refusal_code == "NOT_FOUND"
                     )
             }
-            provenant_fabric_mcp::tools::ServiceError::Mutation { source, .. } => {
+            provenant_fabric_runtime::relay::ServiceError::Mutation { source, .. } => {
                 is_target_not_found(source.as_ref())
             }
-            provenant_fabric_mcp::tools::ServiceError::Cli { code, .. } => code == "NOT_FOUND",
+            provenant_fabric_runtime::relay::ServiceError::Cli { code, .. } => code == "NOT_FOUND",
             _ => false,
         };
     }
@@ -995,7 +995,6 @@ pub(crate) fn unified_graph_steer(
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
 ) -> u8 {
-    use provenant_fabric_mcp::tools::McpFacade;
     let result = (|| -> Result<Result<Value, &'static str>, Box<dyn std::error::Error>> {
         let factory = factory(globals, workers)?;
         let (resolved, checkpoint) =
@@ -1708,7 +1707,7 @@ fn with_graph_failures(
 }
 
 /// Add a current local checkout observation only to CLI readings. Remote and
-/// MCP callers retain the owner's path-free diagnostic.
+/// Relay callers retain the owner's path-free diagnostic.
 fn localise_worktree_actions(factory: &Factory, graph: &str, rows: &mut [Value]) {
     if !rows.iter().any(|row| {
         row["kind"] == "node" && row["state"] == "failed" && row["cause_code"] != "writer_lock_busy"
@@ -1992,7 +1991,7 @@ pub(crate) fn read_lane_graph(
         }
 
         let clock = SystemClock::new();
-        let budget = provenant_fabric_mcp::lane::host_budget(&clock, within)?;
+        let budget = provenant_fabric_runtime::relay::host_budget(&clock, within)?;
         let launch = holder
             .launch
             .as_ref()
@@ -2017,7 +2016,6 @@ pub(crate) fn read_lane_graph(
             cwd: graph_directory.to_path_buf(),
             assets: holder.roots.checkout.clone(),
             host_launch: Some(launch.clone()),
-            mcp_project: None,
             workers,
         };
         if cancel.is_cancelled() {
@@ -2525,7 +2523,6 @@ mod tests {
             cwd: rig.project.clone(),
             assets: rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &FreeWorkers,
         };
         let cancel = CancelToken::new();
@@ -2606,7 +2603,6 @@ mod tests {
                 cwd: rig.project.clone(),
                 assets: rig.project.clone(),
                 host_launch: None,
-                mcp_project: None,
                 workers: &FreeWorkers,
             };
             let cancel = CancelToken::new();

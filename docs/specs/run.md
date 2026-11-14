@@ -302,7 +302,7 @@ unavailable. The host network ceiling still narrows the effective access; see
 [child launch policy](routing.md#the-host-validates-and-launches-children).
 
 Opening and sealing remain crate-private. The public `validate_work` reader
-accepts only the configured host `StateRoot`; CLI/MCP bind it to their trusted
+accepts only the configured host `StateRoot`; the CLI binds it to its trusted
 project identity and pass its coverage to Fabric before a Fabric transaction.
 Identical captures replay; disagreements and permanent capture errors refuse
 handoff. Contention or cancellation leaves the attempt queued for retry.
@@ -331,8 +331,8 @@ its companions or lock. Membership is retained with the attempt row.
 
 ## Chair associations
 
-Local CLI and MCP submissions seal a chair's host and Fabric inbox actor with
-the request. CLI selection matches session discovery; MCP uses its bound inbox.
+Local CLI submissions seal a chair's host and Fabric inbox actor with
+the request, and selection matches session discovery.
 This actor-scoped association identifies no particular live chair session and
 does not change attempt ownership. Worker provider sessions never establish it.
 
@@ -1512,7 +1512,7 @@ Host Git output is bounded per call. A `worktree list` listing may use the
 8 MiB capture default, so a repository with many linked worktrees can still be
 checked; other calls keep 16 KiB, and `--show-origin` keeps 1 MiB. Output over
 its bound is refused at the stage that read it, and the error names the
-command and the limit. The MCP and graph edges keep that text. A truncated
+command and the limit. The graph edge keeps that text. A truncated
 listing is never treated as complete.
 
 Integration prepares objects without holding an application lock through Git.

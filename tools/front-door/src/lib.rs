@@ -443,8 +443,8 @@ fn probe_registered_account(
         (None, Ok(_)) => {}
     }
 }
-/// Registration is saved before this runs. Install the managed hooks, skills,
-/// MCP entry and shared settings into the new account directory, so it matches the
+/// Registration is saved before this runs. Install the managed hooks, skills
+/// and shared settings into the new account directory, so it matches the
 /// others without a further command. A failure leaves the registration in place.
 fn sync_registered_account(
     globals: &provenant_cli::Globals,
@@ -453,7 +453,7 @@ fn sync_registered_account(
     match install::sync_after_registration(globals) {
         Ok(Some(outcome)) => {
             reply.human.push_str(&format!(
-                "synced hooks, skills, the Fabric MCP entry and shared settings: {} changes\n",
+                "synced hooks, skills and shared settings: {} changes\n",
                 outcome.actions.len()
             ));
             for finding in &outcome.findings {
@@ -1097,9 +1097,6 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             &inv.leaf,
             globals,
         ),
-        Command::Fabric(provenant_cli::Fabric::Mcp { client }) => {
-            fabric::mcp(client, globals, process.workers())
-        }
         Command::Fabric(provenant_cli::Fabric::Peer { in_process }) => {
             fabric::peer(globals, in_process, process.workers())
         }

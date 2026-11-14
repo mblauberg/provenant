@@ -26,21 +26,19 @@ Bottom up:
   on `providers` or `routing`.
 - `fabric-store` and `workflow` sit on `sqlite`. `fabric-runtime` composes
   `routing`, `confinement` and `fabric-store`.
-- `fabric-mcp` is a transport over `fabric-runtime`. It depends on neither
-  `providers` nor `run`.
 - `cli` composes the domain crates. Libraries never depend on `cli`.
 
 Execution has one owner per concern. Routing resolves routes, confinement
 compiles access plans, providers prepare launches, supervisor owns processes,
-and run owns attempts and terminal evidence. The CLI and Fabric MCP compose
-those owners. Neither adds an adapter parser, scheduler or lifecycle store.
+and run owns attempts and terminal evidence. The CLI composes
+those owners and adds no adapter parser, scheduler or lifecycle store.
 
 Delegation can narrow authority, never widen it. Access boundaries are those of
 [ADR 0035](0035-four-hard-boundaries-and-flexible-everything-else.md) and
 [ADR 0040](0040-open-lane-policy-with-explicit-boundaries.md).
 
 Rust is the sole runtime for Provenant-owned execution. The external provider,
-hook, skill and MCP contracts remain owned by those tools.
+hook and skill contracts remain owned by those tools.
 
 ## Why
 
@@ -48,7 +46,7 @@ hook, skill and MCP contracts remain owned by those tools.
   break cycles instead of importing `run` into `providers`.
 - One binary and no interpreter on the call path remove per-call startup cost.
   No Python or TypeScript fallback is kept.
-- One launch path keeps CLI and MCP behaviour aligned. Attempt evidence has one
+- One launch path keeps CLI behaviour aligned. Attempt evidence has one
   owner, so a provider's success does not certify delivery acceptance.
 - Existing seams are completed under change pressure. No universal dispatcher,
   unit of work or event framework is added before a concrete need.

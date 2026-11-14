@@ -3,8 +3,6 @@ use crate::launch::{exact, subtree};
 use crate::{ProviderError, SetupStep};
 use provenant_confinement::permissions::ProviderProfileSpec;
 use provenant_core::{AttemptId, RUN_STATE_DIRECTORY_ENV, STATE_DIRECTORY_ENV};
-use provenant_records::Harness;
-use serde_json::Value;
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
@@ -551,15 +549,13 @@ pub struct BuildSlotGate<'a> {
 /// Canonical runtime paths supplied by the composition edge.
 pub struct LaneRuntime<'a> {
     pub executable: &'a Path,
-    /// Canonical host-selected Git, also pinned in MCP and hook environments.
+    /// Canonical host-selected Git, also pinned in the launcher and hook environments.
     pub git: &'a Path,
     pub state: &'a Path,
     pub home: &'a Path,
     pub depth: u64,
     pub attempt: AttemptId,
     pub assets: &'a Path,
-    /// `fabric.mcp_server`: launch the lane with the Fabric MCP server.
-    pub fabric_mcp: bool,
 }
 
 impl LaneRuntime<'_> {
@@ -575,32 +571,28 @@ impl LaneRuntime<'_> {
             .join("relay.sock")
     }
 
-    pub(crate) fn mcp(&self, harness: Harness) -> Result<Value, ProviderError> {
-        if ![
-            self.executable,
-            self.git,
-            self.state,
-            self.assets,
-            self.home,
-        ]
-        .iter()
-        .all(|p| p.is_absolute() && p.to_str().is_some())
-        {
-            return Err(ProviderError::InvalidPath);
-        }
-        let mut entry = provenant_config::mcp_entry(harness, self.executable, self.state)
-            .map_err(|_| ProviderError::UnsupportedPolicy)?;
-        entry["env"] = serde_json::json!({
-            "PROVENANT_AGENT_LABEL": format!("lane-{}", self.attempt),
-            "PROVENANT_LANE_DEPTH": self.depth.to_string(),
-            "PROVENANT_PARENT_ATTEMPT_ID": self.attempt.to_string(),
-            RUN_STATE_DIRECTORY_ENV: self.state,
-            STATE_DIRECTORY_ENV: self.state,
-            "HOME": self.home,
-            "PROVENANT_ROOT": self.assets,
-            "PROVENANT_GIT": self.git,
-        });
-        Ok(entry)
+    /// The environment every lane launcher pins: host identity, state roots
+    /// and the selected Git. Paths must be absolute and UTF-8.
+    pub(crate) fn pinned_environment(&self) -> Result<Vec<(&'static str, String)>, ProviderError> {
+        let path = |path: &Path| {
+            if !path.is_absolute() {
+                return Err(ProviderError::InvalidPath);
+            }
+            path.to_str()
+                .map(str::to_owned)
+                .ok_or(ProviderError::InvalidPath)
+        };
+        path(self.executable)?;
+        Ok(vec![
+            ("PROVENANT_AGENT_LABEL", format!("lane-{}", self.attempt)),
+            ("PROVENANT_LANE_DEPTH", self.depth.to_string()),
+            ("PROVENANT_PARENT_ATTEMPT_ID", self.attempt.to_string()),
+            (RUN_STATE_DIRECTORY_ENV, path(self.state)?),
+            (STATE_DIRECTORY_ENV, path(self.state)?),
+            ("HOME", path(self.home)?),
+            ("PROVENANT_ROOT", path(self.assets)?),
+            ("PROVENANT_GIT", path(self.git)?),
+        ])
     }
 
     pub(crate) fn claude(
@@ -610,18 +602,6 @@ impl LaneRuntime<'_> {
         allowed_tools: Option<&str>,
         image_rules: &[String],
     ) -> Result<Vec<SetupStep>, ProviderError> {
-        let mcp = match self.mcp(Harness::Claude) {
-            _ if !self.fabric_mcp => serde_json::json!({"mcpServers": {}}),
-            Ok(entry) => serde_json::json!({"mcpServers": {"fabric": entry}}),
-            Err(error) => {
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: Fabric MCP configuration is unavailable ({error}); continuing without Fabric MCP"
-                );
-                serde_json::json!({"mcpServers": {}})
-            }
-        };
         let mut settings = provenant_config::claude_lane_settings(self.executable, self.state)
             .map_err(|_| ProviderError::UnsupportedPolicy)?;
         settings["attribution"] = serde_json::json!({"commit": "", "pr": ""});
@@ -629,58 +609,16 @@ impl LaneRuntime<'_> {
             settings["permissions"]["allow"] = serde_json::json!(image_rules);
         }
         let mut steps = Vec::new();
-        for (flag, name, value) in [
-            ("--mcp-config", "provenant-mcp.json", mcp),
-            ("--settings", "provenant-settings.json", settings),
-        ] {
-            let path = scratch.join(name);
-            let bytes = serde_json::to_vec(&value).map_err(|_| ProviderError::Malformed)?;
-            argv.extend([flag.into(), path.clone().into_os_string()]);
-            steps.push(SetupStep::WriteFile { path, bytes });
-        }
+        let path = scratch.join("provenant-settings.json");
+        let bytes = serde_json::to_vec(&settings).map_err(|_| ProviderError::Malformed)?;
+        argv.extend(["--settings".into(), path.clone().into_os_string()]);
+        steps.push(SetupStep::WriteFile { path, bytes });
         // Settings are explicitly sourced from our generated document only.
         argv.extend(["--setting-sources".into(), "".into()]);
         if let Some(tools) = allowed_tools {
             argv.extend(["--allowedTools".into(), tools.into()]);
         }
         Ok(steps)
-    }
-
-    pub(crate) fn codex(&self, argv: &mut Vec<OsString>) -> Result<(), ProviderError> {
-        if !self.fabric_mcp {
-            return Ok(());
-        }
-        let mcp = match self.mcp(Harness::Codex) {
-            Ok(entry) => entry,
-            Err(error) => {
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: Fabric MCP configuration is unavailable ({error}); continuing without Fabric MCP"
-                );
-                return Ok(());
-            }
-        };
-        for key in ["command", "args", "env"] {
-            // JSON values are TOML-compatible except object separators.
-            let value = if key == "env" {
-                let env = mcp[key].as_object().ok_or(ProviderError::Malformed)?;
-                format!(
-                    "{{{}}}",
-                    env.iter()
-                        .map(|(key, value)| { format!("{key}={value}") })
-                        .collect::<Vec<_>>()
-                        .join(",")
-                )
-            } else {
-                mcp[key].to_string()
-            };
-            argv.extend([
-                "-c".into(),
-                format!("mcp_servers.fabric.{key}={value}").into(),
-            ]);
-        }
-        Ok(())
     }
 
     /// `scrubbed_git_config` is for a provider whose shell subprocesses lose
@@ -697,14 +635,12 @@ impl LaneRuntime<'_> {
         // HOME or scrub the shell environment. Children still use the host's
         // configuration; writer Git identity is installed into a lane-private config
         // after adapter preparation, with custody in the private Run store.
-        let entry = self.mcp(Harness::Codex)?;
         let mut script = String::from("#!/bin/sh\n");
-        for (key, value) in entry["env"].as_object().ok_or(ProviderError::Malformed)? {
-            let value = value.as_str().ok_or(ProviderError::InvalidPath)?;
+        for (key, value) in self.pinned_environment()? {
             if value.chars().any(char::is_control) {
                 return Err(ProviderError::InvalidPath);
             }
-            script.push_str(&format!("export {key}={}\n", shell_quote(value)));
+            script.push_str(&format!("export {key}={}\n", shell_quote(&value)));
         }
         let executable = self.executable.to_str().ok_or(ProviderError::InvalidPath)?;
         if executable.chars().any(char::is_control) {
@@ -2514,27 +2450,28 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn unrepresentable_mcp_paths_warn_and_preserve_claude_settings() -> Result<(), ProviderError> {
-        use std::os::unix::ffi::OsStringExt;
-        let bad = PathBuf::from(OsString::from_vec(b"/fixture/\xff".to_vec()));
-        let lane = LaneRuntime {
+    fn fixture_lane<'a>(git: &'a Path, byte: u8) -> LaneRuntime<'a> {
+        LaneRuntime {
             executable: Path::new("/fixture/provenant"),
-            git: &bad,
+            git,
             state: Path::new("/fixture/state"),
             home: Path::new("/fixture/home"),
             depth: 1,
-            attempt: AttemptId::from_bytes([1; 16]),
+            attempt: AttemptId::from_bytes([byte; 16]),
             assets: Path::new("/fixture/assets"),
-            fabric_mcp: true,
-        };
+        }
+    }
+
+    #[test]
+    fn unrepresentable_paths_are_refused_and_claude_settings_survive() -> Result<(), ProviderError>
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = PathBuf::from(OsString::from_vec(b"/fixture/\xff".to_vec()));
         assert!(matches!(
-            lane.mcp(Harness::Codex),
+            fixture_lane(&bad, 1).pinned_environment(),
             Err(ProviderError::InvalidPath)
         ));
-        let mut codex = Vec::new();
-        lane.codex(&mut codex)?;
-        assert!(codex.is_empty());
+        let lane = fixture_lane(Path::new("/fixture/git"), 1);
         let mut claude = Vec::new();
         let setup = lane.claude(
             Path::new("/fixture/scratch"),
@@ -2542,74 +2479,32 @@ mod tests {
             Some("Bash"),
             &[],
         )?;
-        let documents: Vec<Value> = setup
+        let documents: Vec<serde_json::Value> = setup
             .iter()
             .filter_map(|step| match step {
                 SetupStep::WriteFile { bytes, .. } => serde_json::from_slice(bytes).ok(),
                 _ => None,
             })
             .collect();
-        assert_eq!(documents[0]["mcpServers"], serde_json::json!({}));
-        assert!(documents[1]["hooks"].is_object());
+        assert_eq!(documents.len(), 1);
+        assert!(documents[0]["hooks"].is_object());
         assert!(claude.iter().any(|arg| arg == "--setting-sources"));
+        assert!(claude.iter().all(|arg| arg != "--mcp-config"));
         Ok(())
     }
 
     #[test]
-    fn lanes_launch_without_the_fabric_server_unless_opted_in() -> Result<(), ProviderError> {
-        for fabric_mcp in [false, true] {
-            let lane = LaneRuntime {
-                executable: Path::new("/fixture/provenant"),
-                git: Path::new("/fixture/git"),
-                state: Path::new("/fixture/state"),
-                home: Path::new("/fixture/home"),
-                depth: 1,
-                attempt: AttemptId::from_bytes([1; 16]),
-                assets: Path::new("/fixture/assets"),
-                fabric_mcp,
-            };
-            let mut codex = Vec::new();
-            lane.codex(&mut codex)?;
-            assert_eq!(!codex.is_empty(), fabric_mcp);
-            let mut claude = Vec::new();
-            let setup = lane.claude(Path::new("/fixture/scratch"), &mut claude, None, &[])?;
-            let servers = setup.iter().find_map(|step| match step {
-                SetupStep::WriteFile { bytes, .. } => serde_json::from_slice::<Value>(bytes)
-                    .ok()
-                    .and_then(|document| document.get("mcpServers").cloned()),
-                _ => None,
-            });
-            assert_eq!(
-                servers
-                    .ok_or(ProviderError::Malformed)?
-                    .get("fabric")
-                    .is_some(),
-                fabric_mcp
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn lane_mcp_entries_have_attempt_unique_agent_labels() -> Result<(), ProviderError> {
-        for harness in [Harness::Claude, Harness::Codex] {
-            for byte in [1, 2] {
-                let lane = LaneRuntime {
-                    executable: Path::new("/fixture/provenant"),
-                    git: Path::new("/fixture/git"),
-                    state: Path::new("/fixture/state"),
-                    home: Path::new("/fixture/home"),
-                    depth: 1,
-                    attempt: AttemptId::from_bytes([byte; 16]),
-                    assets: Path::new("/fixture/assets"),
-                    fabric_mcp: true,
-                };
-                assert_eq!(
-                    lane.mcp(harness)?["env"]["PROVENANT_AGENT_LABEL"],
-                    format!("lane-{}", lane.attempt)
-                );
-            }
-        }
+    fn pinned_environments_have_attempt_unique_agent_labels() -> Result<(), ProviderError> {
+        let label = |byte| {
+            fixture_lane(Path::new("/fixture/git"), byte)
+                .pinned_environment()
+                .map(|env| {
+                    env.into_iter()
+                        .find_map(|(key, value)| (key == "PROVENANT_AGENT_LABEL").then_some(value))
+                })
+        };
+        assert_ne!(label(1)?, label(2)?);
+        assert!(label(1)?.is_some());
         Ok(())
     }
 

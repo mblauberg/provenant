@@ -151,7 +151,7 @@ pub fn main() -> std::process::ExitCode {
             ExitCode::SUCCESS
         }
         // The compose fixture's lanes run in its `compose` worktree; other
-        // provider fixtures exercise lane MCP and nesting.
+        // provider fixtures exercise lane startup and nesting.
         Some("exec")
             if std::env::current_dir().is_ok_and(|cwd| cwd.ends_with(".worktrees/compose")) =>
         {
@@ -1399,34 +1399,16 @@ impl Executor for FixtureCredential {
     }
 }
 
-// Confinement startup exercises the shared graph child request without a
-// launch. The host relay tests own admission, depth limits and cancellation.
-fn assert_lane_child_preview(result: &Value) -> Result {
-    assert!(
-        result.get("isError").is_none_or(|value| value == false),
-        "{result}"
-    );
-    let operation: provenant_fabric_runtime::graph::relay::RelayOp =
-        serde_json::from_value(result["structuredContent"].clone())?;
-    let provenant_fabric_runtime::graph::relay::RelayOp::Add(request) = operation else {
-        return Err(format!("expected a graph child request: {result}").into());
-    };
-    assert_eq!(request.template, "task", "{result}");
-    assert_eq!(request.brief, "read only", "{result}");
-    assert!(!request.writer, "{result}");
+// Confinement startup runs Provenant from inside the lane. Identity is a read
+// of the host's state, so it fails if the profile withholds the Fabric reads.
+fn assert_lane_identity(stdout: &[u8]) -> Result {
+    let line = stdout
+        .split(|byte| *byte == b'\n')
+        .find(|line| line.first() == Some(&b'{'))
+        .ok_or("lane identity output")?;
+    let reply: Value = serde_json::from_slice(line)?;
+    assert!(reply["data"]["host"].is_string(), "{reply}");
     Ok(())
-}
-
-/// Identity reports errors in text; other tools keep structured codes.
-fn mcp_error_code(result: &Value) -> &str {
-    result["structuredContent"]["code"]
-        .as_str()
-        .unwrap_or_else(|| {
-            result["content"][0]["text"]
-                .as_str()
-                .and_then(|text| text.split_once(':'))
-                .map_or("", |(code, _)| code)
-        })
 }
 
 fn age_gc_output(path: &Path) -> Result {

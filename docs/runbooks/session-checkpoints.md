@@ -13,7 +13,7 @@ lane Cargo volume falls below twice `gc.free_floor`; see [gc](gc.md).
 
 ## Identity
 
-Saves, hooks, MCP and hand-off share one inbox actor: host plus
+Saves, hooks and hand-off share one inbox actor: host plus
 `PROVENANT_AGENT_LABEL`, then `fabric.agent_label`, the harness client, then
 `fabric.client_label` (default `agent`). The harness is inferred from
 `CODEX_THREAD_ID` (Codex) or `CLAUDECODE=1`, `CLAUDE_CODE_SESSION_ID`,

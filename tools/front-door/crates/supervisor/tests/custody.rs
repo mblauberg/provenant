@@ -1620,7 +1620,7 @@ fn descendant_session_after_parent(root: &Path, timed: bool) -> Result<()> {
     wait_for_identity_absence(&descendant)?;
     Ok(())
 }
-/// A lane with an MCP child registers a nested owner whose custody macOS cannot
+/// A lane with a nested Provenant child registers a nested owner whose custody macOS cannot
 /// prove; that must not stop cleanup ending a different, exact escapee, and
 /// cleanup must not repeat a signal to a provider that is already gone.
 #[cfg(target_os = "macos")]

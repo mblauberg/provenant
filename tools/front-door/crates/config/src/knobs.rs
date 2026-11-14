@@ -91,14 +91,6 @@ impl<D> crate::ResolvedConfig<D> {
             .ok_or_else(|| invalid(name, "type"))
     }
 
-    /// Whether `fabric.mcp_server` opts the Fabric MCP server in. Off when unreadable.
-    pub fn fabric_mcp_server(&self) -> bool {
-        self.knobs
-            .get("fabric.mcp_server")
-            .and_then(|knob| knob.value.as_bool())
-            .unwrap_or(false)
-    }
-
     /// Host-owned process exceptions. Never read from a task/profile stamp.
     pub fn census_ignore_unreadable(
         &self,

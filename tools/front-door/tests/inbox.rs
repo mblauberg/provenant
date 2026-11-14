@@ -1,4 +1,4 @@
-//! Human requests through the app-independent installed command and MCP edges.
+//! Human requests through the app-independent installed command.
 mod support;
 use serde_json::{Value, json};
 use support::{Result, TestRig, code};
@@ -367,101 +367,8 @@ fn inbox_explicit_local_and_unconfigured_owner() -> Result {
     Ok(())
 }
 
-fn mcp_call(rig: &TestRig, name: &str, arguments: Value) -> Result<Value> {
-    let frames = [
-        json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}),
-        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-        json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}}),
-    ];
-    let mut stdin = Vec::new();
-    for frame in frames {
-        stdin.extend(serde_json::to_vec(&frame)?);
-        stdin.push(b'\n');
-    }
-    let args = [
-        "--state-dir",
-        rig.state.to_str().ok_or("state")?,
-        "fabric",
-        "mcp",
-        "--client",
-        "codex",
-    ];
-    let output = rig.execute(
-        std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
-        &args,
-        Some(&stdin),
-    )?;
-    assert_eq!(
-        code(&output),
-        0,
-        "{}",
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
-    let frames = output
-        .stdout
-        .bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(serde_json::from_slice)
-        .collect::<std::result::Result<Vec<Value>, _>>()?;
-    Ok(frames
-        .into_iter()
-        .find(|frame| frame["id"] == 1)
-        .ok_or("MCP reply")?["result"]
-        .clone())
-}
-
 #[test]
-fn inbox_mcp_remote_home_lists_locally_when_configured() -> Result {
-    for with_peer in [false, true] {
-        let mut rig = TestRig::new()?;
-        let moved = rig.home.join("repo");
-        std::fs::rename(&rig.project, &moved)?;
-        rig.project = moved;
-        for (key, value) in &mut rig.env {
-            if key == "PROVENANT_ROOT" {
-                *value = rig.project.clone().into();
-            }
-        }
-        let identity = call(&rig, &["fabric", "identity"], None, 0)?;
-        let key = identity["data"]["federation"]["key"]
-            .as_str()
-            .ok_or("project key")?;
-        let remote = "09".repeat(16);
-        assert_ne!(identity["data"]["host"], remote);
-        let file = rig.state.join("config.toml");
-        let mut config: toml_edit::DocumentMut = std::fs::read_to_string(&file)?.parse()?;
-        config["domains"]["fabric"]["home_hosts"][key] = toml_edit::value(remote.clone());
-        if with_peer {
-            config["domains"]["fabric"]["peers"]["fixture"]["host"] = toml_edit::value(remote);
-            config["domains"]["fabric"]["peers"]["fixture"]["destination"] =
-                toml_edit::value("fixture");
-        }
-        std::fs::write(file, config.to_string())?;
-        assert!(!rig.state.join("fabric").exists());
-        let reply = mcp_call(&rig, "fabric_inbox", json!({"op":"list"}))?;
-        if with_peer {
-            assert_eq!(reply["structuredContent"]["result"], "listed", "{reply}");
-            assert_eq!(reply["structuredContent"]["items"], json!([]));
-            assert!(
-                reply["structuredContent"]["coverage"]
-                    .as_str()
-                    .ok_or("coverage")?
-                    .contains("local_only")
-            );
-        } else {
-            assert_eq!(
-                reply["structuredContent"]["code"], "home_unavailable",
-                "{reply}"
-            );
-            assert!(!rig.state.join("fabric").exists());
-        }
-    }
-    Ok(())
-}
-
-#[test]
-fn inbox_close_uses_the_same_configured_body_limit_on_both_edges() -> Result {
+fn inbox_close_uses_the_configured_body_limit() -> Result {
     let rig = TestRig::new()?;
     let file = rig.state.join("config.toml");
     let mut config: toml_edit::DocumentMut = std::fs::read_to_string(&file)?.parse()?;
@@ -493,77 +400,9 @@ fn inbox_close_uses_the_same_configured_body_limit_on_both_edges() -> Result {
         2,
     )?;
     assert_eq!(cli["error"]["code"], "invalid_input");
-    let mcp = mcp_call(
-        &rig,
-        "fabric_inbox",
-        json!({"op":"close","id":id,"state":"withdrawn","reason":reason,"expect_revision":1}),
-    )?;
-    assert_eq!(mcp["structuredContent"]["code"], "invalid_input");
     let current = call(&rig, &["inbox", id], None, 0)?;
     assert_eq!(current["data"]["item"]["request"]["revision"], 1);
     assert_eq!(current["data"]["item"]["request"]["state"], "open");
-    Ok(())
-}
-
-#[test]
-fn inbox_mcp_and_cli_share_the_same_authoritative_records() -> Result {
-    let rig = TestRig::new()?;
-    let file = draft(&rig, "question")?;
-    let request: Value = serde_json::from_slice(&std::fs::read(file)?)?;
-    let asked = mcp_call(
-        &rig,
-        "fabric_inbox",
-        json!({"op":"ask","session":"chair-a","request":request,"operation_id":"mcp-ask"}),
-    )?;
-    assert_ne!(asked["isError"], true, "{asked}");
-    let id = asked["structuredContent"]["request_id"]
-        .as_str()
-        .ok_or("request ID")?;
-    let cli = call(&rig, &["inbox", id], None, 0)?;
-    assert_eq!(
-        cli["data"]["item"]["request"]["chair_session_id"],
-        "chair-a"
-    );
-    let reply = mcp_call(
-        &rig,
-        "fabric_inbox",
-        json!({"op":"answer","id":id,"action":"reply","text":"  yes\n","expect_revision":1,"channel":"chat","operation_id":"mcp-answer"}),
-    )?;
-    assert_ne!(reply["isError"], true, "{reply}");
-    let cli = call(&rig, &["inbox", id], None, 0)?;
-    assert_eq!(cli["data"]["item"]["answer"]["text"], "  yes\n");
-    assert_eq!(cli["data"]["item"]["answer"]["channel"], "chat");
-    let conflict = mcp_call(
-        &rig,
-        "fabric_inbox",
-        json!({"op":"answer","id":id,"action":"reply","text":"different","expect_revision":1,"channel":"chat","operation_id":"mcp-answer"}),
-    )?;
-    assert_eq!(conflict["isError"], true);
-    assert_eq!(conflict["structuredContent"]["code"], "operation_conflict");
-    assert_eq!(conflict["structuredContent"]["operation_id"], "mcp-answer");
-    let stale = call(
-        &rig,
-        &[
-            "answer",
-            id,
-            "--action",
-            "reply",
-            "--text-stdin",
-            "--expect-revision",
-            "1",
-            "--channel",
-            "cli",
-        ],
-        Some(b"another answer"),
-        1,
-    )?;
-    assert_eq!(stale["error"]["code"], "conflict");
-    assert!(
-        stale["error"]["repair"]
-            .as_str()
-            .ok_or("repair")?
-            .contains("inbox --state all")
-    );
     Ok(())
 }
 
@@ -750,17 +589,11 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
         None,
         0,
     )?;
-    let mcp = mcp_call(
-        &rig,
-        "fabric_inbox",
-        json!({"op":"ask","session":"chair-a","request":draft}),
-    )?;
-    for receipt in [&cli["data"], &mcp["structuredContent"]] {
-        assert_eq!(receipt["work_coverage"], "verified");
-        let id = receipt["request_id"].as_str().ok_or("request ID")?;
-        let shown = call(&rig, &["inbox", id], None, 0)?;
-        assert_eq!(shown["data"]["item"]["request"]["schema_version"], 2);
-    }
+    let receipt = &cli["data"];
+    assert_eq!(receipt["work_coverage"], "verified");
+    let id = receipt["request_id"].as_str().ok_or("request ID")?;
+    let shown = call(&rig, &["inbox", id], None, 0)?;
+    assert_eq!(shown["data"]["item"]["request"]["schema_version"], 2);
     for unqualified in [false, true] {
         for field in ["repository", "head"] {
             let mut bad = draft.clone();
@@ -784,21 +617,13 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
                 )?["error"]["code"],
                 "work_mismatch"
             );
-            assert_eq!(
-                mcp_call(
-                    &rig,
-                    "fabric_inbox",
-                    json!({"op":"ask","session":"chair-a","request":bad})
-                )?["structuredContent"]["code"],
-                "work_mismatch"
-            );
         }
     }
     let db = rusqlite::Connection::open(rig.state.join("fabric/fabric.sqlite3"))?;
     assert_eq!(
         db.query_row("SELECT count(*) FROM human_requests", [], |r| r
             .get::<_, i64>(0))?,
-        2
+        1
     );
     let index = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
     index.pragma_update(None, "user_version", 2)?;

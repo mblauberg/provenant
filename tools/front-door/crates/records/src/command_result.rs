@@ -1,4 +1,4 @@
-//! Version-one command transport facts, shared by CLI and MCP edges.
+//! Version-one command transport facts, shared by CLI edges.
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

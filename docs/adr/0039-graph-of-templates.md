@@ -52,8 +52,8 @@ are immutable. Admission applies the configured graph limits.
 "Planner" is only `use = "plan"`: any agent may emit any template, loop, worktree
 or further planner, so replanning after a wave is ordinary.
 
-**Children.** A lane runs `provenant run` or `fabric_run`; the call crosses
-`crates/fabric-mcp/src/lane.rs#HostRelay` and the host writes the journal. Children
+**Children.** A lane runs `provenant run`; the call crosses
+`crates/fabric-runtime/src/relay/host.rs#HostRelay` and the host writes the journal. Children
 join the host's graph, sharing its budget, cancellation and trace, and may be
 writers integrating into the parent's branch. Spawning is recorded separately
 from completion dependencies, so a parent can yield its slot while it waits. A
@@ -114,13 +114,13 @@ restart cannot launch a completed effect twice. Recovery reconciles uncertain
 launches, reuses finished outputs and resumes only unfinished work.
 
 Landing accepts independent review evidence bound to the exact subject it merges. Run settlement
-advances pending graphs without a second scheduler in the CLI or MCP façade
+advances pending graphs without a second scheduler in the CLI
 ([ADR 0021](0021-configured-workspace-dispatch-boundaries.md)).
 
 ## Interface
 
 `provenant help` owns commands and flags.
-CLI and MCP call the same graph service. Inside a lane, submission adds child
+The CLI and the lane relay call the same graph service. Inside a lane, submission adds child
 work through the host relay; it does not create a private child store.
 
 ## Consequences

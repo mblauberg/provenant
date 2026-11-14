@@ -152,7 +152,6 @@ pub(crate) fn tick_graphs(
                     cwd: execution.directory,
                     assets: resolved.assets.clone(),
                     host_launch: None,
-                    mcp_project: None,
                     workers,
                 };
                 let mut owner = BoundGraphOwner {
@@ -1403,7 +1402,6 @@ mod tests {
                 cwd: nested,
                 assets: rig.project.clone(),
                 host_launch: None,
-                mcp_project: None,
                 workers: &provenant_confinement::worktrees::SystemWorkerObserver,
             };
             for selector in ["plan.json", source.to_str().ok_or("graph path")?, &digest] {

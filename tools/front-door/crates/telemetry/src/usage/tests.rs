@@ -19,10 +19,7 @@ fn tempdir() -> Result<(tempfile::TempDir, PathBuf)> {
     Ok((temp, base))
 }
 fn inventory() -> Vec<(String, String)> {
-    vec![
-        (EVENT_KINDS[0].into(), "root".into()),
-        (EVENT_KINDS[1].into(), "fabric_context".into()),
-    ]
+    vec![(EVENT_KINDS[0].into(), "root".into())]
 }
 
 #[test]
@@ -53,7 +50,6 @@ fn recording_on_a_missing_root_creates_nothing() -> Result {
     let (_temp, base) = tempdir()?;
     let roots = roots(&base)?;
     record_cli(&roots, CLOCK, "root", 0, 4, None);
-    record_tool(&roots, CLOCK, "fabric_context", "ok", 1, None);
     assert!(!roots.state.as_path().exists());
     Ok(())
 }
@@ -110,14 +106,13 @@ fn unattributed_events_omit_trace_from_json() -> Result {
     let roots = roots(&base)?;
     provenant_os::fixture::private_state_dir(roots.state.as_path())?;
     record_cli(&roots, CLOCK, "root", 0, 4, None);
-    record_tool(&roots, CLOCK, "fabric_context", "ok", 1, None);
     assert!(roots.state.as_path().join(LOG).is_file());
     let log = std::fs::read_to_string(roots.state.as_path().join(LOG))?;
     let events = log
         .lines()
         .map(serde_json::from_str::<serde_json::Value>)
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 1);
     assert!(events.iter().all(|event| event.get("project_id").is_none()));
     assert!(events.iter().all(|event| event.get("trace").is_none()));
     assert!(
@@ -135,16 +130,14 @@ fn attributed_events_are_reported_under_their_project_id() -> Result {
     provenant_os::fixture::private_state_dir(roots.state.as_path())?;
     let expected_id = ProjectId::from_bytes([1; 16]);
     record_cli(&roots, CLOCK, "root", 0, 4, Some(expected_id));
-    record_tool(&roots, CLOCK, "fabric_context", "ok", 1, Some(expected_id));
 
     let log = std::fs::read_to_string(roots.state.as_path().join(LOG))?;
     let events = log
         .lines()
         .map(serde_json::from_str::<serde_json::Value>)
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 1);
     assert_eq!(events[0]["kind"], "cli.verb");
-    assert_eq!(events[1]["kind"], "mcp.tool");
     assert!(
         events
             .iter()
@@ -157,9 +150,6 @@ fn attributed_events_are_reported_under_their_project_id() -> Result {
             && unit.calls == 1
             && unit.project_id == Some(expected_id)
             && unit.scope == Some("project")
-    }));
-    assert!(report.units.iter().any(|unit| {
-        unit.unit == "fabric_context" && unit.calls == 1 && unit.project_id == Some(expected_id)
     }));
     assert!(
         report
@@ -201,10 +191,7 @@ fn rotation_preserves_appends_and_reports_while_the_rotation_lock_is_busy() -> R
     // newest event follows zero-filled space and is counted too.
     assert_eq!(count(report(&roots, inventory(), None, None)?), Some(2));
     drop(lock);
-    // MCP logging only appends; existing workers perform rotation.
-    record_tool(&roots, CLOCK, "fabric_context", "ok", 1, None);
     assert!(!roots.state.as_path().join(BACKUP).exists());
-    maintain_tools(&roots);
     // Rotation is permitted again; the old log is retained as the backup.
     record_cli(&roots, CLOCK, "root", 0, 1, None);
     assert!(std::fs::metadata(roots.state.as_path().join(BACKUP))?.len() >= CAP);

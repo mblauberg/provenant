@@ -157,7 +157,6 @@ pub fn peer(
             cwd: cwd.clone(),
             assets,
             host_launch: None,
-            mcp_project: None,
             workers,
         };
         let context = &peer_factory.context;

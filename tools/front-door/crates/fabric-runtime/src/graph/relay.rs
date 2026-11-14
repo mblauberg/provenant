@@ -1,7 +1,7 @@
 //! Live children: a running lane adds nodes to its own graph.
 //!
-//! A lane's `provenant run` or `fabric_run` crosses
-//! `crates/fabric-mcp/src/lane.rs#HostRelay`; the host finds the node that
+//! A lane's `provenant run` crosses
+//! `crates/fabric-runtime/src/relay/host.rs#HostRelay`; the host finds the node that
 //! owns the calling attempt and admits the child through
 //! [`super::patch::admit_patch`], so a child is an ordinary node named
 //! `parent--child` in the same graph, sharing its budget, cancellation and

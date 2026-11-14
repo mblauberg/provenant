@@ -13,7 +13,7 @@ Pure shared values for the [state spec](../../../../docs/specs/state.md).
   implementation. The production clock belongs to supervisor; `TestClock`
   advances explicitly and commits no partial update on overflow.
 - `WaitBudget` carries a monotonic deadline, capped at 14400 seconds for CLI and
-  55 seconds for MCP, with a minimum of one second. `WaitBudget::up_to` builds
+  55 seconds for the lane relay, with a minimum of one second. `WaitBudget::up_to` builds
   an internal bound with no minimum, such as a store lock's busy timeout. A
   budget expiring never signals a provider. `Pause` is the cancellable sleep
   that genuine wait loops take, and `ThreadPause` parks the thread in short

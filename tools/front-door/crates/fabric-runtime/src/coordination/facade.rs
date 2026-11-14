@@ -1,4 +1,4 @@
-//! Typed run/identity seam for F3. Runtime implements this trait; MCP consumes
+//! Typed run/identity seam for F3. Runtime implements this trait; the relay consumes
 //! it without a reverse dependency. F9 owns production composition.
 use super::input::bounded_input;
 use provenant_core::{AttemptId, CancelToken, DeliveryId, Digest, HostId, OperationId, WaitBudget};
@@ -6,7 +6,7 @@ use provenant_records::ArtifactRef;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// An MCP run target is an attempt ID, optionally qualified by its owning host.
+/// A run target is an attempt ID, optionally qualified by its owning host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptTarget {
     #[serde(flatten)]
@@ -16,7 +16,7 @@ pub struct AttemptTarget {
     pub host: Option<HostId>,
 }
 
-/// One task in an MCP submission. Project, actor, authority and cwd come from
+/// One task in a submission. Project, actor, authority and cwd come from
 /// the service's authenticated identity rather than request supplied paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubmittedTask {
@@ -414,7 +414,7 @@ pub enum FacadeError {
         #[serde(flatten, with = "invalid_detail_wire")]
         detail: Option<InvalidInputDetail>,
     },
-    /// A graph relay refusal retains its named cause across CLI and MCP.
+    /// A graph relay refusal retains its named cause across the CLI and the relay.
     #[error("graph relay refused: {refusal_code}")]
     GraphRelayRefused {
         refusal_code: String,
@@ -1979,7 +1979,7 @@ pub struct EventCoverage {
     pub more_events: bool,
 }
 
-/// Typed runtime seam shared by the F3 facade and MCP. The run owner is
+/// Typed runtime seam shared by the F3 facade. The run owner is
 /// composed in `src/fabric.rs`; calls are bounded and cancellable, while only
 /// the explicit run-cancel operation can stop a launched run.
 pub trait F3Facade {
@@ -2036,7 +2036,7 @@ pub trait F3Facade {
     ) -> Result<Self::Hosts, FacadeError>;
 }
 
-/// Output payload encoding is explicit and lossless across MCP JSON.
+/// Output payload encoding is explicit and lossless across JSON.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "encoding", content = "data", rename_all = "snake_case")]
 pub enum OutputBytes {

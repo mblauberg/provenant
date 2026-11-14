@@ -1,6 +1,6 @@
 # Run store and bounded readers
 
-`Service` is the typed execution API shared by CLI and MCP. It owns dispatch
+`Service` is the typed execution API shared by the CLI. It owns dispatch
 validation and publication, canonical route requests, target resolution,
 status, lanes, output, cancellation, continuation and reconciliation. The
 edges supply verified identity, configuration and provider preparation, then

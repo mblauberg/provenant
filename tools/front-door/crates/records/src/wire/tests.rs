@@ -471,61 +471,10 @@ fn path_encoding_and_provider_seconds_match_the_runtime_forms() {
     // Absolute paths: the explicit root-plus-path-wire envelope.
     let absolute = crate::AbsolutePath::new(Path::new("/repo/worktree")).unwrap();
     validate(&absolute_path(), &serde_json::to_value(absolute).unwrap()).unwrap();
-    // MCP encodes provider time as seconds; the helper keeps fractional values.
+    // The relay encodes provider time as seconds; the helper keeps fractional values.
     assert_eq!(provider_seconds(Some(1500)), Some(1.5));
     assert_eq!(provider_seconds(None), None);
     assert_eq!(provider_seconds(Some(0)), Some(0.0));
-}
-
-#[test]
-fn mcp_results_validate_by_tag_and_allow_unknown_members() {
-    let run = mcp::run_result_schema();
-    let id = "5".repeat(32);
-    let mut attempt = serde_json::to_value(row()).unwrap();
-    attempt["key"] = json!({
-        "project": "9".repeat(32), "graph": "graph", "node": "node", "attempt": 1
-    });
-    attempt["provider_seconds"] = json!(1.5);
-    attempt["future_member"] = json!(true);
-    for value in [
-        json!({"result": "status", "attempt": attempt}),
-        json!({"result": "cancel", "attempt": attempt}),
-        json!({"result": "resume", "attempt": attempt}),
-        json!({"result": "wait", "condition": {"kind": "all"}, "attempts": [attempt], "satisfied": true, "timed_out": false}),
-        json!({"result": "list", "page": {"items": [attempt], "next_after": null, "truncated": false}}),
-    ] {
-        validate(&run, &value).unwrap();
-    }
-    let mut without_seconds = attempt.clone();
-    without_seconds
-        .as_object_mut()
-        .unwrap()
-        .remove("provider_seconds");
-    assert!(
-        validate(
-            &run,
-            &json!({"result": "status", "attempt": without_seconds})
-        )
-        .is_err()
-    );
-    assert!(validate(&run, &json!({"result": "other"})).is_err());
-
-    let out = mcp::output_result_schema();
-    let target = json!({"attempt": id, "host": null});
-    let chunk = json!({
-        "kind": "chunk", "target": target, "part": "result", "state": "terminal", "reason": null,
-        "offset": 0, "next_offset": 2, "eof": true, "digest": "sha256:00",
-        "bytes": {"encoding": "utf8", "data": "ok"}
-    });
-    validate(&out, &chunk).unwrap();
-    let mut artifact = json!({
-        "kind": "artifact", "target": target, "digest": "sha256:00",
-        "artifact": {"path": {"kind":"relative", "relative":{"encoding":"utf8", "path":"result.md"}}, "digest": null},
-        "bytes": {"encoding": "base64", "data": "AA=="}
-    });
-    validate(&out, &artifact).unwrap();
-    artifact["bytes"]["data"] = json!("%%%");
-    rejected(&out, artifact);
 }
 
 #[test]
@@ -538,8 +487,6 @@ fn published_set_is_stable_versioned_and_self_describing() {
         "output.schema.json",
         "cancel.schema.json",
         "error.schema.json",
-        "mcp/fabric_run.schema.json",
-        "mcp/fabric_output.schema.json",
     ] {
         assert!(names.contains(&required), "missing {required}");
     }
@@ -555,7 +502,7 @@ fn published_set_is_stable_versioned_and_self_describing() {
         );
         assert_eq!(files.iter().filter(|(other, _)| other == name).count(), 1);
     }
-    for (name, schema) in files.iter().filter(|(name, _)| !name.starts_with("mcp/")) {
+    for (name, schema) in &files {
         assert_eq!(
             schema["properties"]["schema_version"]["const"], ENVELOPE_VERSION,
             "{name}"
@@ -563,7 +510,6 @@ fn published_set_is_stable_versioned_and_self_describing() {
     }
     assert_eq!(files, published(), "publication must be deterministic");
     assert!(command_schema("worktree").is_none());
-    assert!(mcp_output_schema("fabric_mail").is_none());
 }
 
 fn cli_envelope(command: &str, status: &str, data: Value, error: Value) -> Value {

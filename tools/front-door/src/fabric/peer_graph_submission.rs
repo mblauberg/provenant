@@ -26,7 +26,6 @@ fn graph_owner_submits_sibling_families_as_a_preference_and_alias_retry_exclusio
         cwd: fixture.rig.project.clone(),
         assets: fixture.rig.project.clone(),
         host_launch: None,
-        mcp_project: None,
         workers: &FreeWorkers,
     };
     let cancel = CancelToken::new();
@@ -174,7 +173,6 @@ fn graph_submission_refuses_a_push_to_main_before_admission()
         cwd: fixture.rig.project.clone(),
         assets: fixture.rig.project.clone(),
         host_launch: None,
-        mcp_project: None,
         workers: &FreeWorkers,
     };
     let document = fixture.rig.project.join("protected-push-graph.json");
@@ -274,7 +272,6 @@ fn bare_graph_miss_names_the_scratch_root_and_searches_no_legacy_root()
         cwd: fixture.rig.project.clone(),
         assets: fixture.rig.project.clone(),
         host_launch: None,
-        mcp_project: None,
         workers: &FreeWorkers,
     };
     let result = factory.graph(
@@ -322,7 +319,6 @@ fn graph_submission_replays_an_accepted_push_after_protection_changes()
         cwd: fixture.rig.project.clone(),
         assets: fixture.rig.project.clone(),
         host_launch: None,
-        mcp_project: None,
         workers: &FreeWorkers,
     };
     let document = fixture.rig.project.join("replay-push-graph.json");
@@ -421,7 +417,6 @@ fn graph_submission_pins_the_integration_base_across_replay()
         cwd: fixture.rig.project.clone(),
         assets: fixture.rig.project.clone(),
         host_launch: None,
-        mcp_project: None,
         workers: &FreeWorkers,
     };
     let document = fixture.rig.project.join("base-graph.json");
@@ -619,7 +614,7 @@ fn detached_writer_reports_branch_requirement() -> Result<(), Box<dyn std::error
     let git = provenant_os::git::git_executable().ok_or("git")?;
     let output = fixture.rig.execute(&git, &["-C", fixture.worktree.to_str().ok_or("path")?, "checkout", "--detach"], None)?;
     assert_eq!(crate::worktree_tests::support::code(&output), 0);
-    let factory = Factory { context: Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.rig.project)?, project_attribution: false, clock: SystemClock, backoff: ThreadPause, executor: SystemExecutor::new(1)?, home: fixture.rig.home.clone(), cwd: fixture.rig.project.clone(), assets: fixture.rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers };
+    let factory = Factory { context: Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.rig.project)?, project_attribution: false, clock: SystemClock, backoff: ThreadPause, executor: SystemExecutor::new(1)?, home: fixture.rig.home.clone(), cwd: fixture.rig.project.clone(), assets: fixture.rig.project.clone(), host_launch: None, workers: &FreeWorkers };
     let document = fixture.rig.project.join("detached-writer.json");
     std::fs::write(&document, serde_json::to_vec(&serde_json::json!({"schema_version":1,"graph_id":"detached-writer", "template_library":{},"nodes":[{"id":"writer","prompt":"write","access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]}))?)?;
     let cancel = CancelToken::new();
@@ -627,7 +622,7 @@ fn detached_writer_reports_branch_requirement() -> Result<(), Box<dyn std::error
     let run = factory.graph(GraphInput::Run { extra: Default::default(), document }, budget, &cancel)?;
     let node = &run.checkpoint.nodes[0];
     assert!(node.advance_error.as_deref().is_some_and(|error| error.contains("writer needs a branch")), "{node:#?}");
-    let detached_factory = Factory { context: Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.worktree)?, project_attribution: false, clock: SystemClock, backoff: ThreadPause, executor: SystemExecutor::new(1)?, home: fixture.rig.home.clone(), cwd: fixture.worktree.clone(), assets: fixture.rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers };
+    let detached_factory = Factory { context: Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.worktree)?, project_attribution: false, clock: SystemClock, backoff: ThreadPause, executor: SystemExecutor::new(1)?, home: fixture.rig.home.clone(), cwd: fixture.worktree.clone(), assets: fixture.rig.project.clone(), host_launch: None, workers: &FreeWorkers };
     let head = fixture.rig.execute(&git, &["-C", fixture.worktree.to_str().ok_or("path")?, "rev-parse", "HEAD"], None)?;
     let head = String::from_utf8(head.stdout.bytes)?.trim().to_owned();
     let document = fixture.worktree.join("detached-review.json");

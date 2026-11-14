@@ -18,7 +18,6 @@ fn graph_factory_reopens_the_retained_directory() -> Result<(), Box<dyn std::err
         cwd: rig.project.clone(),
         assets: rig.project.clone(),
         host_launch: None,
-        mcp_project: None,
         workers: &FreeWorkers,
     };
     let retained = rig.project.join("retained-directory");
@@ -165,7 +164,7 @@ fn tick_dispatches_waiting_node_without_a_deadline() -> Result<(), Box<dyn std::
     assert_eq!(tick.advanced, 1, "{:?}", tick.errors);
     let factory = Factory { context, project_attribution: false, clock: SystemClock, backoff: ThreadPause,
         executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(), assets: rig.project.clone(),
-        host_launch: None, mcp_project: None, workers: &FreeWorkers };
+        host_launch: None, workers: &FreeWorkers };
     let owner = BinaryRunOwner { factory: &factory, allow_remote: true, actor: None, chair: None };
     let operation = graph_operation("graph-attempt-operation", &key)?;
     assert!(owner.store(&cancel)?.operation(&operation, &owner.call(&cancel))?.is_some());
@@ -213,7 +212,7 @@ fn tick_dispatches_capacity_waiter_with_future_decision() -> Result<(), Box<dyn 
     assert_eq!(tick.advanced, 1, "{:?}", tick.errors);
     let factory = Factory { context, project_attribution: false, clock: SystemClock, backoff: ThreadPause,
         executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(), assets: rig.project.clone(),
-        host_launch: None, mcp_project: None, workers: &FreeWorkers };
+        host_launch: None, workers: &FreeWorkers };
     let owner = BinaryRunOwner { factory: &factory, allow_remote: true, actor: None, chair: None };
     let operation = graph_operation("graph-attempt-operation", &key)?;
     assert!(owner.store(&cancel)?.operation(&operation, &owner.call(&cancel))?.is_some());
@@ -254,7 +253,7 @@ fn tick_warns_once_for_missing_worktree_and_advances_another_graph()
     let factory = Factory {
         context, project_attribution: false, clock: SystemClock, backoff: ThreadPause,
         executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
-        assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        assets: rig.project.clone(), host_launch: None, workers: &FreeWorkers,
     };
     let file = |filing: graph::AskFiling<'_>| {
         let cancel = CancelToken::new();
@@ -320,7 +319,7 @@ fn graph_wait_observes_settlement_and_budget() -> Result<(), Box<dyn std::error:
         context: Context::open(roots.clone(), &rig.home, &rig.project)?,
         project_attribution: false, clock: SystemClock, backoff: ThreadPause,
         executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
-        assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        assets: rig.project.clone(), host_launch: None, workers: &FreeWorkers,
     };
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
@@ -384,7 +383,7 @@ fn graph_cancel_persists_reason_and_skips_pending_node() -> Result<(), Box<dyn s
         context: Context::open(roots.clone(), &rig.home, &rig.project)?,
         project_attribution: false, clock: SystemClock, backoff: ThreadPause,
         executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
-        assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        assets: rig.project.clone(), host_launch: None, workers: &FreeWorkers,
     };
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
@@ -436,7 +435,6 @@ fn graph_status_and_cancel_retire_unreadable_record() -> Result<(), Box<dyn std:
         cwd: rig.project.clone(),
         assets: rig.project.clone(),
         host_launch: None,
-        mcp_project: None,
         workers: &FreeWorkers,
     };
     let cancel = CancelToken::new();
@@ -520,7 +518,7 @@ fn accepted_attempt_observes_stable_host_after_alias_is_renamed()
         context: Context::open(roots.clone(), &rig.home, &rig.project)?,
         project_attribution: false, clock: SystemClock, backoff: ThreadPause,
         executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
-        assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        assets: rig.project.clone(), host_launch: None, workers: &FreeWorkers,
     };
     assert_eq!(factory.context.peer_host("old_alias"), Some(host));
     let cancel = CancelToken::new();
@@ -585,7 +583,7 @@ fn graph_peer_without_receipt_keeps_launch_and_cancellation_uncertain()
         context: Context::open(roots, &rig.home, &rig.project)?,
         project_attribution: false, clock: SystemClock, backoff: ThreadPause,
         executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
-        assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        assets: rig.project.clone(), host_launch: None, workers: &FreeWorkers,
     };
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
@@ -656,7 +654,6 @@ fn graph_run_controls_reach_the_sealed_attempt() -> Result<(), Box<dyn std::erro
             cwd: rig.project.clone(),
             assets: rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &FreeWorkers,
         };
         let cancel = CancelToken::new();
@@ -792,7 +789,6 @@ fn new_writer_delivery_refusals_precede_worktree_provisioning()
             cwd: rig.project.clone(),
             assets: rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &FreeWorkers,
         };
         let cancel = CancelToken::new();

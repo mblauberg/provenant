@@ -53,7 +53,6 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
         cwd: fixture.rig.project.clone(),
         assets: fixture.rig.project.clone(),
         host_launch: None,
-        mcp_project: None,
         workers: &FreeWorkers,
     };
     let cancel = CancelToken::new();
@@ -248,7 +247,6 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
         cwd: fixture.rig.project.clone(),
         assets: fixture.rig.project.clone(),
         host_launch: None,
-        mcp_project: None,
         workers: &FreeWorkers,
     };
     let cancel = CancelToken::new();

@@ -1254,57 +1254,6 @@ fn explain_refuses_document_read_roots_outside_the_project() -> Result {
     Ok(())
 }
 
-/// Drive one `fabric_run` MCP tool call through a real server process.
-fn mcp_run(rig: &GraphProject, arguments: Value) -> Result<Value> {
-    use std::io::Write;
-    let frames = [
-        json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}),
-        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-        json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":arguments}}),
-    ];
-    let input = frames
-        .iter()
-        .map(serde_json::to_string)
-        .collect::<std::result::Result<Vec<_>, _>>()?
-        .join("\n")
-        + "\n";
-    let mut command = fixture_cli();
-    command
-        .current_dir(&rig.project)
-        .env("PROVENANT_ROOT", &rig.root)
-        .env("XDG_CONFIG_HOME", rig.temp.path().join("config"))
-        .arg("--state-dir")
-        .arg(rig.state())
-        .args(["fabric", "mcp", "--client", "codex"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let mut child = command.spawn()?;
-    child
-        .stdin
-        .as_mut()
-        .ok_or("MCP stdin")?
-        .write_all(input.as_bytes())?;
-    drop(child.stdin.take());
-    let output = child.wait_with_output()?;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    for line in output
-        .stdout
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
-        let value: Value = serde_json::from_slice(line)?;
-        if value["id"] == 1 {
-            return Ok(value["result"].clone());
-        }
-    }
-    Err("missing MCP reply".into())
-}
-
 /// One state directory that a compile failure can be observed against.
 fn prepare_state(rig: &GraphProject) -> Result {
     std::fs::create_dir_all(rig.state())?;
@@ -1316,7 +1265,7 @@ fn prepare_state(rig: &GraphProject) -> Result {
     Ok(())
 }
 
-/// Assert that the template CLI, a raw document on the CLI and the MCP tool
+/// Assert that the template CLI, and a raw document on the CLI
 /// all refuse the same compile failure with `expected` and journal nothing.
 fn assert_compile_refusal_matches(
     rig: &GraphProject,
@@ -1363,20 +1312,6 @@ fn assert_compile_refusal_matches(
                 .to_owned(),
         );
     }
-    for arguments in [
-        json!({"op":"run","template":name}),
-        json!({"op":"run","template":name,"explain":true}),
-        json!({"op":"run","document":document}),
-    ] {
-        let value = mcp_run(rig, arguments.clone())?;
-        assert_eq!(value["isError"], true, "{name} {arguments}: {value}");
-        messages.push(
-            value["structuredContent"]["message"]
-                .as_str()
-                .ok_or("MCP message")?
-                .to_owned(),
-        );
-    }
     assert!(
         messages.iter().all(|message| message == expected),
         "{name}: {messages:?}"
@@ -1406,7 +1341,7 @@ fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
     )?;
 
     // A graph that compiles to more nodes than the state admits: the template
-    // CLI, the raw document CLI and the MCP tool must read the same refusal.
+    // CLI and the raw document CLI must read the same refusal.
     // The template compiles to one composite boundary over two leaves, so the
     // document carries that shape and both expand to the same node count.
     let node_cap = provenant_fabric_runtime::config::GraphLimits {

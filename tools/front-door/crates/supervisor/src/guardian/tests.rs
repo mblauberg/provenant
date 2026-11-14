@@ -1298,8 +1298,6 @@ fn handoff_round_trips_one_mib_stdin_with_claude_argv_and_environment() {
             "claude-sonnet-4-6",
             "--effort",
             "high",
-            "--mcp-config",
-            "/fixture/attempt/provider-state/fabric-mcp.json",
         ]
         .map(|arg| arg.as_bytes().to_vec())
         .to_vec(),

@@ -19,7 +19,7 @@ fn graph_review_launch_submits_pinned_source_and_base() -> Result<(), Box<dyn st
         context: Context::open(roots, &rig.home, &rig.project)?,
         project_attribution: false, clock: SystemClock, backoff: ThreadPause,
         executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
-        assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        assets: rig.project.clone(), host_launch: None, workers: &FreeWorkers,
     };
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
@@ -80,7 +80,7 @@ fn child_launch_refuses_credential_and_state_roots_at_the_host()
         context: Context::open(roots, &rig.home, &rig.project)?,
         project_attribution: false, clock: SystemClock, backoff: ThreadPause,
         executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
-        assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        assets: rig.project.clone(), host_launch: None, workers: &FreeWorkers,
     };
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
@@ -147,7 +147,7 @@ fn pinned_review_range_survives_moved_ref_and_another_checkout() -> Result<(), B
         context: Context::open(roots, &rig.home, &rig.project)?, project_attribution: false,
         clock: SystemClock, backoff: ThreadPause, executor: SystemExecutor::new(1)?,
         home: rig.home.clone(), cwd: rig.project.clone(), assets: rig.project.clone(),
-        host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        host_launch: None, workers: &FreeWorkers,
     };
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
@@ -221,7 +221,7 @@ fn implicit_writer_binding_uses_verified_worktree_head() -> Result<(), Box<dyn s
         context: Context::open(roots, &rig.home, &rig.project)?, project_attribution: false,
         clock: SystemClock, backoff: ThreadPause, executor: SystemExecutor::new(1)?,
         home: rig.home.clone(), cwd: rig.project.clone(), assets: rig.project.clone(),
-        host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        host_launch: None, workers: &FreeWorkers,
     };
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
@@ -254,7 +254,7 @@ fn integrating_graph_writer_refuses_a_source_outside_the_pinned_base() -> Result
         context: Context::open(roots, &rig.home, &rig.project)?,
         project_attribution: false, clock: SystemClock, backoff: ThreadPause,
         executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
-        assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        assets: rig.project.clone(), host_launch: None, workers: &FreeWorkers,
     };
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
@@ -306,7 +306,6 @@ fn run_list_is_compact_and_pages_newest_first() -> Result<(), Box<dyn std::error
         cwd: fixture.rig.project.clone(),
         assets: fixture.rig.project.clone(),
         host_launch: None,
-        mcp_project: None,
         workers: &FreeWorkers,
     };
     let cancel = CancelToken::new();

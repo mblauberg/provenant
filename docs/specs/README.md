@@ -31,7 +31,7 @@ them as Markdown under the untracked `docs/reference/`.
 - [Routing](routing.md): routes, providers, accounts, quota and readiness
 - [Run](run.md): admission, attempts, publication and reconcile
 - [Retry owner](retry-owner.md): lineage, budgets, admission and recovery
-- [Fabric](fabric.md): coordination store, MCP, graphs and peer hosts
+- [Fabric](fabric.md): coordination store, lane relay, graphs and peer hosts
 - [Telemetry](telemetry.md): usage ledger, cost and outcomes
 - [Workflow](workflow.md): review coverage, receipts and sessions
 - [Rust workspace rules](rust-workspace.md): layering, dependencies,

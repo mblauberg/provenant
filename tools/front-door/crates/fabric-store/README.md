@@ -26,7 +26,7 @@ Mail and event reads return store-owned `Page` values with integer sequences;
 task reads use a task-ID cursor. Each page has a `truncated` flag for the 1 MiB
 byte bound; resume after the last returned sequence or task ID.
 Mail/task records and `Page` stay in fabric-store. Human inbox records live in
-records because runtime, CLI and MCP share their wire contract.
+records because runtime and CLI share their wire contract.
 
 Human requests retain their opening revision, their optional resolution and
 their optional closure, with one immutable answer and one outbox record.

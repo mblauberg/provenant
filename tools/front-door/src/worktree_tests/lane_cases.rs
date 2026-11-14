@@ -197,10 +197,9 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             directory.to_str().ok_or("account path")?
         ));
     }
-    // The Fabric MCP server is opt-in; these cases drive it inside the lane.
     let config = |depth: u8| {
         format!(
-            "schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.max_depth'={depth}\n'lanes.sandbox'='on'\n'fabric.mcp_server'=true\n{accounts}"
+            "schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.max_depth'={depth}\n'lanes.sandbox'='on'\n{accounts}"
         )
     };
     fs::write(rig.state.join("config.toml"), config(1))?;
@@ -421,16 +420,6 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
                 .is_symlink()
             );
         } else {
-            let generated = permissions.scratch.path.join("provenant-mcp.json");
-            let mcp: Value = serde_json::from_slice(&fs::read(generated)?)?;
-            assert_eq!(
-                mcp["mcpServers"]["fabric"]["env"]["PROVENANT_GIT"],
-                selected_git.to_str().ok_or("Git path")?
-            );
-            assert_eq!(
-                mcp["mcpServers"]["fabric"]["env"][provenant_run::LANE_DEPTH_ENV],
-                "1"
-            );
             let settings: Value = serde_json::from_slice(&fs::read(
                 permissions.scratch.path.join("provenant-settings.json"),
             )?)?;
@@ -462,18 +451,12 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
                 );
             }
         }
-        let frames = concat!(
-            "{\"jsonrpc\":\"2.0\",\"id\":999,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}\n",
-            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
-            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fabric_run\",\"arguments\":{\"op\":\"run\",\"template\":\"task\",\"brief\":\"read only\",\"explain\":true}}}\n"
-        );
         let mut options = provenant_os::exec::ExecOptions::new(
             &launch.argv,
             &launch.cwd,
             Duration::from_secs(10),
         );
         options.env = Some(&launch.environment);
-        options.stdin = Some(frames.as_bytes());
         options.stdout = provenant_os::exec::StreamPolicy::Capture { limit: 64 * 1024 };
         options.stderr = provenant_os::exec::StreamPolicy::Capture { limit: 64 * 1024 };
         let output = provenant_os::exec::SystemExecutor::new(1)?.execute(options)?;
@@ -483,22 +466,10 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             "{}",
             String::from_utf8_lossy(&output.stderr.bytes)
         );
-        let replies = output
-            .stdout
-            .bytes
-            .split(|byte| *byte == b'\n')
-            .filter(|line| !line.is_empty())
-            .map(serde_json::from_slice::<Value>)
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let result = &replies
-            .iter()
-            .find(|reply| reply["id"] == 1)
-            .ok_or("MCP reply")?["result"];
-        assert_lane_child_preview(result)?;
+        assert_lane_identity(&output.stdout.bytes)?;
         assert!(!roots.state.as_path().join("tmp/results").exists());
         assert!(permissions.scratch.path.join("results").is_dir());
         assert!(!rig.state.join("children").exists());
-        assert!(!worktree.join("provenant-mcp.json").exists());
         assert!(!worktree.join("provenant-settings.json").exists());
         assert_eq!(
             git(
@@ -547,7 +518,6 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             &mut launch,
             &attempt,
             roots.state.as_path(),
-            frames.as_bytes(),
             &config,
             &parent_context,
             (native_shell_probe_case(adapter, writer, publishing)
@@ -561,8 +531,8 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
     Ok(())
 }
 
-/// Fake provider forwards no provider environment to its MCP child, only a
-/// baseline PATH as real providers do.
+/// Fake provider: as a lane's shell would, start Provenant from the lane
+/// environment the host pinned, then publish through the CLI overflow path.
 pub(crate) fn lane_provider() -> Result {
     if std::env::var(provenant_run::LANE_DEPTH_ENV).as_deref() == Ok("2") {
         let mut prompt = String::new();
@@ -585,127 +555,33 @@ pub(crate) fn lane_provider() -> Result {
     use provenant_os::exec::Executor;
     use provenant_os::exec::StreamPolicy;
     use provenant_os::exec::SystemExecutor;
-    let mut entry = serde_json::Map::new();
-    for arg in std::env::args().filter(|arg| arg.starts_with("mcp_servers.fabric.")) {
-        let value: Value = toml_edit::de::from_str(&arg)?;
-        entry.extend(
-            value["mcp_servers"]["fabric"]
-                .as_object()
-                .ok_or("MCP config")?
-                .clone(),
-        );
-    }
-    if entry.is_empty() {
-        let args: Vec<_> = std::env::args_os().collect();
-        let index = args
-            .iter()
-            .position(|arg| arg == "--mcp-config")
-            .ok_or("MCP config flag")?;
-        let config: Value =
-            serde_json::from_slice(&fs::read(args.get(index + 1).ok_or("MCP config path")?)?)?;
-        entry = config["mcpServers"]["fabric"]
-            .as_object()
-            .ok_or("MCP entry")?
-            .clone();
-    }
-    let mut argv = vec![OsString::from(
-        entry["command"].as_str().ok_or("MCP command")?,
-    )];
-    argv.extend(
-        entry["args"]
-            .as_array()
-            .ok_or("MCP args")?
-            .iter()
-            .map(|arg| arg.as_str().map(OsString::from).ok_or("MCP arg"))
-            .collect::<std::result::Result<Vec<_>, _>>()?,
-    );
-    let env = entry["env"]
-        .as_object()
-        .ok_or("MCP env")?
-        .iter()
-        .map(|(key, value)| {
-            Ok((
-                OsString::from(key),
-                OsString::from(value.as_str().ok_or("MCP env value")?),
-            ))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    // A real provider hands its MCP child a baseline PATH. Mirror that with
-    // this fake's own directory first, so the nested dispatch resolves it.
-    let mut env = env;
-    if let Some(tmp) = std::env::var_os("TMPDIR") {
-        env.push(("TMPDIR".into(), tmp));
-    }
-    if env.iter().all(|(key, _)| key != "PATH") {
-        let mut directories = vec![
-            std::env::current_exe()?
-                .parent()
-                .ok_or("provider bin")?
-                .to_path_buf(),
-        ];
-        directories.extend(std::env::split_paths(
-            &std::env::var_os("PATH").unwrap_or_default(),
-        ));
-        env.push(("PATH".into(), std::env::join_paths(directories)?));
-    }
-    let mut input = Vec::new();
-    std::io::Read::read_to_end(&mut std::io::stdin(), &mut input)?;
+    let argv: Vec<OsString> = vec![
+        std::env::current_exe()?.into_os_string(),
+        "fabric".into(),
+        "identity".into(),
+        "--json".into(),
+    ];
+    let env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
     let cwd = std::env::current_dir()?;
     let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(8));
     options.env = Some(&env);
-    options.stdin = Some(&input);
     options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
     options.stderr = StreamPolicy::Capture { limit: 64 * 1024 };
     let output = SystemExecutor::new(1)?
         .execute(options)
-        .map_err(|e| format!("MCP spawn: {e:?}"))?;
+        .map_err(|e| format!("lane identity spawn: {e:?}"))?;
     std::io::stdout().write_all(&output.stdout.bytes)?;
     std::io::stderr().write_all(&output.stderr.bytes)?;
     if code(&output) != 0 {
-        return Err("configured MCP child failed".into());
+        return Err("lane identity failed".into());
     }
-    let stripped = env
-        .iter()
-        .filter(|(key, _)| {
-            key != provenant_run::LANE_DEPTH_ENV && key != provenant_run::PARENT_ATTEMPT_ENV
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(8));
-    options.env = Some(&stripped);
-    // Explanation is side-effect free. An actual child request still needs
-    // the parent relay identity even if a provider drops its lane variables.
-    let stripped_input =
-        String::from_utf8(input.clone())?.replace("\"explain\":true", "\"explain\":false");
-    options.stdin = Some(stripped_input.as_bytes());
-    let stripped_output = SystemExecutor::new(1)?.execute(options)?;
-    assert_eq!(
-        code(&stripped_output),
-        0,
-        "{}",
-        String::from_utf8_lossy(&stripped_output.stderr.bytes)
-    );
-    let reply = stripped_output
-        .stdout
-        .bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(serde_json::from_slice::<Value>)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    assert_eq!(
-        reply
-            .iter()
-            .find(|reply| reply["id"] == 1)
-            .map(|reply| mcp_error_code(&reply["result"]))
-            .ok_or("stripped MCP reply")?,
-        "graph_relay_unavailable",
-        "{reply:?}"
-    );
     // Exercise the same publisher used by CLI overflow under confinement.
     let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME")?);
     let assets = PathBuf::from(std::env::var_os("PROVENANT_ROOT").ok_or("assets")?);
     let mut inputs = provenant_core::RootInputs::new(home, assets);
-    inputs.state_dir = Some(PathBuf::from(entry["args"][1].as_str().ok_or("state arg")?));
+    inputs.state_dir = Some(PathBuf::from(
+        std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).ok_or("state dir")?,
+    ));
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     provenant_cli::fabric::publish(
         &provenant_records::CommandResult::new(
@@ -751,7 +627,6 @@ fn verify_lane_profile(
     launch: &mut provenant_run::PreparedLaunch,
     attempt: &Path,
     state: &Path,
-    frames: &[u8],
     _config: &dyn Fn(u8) -> String,
     parent: &provenant_run::HolderContext,
     probe: Option<Probe>,
@@ -1226,16 +1101,15 @@ if (process.argv[2] === 'child') {
             "scratch execution denial affected unexpected cells"
         );
     }
-    // Start the configured MCP inside the compiled profile too: an
-    // unconfined fake provider cannot detect ungranted startup writes.
-    let mcp_argv = compiled.command(
+    // Start the fake provider, and through it Provenant, inside the compiled
+    // profile too: an unconfined provider cannot detect ungranted startup writes.
+    let provider_argv = compiled.command(
         &launch.argv,
         &provenant_core::AttemptId::from_bytes([0; 16]),
         &provenant_os::fs::Directory::open_anchor(&std::env::temp_dir())?,
     )?;
-    let mut options = mcp_argv.options(&launch.cwd, Duration::from_secs(10))?;
+    let mut options = provider_argv.options(&launch.cwd, Duration::from_secs(10))?;
     options.env = Some(&launch.environment);
-    options.stdin = Some(frames);
     let output = executor.execute(options)?;
     assert_eq!(
         code(&output),
@@ -1243,18 +1117,7 @@ if (process.argv[2] === 'child') {
         "{}",
         String::from_utf8_lossy(&output.stderr.bytes)
     );
-    let replies = output
-        .stdout
-        .bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(serde_json::from_slice::<Value>)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let result = &replies
-        .iter()
-        .find(|reply| reply["id"] == 1)
-        .ok_or("confined MCP reply")?["result"];
-    assert_lane_child_preview(result)?;
+    assert_lane_identity(&output.stdout.bytes)?;
     // The child-store submission/scanner has been deleted. Graph child
     // admission is covered through the host relay fixtures.
     host.provider_exited(&parent.encode()?, None)?;

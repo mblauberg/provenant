@@ -59,7 +59,7 @@ this version list when publishing a release.
 ## Stability
 
 Provenant makes no stability promise. Commands, flags, `--json` output,
-`config.toml` keys, the state layout and Fabric MCP tool names and schemas can
+`config.toml` keys, the state layout and relay tool names and schemas can
 change in any release, with no deprecation period and no compatibility shims.
 Upgrade every host together, because peers on different versions are not
 supported. Each release lists its breaking changes first. This is the only
@@ -92,7 +92,7 @@ Add one file per user-visible change under `next.d/`, named `<issue>-<topic>.md`
   4. Accounts, quota and routing
   5. Pipelines and graphs
   6. Chair, inbox and console
-  7. Fabric and MCP
+  7. Fabric
   8. Telemetry and providers
 - **Body.** One bullet per change, each one to three sentences for the
   published notes: subject first, in the user's terms, ending with `(#issue)`.

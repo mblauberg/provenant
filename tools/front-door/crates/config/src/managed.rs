@@ -18,8 +18,6 @@ use std::{
 };
 use thiserror::Error;
 
-use crate::harness::CLAUDE_CONFIG_LIMIT;
-
 /// The release asset every harness instruction link and the shared
 /// instructions file point to.
 pub(crate) const INSTRUCTION_ASSET: &str = "instructions/AGENTS.md";
@@ -137,7 +135,7 @@ fn identity(snapshot: &Option<Snapshot>) -> Option<EntryIdentity> {
 pub struct HarnessTarget {
     pub harness: Harness,
     pub skills_dir: PathBuf,
-    pub mcp_file: PathBuf,
+    pub config_file: PathBuf,
     pub hook_file: Option<PathBuf>,
     pub instruction: Option<PathBuf>,
 }
@@ -174,9 +172,6 @@ pub struct Targets {
     pub adopt_existing: bool,
     pub hooks: bool,
     pub remove_hooks: bool,
-    /// `fabric.mcp_server`: write the Fabric MCP entry. Off removes an
-    /// unchanged owned one.
-    pub fabric_mcp: bool,
     /// Rendered per-user LaunchAgent, supplied only by the process edge.
     pub peer_agent: Option<Vec<u8>>,
     /// Rendered host tick scheduler, supplied only by the process edge: the
@@ -210,7 +205,7 @@ impl HarnessTarget {
         (self.harness, self.skills_dir.clone())
     }
     /// The target of `harness` whose configuration directory is `base`.
-    /// `home` is the user's home, which decides where Claude keeps its MCP file.
+    /// `home` is the user's home, which decides where Claude keeps its config file.
     pub fn at(harness: Harness, home: &Path, base: &Path) -> Self {
         let instruction = match harness {
             Harness::Claude => Some("CLAUDE.md"),
@@ -220,7 +215,7 @@ impl HarnessTarget {
         };
         Self {
             harness,
-            mcp_file: crate::harness::default_mcp(harness, home, base),
+            config_file: crate::harness::default_config(harness, home, base),
             hook_file: crate::harness::default_hooks(harness, base),
             skills_dir: base.join("skills"),
             instruction: instruction.map(|name| base.join(name)),
@@ -258,7 +253,6 @@ impl Targets {
             adopt_existing: false,
             hooks: false,
             remove_hooks: false,
-            fabric_mcp: false,
             peer_agent: None,
             tick_agent: None,
             tick_service: None,
@@ -300,7 +294,7 @@ impl Targets {
         self.bin_dir = resolve(&self.bin_dir)?;
         for target in &mut self.harnesses {
             target.skills_dir = destination(&target.skills_dir)?;
-            target.mcp_file = destination(&target.mcp_file)?;
+            target.config_file = destination(&target.config_file)?;
             target.hook_file = target.hook_file.as_deref().map(destination).transpose()?;
             target.instruction = target.instruction.as_deref().map(destination).transpose()?;
         }
@@ -354,7 +348,7 @@ impl Targets {
             if !skills_paths.insert(h.skills_dir.clone()) {
                 return Err(InstallError::Conflict(h.skills_dir.clone()));
             }
-            for path in std::iter::once(&h.mcp_file)
+            for path in std::iter::once(&h.config_file)
                 .chain(h.hook_file.iter())
                 .chain(h.instruction.iter())
             {
@@ -363,7 +357,7 @@ impl Targets {
                 }
             }
             normal_absolute(&h.skills_dir)?;
-            normal_absolute(&h.mcp_file)?;
+            normal_absolute(&h.config_file)?;
             if let Some(path) = &h.hook_file {
                 normal_absolute(path)?;
             }
@@ -1143,7 +1137,7 @@ pub fn plan_install(
                 extra: Default::default(),
                 harness: target.harness,
                 skills_dir: AbsolutePath::new(&target.skills_dir)?,
-                mcp_file: AbsolutePath::new(&target.mcp_file)?,
+                config_file: AbsolutePath::new(&target.config_file)?,
                 hook_file: target
                     .hook_file
                     .as_deref()
@@ -1739,9 +1733,7 @@ fn snapshot_at_inspected(
     if let Some(evidence) = evidence.as_deref_mut() {
         evidence.metadata(path, metadata);
     }
-    let limit = if name == OsStr::new(".claude.json") {
-        CLAUDE_CONFIG_LIMIT
-    } else if Path::new(name)
+    let limit = if Path::new(name)
         .extension()
         .is_some_and(|ext| matches!(ext.to_str(), Some("json" | "jsonc" | "toml" | "md")))
     {
@@ -1904,7 +1896,7 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
             return Err(InstallError::Manifest("duplicate receipt target"));
         }
         normal_absolute(&target.skills_dir.to_path_buf()?)?;
-        normal_absolute(&target.mcp_file.to_path_buf()?)?;
+        normal_absolute(&target.config_file.to_path_buf()?)?;
         if let Some(path) = &target.hook_file {
             normal_absolute(&path.to_path_buf()?)?;
         }
@@ -1997,7 +1989,7 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
     for target in &receipt.harness_targets {
         let target_paths = [
             Some(&target.skills_dir),
-            Some(&target.mcp_file),
+            Some(&target.config_file),
             target.hook_file.as_ref(),
             target.instruction.as_ref(),
         ];
@@ -2061,7 +2053,7 @@ fn distinct_target_paths<'a>(
             .transpose()?;
         let paths = [
             Some(target.skills_dir.to_path_buf()?),
-            Some(target.mcp_file.to_path_buf()?),
+            Some(target.config_file.to_path_buf()?),
             target
                 .hook_file
                 .as_ref()

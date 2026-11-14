@@ -523,7 +523,7 @@ pub fn lane_list_schema() -> Value {
     )
 }
 
-/// MCP's `provider_seconds`: the record's whole milliseconds as fractional
+/// The relay's `provider_seconds`: the record's whole milliseconds as fractional
 /// seconds. The single definition of the conversion `fabric-runtime` applies
 /// when it encodes an attempt, so the two cannot disagree.
 pub fn provider_seconds(provider_ms: Option<u64>) -> Option<f64> {

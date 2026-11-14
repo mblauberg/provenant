@@ -70,9 +70,6 @@ fn a_registered_account_is_unsynced_until_install_reaches_it() {
     apply(&mut f, work.harness, &work.home, None);
     assert!(rules(&f).is_empty());
     assert!(fs::symlink_metadata(work.home.join("skills/example")).is_ok());
-    let mcp: serde_json::Value =
-        serde_json::from_slice(&fs::read(work.home.join(".claude.json")).unwrap()).unwrap();
-    assert_eq!(mcp["mcpServers"]["fabric"]["type"], "stdio");
 }
 
 #[test]
@@ -193,7 +190,7 @@ fn sync_never_overwrites_an_edited_hook_and_check_keeps_reporting_it() {
 }
 
 #[test]
-fn accounts_of_other_adapters_get_their_own_managed_entries() {
+fn accounts_of_other_adapters_get_their_own_skills() {
     let mut f = Fixture::new();
     let codex = f.home.join(".codex-work");
     fs::create_dir_all(&codex).unwrap();
@@ -208,8 +205,6 @@ fn accounts_of_other_adapters_get_their_own_managed_entries() {
     f.targets.accounts = vec![account];
     assert!(rules(&f).is_empty());
     assert!(fs::symlink_metadata(codex.join("skills/example")).is_ok());
-    let config = fs::read_to_string(codex.join("config.toml")).unwrap();
-    assert!(config.contains("mcp_servers"), "{config}");
 }
 
 fn shared(f: &Fixture, source: serde_json::Value) -> crate::shared_settings::SharedSettings {
@@ -521,13 +516,8 @@ fn unlisted_settings_and_identity_fields_are_byte_preserved() {
         text.contains("\"theme\": \"dark\",   \"model\": \"opus\""),
         "{text}"
     );
-    // Only the MCP entry was added to `.claude.json`; everything else is intact.
-    let written = fs::read_to_string(&identity).unwrap();
-    assert!(written.contains(" \"oauthAccount\": {\"emailAddress\": \"x@example.com\"},"));
-    assert!(written.contains(" \"userID\": \"abc\""));
-    let value: serde_json::Value = serde_json::from_str(&written).unwrap();
-    assert_eq!(value["oauthAccount"]["emailAddress"], "x@example.com");
-    assert!(value["mcpServers"]["fabric"].is_object());
+    // Install never rewrites `.claude.json`: identity fields stay byte for byte.
+    assert_eq!(fs::read_to_string(&identity).unwrap(), identity_text);
 }
 
 #[test]

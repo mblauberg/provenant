@@ -8,13 +8,13 @@
 //! replaying the same idempotency key.
 use super::Context;
 use provenant_core::{CancelToken, Clock, WaitBudget};
-use provenant_fabric_mcp::tools::{FacadeError, ServiceError};
 use provenant_fabric_runtime::graph::{
     FileJournal, GraphJournal,
     patch::{LiveGraph, PatchContext, scan_for_secrets},
     relay::{self, RelayOp},
     template::{Layer, TemplateLibrary},
 };
+use provenant_fabric_runtime::relay::{FacadeError, ServiceError};
 use serde_json::{Value, json};
 
 fn refused(code: &str, message: impl Into<String>) -> ServiceError {
@@ -1217,7 +1217,7 @@ pub fn from_lane(
         .ok()
         .and_then(|id| provenant_core::AttemptId::parse(&id).ok())
         .ok_or_else(|| refused("graph_relay_unavailable", "not running inside a lane"))?;
-    provenant_fabric_mcp::lane::graph(
+    provenant_fabric_runtime::relay::graph(
         &provenant_providers::LaneRuntime::fabric_socket(attempt),
         serde_json::to_value(op)?,
         cancel,
@@ -1707,13 +1707,13 @@ mod provisioning_tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
         let socket = root.path().join("relay/socket");
-        let _host = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+        let _host = provenant_fabric_runtime::relay::HostRelay::start_with_graph(
             socket.clone(),
             Default::default(),
             |_, _, _| Err(ServiceError::FabricOwnerUnavailable),
             |_, _, _| Err(refused("writer_parent_required", "PROMPT_SENTINEL")),
         )?;
-        let error = provenant_fabric_mcp::lane::graph(
+        let error = provenant_fabric_runtime::relay::graph(
             &socket,
             json!({"op":"children"}),
             &CancelToken::new(),
@@ -2103,13 +2103,13 @@ mod provisioning_tests {
         let socket = root.path().join("relay/socket");
         let context = std::sync::Arc::new(context);
         let host = std::sync::Arc::clone(&context);
-        let _relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+        let _relay = provenant_fabric_runtime::relay::HostRelay::start_with_graph(
             socket.clone(),
             provenant_records::Limits::CONFIG,
             |_, _, _| unreachable!("graph request expected"),
             move |arguments, cancel, within| {
                 let clock = provenant_os::clock::SystemClock;
-                let budget = provenant_fabric_mcp::lane::host_budget(&clock, within)?;
+                let budget = provenant_fabric_runtime::relay::host_budget(&clock, within)?;
                 serve(&host, "caller", arguments, budget, cancel, &clock)
             },
         )?;
@@ -2137,7 +2137,7 @@ mod provisioning_tests {
                     .unwrap();
                 drop(held);
             });
-            provenant_fabric_mcp::lane::graph(
+            provenant_fabric_runtime::relay::graph(
                 &socket,
                 request("late"),
                 &cancel,
@@ -2165,7 +2165,7 @@ mod provisioning_tests {
             &clock,
         )?;
         let started = std::time::Instant::now();
-        let error = provenant_fabric_mcp::lane::graph(
+        let error = provenant_fabric_runtime::relay::graph(
             &socket,
             request("refused"),
             &cancel,

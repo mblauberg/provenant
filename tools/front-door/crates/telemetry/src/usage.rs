@@ -11,7 +11,7 @@ use std::{
 };
 use thiserror::Error;
 
-pub const EVENT_KINDS: &[&str] = &["cli.verb", "mcp.tool"];
+pub const EVENT_KINDS: &[&str] = &["cli.verb"];
 const CAP: u64 = 5_000_000;
 const LOG: &str = "usage.jsonl";
 const BACKUP: &str = "usage.jsonl.1";
@@ -93,13 +93,6 @@ fn rotate(directory: &Directory, incoming: u64) -> Option<()> {
     Some(())
 }
 
-/// Called by existing MCP workers, never by the transport event loop.
-pub fn maintain_tools(roots: &Roots) {
-    if let Ok(directory) = Directory::open_anchor(roots.state.as_path()) {
-        let _ = rotate(&directory, LINE_CAP as u64);
-    }
-}
-
 fn append(roots: &Roots, event: Event, rotate_log: bool) -> Option<()> {
     let mut line = serde_json::to_vec(&event).ok()?;
     line.push(b'\n');
@@ -179,34 +172,6 @@ pub fn record_cli_context(
             wait,
         },
         true,
-    );
-}
-
-pub fn record_tool(
-    roots: &Roots,
-    clock: &dyn Clock,
-    tool: &str,
-    outcome: &str,
-    duration_ms: u64,
-    project_id: Option<ProjectId>,
-) {
-    let Ok(now) = clock.wall_now() else { return };
-    let _ = append(
-        roots,
-        Event {
-            kind: EVENT_KINDS[1].into(),
-            unit: tool.into(),
-            exit_code: None,
-            outcome: Some(outcome.into()),
-            duration_ms,
-            timestamp: now.to_string(),
-            trace: project_trace(project_id),
-            account: None,
-            session: None,
-            config: None,
-            wait: None,
-        },
-        false,
     );
 }
 

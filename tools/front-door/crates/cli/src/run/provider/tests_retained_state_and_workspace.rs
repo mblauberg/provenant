@@ -533,7 +533,6 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
             depth: 1,
             attempt: provenant_core::AttemptId::from_bytes([7; 16]),
             assets: Path::new("/release"),
-            fabric_mcp: true,
         },
     })?;
     assert!(

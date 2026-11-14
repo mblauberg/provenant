@@ -38,11 +38,10 @@ class ReferenceTests(unittest.TestCase):
         source.parent.mkdir(parents=True)
         source.write_text('{"knobs": {"example": {"default": false}}, "schema_version": 1}')
         files, gaps = GEN['generate'](self.root)
-        self.assertEqual(len(gaps), 3)
+        self.assertEqual(len(gaps), 2)
         self.assertIn('## `example`', files['config-keys.md'])
         for name in ('cli.md', 'cli-all.md'):
             self.assertIn('Cargo.toml is missing', files[name])
-        self.assertIn('MCP tool catalogue unavailable', files['mcp-tools.md'])
         for text in files.values():
             self.assertIn('scripts/generate-reference', text.splitlines()[0])
 
@@ -58,11 +57,10 @@ class ReferenceTests(unittest.TestCase):
         workspace = self.root / GEN['WORKSPACE']
         workspace.mkdir(parents=True)
         (workspace / 'Cargo.toml').touch()
-        tools = lambda *_: [{'name': name} for name in GEN['DEFAULT_TOOLS']]
         def catalogue(root, binary, all_commands):
             name = 'advanced' if all_commands else 'core'
             return {'commands': [{'command': f'provenant {name}', 'arguments': []}]}
-        with patch.dict(GLOBALS, catalogue=catalogue, tool_catalogue=tools,
+        with patch.dict(GLOBALS, catalogue=catalogue,
                         wire_schemas=lambda _: {'error-codes': []}):
             files, _ = GEN['generate'](self.root)
         self.assertIn('## `provenant core`', files['cli.md'])
@@ -93,27 +91,6 @@ class ReferenceTests(unittest.TestCase):
                     'conditional_defaults', 'groups', 'constraints'):
             self.assertIn('"' + key + '"', text)
 
-    def test_non_machine_readable_tool_catalogue_is_a_named_gap(self):
-        workspace = self.root / GEN['WORKSPACE']
-        workspace.mkdir(parents=True)
-        (workspace / 'Cargo.toml').touch()
-        with patch.dict(GLOBALS, catalogue=lambda *_: {'commands': []},
-                        wire_schemas=lambda _: {'error-codes': []}):
-            for tools in ([{'name': 'fabric_context'}], 'not a list', [{'wrong': 'shape'}]):
-                with patch.dict(GLOBALS, tool_catalogue=lambda *_: tools):
-                    files, gaps = GEN['generate'](self.root)
-                self.assertIn('no machine-readable tool catalogue', files['mcp-tools.md'])
-                self.assertTrue(any('fabric mcp' in gap for gap in gaps))
-
-    def test_tool_catalogue_comes_from_the_mcp_server(self):
-        frames = ('{"id":1,"result":{}}\n{"id":2,"result":{"tools":[{"name":"a"}]}}\n'
-                  '{"id":3,"result":{"structuredContent":{"tools":[{"name":"b"}]}}}\n')
-        done = subprocess.CompletedProcess([], 0, stdout=frames)
-        with patch('subprocess.run', return_value=done) as run:
-            tools = GEN['tool_catalogue'](self.root, self.root / 'built-cli')
-        self.assertEqual([tool['name'] for tool in tools], ['a', 'b'])
-        self.assertEqual(run.call_args.args[0][1:], ['fabric', 'mcp'])
-
     def test_unsupported_help_is_a_gap_but_build_failure_is_an_error(self):
         workspace = self.root / GEN['WORKSPACE']
         workspace.mkdir(parents=True)
@@ -128,14 +105,7 @@ class ReferenceTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 GEN['generate'](self.root)
 
-    def test_mcp_and_configuration_preserve_all_schema_fields(self):
-        tool = {'name': 'fixture_tool', 'inputSchema': {'type': 'object'},
-                'outputSchema': {'const': None}, '_meta': {'schemaVersion': 2}}
-        text = GEN['mcp_reference']([tool], [tool, {'name': 'hidden'}])
-        for key in tool:
-            self.assertIn('"' + key + '"', text)
-        self.assertIn('## Discoverable tools', text)
-        self.assertIn('### `hidden`', text)
+    def test_configuration_preserves_all_schema_fields(self):
         data = {'knobs': {'fixture': {'type': 'enum', 'default': 'a', 'values': ['a', 'b'],
                                     'effect': 'One | two `three`.'}},
                 'schema_version': 1, 'profiles': {'balanced': {'fixture': 'b'}}}
@@ -162,11 +132,11 @@ class ReferenceTests(unittest.TestCase):
     def test_published_schemas_are_generated_files(self):
         schema = {'$schema': 'https://json-schema.org/draft/2020-12/schema', 'title': 'fixture',
                   'type': 'object'}
-        data = {'lanes.schema.json': schema, 'mcp/fabric_run.schema.json': schema,
+        data = {'lanes.schema.json': schema, 'error.schema.json': schema,
                 'error-codes': [{'code': 'PR', 'kind': 'umbrella', 'summary': 'A | b.'}]}
         files = GEN['schema_files'](data)
-        self.assertEqual(sorted(files), ['schemas.md', 'schemas/lanes.schema.json',
-                                         'schemas/mcp/fabric_run.schema.json'])
+        self.assertEqual(sorted(files), ['schemas.md', 'schemas/error.schema.json',
+                                         'schemas/lanes.schema.json'])
         self.assertIn('scripts/generate-reference', files['schemas.md'].splitlines()[0])
         self.assertIn('| `PR` | umbrella | A &#124; b. |', files['schemas.md'])
         self.assertEqual(json.loads(files['schemas/lanes.schema.json']), schema)
@@ -177,14 +147,12 @@ class ReferenceTests(unittest.TestCase):
         (workspace / 'Cargo.toml').touch()
         document = {'lanes.schema.json': {'title': 'fixture'}, 'error-codes': []}
         with patch.dict(GLOBALS, catalogue=lambda *_: {'commands': []},
-                        tool_catalogue=lambda *_: [{'name': name} for name in GEN['DEFAULT_TOOLS']],
                         wire_schemas=lambda _: document):
             files, gaps = GEN['generate'](self.root)
         self.assertIn('schemas/lanes.schema.json', files)
         self.assertIn('schemas.md', files)
         self.assertFalse(any('print-wire-schemas' in gap for gap in gaps))
         with patch.dict(GLOBALS, catalogue=lambda *_: {'commands': []},
-                        tool_catalogue=lambda *_: [{'name': name} for name in GEN['DEFAULT_TOOLS']],
                         wire_schemas=lambda _: {'unsupported': True}):
             files, gaps = GEN['generate'](self.root)
         self.assertTrue(any('print-wire-schemas' in gap for gap in gaps))

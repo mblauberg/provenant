@@ -881,7 +881,7 @@ pub struct Stats {
     pub suggest: bool,
     #[command(flatten)]
     pub pipeline: PipelineOptions,
-    /// Count local CLI verbs and MCP tools, including unused installed units.
+    /// Count local CLI verbs, including unused installed units.
     #[arg(long)]
     pub usage: bool,
     /// Count from this date or timestamp, or a span such as 1d ago

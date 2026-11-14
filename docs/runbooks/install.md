@@ -169,8 +169,8 @@ needs registered accounts, and `quota tick` initialises quota state.
 
 ## Account sync
 
-Every registered account directory holds the same managed skill links, Fabric
-MCP entry, managed hooks and allow-listed shared Claude settings. `install`,
+Every registered account directory holds the same managed skill links,
+managed hooks and allow-listed shared Claude settings. `install`,
 `accounts register` and `accounts sync` apply it. Credentials, identity fields
 and user-owned entries are never synced.
 
@@ -208,7 +208,7 @@ the source changed during `--adopt`, nothing is written: rerun.
 
 `provenant accounts sync [--dry-run] [--prune-orphans]` reapplies the installed
 release to every account and recorded target. A conflict in any target (an
-unmanaged file where a link belongs, a foreign `fabric` MCP entry) refuses the
+unmanaged file where a link belongs) refuses the
 whole command before any write: fix it or use `install --adopt-existing`, then
 rerun. A mid-write failure lists completed and remaining actions; rerun.
 `accounts register` reports `ACCOUNT_SYNC` with the same repair and keeps the
@@ -264,7 +264,7 @@ If the home or state root moved since install, uninstall reports
 paths. Finish by hand: `launchctl bootout gui/$UID/dev.provenant.peer`, move the
 old peer plist aside, delete links under `~/.local/bin`, the harness skills
 directories and instruction links that point into the old state root, then
-rerun `install --adopt-existing` to replace MCP entries naming the old binary.
+rerun `install --adopt-existing`.
 
 ## Receipt recovery
 
@@ -272,7 +272,7 @@ A receipt that fails to decode reports a reinstall error. Move
 `<state>/install/receipt.json` aside, preview, and reapply `install`; exact
 existing files and links are no-ops. Links into an older release conflict:
 remove those binary, skill and instruction links first. Use `--adopt-existing`
-for occupied MCP entries or a regular executable that must be replaced.
+for a regular executable that must be replaced.
 Install, uninstall and `check install` ignore pre-1.0 entries and Git
 launchers; remove those by hand.
 
