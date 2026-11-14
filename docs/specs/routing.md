@@ -64,6 +64,7 @@ eligible members. Outcome priors use attributed comparable quality outcomes,
 with exploration among eligible members; infrastructure failures are not quality
 observations. Missing evidence stays unknown or neutral, never a routing gate.
 Configuration and receipts expose the effective sources.
+Account ranking scales reset-adjusted usable headroom by sourced penalties and divides by one plus live lanes.
 
 - Why: routing can use capability, capacity and experience without starving alternatives.
 - Test: `crates/routing/src/tests/quality.rs::capability_priors_and_exploration_are_preferences_on_nonempty_draws`; `crates/routing/src/tests/quality.rs::account_ranking_uses_reset_adjusted_headroom_and_live_load_independent_of_order`; `crates/telemetry/src/tests.rs::route_priors_count_only_attributed_comparable_quality_outcomes`

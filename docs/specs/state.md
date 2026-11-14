@@ -14,6 +14,7 @@ Keys and defaults: `provenant config schema`. Operator steps: the
 
 An empty or relative explicit root fails and never yields to the default. A
 root that overlaps a protected location is refused. Reads create no state.
+The first 2.0 install stops 1.x agents and seeds only `config.toml`, `host-id` and `install/receipt.json` into an absent or empty default root; the 1.x root remains untouched.
 - Why: a wrong root mixes or destroys another installation's state.
 - Test: `crates/core/src/roots.rs::roots_refuse_home_checkout_old_roots_and_any_agent_run_component`;
   `tests/parser.rs::root_uses_release_location_and_explicit_state_without_creating_it`
@@ -75,6 +76,7 @@ Syntax, version and filesystem-boundary failures refuse loading; an invalid
 optional value warns and uses the default, and a malformed restriction never
 becomes permission. `config set` publishes atomically and keeps unknown keys;
 `config show` redacts secrets.
+Commands load their declared domains; invalid unused domains warn, and effective defaults retain their compiled source.
 - Why: errors need visible remedies without expanding authority.
 - Test: `crates/config/src/tests.rs::config_warns_on_optional_input_but_refuses_syntax_and_versions_without_echoing_input`;
   `crates/config/src/tests.rs::knob_edit_preserves_unknown_keys_while_applying_the_edit`
