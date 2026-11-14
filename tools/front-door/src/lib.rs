@@ -6,6 +6,7 @@ mod graph_support;
 // refuses inner attributes.
 mod build_slot;
 mod chair;
+mod check_providers;
 mod checks;
 mod cloud;
 #[cfg(test)]
@@ -1446,7 +1447,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Disk(provenant_cli::Disk::Report) => disk::run(globals),
         Command::Cloud(command) => cloud::run(command, globals),
         Command::Tracker(command) => tracker::run(command, globals),
-        Command::Check(check) => checks::run(check, globals),
+        Command::Check(check) => checks::run(check, globals, process.workers()),
         Command::Hook(hook) => hooks::run(hook, globals),
     }
 }

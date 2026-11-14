@@ -475,6 +475,11 @@ pub fn directory_scans() -> u64 {
 }
 
 impl Directory {
+    /// Arm before reading owner state, then block until an entry changes.
+    pub fn watch_changes(&self) -> io::Result<crate::sys::file_events::FileEvents> {
+        crate::sys::file_events::FileEvents::new(&self.file)
+    }
+
     /// Open the signal itself as its lock, refusing links and replaced entries.
     pub(crate) fn signal_file(&self, name: &OsStr, write: bool) -> Result<File> {
         let name = component(name)?;

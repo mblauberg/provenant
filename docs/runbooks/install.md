@@ -123,6 +123,35 @@ before installing any host and never prompts while capturing installer output.
 Each host rechecks its reset plan before deletion. Keep the fleet quiescent for
 the entire operation; preflight cannot make a multi-host install atomic.
 
+### Check provider routes before and after a release
+
+Run the candidate binary's `check providers --json` against the scratch format-2
+state root prepared by the installer, then repeat with the installed binary.
+It reads the routing catalogue and configured accounts, including derived free
+accounts, without launching anything. Rows show the harness, recorded sign-in
+state and its source, quota coverage and source, and the model's allowance pools.
+An unobserved login stays unknown. Unknown or partial quota never removes a route
+or fails readiness; Zen and Go currently have unknown or partial coverage.
+
+With the owner's authority to spend quota, run `check providers --live`. This
+starts one ordinary read-only lane per route with a one-word, no-tools prompt,
+waits for settlement, and prints `ROUTE pass|fail CAUSE attempt=ID`. These lanes
+consume quota and follow normal confinement, environment finalisation,
+settlement and retention. Each route is `ADAPTER/ACCOUNT/MODEL`, where ACCOUNT is
+the configured label and MODEL may contain slashes. Repeat `--route ROUTE` to
+select exact rows from the readiness report, for example:
+
+```sh
+provenant check providers --live --route claude/pro/claude-sonnet-5-5 --set timeout_seconds=90 --set concurrency=2 --json
+```
+
+The compiled defaults are 60 seconds of provider runtime per route and two
+concurrent routes. `--set timeout_seconds=N` (1..14400) and `--set concurrency=N`
+(1..16) override them; output shows each effective value and whether it came
+from the default or `--set`. Each route uses exactly one attempt, with no
+fallback or continuation. Exit 0 means every selected route passed; exit 1
+means at least one failed. Retain the JSON and attempt IDs with release evidence.
+
 ### Test a candidate binary
 
 Run an uninstalled candidate only with its own `--state-dir`, with

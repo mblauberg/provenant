@@ -66,8 +66,13 @@ enum Inspectable {
         page: provenant_cli::Page,
     },
 }
-pub fn run(check: Check, globals: &Globals) -> u8 {
+pub fn run(
+    check: Check,
+    globals: &Globals,
+    workers: &'static dyn provenant_confinement::worktrees::WorkerObserver,
+) -> u8 {
     let (name, check) = match check {
+        Check::Providers(args) => return crate::check_providers::run(args, globals, workers),
         Check::Config(page) => ("check config", Inspectable::Config(page)),
         Check::Install { source, page } => ("check install", Inspectable::Install { source, page }),
         Check::Release { base, head, page } => {

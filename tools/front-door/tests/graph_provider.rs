@@ -195,6 +195,10 @@ fn without_done(text: &str) -> &str {
 
 fn fixture() -> Result {
     let args: Vec<_> = std::env::args().collect();
+    if args.get(1).is_some_and(|v| v == "login") && args.get(2).is_some_and(|v| v == "status") {
+        writeln!(io::stdout(), "Logged in")?;
+        return Ok(());
+    }
     if args.get(1).is_some_and(|v| v == "--version") {
         let version = if std::path::Path::new(&args[0]).file_name()
             == Some(std::ffi::OsStr::new("opencode"))
@@ -444,6 +448,12 @@ fn fixture() -> Result {
     }
     let home = PathBuf::from(std::env::var_os("CODEX_HOME").ok_or("CODEX_HOME")?);
     let auth: Value = serde_json::from_slice(&fs::read(home.join("auth.json"))?)?;
+    if prompt.contains("Reply with exactly one word: OK.")
+        && auth["tokens"]["account_id"] == "fixture-fail"
+    {
+        writeln!(io::stderr(), "not logged in")?;
+        return Err("synthetic provider auth refusal".into());
+    }
     if !prompt.contains("fixture handoff recovery")
         && !prompt.contains("fixture graph redraw")
         && !prompt.contains("fixture partial quota redraw")
@@ -579,7 +589,9 @@ fn fixture() -> Result {
         }
         return Ok(());
     }
-    let answer = if prompt.contains("fixture writer shell") {
+    let answer = if prompt.contains("Reply with exactly one word: OK.") {
+        "OK".to_owned()
+    } else if prompt.contains("fixture writer shell") {
         format!("{}{DONE_FENCE}", writer_shell_probe()?)
     } else if prompt.contains("fixture council findings") {
         let entries = if prompt.contains("Frame the immutable review subject for:") {
@@ -4422,6 +4434,89 @@ fn graph_host_native_launch_uses_the_provider_contract() -> Result {
     claude_dispatch(true, false)
 }
 
+// Public CLI invariant: absent quota is diagnostic, route selection is exact,
+// and a provider refusal cannot turn into a successful smoke receipt.
+fn provider_checks_preserve_routes_and_settlement_causes() -> Result {
+    let rig = policy_codex_fixture()?;
+    let _cleanup = rig.process_cleanup();
+    for (label, identity) in [("pass", "fixture-one"), ("fail", "fixture-fail")] {
+        let directory = rig.root.join(format!("smoke-{label}"));
+        fs::create_dir_all(&directory)?;
+        let auth = serde_json::to_vec(&json!({"tokens":{"account_id":identity}}))?;
+        fs::write(directory.join("auth.json"), &auth)?;
+        let key =
+            provenant_providers::identity::codex_account(&auth).ok_or("fixture account key")?;
+        support::register_account(&rig, "codex", label, &key, &directory)?;
+    }
+    let pass = "codex/pass/gpt-6-luna";
+    let fail = "codex/fail/gpt-6-luna";
+    let out = rig.command(&[
+        "check",
+        "providers",
+        "--route",
+        pass,
+        "--route",
+        fail,
+        "--json",
+    ])?;
+    assert_eq!(code(&out), 0);
+    let data: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let rows = data["data"]["rows"].as_array().ok_or("readiness rows")?;
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .all(|row| row["quota"]["coverage"] == "unknown" && row["attempt_id"].is_null())
+    );
+    let out = rig.command(&["check", "providers", "--route", pass, "--json"])?;
+    let data: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let rows = data["data"]["rows"].as_array().ok_or("selected row")?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["route"], pass);
+    // The native graph fixture is confined on supported CI hosts. Readiness
+    // and unknown-quota selection above run on every platform.
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let out = rig.command(&[
+        "check",
+        "providers",
+        "--live",
+        "--route",
+        pass,
+        "--route",
+        fail,
+        "--json",
+    ])?;
+    assert_eq!(code(&out), 1);
+    let data: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let rows = data["data"]["rows"].as_array().ok_or("live rows")?;
+    let passed = rows
+        .iter()
+        .find(|row| row["route"] == pass)
+        .ok_or("passing row")?;
+    let failed = rows
+        .iter()
+        .find(|row| row["route"] == fail)
+        .ok_or("failing row")?;
+    assert_eq!(passed["status"], "pass");
+    assert_eq!(passed["cause"], "completed");
+    assert_eq!(failed["status"], "fail");
+    assert_eq!(failed["cause"], "auth_required");
+    assert!(rows.iter().all(|row| row["attempt_id"].is_string()));
+    let out = rig.command(&[
+        "check",
+        "providers",
+        "--live",
+        "--route",
+        pass,
+        "--set",
+        "concurrency=1",
+        "--json",
+    ])?;
+    assert_eq!(code(&out), 0);
+    rig.assert_legacy_unchanged()
+}
+
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     #[cfg(target_os = "macos")]
@@ -4438,7 +4533,7 @@ fn main() -> ExitCode {
     }
     let result = if args
         .first()
-        .is_some_and(|s| s == "exec" || s == "run" || s == "--version" || s == "auth")
+        .is_some_and(|s| s == "exec" || s == "run" || s == "--version" || s == "auth" || s == "login")
         // Claude options such as graph input `--add-dir` may precede `-p`.
         || args.iter().any(|s| s == "-p")
     {
@@ -4446,6 +4541,10 @@ fn main() -> ExitCode {
     } else {
         type NamedTest = (&'static str, fn() -> Result);
         let tests: &[NamedTest] = &[
+            (
+                "provider_checks_preserve_routes_and_settlement_causes",
+                provider_checks_preserve_routes_and_settlement_causes,
+            ),
             (
                 "expanded_writer_registry_wait_uses_launch_allowance",
                 expanded_writer_registry_wait_uses_launch_allowance,
