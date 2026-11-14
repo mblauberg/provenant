@@ -845,15 +845,14 @@ fn idle_writers_are_admitted_beyond_the_build_limit() -> TestResult {
 fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
     for (config, scope) in [
         ("max_writer_lanes = 3\nmax_project_writer_lanes = 3", "host"),
-        (
-            "max_writer_lanes = 8\nmax_project_writer_lanes = 3",
-            "project",
-        ),
+        ("max_project_writer_lanes = 3", "project"),
     ] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        let execution_context = context(temp.path())?;
+        let project = execution_context.project_id.to_string();
+        let mut store = RunStore::open(&execution_context, &call)?;
         store.set_admission_policy(AdmissionPolicy {
             startup_spacing_ms: 0,
             admission_seconds: 1,
@@ -868,6 +867,30 @@ fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
         let facts = super::tests::HostFacts::new(100);
         let mut last = None;
         for seed in 80..84 {
+            if scope == "project" && seed == 82 {
+                let ledger = crate::ledger::open(&store.writer_registry, &call)?;
+                let boot = clock.boot_identity()?;
+                let guardian = serde_json::to_string(
+                    &facts
+                        .guardian_identity()
+                        .ok_or("fixture guardian identity unavailable")?,
+                )?;
+                // An unavailable foreign store with a live guardian stays
+                // counted, but cannot hide a later boot-dead project lease.
+                let unavailable = temp.path().join("unavailable-store");
+                let foreign = provenant_core::ProjectId::from_bytes([222; 16]).to_string();
+                for index in 0..256_u128 {
+                    let attempt = AttemptId::from_bytes((10_000 + index).to_be_bytes());
+                    ledger.execute(
+                        "INSERT INTO leases (attempt,project,store,class,boot,guardian,owner_id,yielded) VALUES (?1,?2,?3,'writer',?4,?5,'0:0',0)",
+                        rusqlite::params![attempt.to_string(), &foreign, unavailable.as_os_str().as_encoded_bytes(), &boot, &guardian],
+                    )?;
+                }
+                ledger.execute(
+                    "INSERT INTO leases (attempt,project,store,class,boot,guardian,owner_id,yielded) VALUES (?1,?2,?3,'writer','old-boot',?4,'0:0',0)",
+                    rusqlite::params![AttemptId::from_bytes([99; 16]).to_string(), project, unavailable.as_os_str().as_encoded_bytes(), &guardian],
+                )?;
+            }
             let run = lane(seed, true);
             let id = starting(&store, &run, &call)?;
             let dir = store.attempt_dir(id, false)?;

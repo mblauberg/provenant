@@ -638,7 +638,7 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
             crate::writer::settle_launch_staging(attempt).map_err(custody_error)?;
         }
         release_and_reclaim(attempt, exit.scope, recovery)?;
-        // Build output is surveyed by admission and GC, outside settlement.
+        // Build output is surveyed by GC, outside settlement.
         Ok(())
     }
 }

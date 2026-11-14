@@ -725,6 +725,7 @@ impl RunStore {
             &provenant_config::LaneBuildSettings::read(&self.writer_registry).unwrap_or_default(),
         )
     }
+    #[cfg(any(test, feature = "fixture"))]
     fn lane_cap_hit(
         &self,
         ticket: &AdmissionTicket,

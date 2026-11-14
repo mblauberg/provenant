@@ -2003,8 +2003,10 @@ mod cargo_setup_tests {
                     &state,
                     custody_project,
                     &worktrees::RepoFacts::default(),
-                )?;
-                prepare_writer_git(writer, &state, &root, None, &CancelToken::new())?;
+                )
+                .map_err(|error| error.to_string())?;
+                prepare_writer_git(writer, &state, &root, None, &CancelToken::new())
+                    .map_err(|error| error.to_string())?;
             }
             Ok::<(), String>(())
         })?;

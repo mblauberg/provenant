@@ -25,8 +25,6 @@ pub enum RetentionTrigger {
     Custody,
     Gc,
     FullGc,
-    Admission,
-    GcAndAdmission,
     Append,
     Never,
 }
@@ -94,9 +92,9 @@ pub const RETENTION_CLASSES: &[RetentionClass] = &[
     RetentionClass {
         class: RetentionKind::BuildDirectories,
         owner: "run/build_dir_gc",
-        custody_proof: "admission boundary; free Cargo profile locks",
+        custody_proof: "GC boundary; free Cargo profile locks",
         age_rule: Some("domains.fabric.lanes.build_dir_grace_seconds"),
-        trigger: RetentionTrigger::GcAndAdmission,
+        trigger: RetentionTrigger::Gc,
     },
     RetentionClass {
         class: RetentionKind::QuotaHistory,
@@ -122,11 +120,6 @@ pub fn retention_schedule(
     RETENTION_CLASSES.iter().filter(move |class| {
         class.trigger == trigger
             || (trigger == RetentionTrigger::FullGc && class.trigger == RetentionTrigger::Gc)
-            || (class.trigger == RetentionTrigger::GcAndAdmission
-                && matches!(
-                    trigger,
-                    RetentionTrigger::Gc | RetentionTrigger::FullGc | RetentionTrigger::Admission
-                ))
     })
 }
 
