@@ -53,8 +53,14 @@ nowhere, the delivering lane's worktree included; conflicts leave checkouts and
 refs intact. Failed and cancelled lanes keep their worktrees. Publishing from a
 writer is on by default and gives it your GitHub credential; set
 `lanes.publish=false` to withhold it so the chair publishes through host-side
-delivery. An advisory `gh` deny list (`deny_verbs`, `deny_labels`) goes in
-`projects/PROJECT_ID/github.json`; it guards against accident, not as a boundary.
+delivery. Host-owned advisory `gh` rules (`deny_verbs`, `deny_labels`) go in
+`projects/PROJECT_ID/github.json`. Writer lanes also have CI dispatch denied
+by default: `gh workflow run`, `gh run rerun`, and `gh api` endpoints ending
+in `/dispatches` are refused unless the host policy sets
+`allow_ci_dispatch: true`. Read-only lanes retain their existing `gh` access.
+These checks guard against accidental use; absolute-path `gh` and other clients
+such as `curl` bypass the shim, and credential availability is configured
+separately.
 
 GitHub login lookup uses the host-recorded executable search path and GitHub
 configuration paths for initial launches and background retries alike. Missing

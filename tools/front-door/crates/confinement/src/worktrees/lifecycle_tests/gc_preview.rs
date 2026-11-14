@@ -464,6 +464,94 @@ fn finished_writer_record_does_not_block_its_worktree_shell() -> Result<(), Box<
 }
 
 #[test]
+fn settled_import_allows_relaunch_after_interrupted_reservation_removal()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let lane = create(
+        &context,
+        WorktreeCreate {
+            branch: "settled-import".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let slot = writer_directory(context.project_state, &lane.path)?;
+    let scope = provenant_supervisor::custody::Scope {
+        run: provenant_core::RunId::from_bytes([21; 16]),
+        attempt: provenant_core::AttemptId::from_bytes([22; 16]),
+        generation: 1,
+    };
+    let lease = provenant_supervisor::fixture::acquire_writer(
+        slot.try_clone()?,
+        scope,
+        WaitBudget::nonblocking(context.clock.mono_now()),
+        &cancel(),
+        context.clock,
+    )?;
+    let attempt = slot.current_path()?.join(scope.attempt.to_string());
+    fs::write(attempt.join("import-retained.json"), "retained")?;
+    drop(lease);
+    let assert_fenced = || -> Result<(), Box<dyn Error>> {
+        let Err(Occupancy::Unknown { evidence, .. }) =
+            cache_writer_probe(context.project_state, &lane.path)
+        else {
+            return Err("unresolved import must fence admission".into());
+        };
+        assert!(evidence.contains(&attempt.join("import-retained.json").display().to_string()));
+        assert!(evidence.contains(&format!("{}/{}", scope.run, scope.attempt)));
+        assert!(evidence.contains(&format!(
+            "provenant reconcile --abandon {}/{} --reason",
+            scope.run, scope.attempt
+        )));
+        Ok(())
+    };
+    assert_fenced()?;
+    // A different generation's settlement is historical, not a release.
+    let journal = attempt.join("settlement.json");
+    // Write using the typed scope so every identity dimension is retained.
+    let stale = provenant_supervisor::custody::Scope {
+        generation: 2,
+        ..scope
+    };
+    fs::write(
+        &journal,
+        serde_json::to_vec(&serde_json::json!({"schema_version":1, "scope":stale}))?,
+    )?;
+    assert_fenced()?;
+    // This is the crash point: the supervisor made the settlement durable but
+    // did not yet unlink reservation.json. Historical markers may remain.
+    fs::write(
+        &journal,
+        serde_json::to_vec(&serde_json::json!({"schema_version":1, "scope":scope}))?,
+    )?;
+    assert!(cache_writer_probe(context.project_state, &lane.path).is_ok());
+    assert!(matches!(
+        disk_writer_state(context.project_state, &lane.path),
+        Occupancy::Available
+    ));
+    let listing = provenant_supervisor::custody::list_writer_reservations_in_slot(&slot)?;
+    assert!(listing.issues.is_empty());
+    assert!(listing.reservations.is_empty());
+    let inventory = context.facts.read_inventory(&context, &cancel())?;
+    let entry = inventory
+        .iter()
+        .find(|entry| entry.path == lane.path)
+        .ok_or("worktree")?;
+    drop(lock_worktree_for_launch(&context, entry, &cancel())?);
+    let next = provenant_supervisor::fixture::acquire_writer(
+        slot,
+        scope,
+        WaitBudget::nonblocking(context.clock.mono_now()),
+        &cancel(),
+        context.clock,
+    )?;
+    next.withdraw_unlaunched()?;
+    Ok(())
+}
+
+#[test]
 fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;

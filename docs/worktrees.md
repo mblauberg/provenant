@@ -119,6 +119,11 @@ under authority for that reservation, holding writer exclusion throughout.
 Automatic withdrawal is limited to proved unlaunched preparation. A handed-off
 writer needs terminal publication and verified settlement, or an expressly
 authorised acceptance of lost custody with its evidence recorded. Unknown files
-and uncertain custody stay fenced. Ordinary Git failure after settled custody
-needs Git repair, not fence clearance. Use a fresh linked worktree while the old
+and uncertain custody stay fenced. A completed supervisor settlement resolves
+its exact attempt and generation even if reservation removal was interrupted;
+a historical import marker alone does not fence the worktree. An unresolved
+import refusal names its marker, run and attempt, with commands to reconcile
+or explicitly abandon it while preserving private Git evidence. Stopping a
+terminal lane does not abandon an unresolved import. Ordinary Git failure after
+settled custody needs Git repair, not fence clearance. Use a fresh linked worktree while the old
 writer remains busy; retain its evidence for recovery.

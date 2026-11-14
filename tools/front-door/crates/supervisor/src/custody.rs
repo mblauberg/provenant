@@ -489,13 +489,18 @@ pub(crate) fn acquire_writer_with_observer(
                 read_record(&directory, "reservation.json", RECORD_LIMIT)
                     .map_err(|_| CustodyError::Fenced)?;
             validate_anchor(&directory, &reservation).map_err(|_| CustodyError::Fenced)?;
-            return Err(
-                if classify_reservation(&reservation, observer) == RecoveryState::Reattached {
-                    CustodyError::Busy
-                } else {
-                    CustodyError::Fenced
-                },
-            );
+            if writer_reservation_settled(&directory, reservation.scope)? {
+                directory.unlink(OsStr::new("reservation.json"))?;
+                directory.sync()?;
+            } else {
+                return Err(
+                    if classify_reservation(&reservation, observer) == RecoveryState::Reattached {
+                        CustodyError::Busy
+                    } else {
+                        CustodyError::Fenced
+                    },
+                );
+            }
         }
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error.into()),
@@ -614,6 +619,14 @@ fn carry_forward_slot_reservation_with(
     let record: Reservation =
         serde_json::from_value(value.clone()).map_err(|_| CustodyError::Fenced)?;
     record.validate().map_err(|_| CustodyError::Fenced)?;
+    if writer_reservation_settled(directory, record.scope)? {
+        // This runs under writer exclusion; finish an interrupted root cleanup
+        // before carrying any unresolved legacy reservation forward.
+        validate_anchor(directory, &record)?;
+        directory.unlink(OsStr::new("reservation.json"))?;
+        directory.sync()?;
+        return Ok(());
+    }
     let slot = directory.metadata()?;
     let child = create_attempt_evidence(directory, record.scope)?;
     let anchor = child.metadata()?;
@@ -661,6 +674,32 @@ fn carry_forward_slot_reservation_with(
             )?)?;
         }
         Err(error) => return Err(error.into()),
+    }
+    // Retention evidence must follow its reservation before the root record
+    // is removed. Otherwise the two halves no longer fence the same directory.
+    match read_record::<serde_json::Value>(directory, "import-retained.json", RECORD_LIMIT) {
+        Ok(marker) => {
+            let scope: Scope = serde_json::from_value(marker["scope"].clone())
+                .map_err(|_| CustodyError::Fenced)?;
+            if scope != record.scope {
+                return Err(CustodyError::Fenced);
+            }
+            match read_record::<serde_json::Value>(&child, "import-retained.json", RECORD_LIMIT) {
+                Ok(existing) if existing == marker => {}
+                Ok(_) => return Err(CustodyError::Fenced),
+                Err(CustodyError::Filesystem(error)) if error.is_not_found() => {
+                    Publication::require_durable(write_record(
+                        &child,
+                        "import-retained.json",
+                        &marker,
+                        PublishMode::NoReplace,
+                    )?)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(CustodyError::Filesystem(error)) if error.is_not_found() => {}
+        Err(error) => return Err(error),
     }
     // An identical record can be left by a publication whose final directory
     // sync failed. Reconfirm durability on replay before removing its source.
@@ -752,6 +791,9 @@ fn ensure_no_exclusive_reservation(directory: &Directory) -> Result<()> {
         validate_anchor(&child, &reservation).map_err(|_| CustodyError::Fenced)?;
         if name != OsStr::new(&reservation.scope.attempt.to_string()) {
             return Err(CustodyError::Fenced);
+        }
+        if writer_reservation_settled(&child, reservation.scope)? {
+            continue;
         }
         // Providers no longer inherit writer.lock. After guardian loss the
         // durable unresolved launch must exclude every new attempt, not just
@@ -2098,6 +2140,9 @@ pub fn list_writer_reservations_in_slot(slot: &Directory) -> Result<ReservationL
             if attempt != OsStr::new(&reservation.scope.attempt.to_string()) {
                 return Err(CustodyError::InvalidRecord);
             }
+            if writer_reservation_settled(&child, reservation.scope)? {
+                return Ok(None);
+            }
             Ok(Some(WriterReservation {
                 scope: reservation.scope,
                 reservation: path.clone(),
@@ -2462,6 +2507,67 @@ pub fn publish_release(attempt: &Directory, scope: Scope) -> Result<()> {
     })?;
     seal(attempt, "release.json", &release)
 }
+/// A durable scoped settlement precedes reservation removal. A crash between
+/// those writes must not turn a resolved import back into a fence. A journal
+/// for another attempt or generation never resolves the current reservation.
+pub fn writer_reservation_settled(directory: &Directory, scope: Scope) -> Result<bool> {
+    let settled: SettlementJournal = match read_record(directory, "settlement.json", RECORD_LIMIT) {
+        Ok(settled) => settled,
+        Err(CustodyError::Filesystem(error)) if error.is_not_found() => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if settled.schema_version != 1 {
+        return Err(CustodyError::InvalidRecord);
+    }
+    Ok(settled.scope == scope)
+}
+
+/// Identify a retained import using its verified reservation, not process or
+/// working-tree cleanliness. Settled journals and historical markers may stay.
+pub fn pending_writer_import(directory: &Directory, slot_root: bool) -> Result<Option<Scope>> {
+    match directory.metadata_at(OsStr::new("import-retained.json"), false) {
+        Ok(_) => {}
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    let reservation: Reservation = match read_record(directory, "reservation.json", RECORD_LIMIT) {
+        Ok(reservation) => reservation,
+        Err(CustodyError::Filesystem(error)) if error.is_not_found() && slot_root => {
+            // An older cutover could move the reservation without its marker.
+            // Correlate its exact scope instead of losing that unresolved fence.
+            let marker: SettlementJournal =
+                read_record(directory, "import-retained.json", RECORD_LIMIT)?;
+            let child = match attempt_evidence(directory, marker.scope) {
+                Ok(child) => child,
+                Err(error) if error.is_not_found() => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
+            let carried: Reservation = match read_record(&child, "reservation.json", RECORD_LIMIT) {
+                Ok(carried) => carried,
+                Err(CustodyError::Filesystem(error)) if error.is_not_found() => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            validate_anchor(&child, &carried)?;
+            if carried.scope != marker.scope {
+                return Ok(None);
+            }
+            return Ok(
+                (!writer_reservation_settled(&child, carried.scope)?).then_some(carried.scope)
+            );
+        }
+        Err(CustodyError::Filesystem(error)) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    validate_anchor(directory, &reservation)?;
+    if !slot_root
+        && directory.current_path()?.file_name()
+            != Some(OsStr::new(&reservation.scope.attempt.to_string()))
+    {
+        return Err(CustodyError::InvalidRecord);
+    }
+    Ok((!writer_reservation_settled(directory, reservation.scope)?).then_some(reservation.scope))
+}
+
 /// Clear a verified, proven-absent fence while the writer lease is held.
 pub(crate) fn clear_reservation(directory: &Directory, scope: Scope) -> Result<()> {
     Publication::require_durable(write_record(

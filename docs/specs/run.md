@@ -1109,16 +1109,23 @@ for host recovery.
 
 ## Project GitHub policy
 
-`projects/<ProjectId>/github.json` holds an optional host-owned advisory deny
-list of GitHub CLI verb prefixes and labels for writer lanes. Missing policy
-defaults to empty. When publishing is available, the lane's `gh` shim refuses
-matching calls with the policy key on standard error. This is an accidental-use
-guard, not a security boundary: a lane can invoke the real `gh` directly.
+`projects/<ProjectId>/github.json` holds optional host-owned advisory GitHub
+CLI rules. `deny_verbs` and `deny_labels` apply as before. Writer lanes also
+deny `gh workflow run`, `gh run rerun`, and `gh api` endpoints ending in
+`/dispatches` by default. Set `allow_ci_dispatch` to `true` only when the
+project's writer work is authorised to dispatch or rerun Actions workflows.
+Read-only lanes keep their existing GitHub CLI behaviour. The `gh` shim reports
+`github.deny_ci_dispatch` on standard error when it refuses a call.
+
+This is an accidental-use guard, not a credential or security boundary. A lane
+can bypass the shim by invoking `gh` by absolute path or using another client
+such as `curl`; credential availability remains controlled separately.
 
 - Why (default): projects can reserve GitHub actions for people or workflows without
   relying on instructions in a lane's prompt.
 - Test: `crates/config/src/tests.rs::github_policy_is_scoped_to_project_and_defaults_only_when_absent`;
-  `crates/providers/src/lane.rs::github_policy_guards_labels_and_verb_prefixes`
+  `crates/providers/src/lane.rs::github_policy_guards_labels_and_verb_prefixes`;
+  `crates/providers/src/lane.rs::writer_ci_dispatch_is_denied_by_default_and_host_grant_is_explicit`
 - Owner: `crates/config/src/github_policy.rs`; `crates/providers/src/lane.rs`
 
 ## Writer hard-link boundary
