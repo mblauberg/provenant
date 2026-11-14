@@ -877,8 +877,8 @@ impl Driver<'_> {
             .resource_sample_interval
             .unwrap_or(crate::process_tree::DEFAULT_SAMPLE_INTERVAL)
             .max(Duration::from_millis(1));
-        let resource_sample_interval_ms = u64::try_from(resource_sample_interval.as_millis())
-            .unwrap_or(u64::MAX);
+        let resource_sample_interval_ms =
+            u64::try_from(resource_sample_interval.as_millis()).unwrap_or(u64::MAX);
         // Keep the original inode and path even if the caller later removes
         // its state. A rename alone must not end a publication retry.
         let writer_evidence_identity = DirectoryIdentity::of(&self.writer_dir).ok();

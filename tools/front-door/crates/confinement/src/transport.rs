@@ -106,8 +106,8 @@ impl LaneRoots {
     }
 
     /// The lane areas of a project checkout: its configured worktrees and scratch.
-    pub fn project(root: &Path) -> Result<Self, TransportError> {
-        let ports = provenant_config::PortTable::read_project(root)
+    pub fn project(root: &Path, host_state: &Path) -> Result<Self, TransportError> {
+        let ports = provenant_config::PortTable::read_for(Some(root), host_state)
             .map_err(|_| TransportError::Unreadable)?;
         let mut roots = ports.worktree_roots_under(root);
         roots.extend([".provenant", ".agent-run"].map(|name| root.join(name)));
@@ -122,6 +122,7 @@ impl LaneRoots {
         private: &Path,
         common: &Path,
         extra: &Self,
+        host_state: &Path,
     ) -> Result<Self, TransportError> {
         let mut roots = extra.0.clone();
         if private != common {
@@ -133,7 +134,7 @@ impl LaneRoots {
             .then(|| common.parent())
             .flatten()
             .unwrap_or(root);
-        roots.extend(Self::project(project)?.0);
+        roots.extend(Self::project(project, host_state)?.0);
         Ok(Self::new(roots))
     }
 
@@ -546,7 +547,7 @@ mod tests {
         ports.worktree_layout.default = PathBuf::from(".claude/worktrees/<branch>");
         std::fs::write(config.join("ports.json"), serde_json::to_vec(&ports)?)?;
 
-        let roots = LaneRoots::project(&root)?;
+        let roots = LaneRoots::project(&root, &root)?;
         assert!(roots.contains(&root.join(".claude/worktrees/topic/helper")));
         assert!(roots.contains(&root.join(".provenant/state")));
         assert!(roots.contains(&root.join(".agent-run/state")));

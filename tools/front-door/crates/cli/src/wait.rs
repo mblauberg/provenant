@@ -42,7 +42,12 @@ impl DomainConfig for Settings {
             ("local_interval_ms", self.local_interval_ms, 10, 60000),
             ("pr_interval_ms", self.pr_interval_ms, 10, 60000),
             ("pr_slow_interval_ms", self.pr_slow_interval_ms, 10, 60000),
-            ("pr_near_end_window_ms", self.pr_near_end_window_ms, 0, 60000),
+            (
+                "pr_near_end_window_ms",
+                self.pr_near_end_window_ms,
+                0,
+                60000,
+            ),
             ("max_targets", self.max_targets, 1, 1024),
             (
                 "pr_read_timeout_seconds",

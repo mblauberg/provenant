@@ -1183,22 +1183,63 @@ impl RunStore {
                     )
                     && self.request(record.attempt_id, call)?.task.writer.is_some()
                 {
+                    self.release_admission(&record, call);
                     return self.record(id, call).map(Some);
                 }
                 if !preserve_evidence {
                     self.settle_cleanup(&record, None, call);
+                } else {
+                    self.release_admission(&record, call);
                 }
                 self.record(id, call).map(Some)
             }
             other => other,
         }
     }
+    pub(crate) fn record_admission_binding(
+        &self,
+        expected: &AttemptRecord,
+        binding: serde_json::Value,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        if !matches!(expected.state, AttemptState::Queued { .. })
+            || expected
+                .extra
+                .contains_key(crate::launch::ADMISSION_PORT_BINDING_FIELD)
+        {
+            return Err(RunError::Conflict);
+        }
+        let mut next = expected.clone();
+        next.revision = expected.revision.checked_add(1).ok_or(RunError::Conflict)?;
+        next.extra
+            .insert(crate::launch::ADMISSION_PORT_BINDING_FIELD.into(), binding);
+        super::reader::validate_attempt(&next)?;
+        self.write(call, |tx| {
+            let changed = tx.execute(
+                "UPDATE attempts SET revision=?1,record=?2 WHERE id=?3 AND revision=?4 AND terminal=0",
+                params![
+                    sql_int(next.revision)?,
+                    crate::db::attempt_bytes(&next)?,
+                    next.attempt_id.to_string(),
+                    sql_int(expected.revision)?,
+                ],
+            )?;
+            if changed != 1 {
+                return Err(RunError::Conflict);
+            }
+            insert_event(tx, &next)?;
+            Ok(())
+        })?;
+        self.record(expected.attempt_id, call)
+    }
+
     pub(crate) fn settle_cleanup(
         &self,
         record: &AttemptRecord,
         recovery: Option<&provenant_supervisor::custody::Recovery>,
         call: &Request<'_>,
     ) {
+        self.release_admission(record, call);
         let Ok(attempt_dir) = self.attempt_dir(record.attempt_id, false) else {
             return;
         };
@@ -1545,6 +1586,8 @@ impl RunStore {
             return Err(RunError::Conflict);
         }
         if matches!(old.state, AttemptState::Terminal { .. }) {
+            drop(_publication);
+            self.release_admission(&old, call);
             return Ok(());
         }
         let mut next = old.clone();
@@ -1579,8 +1622,11 @@ impl RunStore {
                     AttemptState::Terminal { outcome, .. } if outcome != Outcome::Lost
                 ) {
                     let (record, committed) = self.replay_terminal_locked(old.attempt_id, call)?;
+                    drop(_publication);
                     if committed {
                         self.settle_cleanup(&record, None, call);
+                    } else {
+                        self.release_admission(&record, call);
                     }
                     return Ok(());
                 }
@@ -1620,7 +1666,12 @@ impl RunStore {
         // Keep recovery discoverable until fence release, even for readers
         // whose reservations live outside the writer registry. Reconcile
         // recognises this lost state and preserves scratch on every retry.
-        self.commit_terminal_record(&old, &next, call)
+        let result = self.commit_terminal_record(&old, &next, call);
+        drop(_publication);
+        if result.is_ok() {
+            self.release_admission(&next, call);
+        }
+        result
     }
 
     /// Run the post-commit Git pin cleanup of a committed terminal attempt and

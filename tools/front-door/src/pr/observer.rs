@@ -14,6 +14,7 @@
 //! A commit is any head: a pull request head, a `land/**` candidate or a
 //! landed commit.
 use super::gh::{Forge, Gh, Response, rate_limit_reset};
+mod port;
 use provenant_os::fs::{Directory, LockMode, PublishMode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -98,10 +99,48 @@ impl Forge for GhTransport {
     }
 }
 
+/// Resolve the selected repository through the shared GitHub transport context.
+#[allow(clippy::disallowed_methods, reason = "forge transport timing boundary")]
+pub(crate) fn repository_for_project(
+    project: &Path,
+    budget: Duration,
+) -> Result<String, ObserveError> {
+    let mut gh = Gh::in_checkout(project.to_owned(), budget);
+    let response = gh.get("repos/{owner}/{repo}", None).map_err(|error| {
+        ObserveError::Unavailable(format!("cannot identify repository: {error}"))
+    })?;
+    if let Some(reset) = rate_limit_reset(&response, jiff::Timestamp::now().as_second()) {
+        return Err(ObserveError::RateLimited {
+            reset: timestamp(reset),
+        });
+    }
+    if !(200..=299).contains(&response.status) {
+        return Err(ObserveError::Unavailable(format!(
+            "cannot identify repository: HTTP {}",
+            response.status
+        )));
+    }
+    let value: Value = serde_json::from_slice(&response.body).map_err(|error| {
+        ObserveError::Unavailable(format!("invalid repository response: {error}"))
+    })?;
+    value["full_name"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            ObserveError::Unavailable("repository response has no canonical name".into())
+        })
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct Page {
     etag: Option<String>,
     body: Value,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResourcePage {
+    page: Page,
+    fetched_at: i64,
 }
 #[derive(Default, Serialize, Deserialize)]
 struct Cached {
@@ -132,8 +171,7 @@ struct Cadence {
 struct WaitDomain {
     wait: provenant_cli::wait::Settings,
 }
-static WAIT_SECTIONS: [provenant_config::DomainSection; 1] =
-    [provenant_cli::wait::SECTION];
+static WAIT_SECTIONS: [provenant_config::DomainSection; 1] = [provenant_cli::wait::SECTION];
 
 fn adaptive_freshness(
     cached: &Cached,
@@ -151,49 +189,74 @@ fn adaptive_freshness(
         .iter()
         .filter_map(|page| page.body.get("check_runs")?.as_array())
         .flat_map(|runs| runs.iter())
-        .filter(|run| matches!(run.get("status").and_then(Value::as_str),
-            Some("queued" | "in_progress" | "pending" | "waiting" | "requested")))
+        .filter(|run| {
+            matches!(
+                run.get("status").and_then(Value::as_str),
+                Some("queued" | "in_progress" | "pending" | "waiting" | "requested")
+            )
+        })
         .collect::<Vec<_>>();
     if pending.is_empty() {
         return fast;
     }
     let near_end = pending.iter().any(|run| {
-        let Some(name) = run.get("name").and_then(Value::as_str) else { return false; };
-        let Some(started) = time(run.get("started_at")).flatten() else { return false; };
-        let mut durations = history.iter().filter(|sample| sample.name == name)
-            .map(|sample| sample.duration_ms).collect::<Vec<_>>();
-        if durations.is_empty() { return false; }
+        let Some(name) = run.get("name").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(started) = time(run.get("started_at")).flatten() else {
+            return false;
+        };
+        let mut durations = history
+            .iter()
+            .filter(|sample| sample.name == name)
+            .map(|sample| sample.duration_ms)
+            .collect::<Vec<_>>();
+        if durations.is_empty() {
+            return false;
+        }
         durations.sort_unstable();
         let expected_ms = durations[durations.len() / 2];
         let elapsed_ms = now_ms.saturating_sub(started.as_millisecond()).max(0);
         elapsed_ms.saturating_add(i64::try_from(cadence.near_end.as_millis()).unwrap_or(i64::MAX))
             >= expected_ms
     });
-    if near_end { fast } else { cadence.slow.max(fast) }
+    if near_end {
+        fast
+    } else {
+        cadence.slow.max(fast)
+    }
 }
 
 fn durations_from_cache(cached: &Cached) -> Vec<RunDuration> {
-    cached.runs.iter().filter_map(|page| page.body.get("check_runs")?.as_array())
+    cached
+        .runs
+        .iter()
+        .filter_map(|page| page.body.get("check_runs")?.as_array())
         .flat_map(|runs| runs.iter())
         .filter(|run| run.get("status").and_then(Value::as_str) == Some("completed"))
         .filter_map(|run| {
             let started = time(run.get("started_at"))?.flatten()?.as_millisecond();
             let completed = time(run.get("completed_at"))?.flatten()?.as_millisecond();
-            let duration_ms = completed.checked_sub(started).filter(|duration| *duration > 0)?;
+            let duration_ms = completed
+                .checked_sub(started)
+                .filter(|duration| *duration > 0)?;
             Some(RunDuration {
                 id: run.get("id")?.as_u64()?,
                 name: run.get("name")?.as_str()?.to_owned(),
                 duration_ms,
                 completed_at_ms: completed,
             })
-        }).collect()
+        })
+        .collect()
 }
 
 fn unique_run_history(samples: impl IntoIterator<Item = RunDuration>) -> Vec<RunDuration> {
     let mut by_id = std::collections::BTreeMap::<u64, RunDuration>::new();
     for sample in samples {
         match by_id.entry(sample.id) {
-            std::collections::btree_map::Entry::Vacant(entry) => { entry.insert(sample); }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(sample);
+            }
             std::collections::btree_map::Entry::Occupied(mut entry) => {
                 let old = entry.get();
                 if sample.completed_at_ms > old.completed_at_ms
@@ -218,11 +281,20 @@ fn cached_run_history(dir: &Directory) -> Option<Vec<RunDuration>> {
     let mut names = Vec::<(i128, OsString)>::new();
     for entry in entries {
         let name = entry.ok()?;
-        let Some(text) = name.to_str() else { continue; };
-        let Some(commit) = text.strip_suffix(".json") else { continue; };
-        if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) { continue; }
+        let Some(text) = name.to_str() else {
+            continue;
+        };
+        let Some(commit) = text.strip_suffix(".json") else {
+            continue;
+        };
+        if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            continue;
+        }
         let metadata = dir.metadata_at(&name, false).ok()?;
-        if metadata.kind == provenant_os::fs::FileKind::Regular { names.push((metadata.modified_ns, name)); }
+        if metadata.kind == provenant_os::fs::FileKind::Regular {
+            names.push((metadata.modified_ns, name));
+        }
     }
     names.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
     let mut history = Vec::new();
@@ -235,17 +307,25 @@ fn cached_run_history(dir: &Directory) -> Option<Vec<RunDuration>> {
 }
 
 fn settings_roots(state: &Path, project: &Path) -> Result<provenant_core::Roots, ObserveError> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)
-        .ok_or_else(|| ObserveError::Unavailable("cannot resolve CI cadence configuration roots".into()))?;
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+        ObserveError::Unavailable("cannot resolve CI cadence configuration roots".into())
+    })?;
     let mut inputs = provenant_core::RootInputs::new(home, project.to_owned());
     inputs.state_dir = Some(state.to_owned());
     inputs.workspaces.push(project.to_owned());
-    inputs.resolve(&provenant_os::fs::SystemPathResolver)
-        .map_err(|_| ObserveError::Unavailable("cannot resolve CI cadence configuration roots".into()))
+    inputs
+        .resolve(&provenant_os::fs::SystemPathResolver)
+        .map_err(|_| {
+            ObserveError::Unavailable("cannot resolve CI cadence configuration roots".into())
+        })
 }
 
 fn request_etag<'a>(cadence: Cadence, previous: Option<&'a Page>) -> Option<&'a str> {
-    if cadence.conditional_requests { previous.and_then(|page| page.etag.as_deref()) } else { None }
+    if cadence.conditional_requests {
+        previous.and_then(|page| page.etag.as_deref())
+    } else {
+        None
+    }
 }
 #[derive(Serialize, Deserialize)]
 struct RateLimit {
@@ -259,31 +339,71 @@ enum Fetch {
 }
 
 pub(crate) struct Observer<F, C> {
-    dir: Directory, repository: String, forge: F, clock: C,
-    cadence: Cadence, history: Vec<RunDuration>, next_poll_interval: Duration,
+    dir: Directory,
+    repository: String,
+    forge: F,
+    clock: C,
+    cadence: Cadence,
+    history: Vec<RunDuration>,
+    next_poll_interval: Duration,
 }
 
-impl Observer<GhTransport, WallClock> {
-    /// The observer for `repository` (`owner/name`), reading through `gh` in
-    /// `project` within `budget`, with its cache under the state root.
-    #[allow(clippy::disallowed_methods, reason = "forge transport timing boundary")]
+impl Observer<port::SelectedTransport, WallClock> {
+    /// Select the configured CI transport once, then share the observer cache.
     pub(crate) fn open(
         state: &Path,
         project: &Path,
         repository: &str,
         budget: Duration,
     ) -> Result<Self, ObserveError> {
-        let transport = GhTransport { project: project.to_owned(), left: budget };
+        let ports =
+            provenant_config::PortTable::read_for(Some(project), state).map_err(|error| {
+                ObserveError::Unavailable(format!("CI port configuration is unavailable: {error}"))
+            })?;
+        let source = ports.ci_observation.source;
+        let transport = match ports.ci_observation.backend {
+            provenant_config::PortBackend::Builtin => {
+                port::SelectedTransport::Builtin(GhTransport {
+                    project: project.to_owned(),
+                    left: budget,
+                })
+            }
+            provenant_config::PortBackend::Command { command } => {
+                let executor = provenant_os::exec::SystemExecutor::new(1).map_err(|error| {
+                    ObserveError::Unavailable(format!("cannot start CI command executor: {error}"))
+                })?;
+                port::SelectedTransport::Command(port::CommandTransport::new(
+                    command,
+                    source,
+                    project.to_owned(),
+                    state.to_owned(),
+                    executor,
+                    budget,
+                    provenant_core::CancelToken::new(),
+                ))
+            }
+            provenant_config::PortBackend::None => {
+                return Err(ObserveError::Unavailable(
+                    "CI observation is disabled by the effective repository port".into(),
+                ));
+            }
+        };
         let settings = match settings_roots(state, project).and_then(|roots| {
             let sections = provenant_config::DomainSections::<WaitDomain>::new(&WAIT_SECTIONS);
             provenant_config::read_with_domains(&roots, &sections)
                 .map(|config| config.domains.wait)
-                .map_err(|error| ObserveError::Unavailable(format!("cannot read CI cadence configuration: {error}")))
+                .map_err(|error| {
+                    ObserveError::Unavailable(format!(
+                        "cannot read CI cadence configuration: {error}"
+                    ))
+                })
         }) {
             Ok(settings) => settings,
             Err(error) => {
-                let _ = writeln!(std::io::stderr().lock(),
-                    "warning: {error}; using compiled CI observation cadence");
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: {error}; using compiled CI observation cadence"
+                );
                 provenant_cli::wait::Settings::default()
             }
         };
@@ -298,12 +418,26 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         forge: F,
         clock: C,
     ) -> Result<Self, ObserveError> {
-        Self::with_settings(state, repository, forge, clock, provenant_cli::wait::Settings::default())
+        Self::with_settings(
+            state,
+            repository,
+            forge,
+            clock,
+            provenant_cli::wait::Settings::default(),
+        )
     }
 
-    #[allow(clippy::disallowed_methods, reason = "optional cadence-history warning") ]
-    fn with_settings(state: &Path, repository: &str, forge: F, clock: C,
-        settings: provenant_cli::wait::Settings) -> Result<Self, ObserveError> {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "optional cadence-history warning"
+    )]
+    fn with_settings(
+        state: &Path,
+        repository: &str,
+        forge: F,
+        clock: C,
+        settings: provenant_cli::wait::Settings,
+    ) -> Result<Self, ObserveError> {
         let repository = repository
             .strip_prefix("repos/")
             .unwrap_or(repository)
@@ -328,8 +462,10 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         let history = match cached_run_history(&dir) {
             Some(history) => history,
             None => {
-                let _ = writeln!(std::io::stderr().lock(),
-                    "warning: recent CI duration cache unavailable; using slower observation cadence");
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: recent CI duration cache unavailable; using slower observation cadence"
+                );
                 Vec::new()
             }
         };
@@ -340,7 +476,15 @@ impl<F: Forge, C: Clock> Observer<F, C> {
             conditional_requests: settings.pr_conditional_requests,
         };
         let next_poll_interval = cadence.fast;
-        Ok(Self { dir, repository, forge, clock, cadence, history, next_poll_interval })
+        Ok(Self {
+            dir,
+            repository,
+            forge,
+            clock,
+            cadence,
+            history,
+            next_poll_interval,
+        })
     }
 
     /// The configured fast interval for PR and CI observation.
@@ -351,6 +495,79 @@ impl<F: Forge, C: Clock> Observer<F, C> {
     /// The interval selected from the last CI observation for the next read.
     pub(crate) fn next_poll_interval(&self) -> Duration {
         self.next_poll_interval
+    }
+
+    /// Read one repository-relative forge resource through the selected port.
+    /// Its cache is separate from the check-run cache shape.
+    pub(crate) fn resource(
+        &mut self,
+        relative_path: &str,
+        max_age: Duration,
+        budget: Duration,
+    ) -> Result<Value, ObserveError> {
+        if !valid_resource_path(relative_path) {
+            return Err(ObserveError::Unavailable(
+                "invalid repository resource path".into(),
+            ));
+        }
+        let path = format!("repos/{}/{relative_path}", self.repository);
+        let name = format!(
+            "resource-{}.json",
+            provenant_records::CanonicalV1::file_digest(path.as_bytes())
+        );
+        let now = self.clock.now();
+        let cached: Option<ResourcePage> = self
+            .dir
+            .read_bounded(OsStr::new(&name), CACHE_LIMIT)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        if let Some(entry) = cached.as_ref() {
+            let age = now.as_millisecond().saturating_sub(entry.fetched_at);
+            if (0..i64::try_from(max_age.as_millis()).unwrap_or(i64::MAX)).contains(&age) {
+                return Ok(entry.page.body.clone());
+            }
+        }
+        if let Some(reset) = self.rate_limited(now) {
+            return Err(ObserveError::RateLimited {
+                reset: timestamp(reset),
+            });
+        }
+        if budget.is_zero() {
+            return Err(ObserveError::Expired);
+        }
+        self.forge.bound(budget);
+        let previous = cached.map(|entry| entry.page);
+        let fetched =
+            self.page(&path, previous.as_ref(), identity)
+                .map_err(|fetch| match fetch {
+                    Fetch::Limited(reset) => {
+                        let reset = self.record_reset(reset.max(now.as_second().saturating_add(1)));
+                        ObserveError::RateLimited {
+                            reset: timestamp(reset),
+                        }
+                    }
+                    Fetch::Transient(message) | Fetch::Failed(message) => {
+                        ObserveError::Unavailable(message)
+                    }
+                })?;
+        let entry = ResourcePage {
+            page: fetched,
+            fetched_at: self.clock.now().as_millisecond(),
+        };
+        let bytes = serde_json::to_vec(&entry).map_err(|error| {
+            ObserveError::Unavailable(format!("cannot encode repository resource: {error}"))
+        })?;
+        self.dir
+            .atomic_write(
+                OsStr::new(&name),
+                ".resource-",
+                &bytes,
+                PublishMode::Replace,
+            )
+            .map_err(|error| {
+                ObserveError::Unavailable(format!("cannot record repository resource: {error}"))
+            })?;
+        Ok(entry.page.body)
     }
 
     /// Every check reported for `commit`. A zero `max_age` forces a fresh read;
@@ -407,14 +624,22 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                 .ok()
                 .and_then(|bytes| serde_json::from_slice(&bytes).ok());
             let freshness = cached.as_ref().map_or_else(
-                || if max_age.is_zero() { Duration::ZERO } else { self.cadence.fast },
-                |cached| adaptive_freshness(
-                    cached,
-                    &self.history,
-                    max_age,
-                    self.cadence,
-                    now.as_millisecond(),
-                ),
+                || {
+                    if max_age.is_zero() {
+                        Duration::ZERO
+                    } else {
+                        self.cadence.fast
+                    }
+                },
+                |cached| {
+                    adaptive_freshness(
+                        cached,
+                        &self.history,
+                        max_age,
+                        self.cadence,
+                        now.as_millisecond(),
+                    )
+                },
             );
             let fresh = cached.as_ref().is_some_and(|cached| {
                 let age = now.as_millisecond().saturating_sub(cached.fetched_at);
@@ -570,10 +795,17 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         prune: fn(Value) -> Value,
     ) -> Result<Page, Fetch> {
         let etag = request_etag(self.cadence, previous);
-        let response = self
-            .forge
-            .get(path, etag)
-            .map_err(|error| Fetch::Transient(format!("cannot read CI: {error}")))?;
+        let response = self.forge.get(path, etag).map_err(|error| {
+            let message = format!("cannot read CI: {error}");
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidData
+            ) {
+                Fetch::Failed(message)
+            } else {
+                Fetch::Transient(message)
+            }
+        })?;
         if let Some(reset) = rate_limit_reset(&response, self.clock.now().as_second()) {
             return Err(Fetch::Limited(reset));
         }
@@ -602,6 +834,23 @@ impl<F: Forge, C: Clock> Observer<F, C> {
             ))),
         }
     }
+}
+
+fn identity(body: Value) -> Value {
+    body
+}
+
+fn valid_resource_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && path.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
 }
 
 /// `state/ci-observer/<repository>`, private to this user, so its locks hold.
@@ -952,6 +1201,56 @@ mod tests {
     }
     fn state() -> tempfile::TempDir {
         tempfile::tempdir().expect("state")
+    }
+
+    #[derive(Clone, Default)]
+    struct ResourceForge(Arc<Mutex<Vec<(String, Option<String>)>>>);
+    impl ResourceForge {
+        fn requests(&self) -> Vec<(String, Option<String>)> {
+            self.0.lock().expect("requests").clone()
+        }
+    }
+    impl Forge for ResourceForge {
+        fn get(&mut self, path: &str, etag: Option<&str>) -> io::Result<Response> {
+            self.0
+                .lock()
+                .expect("requests")
+                .push((path.into(), etag.map(str::to_owned)));
+            let headers = BTreeMap::from([("etag".into(), "stable".into())]);
+            if etag == Some("stable") {
+                Ok(Response {
+                    status: 304,
+                    headers,
+                    body: Vec::new(),
+                })
+            } else {
+                Ok(Response {
+                    status: 200,
+                    headers,
+                    body: br#"{"number":12,"state":"open"}"#.to_vec(),
+                })
+            }
+        }
+    }
+
+    #[test]
+    fn repository_resource_revalidates_through_the_shared_forge_cache() {
+        let state = state();
+        let forge = ResourceForge::default();
+        let mut observer = Observer::with(state.path(), "Owner/Repo", forge.clone(), Shared::new())
+            .expect("observer");
+        let first = observer
+            .resource("pulls/12", Duration::ZERO, Duration::from_secs(30))
+            .expect("first resource");
+        let second = observer
+            .resource("pulls/12", Duration::ZERO, Duration::from_secs(30))
+            .expect("conditional resource");
+        assert_eq!(first, second);
+        let requests = forge.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].0, "repos/Owner/Repo/pulls/12");
+        assert_eq!(requests[0].1, None);
+        assert_eq!(requests[1].1.as_deref(), Some("stable"));
     }
 
     #[test]
@@ -1311,14 +1610,39 @@ mod tests {
 
     #[test]
     fn pending_cache_cadence_speeds_up_near_the_recent_check_duration() {
-        let cached = Cached { runs: vec![Page { etag: None, body: json!({"check_runs":[{
-            "name":"build", "status":"in_progress", "started_at":"1970-01-01T00:00:00Z"
-        }]}) }], ..Cached::default() };
-        let history = [RunDuration { id: 1, name: "build".into(), duration_ms: 300_000, completed_at_ms: 300_000 }];
-        let cadence = Cadence { fast: Duration::from_secs(5), slow: Duration::from_secs(15), near_end: Duration::from_secs(30), conditional_requests: true };
-        assert_eq!(adaptive_freshness(&cached, &history, Duration::from_secs(5), cadence, 100_000), Duration::from_secs(15));
-        assert_eq!(adaptive_freshness(&cached, &history, Duration::from_secs(5), cadence, 280_000), Duration::from_secs(5));
-        assert_eq!(adaptive_freshness(&cached, &[], Duration::from_secs(5), cadence, 280_000), Duration::from_secs(15));
+        let cached = Cached {
+            runs: vec![Page {
+                etag: None,
+                body: json!({"check_runs":[{
+                    "name":"build", "status":"in_progress", "started_at":"1970-01-01T00:00:00Z"
+                }]}),
+            }],
+            ..Cached::default()
+        };
+        let history = [RunDuration {
+            id: 1,
+            name: "build".into(),
+            duration_ms: 300_000,
+            completed_at_ms: 300_000,
+        }];
+        let cadence = Cadence {
+            fast: Duration::from_secs(5),
+            slow: Duration::from_secs(15),
+            near_end: Duration::from_secs(30),
+            conditional_requests: true,
+        };
+        assert_eq!(
+            adaptive_freshness(&cached, &history, Duration::from_secs(5), cadence, 100_000),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            adaptive_freshness(&cached, &history, Duration::from_secs(5), cadence, 280_000),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            adaptive_freshness(&cached, &[], Duration::from_secs(5), cadence, 280_000),
+            Duration::from_secs(15)
+        );
     }
 
     #[test]
@@ -1354,8 +1678,16 @@ mod tests {
 
     #[test]
     fn etag_requests_follow_the_sourced_conditional_setting() {
-        let previous = Page { etag: Some("validator".into()), body: Value::Null };
-        let mut cadence = Cadence { fast: Duration::from_secs(5), slow: Duration::from_secs(15), near_end: Duration::from_secs(30), conditional_requests: true };
+        let previous = Page {
+            etag: Some("validator".into()),
+            body: Value::Null,
+        };
+        let mut cadence = Cadence {
+            fast: Duration::from_secs(5),
+            slow: Duration::from_secs(15),
+            near_end: Duration::from_secs(30),
+            conditional_requests: true,
+        };
         assert_eq!(request_etag(cadence, Some(&previous)), Some("validator"));
         cadence.conditional_requests = false;
         assert_eq!(request_etag(cadence, Some(&previous)), None);

@@ -277,7 +277,8 @@ impl Context {
             .repository
             .as_ref()
             .map_or(discovered.location.common_dir(), |repo| repo.root_path());
-        let port_table = provenant_config::PortTable::read_project(project_root)?;
+        let port_table =
+            provenant_config::PortTable::read_for(Some(project_root), roots.state.as_path())?;
         let binding = if lane {
             provenant_config::lookup_project(&roots, &discovered.location)?
                 .ok_or(EdgeError::Invalid)?
@@ -333,7 +334,8 @@ impl Context {
             .repository
             .as_ref()
             .map_or(discovered.location.common_dir(), |repo| repo.root_path());
-        let port_table = provenant_config::PortTable::read_project(project_root)?;
+        let port_table =
+            provenant_config::PortTable::read_for(Some(project_root), roots.state.as_path())?;
         let binding = provenant_config::lookup_project(&roots, &discovered.location)?
             .ok_or(EdgeError::Invalid)?;
         let host = provenant_config::lookup_host(&roots)?.ok_or(EdgeError::Invalid)?;
@@ -385,7 +387,8 @@ impl Context {
             .repository
             .as_ref()
             .map_or(discovered.location.common_dir(), |repo| repo.root_path());
-        let port_table = provenant_config::PortTable::read_project(project_root)?;
+        let port_table =
+            provenant_config::PortTable::read_for(Some(project_root), roots.state.as_path())?;
         let state_present = roots.state.as_path().try_exists()?;
         let binding = if state_present {
             provenant_config::lookup_project(&roots, &discovered.location)?
@@ -444,7 +447,7 @@ impl Context {
     ) -> Result<Self, EdgeError> {
         // Its working directory is the project's, as if started there.
         let cwd = binding.common_dir().parent().ok_or(EdgeError::Invalid)?;
-        let port_table = provenant_config::PortTable::read_project(cwd)?;
+        let port_table = provenant_config::PortTable::read_for(Some(cwd), roots.state.as_path())?;
         let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);

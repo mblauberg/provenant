@@ -377,8 +377,12 @@ pub fn read(path: &Path, root_pid: u32) -> Result<Sample> {
 }
 
 fn freshness_micros(interval: std::time::Duration) -> u64 {
-    u64::try_from(interval.as_micros().saturating_add(u128::from(MAX_SAMPLE_MICROS)))
-        .unwrap_or(u64::MAX)
+    u64::try_from(
+        interval
+            .as_micros()
+            .saturating_add(u128::from(MAX_SAMPLE_MICROS)),
+    )
+    .unwrap_or(u64::MAX)
 }
 
 fn select(

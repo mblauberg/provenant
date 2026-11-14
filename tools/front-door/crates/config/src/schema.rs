@@ -56,9 +56,7 @@ const GC_FIELDS: &[FieldMetadata] = &[
     ),
 ];
 const WORKTREE_FIELDS: &[FieldMetadata] = &[
-    FieldMetadata::new("setup", "array"),
     FieldMetadata::int("timeout_seconds", 1, 3600),
-    FieldMetadata::new("projects.{project}.setup", "array"),
     FieldMetadata::int("projects.{project}.timeout_seconds", 1, 3600),
 ];
 const RETENTION_FIELDS: &[FieldMetadata] = &[

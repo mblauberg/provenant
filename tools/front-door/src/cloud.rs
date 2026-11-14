@@ -52,7 +52,12 @@ pub fn run(command: Cloud, globals: &Globals) -> u8 {
                 Ok(result)
             }
             Cloud::Collect(collect) => {
-                let result = collect_result(&project, &collect)?;
+                let resolved = roots::resolve(
+                    globals,
+                    roots::Workspace::Checkout,
+                    roots::Product::Required,
+                )?;
+                let result = collect_result(&project, resolved.roots.state.as_path(), &collect)?;
                 let capture = || -> Result<(), Error> {
                     let resolved = roots::resolve(
                         globals,
@@ -223,7 +228,11 @@ fn launch_session(project: &Path, launch: &cloud::Launch) -> Result<(Value, Stri
     ))
 }
 
-fn collect_result(project: &Path, collect: &cloud::Collect) -> Result<(Value, String), Error> {
+fn collect_result(
+    project: &Path,
+    host_state: &Path,
+    collect: &cloud::Collect,
+) -> Result<(Value, String), Error> {
     let key = cloud::record_key(&collect.id);
     let path = record_path(project, &key)?;
     let record: LaunchRecord = serde_json::from_slice(
@@ -243,7 +252,8 @@ fn collect_result(project: &Path, collect: &cloud::Collect) -> Result<(Value, St
         None,
     )?);
     let main = common.parent().map(Path::to_path_buf).unwrap_or(common);
-    let worktree = cloud::collect_path(project, &main, collect.path.as_deref(), &branch)?;
+    let worktree =
+        cloud::collect_path(project, host_state, &main, collect.path.as_deref(), &branch)?;
     let target = worktree.display().to_string();
     match record.provider {
         Provider::Claude => {

@@ -334,7 +334,12 @@ fn bind_submission_subject(
 }
 
 /// Apply plain-task execution controls before template lowering and patch admission.
-fn bind_launch_controls(input: &Value, node: &mut Value, cwd: &Path) -> Result<(), FacadeError> {
+fn bind_launch_controls(
+    input: &Value,
+    node: &mut Value,
+    cwd: &Path,
+    ports: &provenant_config::PortTable,
+) -> Result<(), FacadeError> {
     let invalid = |field: &str| FacadeError::invalid(InvalidInputDetail::Field(field.into()));
     let branch = input.get("branch").filter(|value| !value.is_null());
     let base = input.get("base").filter(|value| !value.is_null());
@@ -369,7 +374,8 @@ fn bind_launch_controls(input: &Value, node: &mut Value, cwd: &Path) -> Result<(
             None => "refs/remotes/origin/HEAD",
         };
         provenant_confinement::repo::GitRevision::new(base).map_err(|_| invalid("base"))?;
-        let worktree = provenant_confinement::worktrees::managed_writer_relative_path(cwd, branch)
+        let worktree = ports
+            .managed_writer_path(branch)
             .map_err(|_| invalid("branch"))?;
         node["worktree"] = json!(worktree);
         if node.get("attempt").is_none() {
@@ -654,10 +660,13 @@ impl Factory {
                         std::time::Duration::from_millis(
                             provenant_cli::wait::Settings::default().local_interval_ms,
                         ),
-                        Some(format!("configuration unavailable; compiled default: {error}")),
+                        Some(format!(
+                            "configuration unavailable; compiled default: {error}"
+                        )),
                     ),
                 };
-            let mut observation = provenant_cli::fabric::graph_relay::child_wait_observation(interval);
+            let mut observation =
+                provenant_cli::fabric::graph_relay::child_wait_observation(interval);
             if let Some(warning) = configuration_warning {
                 observation.push_str(&format!("; {warning}"));
             }
@@ -837,7 +846,7 @@ impl Factory {
             }
             node["with"] = parameters;
         }
-        bind_launch_controls(input, &mut node, &self.cwd)?;
+        bind_launch_controls(input, &mut node, &self.cwd, &self.context.port_table)?;
         node["id"] = json!(key);
         let resolvers = self.launch_resolvers_for_tier(raw, route.as_ref())?;
         let mut compiled = provenant_fabric_runtime::graph::template::Compiler {
@@ -1425,7 +1434,7 @@ impl Factory {
                     "launch controls require a leaf template".into(),
                 )));
             }
-            bind_launch_controls(input, &mut node, &self.cwd)?;
+            bind_launch_controls(input, &mut node, &self.cwd, &self.context.port_table)?;
             let mut parameters = node.get("with").cloned().unwrap_or_else(|| json!({}));
             let overrides = input
                 .get("set")
@@ -2951,11 +2960,13 @@ mod tests {
             serde_json::to_vec(&ports)?,
         )?;
 
+        let ports = provenant_config::PortTable::read_for(Some(project.path()), project.path())?;
         let mut node = json!({"use":"task"});
         bind_launch_controls(
             &json!({"branch":"feature/topic"}),
             &mut node,
             project.path(),
+            &ports,
         )?;
         assert_eq!(node["worktree"], ".claude/worktrees/feature-topic");
         Ok(())
@@ -2968,6 +2979,7 @@ mod tests {
             &json!({"branch":"topic"}),
             &mut node,
             Path::new("/repo/src"),
+            &provenant_config::PortTable::builtin(),
         )?;
         assert_eq!(
             node["attempt"]["new_worktree"]["base"],
@@ -2979,6 +2991,7 @@ mod tests {
             &json!({"branch":"topic", "base":"refs/remotes/origin/HEAD"}),
             &mut explicit,
             Path::new("/repo"),
+            &provenant_config::PortTable::builtin(),
         )?;
         assert!(
             explicit["attempt"]["new_worktree"]
@@ -2986,7 +2999,13 @@ mod tests {
                 .is_none()
         );
         assert!(
-            bind_launch_controls(&json!({"base":"HEAD"}), &mut node, Path::new("/repo")).is_err()
+            bind_launch_controls(
+                &json!({"base":"HEAD"}),
+                &mut node,
+                Path::new("/repo"),
+                &provenant_config::PortTable::builtin()
+            )
+            .is_err()
         );
         Ok(())
     }
@@ -3694,6 +3713,7 @@ mod tests {
             &json!({"branch":"fix/parser","base":"origin/main"}),
             &mut node,
             cwd,
+            &provenant_config::PortTable::builtin(),
         )?;
         assert_eq!(node["worktree"], ".worktrees/fix-parser");
         let mut explicit = json!({"id":"task","use":"task"});
@@ -3701,6 +3721,7 @@ mod tests {
             &json!({"worktree":".worktrees/fix-parser"}),
             &mut explicit,
             Path::new("/fixture/project"),
+            &provenant_config::PortTable::builtin(),
         )?;
         let branch_path =
             Path::new("/fixture/project").join(node["worktree"].as_str().ok_or("branch path")?);
@@ -3713,6 +3734,7 @@ mod tests {
             &json!({"worktree":"writer"}),
             &mut relative,
             Path::new("/fixture/project/src"),
+            &provenant_config::PortTable::builtin(),
         )?;
         assert_eq!(relative["worktree"], "/fixture/project/src/writer");
         assert_eq!(
@@ -3727,7 +3749,15 @@ mod tests {
             json!({"access":"unknown"}),
             json!({"write_scope":[1]}),
         ] {
-            assert!(bind_launch_controls(&input, &mut json!({"use":"task"}), cwd).is_err());
+            assert!(
+                bind_launch_controls(
+                    &input,
+                    &mut json!({"use":"task"}),
+                    cwd,
+                    &provenant_config::PortTable::builtin()
+                )
+                .is_err()
+            );
         }
         Ok(())
     }

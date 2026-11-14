@@ -175,20 +175,6 @@ struct RestUser {
 fn pull_endpoint(number: &str) -> String {
     format!("repos/{{owner}}/{{repo}}/pulls/{number}")
 }
-fn rest_pull(read: &impl Fn(&[&str]) -> Result<ExecOutcome>, number: &str) -> Result<RestPull> {
-    let endpoint = pull_endpoint(number);
-    let bytes = successful(read(&[
-        "gh",
-        "api",
-        &endpoint,
-        "-H",
-        "X-GitHub-Api-Version:2026-03-10",
-    ])?)?;
-    Ok(serde_json::from_slice(&bytes)?)
-}
-fn head(project: &Path, number: &str) -> Result<GitOid> {
-    Ok(rest_pull(&|argv| execute(project, argv), number)?.head.sha)
-}
 /// The pull request a graph lands: found by head branch, never by `gh pr
 /// view BRANCH`, which reads a numeric branch as a pull request number.
 #[derive(Debug, PartialEq, Eq)]
@@ -358,7 +344,15 @@ fn watch(project: &Path, state: &Path, number: &str, head: GitOid, repository: &
         &|| next_poll.get(),
         number,
     )?;
-    if self::head(project, number)? != head {
+    let pull = ci
+        .resource(
+            &format!("pulls/{number}"),
+            Duration::ZERO,
+            WATCH_BUDGET.saturating_sub(started.elapsed()),
+        )
+        .map_err(|error| wait::ci_failure(error, &format!("provenant pr watch {number}")))?;
+    let expected_head = head.to_string();
+    if pull["head"]["sha"].as_str() != Some(expected_head.as_str()) {
         return Err(format!("pull request head moved from {head}").into());
     }
     Ok(())
@@ -448,18 +442,24 @@ pub fn run(command: Pr, globals: &Globals, _workers: &dyn WorkerObserver) -> u8 
         let result = (|| -> Result<()> {
             let project = roots::selected_project(globals.project.as_deref(), true)?;
             let number = number.to_string();
-            let pull = rest_pull(&|argv| execute(&project, argv), &number)?;
-            let current = pull.head.sha;
-            captured = Some(current);
-            let repository = pull
-                .base
-                .repo
-                .map(|repo| repo.full_name)
-                .ok_or("pull request base repository is unavailable")?;
+            let repository = observer::repository_for_project(&project, WATCH_BUDGET)?;
             let state =
                 roots::resolve(globals, roots::Workspace::Project, roots::Product::Optional)?
                     .roots
                     .state;
+            let mut observer =
+                observer::Observer::open(state.as_path(), &project, &repository, WATCH_BUDGET)
+                    .map_err(|error| {
+                        wait::ci_failure(error, &format!("provenant pr watch {number}"))
+                    })?;
+            let pull = observer
+                .resource(&format!("pulls/{number}"), Duration::ZERO, WATCH_BUDGET)
+                .map_err(|error| {
+                    wait::ci_failure(error, &format!("provenant pr watch {number}"))
+                })?;
+            let pull: RestPull = serde_json::from_value(pull)?;
+            let current = pull.head.sha;
+            captured = Some(current);
             watch(&project, state.as_path(), &number, current, &repository)?;
             Ok(())
         })();
@@ -681,7 +681,12 @@ mod unreported_checks_tests {
             "7",
         )
         .expect("the real workflow registered and passed");
-        let error = watch_with(&mut || Ok(vec![check("skipping")]), &|_| {}, &|| observer::POLL, "7");
+        let error = watch_with(
+            &mut || Ok(vec![check("skipping")]),
+            &|_| {},
+            &|| observer::POLL,
+            "7",
+        );
         assert!(error.is_err(), "only skipped checks at the bound");
     }
 

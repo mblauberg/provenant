@@ -634,28 +634,32 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
         let options = config::EditOptions::new("cli");
         Ok(match action {
             ConfigAction::Ports => {
-                let table = config::PortTable::read_project(&context.project)?;
-                let ports: Vec<_> = table.entries().map(|(name, source, backend, valid)| {
-                    let backend = match backend {
-                        config::PortBackendKind::Builtin => "builtin",
-                        config::PortBackendKind::Command => "command",
-                        config::PortBackendKind::None => "none",
-                    };
-                    let unavailable_reason = if !valid {
-                        Some("the port declaration is invalid")
-                    } else if backend == "none" {
-                        Some("the effective declaration disables this port")
-                    } else {
-                        None
-                    };
-                    serde_json::json!({
-                        "name": name,
-                        "backend": backend,
-                        "source": source,
-                        "available": unavailable_reason.is_none(),
-                        "unavailable_reason": unavailable_reason,
+                let table =
+                    config::PortTable::read_for(Some(&context.project), roots.state.as_path())?;
+                let ports: Vec<_> = table
+                    .entries()
+                    .map(|(name, source, backend, valid)| {
+                        let backend = match backend {
+                            config::PortBackendKind::Builtin => "builtin",
+                            config::PortBackendKind::Command => "command",
+                            config::PortBackendKind::None => "none",
+                        };
+                        let unavailable_reason = if !valid {
+                            Some("the port declaration is invalid")
+                        } else if backend == "none" {
+                            Some("the effective declaration disables this port")
+                        } else {
+                            None
+                        };
+                        serde_json::json!({
+                            "name": name,
+                            "backend": backend,
+                            "source": source,
+                            "available": unavailable_reason.is_none(),
+                            "unavailable_reason": unavailable_reason,
+                        })
                     })
-                }).collect();
+                    .collect();
                 serde_json::json!({ "schema_version": table.schema_version, "ports": ports })
             }
             ConfigAction::Show => {

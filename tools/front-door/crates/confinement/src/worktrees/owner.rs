@@ -326,7 +326,9 @@ pub fn prune_owned(
     let relative = path
         .strip_prefix(context.repo.root_path())
         .map_err(|_| WorktreeError::UnknownWriter)?;
-    let managed = managed_writer_branch(context.repo.root_path(), relative)?.is_some();
+    let managed =
+        managed_writer_branch(context.repo.root_path(), &context.host_state()?, relative)?
+            .is_some();
     if owner.origin != WorktreeOrigin::Lane || owner.attempt_id != Some(attempt) || !managed {
         return Err(WorktreeError::UnknownWriter);
     }

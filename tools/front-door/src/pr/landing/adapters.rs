@@ -9,11 +9,12 @@ use super::{
 };
 use crate::pr::{
     RestPull, TimedOut, execute_with,
+    gh::REST_API_VERSION_HEADER,
     git::Git,
     git::plain_ref,
     merge_with,
     observer::{Check, ObserveError, Observer},
-    rest_pull, wait,
+    wait,
 };
 use provenant_cli::domains::MergeMethod;
 use provenant_os::exec::Termination;
@@ -185,6 +186,44 @@ impl GhForge {
             retry_command: "provenant land".into(),
         }
     }
+    fn repository_name(&mut self) -> Result<String, LandingError> {
+        if let Some(repository) = &self.repository {
+            return Ok(repository.clone());
+        }
+        let repository = self.json("repos/{owner}/{repo}")?["full_name"]
+            .as_str()
+            .ok_or_else(|| LandingError::Failed("repository has no canonical name".into()))?
+            .to_owned();
+        self.repository = Some(repository.clone());
+        Ok(repository)
+    }
+    fn observed_resource(
+        &mut self,
+        path: &str,
+        budget: Duration,
+    ) -> Result<serde_json::Value, LandingError> {
+        let repository = self.repository_name()?;
+        Observer::open(&self.state, &self.project, &repository, budget)
+            .and_then(|mut observer| observer.resource(path, Duration::ZERO, budget))
+            .map_err(|error| match error {
+                ObserveError::RateLimited { .. } => LandingError::RateLimited(error.to_string()),
+                _ => LandingError::Failed(error.to_string()),
+            })
+    }
+    fn pull_request_with_budget(
+        &mut self,
+        number: u64,
+        budget: Duration,
+    ) -> Result<PullRequestInfo, LandingError> {
+        let pull: RestPull =
+            serde_json::from_value(self.observed_resource(&format!("pulls/{number}"), budget)?)
+                .map_err(|error| {
+                    LandingError::Failed(format!(
+                        "GitHub returned invalid pull request JSON: {error}"
+                    ))
+                })?;
+        Ok(pull_info(number, pull))
+    }
     fn get(&self, args: &[&str]) -> Result<Vec<u8>, LandingError> {
         let mut argv = vec!["gh", "api"];
         argv.extend_from_slice(args);
@@ -265,7 +304,7 @@ impl GhForge {
                     "PUT",
                     &endpoint,
                     "-H",
-                    "X-GitHub-Api-Version:2026-03-10",
+                    REST_API_VERSION_HEADER,
                     "-f",
                     &sha,
                     "-f",
@@ -285,8 +324,12 @@ impl GhForge {
             .map_err(|_| LandingError::PublicationUnknown)?;
         loop {
             if let Some(sha) = async_merge_result(&result)? {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    return Err(LandingError::PublicationUnknown);
+                }
                 let observed = self
-                    .pull_request(number)
+                    .pull_request_with_budget(number, left)
                     .map_err(|_| LandingError::PublicationUnknown)?;
                 if observed.state == PullRequestState::Merged
                     && observed.head == head
@@ -294,18 +337,18 @@ impl GhForge {
                 {
                     if let Some(upper) = upper {
                         loop {
+                            let left =
+                                deadline.saturating_duration_since(std::time::Instant::now());
+                            if left.is_zero() {
+                                return Err(LandingError::PublicationUnknown);
+                            }
                             let next = self
-                                .pull_request(upper)
+                                .pull_request_with_budget(upper, left)
                                 .map_err(|_| LandingError::PublicationUnknown)?;
                             if next.state != PullRequestState::Open
                                 || next.base_branch == membership.base_branch
                             {
                                 break;
-                            }
-                            let left =
-                                deadline.saturating_duration_since(std::time::Instant::now());
-                            if left.is_zero() {
-                                return Err(LandingError::PublicationUnknown);
                             }
                             std::thread::sleep(Duration::from_secs(1).min(left));
                         }
@@ -332,15 +375,13 @@ impl GhForge {
                 return Err(LandingError::PublicationUnknown);
             }
             std::thread::sleep(Duration::from_secs(1).min(left));
-            let bytes = self
-                .get(&[
-                    &format!("{endpoint}/{uuid}"),
-                    "-H",
-                    "X-GitHub-Api-Version:2026-03-10",
-                ])
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Err(LandingError::PublicationUnknown);
+            }
+            result = self
+                .observed_resource(&format!("pulls/{number}/merge-async/{uuid}"), left)
                 .map_err(|_| LandingError::PublicationUnknown)?;
-            result =
-                serde_json::from_slice(&bytes).map_err(|_| LandingError::PublicationUnknown)?;
         }
     }
 }
@@ -522,7 +563,7 @@ impl Forge for GhForge {
     }
     fn stack_members(&mut self, number: u64) -> Result<Vec<StackMember>, LandingError> {
         let endpoint = format!("repos/{{owner}}/{{repo}}/stacks/{number}");
-        let bytes = self.get(&[&endpoint, "-H", "X-GitHub-Api-Version:2026-03-10"])?;
+        let bytes = self.get(&[&endpoint, "-H", REST_API_VERSION_HEADER])?;
         let response: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
             LandingError::Failed(format!("GitHub returned invalid stack JSON: {error}"))
         })?;
@@ -559,9 +600,7 @@ impl Forge for GhForge {
     }
 
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError> {
-        let pull =
-            rest_pull(&|argv| self.reader().read(argv), &number.to_string()).map_err(failed)?;
-        Ok(pull_info(number, pull))
+        self.pull_request_with_budget(number, self.budget)
     }
     fn actor(&mut self) -> Result<String, LandingError> {
         self.json("user")?["login"]
@@ -607,17 +646,7 @@ impl Forge for GhForge {
     }
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError> {
         let commit = object_id(commit)?;
-        let repository = match &self.repository {
-            Some(repository) => repository.clone(),
-            None => {
-                let name = self.json("repos/{owner}/{repo}")?["full_name"]
-                    .as_str()
-                    .ok_or_else(|| LandingError::Failed("repository has no canonical name".into()))?
-                    .to_owned();
-                self.repository = Some(name.clone());
-                name
-            }
-        };
+        let repository = self.repository_name()?;
         #[allow(clippy::disallowed_methods, reason = "forge read budget")]
         let budget = self
             .reader()
@@ -1868,7 +1897,7 @@ esac
                 "{landing_calls}pr list --head branch\n"
             )));
             assert!(calls.contains(&format!("sha={HEAD}")), "{calls}");
-            assert!(calls.contains("X-GitHub-Api-Version:2026-03-10"), "{calls}");
+            assert!(calls.contains(REST_API_VERSION_HEADER), "{calls}");
             assert_eq!(
                 calls
                     .lines()

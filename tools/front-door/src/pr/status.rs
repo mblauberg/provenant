@@ -23,6 +23,22 @@ struct View {
     url: String,
 }
 #[derive(Deserialize)]
+struct RestWaitPull {
+    state: String,
+    head: RestWaitHead,
+    #[serde(default)]
+    merged_at: Option<String>,
+    #[serde(default)]
+    mergeable_state: Option<String>,
+    #[serde(default)]
+    draft: bool,
+    html_url: String,
+}
+#[derive(Deserialize)]
+struct RestWaitHead {
+    sha: String,
+}
+#[derive(Deserialize)]
 struct Check {
     #[serde(default)]
     name: String,
@@ -65,6 +81,8 @@ impl Line {
             "pending"
         } else if self.draft {
             "draft"
+        } else if self.review.as_deref() == Some("unknown") {
+            "review_unknown"
         } else {
             "ready"
         }
@@ -505,6 +523,51 @@ fn open_numbers(project: &Path) -> Result<Vec<u64>> {
     listed.sort_by_key(|entry| entry.number);
     Ok(listed.into_iter().map(|entry| entry.number).collect())
 }
+/// Resolve the selected repository once before a `wait --pr` observation loop.
+pub(crate) fn wait_repository(project: &Path, budget: std::time::Duration) -> Result<String> {
+    Ok(super::observer::repository_for_project(project, budget)?)
+}
+
+/// Revalidate PR metadata and its CI through the shared observer during a wait loop.
+pub(crate) fn wait_line_observed(
+    project: &Path,
+    state: &Path,
+    repository: &str,
+    number: u64,
+    timeout: std::time::Duration,
+    max_age: std::time::Duration,
+) -> Result<Line> {
+    use super::observer::{ObserveError, Observer};
+    let mut observer = Observer::open(state, project, repository, timeout)?;
+    let value = observer.resource(
+        &format!("pulls/{number}"),
+        std::time::Duration::ZERO,
+        timeout,
+    )?;
+    let pull: RestWaitPull = serde_json::from_value(value)?;
+    let state = if pull.merged_at.is_some() {
+        "MERGED".to_owned()
+    } else {
+        pull.state.to_ascii_uppercase()
+    };
+    let view = View {
+        state,
+        head: pull.head.sha,
+        merge: pull
+            .mergeable_state
+            .map_or_else(|| "UNKNOWN".to_owned(), |state| state.to_ascii_uppercase()),
+        review: Some("unknown".to_owned()),
+        draft: pull.draft,
+        url: pull.html_url,
+    };
+    let checks = match observer.checks(&view.head, max_age, timeout) {
+        Ok(checks) => Some(checks),
+        Err(ObserveError::Unavailable(_)) => None,
+        Err(error) => return Err(error.to_string().into()),
+    };
+    Ok(status_line(number, view, checks.as_deref()))
+}
+
 /// `max_age` is how old an observed CI answer may be: a waiter's poll, or
 /// zero for a one-shot read.
 pub(crate) fn wait_line(

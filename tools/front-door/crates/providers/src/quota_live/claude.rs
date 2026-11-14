@@ -206,11 +206,7 @@ impl LiveQuota {
     fn claude_selector<'a>(&self, dir: &'a Path) -> Option<(&'static str, &'a Path)> {
         (dir != self.home.join(".claude")).then_some(("CLAUDE_CONFIG_DIR", dir))
     }
-    fn claude_auth_status(
-        &self,
-        dir: &Path,
-        deadline: i64,
-    ) -> Result<AuthStatus, ProbeFailure> {
+    fn claude_auth_status(&self, dir: &Path, deadline: i64) -> Result<AuthStatus, ProbeFailure> {
         let status = auth_status(self.command(
             "claude",
             &["auth", "status", "--json"],
@@ -835,10 +831,7 @@ mod tests {
 
         assert_eq!(
             identity,
-            provenant_records::AccountIdentity::provider_observation(
-                "claude",
-                "0123456789abcdef",
-            )
+            provenant_records::AccountIdentity::provider_observation("claude", "0123456789abcdef",)
         );
     }
 

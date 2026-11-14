@@ -24,7 +24,7 @@ pub(super) fn inspect(
         findings: Vec::new(),
         evidence: Vec::new(),
     };
-    let ports = provenant_config::PortTable::read_project(git.repo.root_path())
+    let ports = provenant_config::PortTable::read_for(Some(git.repo.root_path()), git.host_state)
         .map_err(|_| CheckError::Evidence("worktree layout configuration is unreadable"))?;
     let worktree_roots = ports.worktree_layout.roots;
     let head_bytes = release_read(git, GitRead::RevParseHead)?;

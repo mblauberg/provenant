@@ -163,12 +163,12 @@ pub enum Refresh {
 #[allow(dead_code)]
 pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
     refuse_in_lane()?;
-    if target_seed::cargo_build_directory(project)?.is_none() {
+    if target_seed::cargo_build_directory(project, state)?.is_none() {
         return Ok(Refresh::NotCargo);
     }
     let commit = origin_main(project)?;
     refresh_with(state, &marker_name(project), &commit, |stage| {
-        build_into(stage, project, &commit)
+        build_into(stage, project, state, &commit)
     })
 }
 
@@ -288,13 +288,13 @@ fn refuse_in_lane() -> Result<()> {
 pub fn build(state: &Path, project: &Path) -> Result<String> {
     refuse_in_lane()?;
     let commit = origin_main(project)?;
-    publish(state, |stage| build_into(stage, project, &commit))
+    publish(state, |stage| build_into(stage, project, state, &commit))
 }
 
-fn build_into(stage: &Path, project: &Path, commit: &str) -> Result<Manifest> {
+fn build_into(stage: &Path, project: &Path, host_state: &Path, commit: &str) -> Result<Manifest> {
     let checkout = stage.join("checkout");
     checkout_commit(project, &checkout, commit)?;
-    let worktree = target_seed::cargo_build_directory(&checkout)?
+    let worktree = target_seed::cargo_build_directory(&checkout, host_state)?
         .ok_or_else(|| io::Error::other("project has no selected Cargo workspace"))?;
     let target = stage.join("target");
     fs::create_dir(&target)?;

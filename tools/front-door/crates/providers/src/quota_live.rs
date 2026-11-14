@@ -557,20 +557,10 @@ mod tests {
 
     #[test]
     fn provider_adapter_resolves_rotation_for_an_unregistered_session_directory() {
-        struct SessionIdentityProbe(
-            std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>,
-        );
+        struct SessionIdentityProbe(std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>);
         impl Executor for SessionIdentityProbe {
-            fn execute(
-                &self,
-                _: ExecOptions<'_>,
-            ) -> Result<ExecOutcome, ExecError> {
-                let bytes = self
-                    .0
-                    .lock()
-                    .unwrap()
-                    .pop_front()
-                    .ok_or(ExecError::Busy)?;
+            fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                let bytes = self.0.lock().unwrap().pop_front().ok_or(ExecError::Busy)?;
                 Ok(ExecOutcome {
                     termination: Termination::Exit(0),
                     stdout: provenant_os::exec::CapturedStream {
@@ -611,14 +601,8 @@ mod tests {
             .find(|registration| registration.adapter.id() == "claude")
             .unwrap();
 
-        let first = adapter
-            .adapter
-            .session_identity(&live, &directory)
-            .unwrap();
-        let second = adapter
-            .adapter
-            .session_identity(&live, &directory)
-            .unwrap();
+        let first = adapter.adapter.session_identity(&live, &directory).unwrap();
+        let second = adapter.adapter.session_identity(&live, &directory).unwrap();
 
         assert_eq!(
             first,

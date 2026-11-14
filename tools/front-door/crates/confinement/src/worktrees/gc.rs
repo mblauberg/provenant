@@ -174,7 +174,7 @@ fn collect_impl(
         context.workers.observe_roots(&roots);
     }
     let primary = canonicalize(context.repo.root_path())?;
-    let ports = provenant_config::PortTable::read_project(&primary)
+    let ports = provenant_config::PortTable::read_for(Some(&primary), &context.host_state()?)
         .map_err(WorktreeError::PortConfiguration)?;
     let managed_roots = ports.worktree_roots_under(&primary);
     let layout_roots = ports.worktree_layout.roots;
@@ -1196,8 +1196,11 @@ fn prepare_removal_before(
     preview_only: bool,
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
-    let ports = provenant_config::PortTable::read_project(context.repo.root_path())
-        .map_err(WorktreeError::PortConfiguration)?;
+    let ports = provenant_config::PortTable::read_for(
+        Some(context.repo.root_path()),
+        &context.host_state()?,
+    )
+    .map_err(WorktreeError::PortConfiguration)?;
     let layout_roots = ports.worktree_layout.roots;
     let protected = output_protection(context, repo, keep, cancel)?;
     let mut policy = WorktreeGcPolicy {

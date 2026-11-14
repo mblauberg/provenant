@@ -6,6 +6,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// The REST API version used by the shared forge adapter.
+pub(crate) const REST_API_VERSION_HEADER: &str = "X-GitHub-Api-Version:2026-03-10";
+
 /// A response from an authenticated conditional REST request.
 #[derive(Debug)]
 pub struct Response {
@@ -106,7 +109,7 @@ impl Forge for Gh {
             "-H",
             "Accept:application/vnd.github+json",
             "-H",
-            "X-GitHub-Api-Version:2022-11-28",
+            REST_API_VERSION_HEADER,
         ]
         .into_iter()
         .map(Into::into)

@@ -18,13 +18,16 @@ use std::{
 enum Source {
     Graph(provenant_cli::Target),
     UnreadableGraph(provenant_cli::Target, String),
-    Pr(u64),
+    Pr {
+        number: u64,
+        repository: Result<String, String>,
+    },
 }
 impl Source {
     fn label(&self) -> String {
         match self {
             Self::Graph(target) | Self::UnreadableGraph(target, _) => target.to_string(),
-            Self::Pr(number) => format!("#{number}"),
+            Self::Pr { number, .. } => format!("#{number}"),
         }
     }
 }
@@ -142,24 +145,27 @@ fn read(
                 Err(error) => Reading::unavailable(&label, &error.to_string()),
             }
         }
-        Source::Pr(number) => match crate::pr::status::wait_line(
-            edge.cwd,
-            edge.roots.state.as_path(),
-            *number,
-            left.min(pr_read_timeout),
-            crate::pr::observer::POLL,
-            Some(cancel),
-        ) {
-            Ok(line) => Reading {
-                settle: match line.verdict() {
-                    Some(true) => Settle::Succeeded,
-                    Some(false) => Settle::Unsuccessful,
-                    None => Settle::Pending,
+        Source::Pr { number, repository } => match repository {
+            Ok(repository) => match crate::pr::status::wait_line_observed(
+                edge.cwd,
+                edge.roots.state.as_path(),
+                repository,
+                *number,
+                left.min(pr_read_timeout),
+                crate::pr::observer::POLL,
+            ) {
+                Ok(line) => Reading {
+                    settle: match line.verdict() {
+                        Some(true) => Settle::Succeeded,
+                        Some(false) => Settle::Unsuccessful,
+                        None => Settle::Pending,
+                    },
+                    line: format!("{label} {}", line.class()),
+                    data: json!(line),
                 },
-                line: format!("{label} {}", line.class()),
-                data: json!(line),
+                Err(error) => Reading::unavailable(&label, &error.to_string()),
             },
-            Err(error) => Reading::unavailable(&label, &error.to_string()),
+            Err(error) => Reading::unavailable(&label, error),
         },
     };
     reading
@@ -645,8 +651,8 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     let mut prs = command.prs.clone();
     prs.sort_unstable();
     prs.dedup();
-    sources.extend(prs.into_iter().map(Source::Pr));
-    if sources.len() > settings.max_targets as usize {
+    let pr_read_timeout = Duration::from_secs(settings.pr_read_timeout_seconds);
+    if sources.len() + prs.len() > settings.max_targets as usize {
         return crate::fail(
             "wait",
             Outcome::Invalid,
@@ -655,7 +661,14 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             globals,
         );
     }
-    let pr_read_timeout = Duration::from_secs(settings.pr_read_timeout_seconds);
+    if !prs.is_empty() {
+        let repository = crate::pr::status::wait_repository(&edge.cwd, pr_read_timeout)
+            .map_err(|error| error.to_string());
+        sources.extend(prs.into_iter().map(|number| Source::Pr {
+            number,
+            repository: repository.clone(),
+        }));
+    }
     let mut latest: Vec<Option<Reading>> = sources
         .iter()
         .map(|source| validation.get(&source.label()).cloned())
@@ -715,7 +728,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         .enumerate()
         .filter_map(|(index, source)| match source {
             Source::Graph(_) | Source::UnreadableGraph(..) => Some(index),
-            Source::Pr(_) => None,
+            Source::Pr { .. } => None,
         })
         .collect::<Vec<_>>();
     let done = std::thread::scope(|scope| {
@@ -918,7 +931,8 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             });
         }
         for (index, source) in sources.iter().enumerate() {
-            if !matches!(source, Source::Pr(_)) || latest[index].as_ref().is_some_and(Reading::done)
+            if !matches!(source, Source::Pr { .. })
+                || latest[index].as_ref().is_some_and(Reading::done)
             {
                 continue;
             }

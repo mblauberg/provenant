@@ -797,6 +797,11 @@ pub enum Started {
         reason: String,
         kind: RefusalKind,
     },
+    /// Repository admission was unavailable; the queued attempt remains eligible.
+    Skipped {
+        attempt: AttemptId,
+        reason: String,
+    },
     /// Handoff did not confirm; the attempt stays fenced for `reconcile`.
     Unknown {
         attempt: AttemptId,
@@ -807,6 +812,31 @@ pub enum Started {
         attempt: AttemptId,
         error: String,
     },
+}
+
+pub(crate) const ADMISSION_PORT_BINDING_FIELD: &str = "repository_admission_binding";
+
+/// The command and source acquired for one attempt stay frozen across retries,
+/// config rotation and terminal release.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct AdmissionPortBinding {
+    source: provenant_config::PortSource,
+    command: provenant_config::PortCommand,
+    command_digest: provenant_records::FileDigest,
+}
+
+impl AdmissionPortBinding {
+    fn new(source: provenant_config::PortSource, command: &provenant_config::PortCommand) -> Self {
+        Self {
+            source,
+            command: command.clone(),
+            command_digest: command.digest(),
+        }
+    }
+
+    fn valid(&self) -> bool {
+        self.command_digest == self.command.digest()
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RefusalKind {
@@ -1060,7 +1090,194 @@ impl RunStore {
             call,
         )
     }
-    #[allow(clippy::too_many_arguments)]
+    fn admission_binding(
+        &self,
+        request: &CanonicalRequest,
+        record: &AttemptRecord,
+        call: &Request<'_>,
+    ) -> std::result::Result<(AttemptRecord, Option<AdmissionPortBinding>), &'static str> {
+        if let Some(value) = record.extra.get(ADMISSION_PORT_BINDING_FIELD) {
+            let binding: AdmissionPortBinding = serde_json::from_value(value.clone())
+                .map_err(|_| "stored repository admission binding is invalid")?;
+            if !binding.valid() {
+                return Err("stored repository admission binding digest is invalid");
+            }
+            return Ok((record.clone(), Some(binding)));
+        }
+        let Some(writer) = request.task.writer.as_ref() else {
+            return Ok((record.clone(), None));
+        };
+        let ports =
+            provenant_config::PortTable::read_for(Some(&writer.project), &self.writer_registry)
+                .map_err(|_| "repository admission declaration is unavailable")?;
+        let (source, command) = match &ports.admission.backend {
+            provenant_config::PortBackend::Builtin | provenant_config::PortBackend::None => {
+                return Ok((record.clone(), None));
+            }
+            provenant_config::PortBackend::Command { command } => (ports.admission.source, command),
+        };
+        let binding = AdmissionPortBinding::new(source, command);
+        let encoded = serde_json::to_value(&binding)
+            .map_err(|_| "repository admission binding could not be encoded")?;
+        let updated = self
+            .record_admission_binding(record, encoded, call)
+            .map_err(|_| "repository admission binding could not be stored")?;
+        let value = updated
+            .extra
+            .get(ADMISSION_PORT_BINDING_FIELD)
+            .ok_or("repository admission binding was not stored")?;
+        let binding: AdmissionPortBinding = serde_json::from_value(value.clone())
+            .map_err(|_| "stored repository admission binding is invalid")?;
+        if !binding.valid() {
+            return Err("stored repository admission binding digest is invalid");
+        }
+        Ok((updated, Some(binding)))
+    }
+
+    fn run_admission_phase(
+        &self,
+        request: &CanonicalRequest,
+        attempt: AttemptId,
+        binding: &AdmissionPortBinding,
+        phase: &str,
+        cancel: &provenant_core::CancelToken,
+    ) -> bool {
+        let Some(writer) = request.task.writer.as_ref() else {
+            return false;
+        };
+        let execution = if binding.valid() {
+            let environment = [
+                ("PROVENANT_PORT_PHASE".into(), phase.into()),
+                (
+                    "PROVENANT_ADMISSION_ATTEMPT".into(),
+                    attempt.to_string().into(),
+                ),
+                (
+                    "PROVENANT_ADMISSION_WORKTREE".into(),
+                    writer.worktree.as_os_str().to_owned(),
+                ),
+                (
+                    "PROVENANT_ADMISSION_PROJECT".into(),
+                    writer.project.as_os_str().to_owned(),
+                ),
+                (
+                    "PROVENANT_ADMISSION_OWNER_PID".into(),
+                    std::process::id().to_string().into(),
+                ),
+            ];
+            let timeout =
+                std::time::Duration::from_secs(request.task.provider_timeout_seconds.max(1));
+            match provenant_os::exec::SystemExecutor::new(1) {
+                Ok(executor) => provenant_config::execute_port_command(
+                    &executor,
+                    &binding.command,
+                    &writer.project,
+                    &[],
+                    &environment,
+                    timeout,
+                    cancel,
+                ),
+                Err(_) => provenant_config::PortCommandExecution::failed(&binding.command),
+            }
+        } else {
+            provenant_config::PortCommandExecution {
+                command_digest: binding.command_digest,
+                disposition: provenant_config::PortCommandDisposition::Failed,
+                outcome: None,
+            }
+        };
+        let evidence = provenant_config::record_port_command(
+            &self.writer_registry,
+            "admission",
+            binding.source,
+            phase,
+            &attempt.to_string(),
+            &execution,
+        );
+        execution.disposition == provenant_config::PortCommandDisposition::Succeeded
+            && evidence.is_ok()
+    }
+
+    fn admission_skip(
+        &self,
+        request: &CanonicalRequest,
+        record: &AttemptRecord,
+        call: &Request<'_>,
+    ) -> (AttemptRecord, Option<String>) {
+        let (record, binding) = match self.admission_binding(request, record, call) {
+            Ok(value) => value,
+            Err(_) => {
+                return (
+                    record.clone(),
+                    Some("repository admission configuration or binding is unavailable; attempt remains queued".into()),
+                );
+            }
+        };
+        let Some(binding) = binding else {
+            return (record, None);
+        };
+        if self.run_admission_phase(request, record.attempt_id, &binding, "acquire", call.cancel) {
+            return (record, None);
+        }
+        let released = self.run_admission_phase(
+            request,
+            record.attempt_id,
+            &binding,
+            "release",
+            &provenant_core::CancelToken::new(),
+        );
+        if !released {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: repository admission release failed after an unsuccessful acquire"
+            );
+        }
+        (
+            record,
+            Some("repository admission port skipped this attempt; it remains queued".into()),
+        )
+    }
+
+    /// Release the attempt-keyed repository lease after terminal publication.
+    /// The exact command and source are read from the sealed attempt binding.
+    pub(crate) fn release_admission(&self, record: &AttemptRecord, call: &Request<'_>) {
+        let Some(value) = record.extra.get(ADMISSION_PORT_BINDING_FIELD) else {
+            return;
+        };
+        let binding: AdmissionPortBinding = match serde_json::from_value(value.clone()) {
+            Ok(binding) if binding.valid() => binding,
+            _ => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: stored repository admission binding is invalid; release was not run"
+                );
+                return;
+            }
+        };
+        let request = match self.request(record.attempt_id, call) {
+            Ok(request) => request,
+            Err(_) => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: repository admission release could not read the stored request"
+                );
+                return;
+            }
+        };
+        if !self.run_admission_phase(
+            &request,
+            record.attempt_id,
+            &binding,
+            "release",
+            &provenant_core::CancelToken::new(),
+        ) {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: repository admission release failed; the repository command should retry idempotently"
+            );
+        }
+    }
+
     fn start_inner(
         &self,
         attempt: AttemptId,
@@ -1112,7 +1329,7 @@ impl RunStore {
         let mut started = Vec::new();
         for id in ids {
             let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
-            let record = self.record(id, call)?;
+            let mut record = self.record(id, call)?;
             if !matches!(record.state, AttemptState::Queued { .. }) {
                 continue;
             }
@@ -1163,6 +1380,15 @@ impl RunStore {
             let mut effective_task = self.effective_launch_task(&request, task);
             self.seal_parent_sandbox(&request, &mut effective_task, call);
             let task = &effective_task;
+            let (admitted_record, skipped) = self.admission_skip(&request, &record, call);
+            record = admitted_record;
+            if let Some(reason) = skipped {
+                started.push(Started::Skipped {
+                    attempt: id,
+                    reason,
+                });
+                continue;
+            }
             let prompt = match self
                 .artifact_bytes(&record.prompt, RECORD_LIMIT)
                 .and_then(|bytes| {
