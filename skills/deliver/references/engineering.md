@@ -17,7 +17,9 @@ checklists: name the alternatives and say which one you chose and why.
 
 - **Extensible.** Each mechanism is one declared core (registry, declaration,
   table or setting) and a new case is one entry. Nothing is kept by hand in
-  parallel lists.
+  parallel lists. Before adding a policy or rule, check whether an existing
+  declaration already encodes it; if it is wrong, fix that declaration rather
+  than layering a second.
 - **Configurable.** Behaviour that varies is data or a config key with its
   source shown, never a branch or special case for one host, project or
   provider.

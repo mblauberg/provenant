@@ -862,7 +862,7 @@ mod tests {
         let wait = field("domains.wait.timeout_seconds");
         assert_eq!(
             (wait.min, wait.max, &wait.default),
-            (Some(1), Some(14400), &json!(300))
+            (Some(1), Some(u32::MAX as i64), &json!(300))
         );
         let max_targets = field("domains.wait.max_targets");
         assert_eq!(

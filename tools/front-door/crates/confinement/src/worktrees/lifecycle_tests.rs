@@ -115,6 +115,17 @@ impl<'a> TestContext<'a> {
         fs::create_dir(&state_path)?;
         fs::set_permissions(&state_path, fs::Permissions::from_mode(0o700))?;
         let project_state = Directory::open_anchor(&state_path)?;
+        // Baseline fixtures model a repository whose first foreign preview has
+        // already been observed. The first-pass invariant removes this receipt.
+        let identity = fixture.repo.common_identity();
+        fs::write(
+            state_path.join(format!(
+                "foreign-preview-{}-{}",
+                identity.device, identity.inode
+            )),
+            b"{}",
+        )?;
+
         let clock = SystemClock;
         let lock_budget = WaitBudget::cli(clock.mono_now(), 5)?;
         Ok(Self {
@@ -184,6 +195,54 @@ impl HostRetirementFixture {
         }
     }
 
+    fn ensure_custody(
+        &self,
+        project: provenant_core::ProjectId,
+        subject: &provenant_records::custody::Subject,
+        request: &provenant_fabric_store::Request<'_>,
+    ) -> Result<bool, WorktreeError> {
+        use provenant_records::custody::CustodyState;
+
+        if let Some(item) = self
+            .store
+            .custody_item(project, subject, request)
+            .map_err(Self::error)?
+        {
+            return Ok(matches!(
+                item.state,
+                CustodyState::Active | CustodyState::Landed { .. }
+            ));
+        }
+        let holder = provenant_records::custody::Holder::Chair {
+            chair: provenant_records::custody::Chair {
+                extra: Default::default(),
+                host: provenant_core::HostId::from_bytes([1; 16]),
+                actor: self.actor,
+                session: Some("confinement-test".into()),
+                process: None,
+            },
+        };
+        self.store
+            .acquire_custody(
+                project,
+                subject,
+                &holder,
+                provenant_records::custody::Origin::Provenant,
+                request,
+            )
+            .map_err(Self::error)?;
+        let provenance = provenant_records::CanonicalV1::record_digest(
+            "confinement-test-retirement",
+            2,
+            subject,
+        )
+        .map_err(Self::error)?;
+        self.store
+            .seal_custody_provenance(project, subject, provenance, request)
+            .map_err(Self::error)?;
+        Ok(true)
+    }
+
     /// Seed the real branch and worktree owners backing a lane produced by
     /// `create`; the HostStore then derives the generation-qualified ref
     /// subject using the production retirement transition.
@@ -248,16 +307,6 @@ impl HostRetirementFixture {
         Ok(())
     }
 
-    pub(super) fn apply<'a>(
-        &'a self,
-        evidence: &'a provenant_records::custody::LandedEvidence,
-    ) -> RetirementMode<'a> {
-        RetirementMode::Apply {
-            port: self,
-            evidence,
-        }
-    }
-
     fn error(error: impl Error + 'static) -> WorktreeError {
         WorktreeError::Retirement(Box::new(error))
     }
@@ -268,57 +317,28 @@ impl RetirementPort for HostRetirementFixture {
         &self,
         intent: RetirementIntent,
     ) -> Result<Option<provenant_records::custody::RetirementRecord>, WorktreeError> {
-        use provenant_records::custody::{CustodyState, RetirementDecision, RetirementRecord};
+        use provenant_records::custody::RetirementRecord;
 
         if intent.project != self.project || intent.reference.repository != self.project {
             return Err(WorktreeError::InvalidRequest);
         }
-        let request = self.request();
-        let subject = intent.reference.custody_subject().map_err(Self::error)?;
-        if self
-            .store
-            .custody_item(intent.project, &subject, &request)
-            .map_err(Self::error)?
-            .is_none()
-        {
-            let Some(source) = intent
-                .related_subjects
-                .iter()
-                .find(|subject| subject.kind == provenant_records::custody::SubjectKind::Branch)
-                .cloned()
-                .or_else(|| intent.reference.logical_branch_subject())
-            else {
-                return Ok(None);
-            };
-            let Some(owner) = self
-                .store
-                .custody_item(intent.project, &source, &request)
-                .map_err(Self::error)?
-            else {
-                return Ok(None);
-            };
-            if !matches!(
-                owner.state,
-                CustodyState::Active | CustodyState::Landed { .. }
-            ) {
-                return Ok(None);
-            }
-            self.store
-                .ensure_custody_from_existing(intent.project, &subject, &source, &request)
-                .map_err(Self::error)?;
+        if intent.decision.authority() != self.actor {
+            return Err(WorktreeError::InvalidRequest);
         }
-        let decision = RetirementDecision::Discard {
-            authority: self.actor,
-            evidence: intent.evidence,
-        };
+        let request = self.request();
         let planned = RetirementRecord::plan(
             intent.project,
             intent.related_subjects,
             intent.reference,
             intent.expected_tip,
-            decision,
+            intent.decision,
         )
         .map_err(Self::error)?;
+        for subject in planned.subjects() {
+            if !self.ensure_custody(intent.project, subject, &request)? {
+                return Ok(None);
+            }
+        }
         self.store
             .start_retirement(&planned, &request)
             .map(Some)
@@ -357,6 +377,54 @@ impl RetirementPort for HostRetirementFixture {
         Ok(Some(record))
     }
 
+    fn pending_retirements(
+        &self,
+        project: provenant_core::ProjectId,
+    ) -> Result<Vec<provenant_records::custody::RetirementRecord>, WorktreeError> {
+        use provenant_records::custody::{CustodyQuery, CustodyState, StateKind};
+
+        if project != self.project {
+            return Err(WorktreeError::InvalidRequest);
+        }
+        let request = self.request();
+        let mut query = CustodyQuery {
+            project: Some(project),
+            state: Some(StateKind::Retired),
+            ..Default::default()
+        };
+        let mut records = std::collections::BTreeMap::new();
+        loop {
+            let page = self.store.custody(&query, &request).map_err(Self::error)?;
+            for item in page.items {
+                let CustodyState::Retired { retirement_id } = item.state else {
+                    continue;
+                };
+                let record = self
+                    .store
+                    .retirement(project, &retirement_id, &request)
+                    .map_err(Self::error)?
+                    .ok_or(WorktreeError::RegistrationUnconfirmed)?;
+                if !record.valid_evidence() {
+                    return Err(WorktreeError::InvalidOutput);
+                }
+                if record.outcomes.iter().any(|outcome| {
+                    !matches!(
+                        &outcome.state,
+                        provenant_records::custody::RetirementStepState::Completed { .. }
+                    )
+                }) {
+                    records.insert(record.id.clone(), record);
+                }
+            }
+            match page.next {
+                Some(next) if next > query.after => query.after = next,
+                Some(_) => return Err(WorktreeError::RegistrationUnconfirmed),
+                None => break,
+            }
+        }
+        Ok(records.into_values().collect())
+    }
+
     fn advance_retirement(
         &self,
         record: &provenant_records::custody::RetirementRecord,
@@ -372,6 +440,36 @@ impl RetirementPort for HostRetirementFixture {
                 &self.request(),
             )
             .map_err(Self::error)
+    }
+}
+
+impl RetirementFeeds for HostRetirementFixture {
+    fn authority(&self) -> Result<provenant_core::ActorId, String> {
+        Ok(self.actor)
+    }
+
+    fn custody(&self, _lane: &WorktreeInfo) -> Result<(), String> {
+        // These fixtures declare that no active run owns a candidate; the
+        // durable port establishes or verifies the relevant custody subjects.
+        Ok(())
+    }
+
+    fn forge(&self, _branch: &GitRefName) -> ForgeObservation {
+        ForgeObservation::Absent
+    }
+
+    fn integration_bases(&self) -> Vec<(String, GitOid)> {
+        Vec::new()
+    }
+
+    fn remote_guard(
+        &self,
+        _context: &WorktreeContext<'_>,
+        _branch: &str,
+        _tip: GitOid,
+        _min_days: u64,
+    ) -> Result<(), String> {
+        Ok(())
     }
 }
 
@@ -568,9 +666,15 @@ pub(super) fn gc_foreign_retains_a_process_with_cwd_inside_the_worktree()
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: false,
-            foreign_merged_clean: true,
+            include_foreign: true,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
-        RetirementMode::Observe,
         &cancel(),
     )?;
     assert_eq!(
@@ -587,7 +691,7 @@ pub(super) fn gc_foreign_retains_a_process_with_cwd_inside_the_worktree()
 }
 
 #[test]
-pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck_and_retains_unowned_lane()
+pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck_and_retires_idle_lane()
 -> Result<(), Box<dyn Error>> {
     for scenario in [
         "remove",
@@ -615,7 +719,6 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck_and_re
         ])?;
         let lanes = list(&context, &cancel())?;
         let retirement = HostRetirementFixture::new(&test_context)?;
-        let evidence = gc_landing_evidence(&fixture, fixture.head()?)?;
         let state_name = state_dir_name(&path);
         assert!(
             context
@@ -675,9 +778,15 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck_and_re
                 keep: &[],
                 written_before_ns: i128::MAX,
                 dry_run: false,
-                foreign_merged_clean: true,
+                include_foreign: true,
+                retirement_port: Some(&retirement),
+                retirement_feeds: Some(&retirement),
+                mode: CollectionMode::Worktrees,
+                proof: None,
+                upstream_reference: None,
+                integration_patterns: &[],
+                excluded_paths: &[],
             },
-            retirement.apply(&evidence),
             &collection_cancel,
         )?;
         if refuse {
@@ -685,6 +794,7 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck_and_re
                 retained.branch == "native-no-state"
                     && retained.reason == RetainReason::UnknownWriter
             }));
+            assert!(path.is_dir());
         } else {
             let subject = provenant_records::custody::Subject::new(
                 provenant_records::custody::SubjectKind::Worktree,
@@ -694,21 +804,12 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck_and_re
                 removal.subject == subject
                     && matches!(
                         &removal.outcome,
-                        provenant_records::custody::RemovalOutcome::Kept {
-                            cause:
-                                provenant_records::custody::RemovalUncertainty::RetirementIncomplete
-                        }
+                        provenant_records::custody::RemovalOutcome::Removed { .. }
                     )
             }));
         }
-        assert!(path.is_dir(), "unowned worktrees remain in place");
+        assert_eq!(path.is_dir(), refuse, "idle foreign worktree outcome");
         assert!(branch_exists(&fixture, "native-no-state"));
-        assert!(report.removals.iter().all(|removal| {
-            !matches!(
-                &removal.outcome,
-                provenant_records::custody::RemovalOutcome::Removed { .. }
-            )
-        }));
         if let Some(holder) = holder.into_inner() {
             drop(holder);
         } else {
@@ -784,22 +885,27 @@ fn merge_proof_scenario() -> Result<(), Box<dyn Error>> {
     )?;
     let retirement = HostRetirementFixture::new(&test_context)?;
     retirement.seed_lane(&context, &via_batch)?;
-    let evidence = gc_landing_evidence(&fixture, pin)?;
     let policy = |upstream, dry_run| WorktreeGcPolicy {
-        foreign_merged_clean: false,
         upstream: Some(upstream),
+        upstream_reference: Some("refs/heads/main"),
         terminal: &|_| true,
         no_live_lanes: &|_| true,
         regenerable: &[],
         keep: &[],
         written_before_ns: 0,
         dry_run,
+        include_foreign: true,
+        retirement_port: Some(&retirement),
+        retirement_feeds: Some(&retirement),
+        mode: CollectionMode::Worktrees,
+        proof: None,
+        integration_patterns: &[],
+        excluded_paths: &[],
     };
     let local = collect(
         &context,
         &[via_batch.clone(), local_only.clone()],
         &policy(stale_pin, false),
-        RetirementMode::Observe,
         &cancel(),
     )?;
     assert!(local.worktrees.removed.is_empty(), "{local:?}");
@@ -812,24 +918,12 @@ fn merge_proof_scenario() -> Result<(), Box<dyn Error>> {
     );
     assert!(via_batch.path.is_dir() && branch_exists(&fixture, "proof-via-batch"));
     let lanes = [via_batch.clone(), squashed, unmerged, advanced.clone()];
-    let preview = collect(
-        &context,
-        &lanes,
-        &policy(pin, true),
-        RetirementMode::Observe,
-        &cancel(),
-    )?;
+    let preview = collect(&context, &lanes, &policy(pin, true), &cancel())?;
     let mut previewed = preview.worktrees.pruned_refs.clone();
     previewed.sort();
     assert_eq!(previewed, ["proof-via-batch"], "{preview:?}");
     assert!(branch_exists(&fixture, "proof-via-batch"));
-    let applied = collect(
-        &context,
-        &lanes,
-        &policy(pin, false),
-        retirement.apply(&evidence),
-        &cancel(),
-    )?;
+    let applied = collect(&context, &lanes, &policy(pin, false), &cancel())?;
     let retained: BTreeMap<_, _> = applied
         .worktrees
         .retained

@@ -9,16 +9,27 @@ pub(crate) fn decode_source(
         plan,
         capture,
         |payload, windows, details| {
-            decode_opencode(payload, windows);
-            if !provenant_records::AdapterSpec::get(&plan.account.adapter)
-                .is_some_and(|spec| spec.is_free_account(&plan.account.account_key))
-            {
-                let details = super::details_mut(details);
-                details.source = Some("local-ledger".into());
-                details.coverage = Some("partial".into());
-                details.note = Some(
-                    "Partial lower bound: this host only; other devices are not counted".into(),
-                );
+            let quota = provenant_records::AdapterSpec::get(&plan.account.adapter)
+                .and_then(|spec| {
+                    spec.account_plan(details.as_ref().and_then(|details| details.plan.as_deref()))
+                })
+                .map(|plan| plan.quota);
+            match quota {
+                Some(provenant_records::AccountQuota::LocalLedger) => {
+                    decode_opencode(payload, windows);
+                    let details = super::details_mut(details);
+                    details.source = Some("local-ledger".into());
+                    details.coverage = Some("partial".into());
+                    details.note = Some(
+                        "Partial lower bound: this host only; other devices are not counted".into(),
+                    );
+                }
+                Some(provenant_records::AccountQuota::ObservedRefusals) => {}
+                None => {
+                    super::details_mut(details).note = Some(
+                        "Registered plan is missing or unrecognised; quota remains unknown".into(),
+                    );
+                }
             }
             Ok(())
         },
@@ -32,6 +43,12 @@ fn status(
     windows: &[QuotaWindow],
     details: Option<&QuotaDetails>,
 ) -> QuotaStatus {
+    let ledger = provenant_records::AdapterSpec::get(adapter)
+        .and_then(|spec| spec.account_plan(details.and_then(|details| details.plan.as_deref())))
+        .is_some_and(|plan| plan.quota == provenant_records::AccountQuota::LocalLedger);
+    if !ledger {
+        return QuotaStatus::Unknown;
+    }
     let can_use_credits = provenant_records::AdapterSpec::get(adapter)
         .is_some_and(|spec| spec.quota_credits)
         && details

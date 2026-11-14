@@ -977,9 +977,7 @@ mod reboot_tests {
 #[cfg(test)]
 mod lineage_tests {
     use super::*;
-    use provenant_confinement::worktrees::{
-        self, WorktreeCreate, WorktreeGcPolicy, WorktreeOrigin, WorktreeOwner,
-    };
+    use provenant_confinement::worktrees::{self, WorktreeCreate, WorktreeOrigin, WorktreeOwner};
     use provenant_core::Clock;
     use provenant_os::fixture::run_git;
     use std::path::Path;
@@ -1311,7 +1309,7 @@ mod lineage_tests {
     }
 
     #[test]
-    fn resume_refuses_a_pruned_worktree_reused_by_another_lane()
+    fn resume_refuses_a_worktree_reused_by_another_lane()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let mut execution = crate::tests::context(temp.path())?;
@@ -1492,25 +1490,11 @@ mod lineage_tests {
             clock.wall_now()?,
             &call,
         )?;
+        // Simulate an external replacement. This fixture tests lineage,
+        // rather than the host retirement policy used to remove a checkout.
+        let path = info.path.to_str().ok_or("fixture worktree path encoding")?;
+        run_git(&project, &["worktree", "remove", "--", path])?;
         worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
-            worktrees::prune_owned(
-                context,
-                &info.path,
-                prior,
-                info.head,
-                info.head,
-                &WorktreeGcPolicy {
-                    upstream: Some(info.head),
-                    terminal: &|_| true,
-                    no_live_lanes: &|_| true,
-                    regenerable: &[],
-                    keep: &[],
-                    written_before_ns: i128::MAX,
-                    foreign_merged_clean: false,
-                    dry_run: false,
-                },
-                &cancel,
-            )?;
             let replacement = worktrees::create(
                 context,
                 WorktreeCreate {

@@ -1244,10 +1244,13 @@ fn span_seconds(value: &str) -> Option<u64> {
     });
     Some(seconds.saturating_mul(multiplier))
 }
-pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
-    let seconds = span_seconds(value)
+pub(crate) fn positive_span_seconds(value: &str) -> Result<u64, &'static str> {
+    span_seconds(value)
         .filter(|n| *n > 0)
-        .ok_or("duration must be a positive span; run `provenant help` for examples")?;
+        .ok_or("duration must be a positive span; run `provenant help` for examples")
+}
+pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
+    let seconds = positive_span_seconds(value)?;
     let maximum = provenant_core::MAX_LANE_RUNTIME_SECONDS;
     if seconds > maximum {
         use std::io::Write;
@@ -1259,9 +1262,10 @@ pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
     Ok(seconds.min(maximum))
 }
 pub(crate) fn observation_wait_seconds(value: &str) -> Result<u64, &'static str> {
-    span_seconds(value)
-        .filter(|n| *n <= provenant_core::MAX_LANE_RUNTIME_SECONDS)
-        .ok_or("duration must be 0s to 4h; run `provenant help` for examples")
+    if span_seconds(value) == Some(0) {
+        return Ok(0);
+    }
+    duration_seconds(value)
 }
 #[derive(Clone, Debug, Args)]
 pub struct Status {
@@ -1304,8 +1308,8 @@ pub struct Wait {
     /// Print one line per transition until the wait ends
     #[arg(long)]
     pub follow: bool,
-    /// Wait budget (default domains.wait.timeout_seconds; at most 4 hours)
-    #[arg(long, value_name = "SPAN", catalog_duration())]
+    /// Wait budget (default domains.wait.timeout_seconds; clamped to domains.wait.max_timeout_seconds)
+    #[arg(long, value_name = "SPAN", value_parser = positive_span_seconds, catalog_bounds = (1, u64::MAX))]
     pub timeout: Option<u64>,
 }
 /// `trace`: a graph's revisions and attempt timeline.

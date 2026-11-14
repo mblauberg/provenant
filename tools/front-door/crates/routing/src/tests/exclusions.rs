@@ -504,6 +504,7 @@ fn read_only_policy_model_stays_in_junior_and_senior_pools_for_read_only_work()
     )?;
     let records = [AvailabilityRecord {
         adapter: "agy".into(),
+        plan: None,
         observed_models: vec!["gemini-3.8-flash".into()],
         ..availability()
     }];
@@ -697,6 +698,7 @@ fn free_pool_refusal_excludes_the_account_for_every_free_model()
     let mut record = availability();
     record.adapter = "opencode".into();
     record.account_key = Some("zen".into());
+    record.plan = Some("zen".into());
     let records = [record];
     let access = [AccessContext {
         adapter: "opencode",

@@ -25,7 +25,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
                     policy_code: None,
                     resource: None,
                     terminal_cause: TerminalCause::DiskFloor,
-                    terminal_note: Some("99 bytes available; gc.free_floor is 100 bytes (source: host configuration)".into()),
+                    terminal_note: Some("99 bytes available; gc.critical_free is 100 bytes (source: host configuration)".into()),
                     message: "HOST_DISK_ERROR_SENTINEL".into(),
                     skipped_routes: Vec::new(),
                     fallback_outcome: None,
@@ -84,10 +84,6 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             effort: None,
         };
         if disk {
-            std::fs::write(
-                store.writer_registry.join("config.toml"),
-                "schema_version=1\n[knobs]\n'policy.LAUNCH_DISK'='refuse'\n",
-            )?;
             let project = temp.path().join("project");
             let worktree = temp.path().join("worktree");
             std::fs::create_dir(&project)?;
@@ -138,7 +134,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         let reason = reason.ok_or("missing structured reason")?;
         assert!(reason.starts_with(cause.detail()), "{reason}");
         if disk {
-            assert!(reason.contains("gc.free_floor"), "{reason}");
+            assert!(reason.contains("gc.critical_free"), "{reason}");
             assert!(reason.contains("99 bytes available"), "{reason}");
             assert!(reason.contains("100 bytes"), "{reason}");
             assert!(reason.contains("host configuration"), "{reason}");

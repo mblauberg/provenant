@@ -2603,6 +2603,7 @@ mod panel_tests {
                 fixture_ref: "test".into(),
                 catalogue_revision: catalogue.revision().to_owned(),
                 account_key: Some("fixture-account".into()),
+                plan: None,
                 observed_models: vec!["test".into()],
                 observed_unix_seconds: 80,
                 expires_unix_seconds: 120,

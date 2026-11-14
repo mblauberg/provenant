@@ -67,6 +67,7 @@ fn mixed_model_node_stays_unknown_instead_of_charging_the_final_model()
         project_id: ProjectId::from_bytes([3; 16]),
         terminal_state: AttemptOutcome::Succeeded,
         cause_source: provenant_records::run::CauseSource::Unavailable,
+        settlement_reason: None,
         account_identity: provenant_records::AccountIdentity::unknown(),
         exit_code: Some(0),
         queued_at: WallTime::from_micros(0)?,

@@ -1690,7 +1690,27 @@ impl RunStore {
                 RECORD_LIMIT,
             )?
             .is_some();
-        if clean_budget && !decoded.complete {
+        let completed_budget_handoff = exit.stop_reason == Some(StopReason::TokenBudget)
+            && matches!(
+                provenant_records::run::SettlementReason::derive(
+                    decoded.outcome,
+                    Some(&provenant_records::run::TerminalEvidence::ProcessExit),
+                    &decoded.partial_signals,
+                    Some(TerminalCause::TokenBudget),
+                    handoff.as_ref(),
+                )
+                .rule()
+                .terminal_outcome,
+                provenant_records::run::SettlementTerminalOutcome::Succeeded
+            );
+        if completed_budget_handoff {
+            // Completion is a candidate before writer validation, so dirty work
+            // and import failures can still veto it before final classification.
+            decoded.outcome = Outcome::Succeeded;
+        }
+        if (clean_budget || completed_budget_handoff)
+            && (!decoded.complete || decoded.result.trim().is_empty())
+        {
             // Use the lane's recorded outcome, including a done progress
             // handoff. With no completed report, ordinary review is required;
             // a clean boundary must not invent success or impose a timeout.
@@ -1779,7 +1799,9 @@ impl RunStore {
         // A writer that passed its token budget was stopped by the host: say
         // so, with the budget and where it came from. Settlement records
         // whether its work could be committed.
-        if decoded.outcome == Outcome::TimedOut && exit.stop_reason == Some(StopReason::TokenBudget)
+        if exit.stop_reason == Some(StopReason::TokenBudget)
+            && (decoded.outcome == Outcome::TimedOut
+                || exit.termination != Some(Termination::Exit(0)))
         {
             decoded.terminal_cause = Some(TerminalCause::TokenBudget);
             let budget = record.limits.as_ref().and_then(|l| l.token_budget.as_ref());
@@ -2162,6 +2184,9 @@ impl RunStore {
                     ));
                 }
             }
+            if completed_budget_handoff && decoded.outcome == Outcome::Failed {
+                decoded.terminal_cause = Some(TerminalCause::SettlementFailure);
+            }
         } else {
             let archive =
                 crate::artifacts::subdir(attempt, std::ffi::OsStr::new("quarantine"), true)?;
@@ -2287,18 +2312,22 @@ impl RunStore {
             decoded.complete = false;
         }
         if matches!(decoded.outcome, Outcome::Succeeded | Outcome::Uncommitted) {
-            if exit.termination != Some(Termination::Exit(0)) {
+            if exit.termination != Some(Termination::Exit(0)) && !completed_budget_handoff {
                 decoded.outcome = Outcome::Failed;
                 decoded.reason = Some("provider exited unsuccessfully".into());
             } else if !decoded.complete {
                 decoded.outcome = Outcome::Failed;
+                if completed_budget_handoff {
+                    decoded.terminal_cause = Some(TerminalCause::SettlementFailure);
+                }
                 decoded.reason = Some("provider result is empty or incomplete".into());
             }
         }
         if matches!(
             decoded.outcome,
             Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
-        ) {
+        ) || completed_budget_handoff
+        {
             match crate::reader::route_identity(
                 record.resolved_route.as_ref(),
                 record.applied_route.as_ref(),
@@ -2371,6 +2400,9 @@ impl RunStore {
         }
         let redaction_failed = result_redaction_failed || session_redaction_failed;
         if redaction_failed {
+            if decoded.terminal_cause == Some(TerminalCause::TokenBudget) {
+                decoded.terminal_cause = Some(TerminalCause::SettlementFailure);
+            }
             // A redaction failure fails a lane that would otherwise succeed. A
             // cancelled, timed-out or lost lane keeps its outcome, and every
             // reason it already has survives with the redaction failure after it.
@@ -3600,12 +3632,14 @@ mod writer_recovery_tests {
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
         use provenant_records::wire::lane::{LaneProjectionFacts, LaneRow};
-        for (changed, dirty, blocked, shared) in [
-            (false, false, false, false),
-            (true, false, false, false),
-            (false, true, false, false),
-            (false, false, true, false),
-            (true, false, false, true),
+        for (changed, dirty, blocked, shared, budget) in [
+            (false, false, false, false, false),
+            (true, false, false, false, false),
+            (false, true, false, false, false),
+            (false, false, true, false, false),
+            (true, false, false, true, false),
+            (true, false, false, false, true),
+            (false, true, false, false, true),
         ] {
             let fixture = PrepareFixture::new()?;
             let execution = registered_landed_writer_fixture(&fixture)?;
@@ -3723,18 +3757,35 @@ mod writer_recovery_tests {
             }
             let mut observed = crate::tests::exit();
             observed.scope = scope;
+            if budget {
+                observed.stop_reason = Some(StopReason::TokenBudget);
+                observed.termination = Some(Termination::Exit(1));
+            }
             crate::dispatch_tests::seal_exit(&store, &observed)?;
             let mut fake =
                 crate::dispatch_tests::Fake::with_observed(Some(route()), Some(Outcome::Succeeded));
+            if budget {
+                fake.outcome = Some(Outcome::Failed);
+                fake.complete = Some(true);
+            }
             let note = if changed {
                 "No commit was made; acceptance remains unfinished"
             } else {
                 "Acceptance remains unfinished"
             };
-            let status = if blocked { "blocked" } else { "stopped_early" };
+            let status = if budget {
+                "done"
+            } else if blocked {
+                "blocked"
+            } else {
+                "stopped_early"
+            };
             fake.answer = Some(format!(
                 "```handoff\n{{\"schema_version\":2,\"status\":\"{status}\",\"note\":\"{note}\",\"remaining\":[\"Finish work\"],\"decisions\":[],\"verify\":[]}}\n```"
             ));
+            if budget {
+                fake.answer = Some("```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"Delivered\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```".into());
+            }
             let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
             if let Some(head) = shared_head {
                 assert_eq!(finished.head, Some(head));
@@ -3768,6 +3819,29 @@ mod writer_recovery_tests {
                 continue;
             }
             assert_eq!(finished.superseded_by, None);
+            if budget {
+                let AttemptState::Terminal { extra, outcome, .. } = &finished.state else {
+                    unreachable!()
+                };
+                let stop: provenant_records::Stop = serde_json::from_value(extra["stop"].clone())?;
+                assert_eq!(
+                    stop.handoff().unwrap().status,
+                    provenant_records::handoff::HandoffStatus::Done
+                );
+                assert_eq!(
+                    stop.cause().source(),
+                    provenant_records::run::CauseSource::Host
+                );
+                if !dirty {
+                    assert_eq!(*outcome, Outcome::Succeeded);
+                    assert_eq!(
+                        finished.settlement_reason,
+                        Some(provenant_records::run::SettlementReason::CompletedBeforeBudget)
+                    );
+                    continue;
+                }
+            }
+
             if dirty {
                 assert!(matches!(
                     finished.state,

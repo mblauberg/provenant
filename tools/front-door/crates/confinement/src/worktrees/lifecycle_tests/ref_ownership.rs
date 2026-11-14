@@ -149,7 +149,7 @@ fn missing_generation_sequence_does_not_restart_a_nonempty_ledger() -> Result<()
 }
 
 #[test]
-fn each_unscoped_adoption_starts_a_generation_even_at_the_same_tip() -> Result<(), Box<dyn Error>> {
+fn fresh_adoption_advances_but_observed_ref_identity_is_idempotent() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
@@ -172,12 +172,139 @@ fn each_unscoped_adoption_starts_a_generation_even_at_the_same_tip() -> Result<(
     assert!(adopted.generation > created.generation);
     let adopted_again = ledger.record(observe(RefOrigin::Adopted, head), &test.clock, &cancel())?;
     assert!(adopted_again.generation > adopted.generation);
+    let observed_again = ledger.observe_local_branch(&reference, head, &test.clock, &cancel())?;
+    assert_eq!(observed_again, adopted_again);
     fixture.run(&["commit", "--allow-empty", "-m", "moved"])?;
     let moved = fixture.head()?;
-    let moved_adoption =
-        ledger.record(observe(RefOrigin::Adopted, moved), &test.clock, &cancel())?;
+    let moved_adoption = ledger.observe_local_branch(&reference, moved, &test.clock, &cancel())?;
     assert_eq!(moved_adoption.origin, RefOrigin::Adopted);
     assert!(moved_adoption.generation > adopted_again.generation);
+    let moved_again = ledger.observe_local_branch(&reference, moved, &test.clock, &cancel())?;
+    assert_eq!(moved_again, moved_adoption);
+    let returned = ledger.observe_local_branch(&reference, head, &test.clock, &cancel())?;
+    assert!(returned.generation > moved_adoption.generation);
+
+    let owned_reference = GitRefName::branch("lane/owned-observation")?;
+    let owner_operation = "observed-owner".parse()?;
+    let owned = ledger.record(
+        RefObservation {
+            endpoint: RefEndpoint::Local,
+            reference: owned_reference.clone(),
+            origin: RefOrigin::Created,
+            tip: head,
+            recorded_at: test.clock.wall_now()?,
+            attempt_id: Some(AttemptId::from_bytes([12; 16])),
+            operation_id: Some(owner_operation),
+        },
+        &test.clock,
+        &cancel(),
+    )?;
+    assert_eq!(
+        ledger.observe_local_branch(&owned_reference, head, &test.clock, &cancel())?,
+        owned
+    );
+    let advanced = ledger.observe_local_branch(&owned_reference, moved, &test.clock, &cancel())?;
+    assert!(advanced.generation > owned.generation);
+    assert_eq!(advanced.origin, owned.origin);
+    assert_eq!(advanced.attempt_id, owned.attempt_id);
+    assert_eq!(advanced.operation_id, owned.operation_id);
+    Ok(())
+}
+
+#[test]
+fn detached_private_head_uses_the_shared_generation_and_endpoint_identity()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let created = create(
+        &context,
+        WorktreeCreate {
+            branch: "lane/detached".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let ledger = RefLedger::for_context(&context)?;
+    let branch = ledger_record(&context, "lane/detached")?.ok_or("no branch record")?;
+    run_in_worktree(&fixture, &created.path, &["checkout", "--detach"])?;
+    let path = canonicalize(&created.path)?;
+    let path_text = path.to_str().ok_or("non-UTF8 worktree path")?;
+    let head = GitOid::parse(
+        std::str::from_utf8(
+            &fixture
+                .run(&["-C", path_text, "rev-parse", "--verify", "HEAD"])?
+                .stdout
+                .bytes,
+        )?
+        .trim(),
+    )?;
+    let first = ledger.record_worktree_head(&path, head, &test.clock, &cancel())?;
+    assert!(matches!(
+        &first.endpoint,
+        RefEndpoint::Worktree { path } if path == path_text
+    ));
+    assert_eq!(first.reference, "HEAD");
+    assert_eq!(first.origin, RefOrigin::Adopted);
+    assert!(first.generation > branch.generation);
+    assert_eq!(ledger.load_worktree_head(&path)?.as_ref(), Some(&first));
+    assert_eq!(
+        ledger.record_worktree_head(&path, head, &test.clock, &cancel())?,
+        first
+    );
+    let identity = first.ownership().identity()?;
+    assert!(matches!(
+        identity.endpoint,
+        provenant_records::custody::RefEndpointIdentity::Worktree { .. }
+    ));
+    assert!(!serde_json::to_string(&identity)?.contains(path_text));
+
+    run_in_worktree(
+        &fixture,
+        &created.path,
+        &["commit", "--allow-empty", "-m", "move detached HEAD"],
+    )?;
+    let moved = GitOid::parse(
+        std::str::from_utf8(
+            &fixture
+                .run(&["-C", path_text, "rev-parse", "--verify", "HEAD"])?
+                .stdout
+                .bytes,
+        )?
+        .trim(),
+    )?;
+    let next = ledger.record_worktree_head(&path, moved, &test.clock, &cancel())?;
+    assert_eq!(next.reference, "HEAD");
+    assert_eq!(next.tip, moved);
+    assert!(next.generation > first.generation);
+
+    let other = create(
+        &context,
+        WorktreeCreate {
+            branch: "lane/detached-other".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    run_in_worktree(&fixture, &other.path, &["checkout", "--detach"])?;
+    let other_path = canonicalize(&other.path)?;
+    let other_path_text = other_path.to_str().ok_or("non-UTF8 worktree path")?;
+    let other_head = GitOid::parse(
+        std::str::from_utf8(
+            &fixture
+                .run(&["-C", other_path_text, "rev-parse", "--verify", "HEAD"])?
+                .stdout
+                .bytes,
+        )?
+        .trim(),
+    )?;
+    let other_record =
+        ledger.record_worktree_head(&other_path, other_head, &test.clock, &cancel())?;
+    assert!(other_record.generation > next.generation);
+    assert_ne!(
+        other_record.ownership().identity()?,
+        next.ownership().identity()?
+    );
     Ok(())
 }
 
@@ -338,6 +465,7 @@ fn landed_check_uses_ancestry_and_refuses_rewritten_or_missing_commits()
     let test = TestContext::new(&fixture)?;
     let context = test.context();
     let graph = RepoGraph {
+        repo: context.repo,
         context: &context,
         cancel: &cancel(),
     };

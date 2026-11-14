@@ -234,8 +234,9 @@ refuses credential-bearing URLs.
 
 Git's own inventory is the worktree registry. One writer holds each linked
 worktree, and custody outlives the requesting call. `worktree remove` refuses
-the primary, a dirty tree, a live writer or observed process, and has no force;
-it deletes a branch only when merged or explicitly selected for discard.
+the primary, a live writer or observed process, and has no force. Dirty work
+requires explicit discard, with its recoverable archive captured before removal;
+it deletes a branch only with current landing evidence or explicit discard.
 - Why: removing a tree under a live writer destroys its work.
 - Test: `src/worktree_tests/writer_cases.rs::second_writer_is_refused_while_first_holds_the_worktree`;
   `crates/confinement/src/worktrees/lifecycle_tests/gc_safety.rs::detached_removal_keeps_dirty_unmerged_and_live_work`
@@ -259,10 +260,14 @@ Landing and collection require `Free`; the census grants no signal authority.
 
 ### Pruning and GC need proof
 
-Merged pruning proves a merge by ancestry or a recorded merged PR at the tip,
-never prunes the integration branch, and deletes refs against their expected
-old OID. GC keeps anything in doubt: a held writer lock keeps a cache, and a
-worktree goes only clean, registered and with terminal lanes.
+Pruning proves subsumption or landing from declared retained-ref, tree-equivalent,
+integration or forge evidence and revalidates it at mutation. Reference deletion
+requires landed evidence and the expected old OID; worktree-only retirement
+preserves the branch. GC keeps anything in doubt: a held writer lock keeps a
+cache, and foreign, detached or idle worktree collection requires the declared
+retention policy and complete current custody, run and process evidence.
+Shallow history, conflicted comparisons, moved tips and unavailable evidence
+keep the candidate.
 - Why: GC runs unattended; pruning on a guess deletes the user's work.
 - Test: `crates/confinement/src/worktrees/lifecycle_tests/worktree_operations.rs::merged_pruning_is_branch_scoped_and_keeps_unselected_refs`;
   `crates/confinement/src/cache.rs::gc_idle_refuses_writers_that_became_held_or_unobservable`

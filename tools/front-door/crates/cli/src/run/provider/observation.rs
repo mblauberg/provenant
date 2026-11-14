@@ -232,8 +232,9 @@ pub(super) fn unavailable_auth_detail(
                 && selected
                     .or(route.account_key.as_deref())
                     .is_none_or(|key| key == entry.key)
-                && AdapterSpec::get(&entry.adapter)
-                    .is_none_or(|spec| spec.account_serves_model(&entry.key, &route.model))
+                && AdapterSpec::get(&entry.adapter).is_none_or(|spec| {
+                    spec.account_serves_model(entry.plan.as_deref(), &route.model)
+                })
         })
         .collect();
     if relevant.is_empty() {
@@ -417,6 +418,7 @@ pub(super) fn observe_account(
         fixture_ref: format!("installed/{}/version", entry.adapter),
         catalogue_revision: catalogue_revision.into(),
         account_key: Some(entry.key.clone()),
+        plan: entry.plan.clone(),
         observed_models,
         observed_unix_seconds: timestamp,
         expires_unix_seconds: timestamp.saturating_add(300),

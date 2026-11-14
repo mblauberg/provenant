@@ -2268,6 +2268,34 @@ mod cargo_setup_tests {
     }
 
     #[test]
+    fn lane_cargo_home_is_host_owned_before_seed_validation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree = tmp.path().join("worktree");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(cache.join("cargo-home")).unwrap();
+        let inherited = (OsString::from("CARGO_HOME"), OsString::from("/inherited"));
+        for mut environment in [
+            vec![],
+            vec![inherited.clone()],
+            vec![inherited.clone(), inherited],
+        ] {
+            environment.push((OsString::from("LANE_INPUT"), OsString::from("preserved")));
+            lane_cargo_environment(tmp.path(), &cache, &mut environment);
+            // Validation requires exactly one CARGO_HOME equal to the lane cache.
+            assert_eq!(
+                verified_cargo_config(&worktree, &cache, &environment),
+                Ok(())
+            );
+            assert!(
+                environment
+                    .iter()
+                    .any(|(key, value)| { key == "LANE_INPUT" && value == "preserved" })
+            );
+        }
+    }
+
+    #[test]
     fn cargo_config_makes_toolchain_unverifiable() {
         let tmp = tempfile::tempdir().unwrap();
         let worktree = tmp.path().join("worktree");

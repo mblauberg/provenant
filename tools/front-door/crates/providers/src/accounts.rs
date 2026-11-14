@@ -84,54 +84,13 @@ pub struct Limits {
     pub weekly_anchor: Option<String>,
 }
 impl Settings {
-    /// Effective account rows are keyed by credential identity, never model.
-    /// Go and Zen each own one row; Zen shares the Go credential directory when
-    /// it has no explicit registration, but never copies Go quota or pacing.
-    pub fn with_derived_accounts(&self) -> Self {
+    /// One row per registered credential identity; no plan or account is invented.
+    pub fn unique_accounts(&self) -> Self {
         let mut settings = self.clone();
         let mut identities = std::collections::BTreeSet::new();
-        settings.entries.retain(|_, entry| {
-            provenant_records::AdapterSpec::get(&entry.adapter)
-                .is_none_or(|spec| spec.free_account.is_none())
-                || identities.insert((entry.adapter.clone(), entry.key.clone()))
-        });
-        for spec in provenant_records::ADAPTER_SPECS {
-            let Some((key, _)) = spec.free_account else {
-                continue;
-            };
-            if settings
-                .entries
-                .values()
-                .any(|entry| entry.adapter == spec.name && entry.key == key)
-            {
-                continue;
-            }
-            let Some(mut entry) = settings
-                .entries
-                .values()
-                .find(|entry| entry.adapter == spec.name && entry.key == spec.local_account.0)
-                .cloned()
-            else {
-                continue;
-            };
-            entry.key = key.into();
-            entry.label = key.into();
-            entry.plan = None;
-            entry.plans.clear();
-            entry.directories.clear();
-            entry.limits = None;
-            entry.billing_anchor = None;
-            entry.display_name = None;
-            entry.hidden = false;
-            entry.order = None;
-            entry.headline = None;
-            entry.settings.clear();
-            let mut id = format!("{}-{key}", spec.name);
-            while settings.entries.contains_key(&id) {
-                id.push('_');
-            }
-            settings.entries.insert(id, entry);
-        }
+        settings
+            .entries
+            .retain(|_, entry| identities.insert((entry.adapter.clone(), entry.key.clone())));
         settings
     }
 }
@@ -866,53 +825,37 @@ mod config_tests {
 mod account_pool_tests {
     use super::*;
     #[test]
-    fn go_and_zen_share_one_account_row_per_identity_across_models() {
-        let settings: Settings = serde_json::from_value(serde_json::json!({"entries": {
-            "go": {"adapter":"opencode","label":"go","key":"go","directory":"/fixture/go"},
-            "go-model-alias": {"adapter":"opencode","label":"same","key":"go","directory":"/fixture/go"},
-            "zen": {"adapter":"opencode","label":"zen","key":"zen","directory":"/fixture/zen"}
-        }})).unwrap();
-        let effective = settings.with_derived_accounts();
-        for (key, models) in [
-            (
-                "go",
-                [
-                    "opencode-go/glm-5.3-flash",
-                    "opencode-go/deepseek-v4.1-flash",
-                ],
-            ),
-            (
-                "zen",
-                [
-                    "opencode/glm-5.3-flash-free",
-                    "opencode/deepseek-v4.1-flash-free",
-                ],
-            ),
-        ] {
-            let accounts: Vec<_> = effective
+    fn registered_plans_enumerate_once_without_inventing_identities() {
+        let spec = provenant_records::AdapterSpec::get("opencode").unwrap();
+        let mut settings = Settings::default();
+        for (index, plan) in spec.account_model_plans.iter().enumerate() {
+            let entry: Registration = serde_json::from_value(serde_json::json!({
+                "adapter":spec.name, "label":plan.plan, "key":format!("identity-{index}"),
+                "directory":format!("/fixture/{index}"), "plan":plan.plan
+            }))
+            .unwrap();
+            settings
+                .entries
+                .insert(format!("entry-{index}"), entry.clone());
+            settings.entries.insert(format!("alias-{index}"), entry);
+            let effective = settings.unique_accounts();
+            let identities: std::collections::BTreeSet<_> = settings
                 .entries
                 .values()
-                .filter(|entry| entry.adapter == "opencode" && entry.key == key)
+                .map(|entry| (&entry.adapter, &entry.key))
                 .collect();
-            assert_eq!(
-                accounts.len(),
-                1,
-                "one credential identity per service, never per model"
-            );
-            assert_eq!(
-                accounts[0].directory,
-                PathBuf::from(format!("/fixture/{key}"))
-            );
-            let spec = provenant_records::AdapterSpec::get("opencode").unwrap();
-            assert!(
-                models
+            assert_eq!(effective.entries.len(), identities.len());
+            for account in effective.entries.values() {
+                let plan = spec
+                    .account_model_plans
                     .iter()
-                    .all(|model| spec.account_serves_model(key, model))
-            );
+                    .find(|plan| Some(plan.plan) == account.plan.as_deref())
+                    .unwrap();
+                assert!(spec.account_serves_model(
+                    account.plan.as_deref(),
+                    &format!("{}fixture", plan.model_prefix)
+                ));
+            }
         }
-        assert_eq!(
-            effective.with_derived_accounts().entries.len(),
-            effective.entries.len()
-        );
     }
 }

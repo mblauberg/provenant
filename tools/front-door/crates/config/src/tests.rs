@@ -361,6 +361,7 @@ fn assert_gc_settings_parse_defaults_and_warnings() {
         ("graph_checkpoint_days=3651", "graph_checkpoint_days_range"),
         ("schedule='yes'", "type"),
         ("free_floor='bad'", "invalid_cache_size"),
+        ("critical_free='bad'", "invalid_cache_size"),
         ("alert_below='bad'", "invalid_cache_size"),
         (
             "projects.p.regenerable=['../target']",

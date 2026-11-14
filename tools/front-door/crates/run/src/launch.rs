@@ -430,6 +430,11 @@ fn check_launch_policy(
     let Err(refusal) = providers.check_policy(task) else {
         return Ok(());
     };
+    // DiskFloor is emitted only by the shared critical-space decision.
+    // Advisory pressure has already warned and continued at that core.
+    if refusal.terminal_cause == TerminalCause::DiskFloor {
+        return Err(refusal);
+    }
     let owned = refusal.policy_code.clone();
     let code = if let Some(code) = owned.as_deref() {
         code
@@ -450,10 +455,10 @@ fn check_launch_policy(
             provenant_records::diagnostic::BoundaryClass::None
                 if matches!(
                     refusal.terminal_cause,
-                    TerminalCause::DiskFloor | TerminalCause::DiskObservationUnavailable
+                    TerminalCause::DiskObservationUnavailable
                 ) =>
             {
-                "LAUNCH_DISK"
+                "SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE"
             }
             // A generic refusal with no boundary is not evidence of disk pressure.
             // Keep its typed outcome instead of letting a disk knob authorize it.

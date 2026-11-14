@@ -292,7 +292,28 @@ pub fn list(
                     .find(|m| {
                         m.model.adapter() == adapter
                             && provenant_records::AdapterSpec::get(adapter).is_none_or(|spec| {
-                                spec.account_serves_model(account, m.model.model())
+                                spec.account_serves_model(
+                                    context
+                                        .availability
+                                        .iter()
+                                        .find(|a| {
+                                            a.adapter == adapter
+                                                && a.account_key.as_deref() == Some(account)
+                                        })
+                                        .and_then(|a| a.plan.as_deref())
+                                        .or_else(|| {
+                                            context
+                                                .quota
+                                                .iter()
+                                                .find(|q| {
+                                                    q.snapshot.account.adapter == adapter
+                                                        && q.snapshot.account.account_key == account
+                                                })
+                                                .and_then(|q| q.snapshot.details.as_ref())
+                                                .and_then(|d| d.plan.as_deref())
+                                        }),
+                                    m.model.model(),
+                                )
                             })
                     })?
                     .model
@@ -948,7 +969,10 @@ pub fn pacing_preview(model: &ModelId, context: &RoutingContext<'_>) -> Vec<Paci
         .filter(|q| {
             q.snapshot.account.adapter == model.adapter()
                 && provenant_records::AdapterSpec::get(model.adapter()).is_none_or(|spec| {
-                    spec.account_serves_model(&q.snapshot.account.account_key, model.model())
+                    spec.account_serves_model(
+                        q.snapshot.details.as_ref().and_then(|d| d.plan.as_deref()),
+                        model.model(),
+                    )
                 })
         })
         .map(|q| Some(q.snapshot.account.account_key.clone()))
@@ -960,9 +984,7 @@ pub fn pacing_preview(model: &ModelId, context: &RoutingContext<'_>) -> Vec<Paci
             .filter(|a| {
                 a.adapter == model.adapter()
                     && provenant_records::AdapterSpec::get(model.adapter()).is_none_or(|spec| {
-                        a.account_key
-                            .as_deref()
-                            .is_none_or(|key| spec.account_serves_model(key, model.model()))
+                        spec.account_serves_model(a.plan.as_deref(), model.model())
                     })
             })
             .map(|a| a.account_key.clone()),
@@ -1660,6 +1682,25 @@ fn account_load(
     }
 }
 
+/// Normalise only valid, catalogued controls for adapters declaring this policy.
+/// Unknown models and invalid controls retain the usual explicit error.
+fn normalised_effort<'e>(
+    model: &ModelId,
+    effort: Option<&'e str>,
+    context: &ValidatedContext<'_>,
+) -> (Option<&'e str>, Option<&'e str>) {
+    let dropped = effort.filter(|value| {
+        crate::request::effort_valid(value)
+            && provenant_records::AdapterSpec::get(model.adapter())
+                .is_some_and(|spec| spec.drop_unsupported_effort)
+            && context
+                .catalogue
+                .model(model)
+                .is_some_and(|entry| !entry.efforts.iter().any(|allowed| allowed == value))
+    });
+    (if dropped.is_some() { None } else { effort }, dropped)
+}
+
 fn candidate(
     model: &ModelId,
     effort: Option<&str>,
@@ -1667,6 +1708,7 @@ fn candidate(
     avoid_cooling: bool,
     intent: RouteIntent,
 ) -> Result<RouteAlternative, RoutingError> {
+    let (effort, dropped_effort) = normalised_effort(model, effort, context);
     let entry = admissible(model, effort, context)?;
     #[cfg(test)]
     let spec = context
@@ -1691,11 +1733,8 @@ fn candidate(
         .iter()
         .filter(|a| {
             a.adapter == model.adapter()
-                && provenant_records::AdapterSpec::get(model.adapter()).is_none_or(|spec| {
-                    a.account_key
-                        .as_deref()
-                        .is_none_or(|key| spec.account_serves_model(key, model.model()))
-                })
+                && provenant_records::AdapterSpec::get(model.adapter())
+                    .is_none_or(|spec| spec.account_serves_model(a.plan.as_deref(), model.model()))
         })
         .filter(|a| {
             let permitted = context
@@ -1796,6 +1835,12 @@ fn candidate(
         },
     };
     let mut extra = provenant_records::ExtraFields::default();
+    if let Some(value) = dropped_effort {
+        extra.insert("effort_warning".into(), serde_json::json!({
+            "requested": value, "applied": effort, "model": model.as_str(),
+            "source": "adapter:drop_unsupported_effort", "reason": "unsupported model effort dropped"
+        }));
+    }
     if availability.is_none()
         && let Err(warning) = check_go_allowance(model, context.config, context.catalogue)
     {
@@ -2119,10 +2164,7 @@ impl Excluded<'_> {
         let serving_accounts_remain = context.availability.iter().any(|record| {
             record.adapter == model.adapter()
                 && provenant_records::AdapterSpec::get(model.adapter()).is_none_or(|spec| {
-                    record
-                        .account_key
-                        .as_deref()
-                        .is_none_or(|key| spec.account_serves_model(key, model.model()))
+                    spec.account_serves_model(record.plan.as_deref(), model.model())
                 })
         });
         if let Some(rule) = self
@@ -2426,19 +2468,66 @@ fn classify_pool(
         exclusions: Vec::new(),
     };
     for member in members {
-        let effort = request.effort.clone().or(member.effort.clone());
+        let mut effort = request.effort.clone().or(member.effort.clone());
         let mut factor_basis_points = NEUTRAL_FACTOR_BASIS_POINTS;
+        let capability = context
+            .catalogue
+            .model(&member.model)
+            .map(|model| model.capability)
+            .unwrap_or_default();
+        let role = context
+            .selection_evidence
+            .map(|evidence| evidence.role(request.intent.workload, request.intent.writes))
+            .unwrap_or(if request.intent.workload == Workload::Review {
+                "review"
+            } else if request.intent.writes {
+                "writer"
+            } else {
+                "task"
+            });
+        let selector = if role == "review" || request.intent.workload == Workload::Review {
+            "review"
+        } else {
+            name
+        };
+        let (preferences, preference_source) = context
+            .config
+            .capability_preferences
+            .get(selector)
+            .map(|weights| (Some(weights), "config"))
+            .unwrap_or((
+                context.catalogue.capability_preferences.get(selector),
+                "catalogue",
+            ));
+        let capability_weight = preferences
+            .and_then(|weights| weights.get(&capability))
+            .copied()
+            .unwrap_or(1)
+            .max(1);
+        let observed_prior = context.selection_evidence.and_then(|evidence| {
+            evidence.priors.iter().find(|prior| {
+                prior.model == member.model && prior.pool == name && prior.role == role
+            })
+        });
+        let prior = context
+            .config
+            .outcome_priors
+            .enabled
+            .then_some(observed_prior)
+            .flatten();
+        let prior_factor = prior.map_or(10_000, RoutePrior::factor_basis_points);
+        let evidence_count =
+            observed_prior.map_or(0, |prior| prior.successes.saturating_add(prior.failures));
+        let mut ranking = provenant_records::ExtraFields::default();
+        ranking.insert("capability_preference".into(), serde_json::json!({"capability":capability,"weight":capability_weight,"selector":selector,"source":preference_source}));
+        ranking.insert("outcome_prior".into(), serde_json::json!({"enabled":context.config.outcome_priors.enabled,"role":role,"pool":name,"factor_basis_points":prior_factor,"evidence_count":evidence_count,"evidence":observed_prior,"source":if !context.config.outcome_priors.enabled {"config:disabled"} else if observed_prior.is_some() {"route_outcomes"} else {"no_evidence"}}));
         let spent = context
             .availability
             .iter()
             .filter(|a| {
                 a.adapter == member.model.adapter()
                     && provenant_records::AdapterSpec::get(member.model.adapter()).is_none_or(
-                        |spec| {
-                            a.account_key.as_deref().is_none_or(|key| {
-                                spec.account_serves_model(key, member.model.model())
-                            })
-                        },
+                        |spec| spec.account_serves_model(a.plan.as_deref(), member.model.model()),
                     )
             })
             .map(|a| latest_reading(&member.model, a, context, false))
@@ -2495,7 +2584,7 @@ fn classify_pool(
                 .exclusions
                 .push(format!("{}: {detail}", member.model.as_str()));
             classified.candidates.push(RouteSelectionCandidate {
-                extra: Default::default(),
+                extra: ranking.clone(),
                 model: member.model.as_str().into(),
                 weight: member.weight,
                 factor_basis_points,
@@ -2510,8 +2599,8 @@ fn classify_pool(
         let exclusion = if !privacy_allowed(&member.model, request.confidential, context.catalogue)
         {
             Some(("confidential", "confidential model"))
-        } else if effort
-            .as_deref()
+        } else if normalised_effort(&member.model, effort.as_deref(), context)
+            .0
             .is_some_and(|value| !member.efforts.iter().any(|allowed| allowed == value))
         {
             Some(("effort", "unsupported effort"))
@@ -2521,7 +2610,6 @@ fn classify_pool(
         let mut pacing_detail = None;
         let mut readiness = None;
         let mut option = None;
-        let mut ranking = provenant_records::ExtraFields::default();
         let exclusion = if let Some((kind, detail)) = exclusion {
             classified.exclusions.push(detail.to_owned());
             Some(kind.to_owned())
@@ -2534,6 +2622,10 @@ fn classify_pool(
                 request.intent,
             ) {
                 Ok(resolved) => {
+                    effort = resolved.effort.clone();
+                    if let Some(warning) = resolved.extra.get("effort_warning") {
+                        ranking.insert("effort_warning".into(), warning.clone());
+                    }
                     if let Some(family) = excluded_members.required_family
                         && matches!(&resolved.readiness, RouteReadiness::Unavailable { reason, .. } if reason.is_account_block())
                     {
@@ -2545,7 +2637,7 @@ fn classify_pool(
                             .exclusions
                             .push(format!("{}: {detail}", member.model.as_str()));
                         classified.candidates.push(RouteSelectionCandidate {
-                            extra: Default::default(),
+                            extra: ranking.clone(),
                             model: member.model.as_str().into(),
                             weight: member.weight,
                             factor_basis_points,
@@ -2574,7 +2666,7 @@ fn classify_pool(
                             .exclusions
                             .push(format!("{}: read-only model policy", member.model.as_str()));
                         classified.candidates.push(RouteSelectionCandidate {
-                            extra: Default::default(),
+                            extra: ranking.clone(),
                             model: member.model.as_str().into(),
                             weight: member.weight,
                             factor_basis_points,
@@ -2595,56 +2687,6 @@ fn classify_pool(
                         context,
                     );
                     let cache_factor = model_policy.cache_factor_basis_points(request.intent);
-                    let capability = context
-                        .catalogue
-                        .model(&member.model)
-                        .map(|m| m.capability)
-                        .unwrap_or_default();
-                    let role = context
-                        .selection_evidence
-                        .map(|e| e.role(request.intent.workload, request.intent.writes))
-                        .unwrap_or(if request.intent.workload == Workload::Review {
-                            "review"
-                        } else if request.intent.writes {
-                            "writer"
-                        } else {
-                            "task"
-                        });
-                    let selector =
-                        if role == "review" || request.intent.workload == Workload::Review {
-                            "review"
-                        } else {
-                            name
-                        };
-                    let (preferences, source) = context
-                        .config
-                        .capability_preferences
-                        .get(selector)
-                        .map(|weights| (Some(weights), "config"))
-                        .unwrap_or((
-                            context.catalogue.capability_preferences.get(selector),
-                            "catalogue",
-                        ));
-                    let capability_weight = preferences
-                        .and_then(|weights| weights.get(&capability))
-                        .copied()
-                        .unwrap_or(1)
-                        .max(1);
-                    let prior = context
-                        .config
-                        .outcome_priors
-                        .enabled
-                        .then(|| {
-                            context.selection_evidence.and_then(|e| {
-                                e.priors.iter().find(|prior| {
-                                    prior.model == member.model
-                                        && prior.pool == name
-                                        && prior.role == role
-                                })
-                            })
-                        })
-                        .flatten();
-                    let prior_factor = prior.map_or(10_000, RoutePrior::factor_basis_points);
                     let load = context
                         .availability
                         .iter()
@@ -2667,8 +2709,6 @@ fn classify_pool(
                         "ranking_factor_basis_points".into(),
                         ranking_factor_basis_points.into(),
                     );
-                    ranking.insert("capability_preference".into(), serde_json::json!({"capability":capability,"weight":capability_weight,"selector":selector,"source":source}));
-                    ranking.insert("outcome_prior".into(), serde_json::json!({"enabled":context.config.outcome_priors.enabled,"role":role,"pool":name,"factor_basis_points":prior_factor,"evidence":prior,"source":if !context.config.outcome_priors.enabled {"config:disabled"} else if prior.is_some() {"route_outcomes"} else {"no_evidence"}}));
                     if let Some(load) = load {
                         ranking.insert("account_load".into(), serde_json::json!(load));
                     }
@@ -2676,7 +2716,7 @@ fn classify_pool(
                         && cooling(&member.model, resolved.account_key.as_deref(), context)
                     {
                         classified.candidates.push(RouteSelectionCandidate {
-                            extra: Default::default(),
+                            extra: ranking.clone(),
                             model: member.model.as_str().into(),
                             weight: member.weight,
                             factor_basis_points,

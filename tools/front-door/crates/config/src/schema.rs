@@ -47,13 +47,16 @@ const GC_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::new("schedule", "bool"),
     FieldMetadata::int("idle_days", 1, 3650),
     FieldMetadata::int("graph_checkpoint_days", 1, 3650),
+    FieldMetadata::int("discard_archive_days", 1, 3650),
     FieldMetadata::new("free_floor", "string"),
+    FieldMetadata::new("critical_free", "string"),
     FieldMetadata::new("lane_cargo_cache_max", "string"),
     FieldMetadata::new("alert_below", "string"),
-    FieldMetadata::enumeration(
-        "projects.{project}.foreign_worktrees",
-        &["keep", "merged-clean"],
-    ),
+    FieldMetadata::new("projects.{project}.integration_branches", "array"),
+    FieldMetadata::new("projects.{project}.keep_paths", "array"),
+    FieldMetadata::enumeration("projects.{project}.remote_branches", &["never", "managed"]),
+    FieldMetadata::int("projects.{project}.remote_min_tip_age_days", 0, 3650),
+    FieldMetadata::enumeration("projects.{project}.foreign_worktrees", &["keep", "collect"]),
 ];
 const WORKTREE_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::new("setup", "array"),

@@ -1,7 +1,7 @@
 //! Command projection and host lifecycle effects for the single custody ledger.
 use crate::{emit, fail, roots};
 use provenant_cli::{Globals, Status};
-use provenant_core::{ActorId, CancelToken, Clock, ProjectId, Roots};
+use provenant_core::{CancelToken, Clock, ProjectId, Roots};
 use provenant_fabric_store::{HostStore, Request};
 use provenant_os::clock::SystemClock;
 use provenant_records::{CommandResult, Outcome, custody::*};
@@ -18,7 +18,7 @@ type Error = Box<dyn std::error::Error>;
 pub struct RetirementWriter<'a> {
     store: HostStore,
     project: ProjectId,
-    actor: ActorId,
+    chair: Chair,
     clock: &'a dyn Clock,
     cancel: &'a CancelToken,
 }
@@ -27,7 +27,7 @@ impl<'a> RetirementWriter<'a> {
     pub fn open(
         roots: &'a Roots,
         project: ProjectId,
-        actor: ActorId,
+        chair: Chair,
         clock: &'a dyn Clock,
         cancel: &'a CancelToken,
     ) -> Result<Self, provenant_confinement::worktrees::WorktreeError> {
@@ -36,7 +36,7 @@ impl<'a> RetirementWriter<'a> {
         Ok(Self {
             store,
             project,
-            actor,
+            chair,
             clock,
             cancel,
         })
@@ -66,46 +66,70 @@ impl<'a> RetirementWriter<'a> {
         }
     }
 
-    fn ensure_ref_subject(
-        store: &HostStore,
-        project: ProjectId,
-        reference: &RefOwnership,
-        related_subjects: &[Subject],
+    fn ensure_retirement_subjects(
+        &self,
+        record: &RetirementRecord,
         request: &Request<'_>,
-    ) -> Result<bool, provenant_confinement::worktrees::WorktreeError> {
-        let subject = reference.custody_subject().map_err(Self::error)?;
-        if store
-            .custody_item(project, &subject, request)
-            .map_err(Self::error)?
-            .is_some()
-        {
-            return Ok(true);
+    ) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
+        let subjects = record.subjects().cloned().collect::<Vec<_>>();
+        if subjects.is_empty() {
+            return Err(provenant_confinement::worktrees::WorktreeError::InvalidRequest);
         }
-
-        let source_subjects = related_subjects
-            .iter()
-            .cloned()
-            .chain(reference.logical_branch_subject())
-            .collect::<Vec<_>>();
-        for source_subject in source_subjects {
-            let Some(source) = store
-                .custody_item(project, &source_subject, request)
-                .map_err(Self::error)?
-            else {
-                continue;
-            };
-            if !matches!(
-                source.state,
-                CustodyState::Active | CustodyState::Landed { .. }
-            ) {
-                continue;
-            }
-            store
-                .ensure_custody_from_existing(project, &subject, &source_subject, request)
+        let holder = Holder::Chair {
+            chair: self.chair.clone(),
+        };
+        let origin = match record.reference.origin {
+            RefOrigin::Created => Origin::Provenant,
+            RefOrigin::Adopted => Origin::External,
+        };
+        for subject in &subjects {
+            let current = self
+                .store
+                .custody_item(record.project, subject, request)
                 .map_err(Self::error)?;
-            return Ok(true);
+            match current.as_ref().map(|item| &item.state) {
+                Some(CustodyState::Active | CustodyState::Landed { .. }) => continue,
+                Some(CustodyState::Retired { .. }) => {
+                    return Err(
+                        provenant_confinement::worktrees::WorktreeError::RegistrationUnconfirmed,
+                    );
+                }
+                _ => {}
+            }
+
+            let mut source = None;
+            for candidate in &subjects {
+                if candidate == subject {
+                    continue;
+                }
+                let item = self
+                    .store
+                    .custody_item(record.project, candidate, request)
+                    .map_err(Self::error)?;
+                if item.as_ref().is_some_and(|item| {
+                    matches!(
+                        &item.state,
+                        CustodyState::Active | CustodyState::Landed { .. }
+                    )
+                }) {
+                    source = Some(candidate.clone());
+                    break;
+                }
+            }
+            if let Some(source) = source {
+                self.store
+                    .ensure_custody_from_existing(record.project, subject, &source, request)
+                    .map_err(Self::error)?;
+            } else {
+                self.store
+                    .acquire_custody(record.project, subject, &holder, origin, request)
+                    .map_err(Self::error)?;
+            }
         }
-        Ok(false)
+        self.store
+            .link_custody(record.project, &subjects, request)
+            .map_err(Self::error)?;
+        Ok(())
     }
 }
 
@@ -118,42 +142,57 @@ impl provenant_confinement::worktrees::RetirementPort for RetirementWriter<'_> {
         if intent.reference.repository != intent.project {
             return Err(provenant_confinement::worktrees::WorktreeError::InvalidRequest);
         }
+        if intent.decision.authority() != self.chair.actor {
+            return Err(provenant_confinement::worktrees::WorktreeError::InvalidRequest);
+        }
         let request = self.request();
         let subject = intent.reference.custody_subject().map_err(Self::error)?;
-        if let Some(item) = self
-            .store
-            .custody_item(intent.project, &subject, &request)
-            .map_err(Self::error)?
-            && let CustodyState::Retired { retirement_id } = item.state
-        {
+        let planned = RetirementRecord::plan(
+            intent.project,
+            intent.related_subjects,
+            intent.reference,
+            intent.expected_tip,
+            intent.decision,
+        )
+        .map_err(Self::error)?;
+        if planned.subject != subject || !planned.valid_evidence() {
+            return Err(provenant_confinement::worktrees::WorktreeError::InvalidRequest);
+        }
+        let mut retirement_ids = std::collections::BTreeSet::new();
+        for affected in planned.subjects() {
+            if let Some(item) = self
+                .store
+                .custody_item(intent.project, affected, &request)
+                .map_err(Self::error)?
+                && let CustodyState::Retired { retirement_id } = item.state
+            {
+                retirement_ids.insert(retirement_id);
+            }
+        }
+        if retirement_ids.len() > 1 {
+            return Err(provenant_confinement::worktrees::WorktreeError::IdentityChanged);
+        }
+        if let Some(retirement_id) = retirement_ids.into_iter().next() {
             let record = self
                 .store
                 .retirement(intent.project, &retirement_id, &request)
                 .map_err(Self::error)?
                 .ok_or_else(|| Self::error(provenant_fabric_store::Error::NotFound))?;
-            let mut requested_related = intent.related_subjects.clone();
+            let mut requested_related = planned.related_subjects.clone();
             requested_related.sort_by(|left, right| {
                 (left.kind.as_str(), &left.id).cmp(&(right.kind.as_str(), &right.id))
             });
             requested_related.dedup();
-            let escalates_landing = matches!(
-                (record.decision.evidence(), &intent.evidence),
-                (
-                    RemovalEvidence::Landing { .. },
-                    RemovalEvidence::ExplicitDiscard
-                )
-            );
             if record.project != intent.project
                 || record.subject != subject
-                || !requested_related
-                    .iter()
-                    .all(|subject| record.related_subjects.contains(subject))
-                || !record
-                    .reference
-                    .matches_ownership(&intent.reference)
-                    .map_err(Self::error)?
-                || record.expected_tip != intent.expected_tip
-                || escalates_landing
+                || requested_related != record.related_subjects
+                || record.reference != planned.reference
+                || record.expected_tip != planned.expected_tip
+                || !record.decision.permits_replay(&planned.decision)
+                || !planned
+                    .decision
+                    .valid_for(&planned.related_subjects, planned.expected_tip)
+                || !record.valid_evidence()
             {
                 return Err(
                     provenant_confinement::worktrees::WorktreeError::RegistrationUnconfirmed,
@@ -162,27 +201,7 @@ impl provenant_confinement::worktrees::RetirementPort for RetirementWriter<'_> {
             return Ok(Some(record));
         }
 
-        if !Self::ensure_ref_subject(
-            &self.store,
-            intent.project,
-            &intent.reference,
-            &intent.related_subjects,
-            &request,
-        )? {
-            return Ok(None);
-        }
-
-        let planned = RetirementRecord::plan(
-            intent.project,
-            intent.related_subjects,
-            intent.reference,
-            intent.expected_tip,
-            RetirementDecision::Discard {
-                authority: self.actor,
-                evidence: intent.evidence,
-            },
-        )
-        .map_err(Self::error)?;
+        self.ensure_retirement_subjects(&planned, &request)?;
         self.store
             .start_retirement(&planned, &request)
             .map(Some)
@@ -211,10 +230,19 @@ impl provenant_confinement::worktrees::RetirementPort for RetirementWriter<'_> {
             .retirement(project, &retirement_id, &request)
             .map_err(Self::error)?
             .ok_or_else(|| Self::error(provenant_fabric_store::Error::NotFound))?;
-        if !record.owns_subject(subject) {
+        if !record.owns_subject(subject) || !record.valid_evidence() {
             return Err(provenant_confinement::worktrees::WorktreeError::RegistrationUnconfirmed);
         }
         Ok(Some(record))
+    }
+
+    fn pending_retirements(
+        &self,
+        project: ProjectId,
+    ) -> Result<Vec<RetirementRecord>, provenant_confinement::worktrees::WorktreeError> {
+        self.require_project(project)?;
+        let request = self.request();
+        pending_retirements(&self.store, project, &request)
     }
 
     fn advance_retirement(
@@ -237,37 +265,149 @@ impl provenant_confinement::worktrees::RetirementPort for RetirementWriter<'_> {
     }
 }
 
-/// No-effect port for previews and callers that have no verified evidence.
-/// The confinement boundary treats a missing durable owner as Kept.
-pub(crate) struct PreviewRetirementPort;
+/// Read-only S2 view used by previews. It reads the same custody pointers and
+/// lifecycle records as apply, while every lifecycle mutation is rejected.
+pub(crate) struct RetirementReader<'a> {
+    store: Option<HostStore>,
+    project: ProjectId,
+    clock: &'a dyn Clock,
+    cancel: &'a CancelToken,
+}
 
-impl provenant_confinement::worktrees::RetirementPort for PreviewRetirementPort {
-    fn begin_retirement(
-        &self,
-        _intent: provenant_confinement::worktrees::RetirementIntent,
-    ) -> Result<Option<RetirementRecord>, provenant_confinement::worktrees::WorktreeError> {
-        Ok(None)
+impl<'a> RetirementReader<'a> {
+    pub(crate) fn open(
+        roots: &'a Roots,
+        project: ProjectId,
+        clock: &'a dyn Clock,
+        cancel: &'a CancelToken,
+    ) -> Result<Self, provenant_confinement::worktrees::WorktreeError> {
+        let store =
+            HostStore::open_read_only(&roots.state, Instant::now() + Duration::from_secs(2))
+                .map_err(RetirementWriter::error)?;
+        Ok(Self {
+            store,
+            project,
+            clock,
+            cancel,
+        })
     }
 
-    fn retirement_for_subject(
-        &self,
-        _project: ProjectId,
-        _subject: &Subject,
-    ) -> Result<Option<RetirementRecord>, provenant_confinement::worktrees::WorktreeError> {
-        Ok(None)
+    fn request(&self) -> Request<'_> {
+        Request {
+            clock: self.clock,
+            cancel: self.cancel,
+        }
     }
 
-    fn advance_retirement(
+    fn require_project(
         &self,
-        _record: &RetirementRecord,
-        _step: RetirementStep,
-        _state: RetirementStepState,
-    ) -> Result<RetirementRecord, provenant_confinement::worktrees::WorktreeError> {
-        Err(provenant_confinement::worktrees::WorktreeError::InvalidRequest)
+        project: ProjectId,
+    ) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
+        if project == self.project {
+            Ok(())
+        } else {
+            Err(provenant_confinement::worktrees::WorktreeError::InvalidRequest)
+        }
+    }
+
+    pub(crate) fn retirement_for_subject(
+        &self,
+        project: ProjectId,
+        subject: &Subject,
+    ) -> Result<Option<RetirementRecord>, provenant_confinement::worktrees::WorktreeError> {
+        self.require_project(project)?;
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let request = self.request();
+        let Some(item) = store
+            .custody_item(project, subject, &request)
+            .map_err(RetirementWriter::error)?
+        else {
+            return Ok(None);
+        };
+        let CustodyState::Retired { retirement_id } = item.state else {
+            return Ok(None);
+        };
+        let Some(record) = store
+            .retirement(project, &retirement_id, &request)
+            .map_err(RetirementWriter::error)?
+        else {
+            return Err(RetirementWriter::error(
+                provenant_fabric_store::Error::NotFound,
+            ));
+        };
+        if record.id != retirement_id
+            || record.project != project
+            || !record.owns_subject(subject)
+            || !record.valid_evidence()
+        {
+            return Err(provenant_confinement::worktrees::WorktreeError::IdentityChanged);
+        }
+        Ok(Some(record))
     }
 }
 
-fn presence(
+fn pending_retirements(
+    store: &HostStore,
+    project: ProjectId,
+    request: &Request<'_>,
+) -> Result<Vec<RetirementRecord>, provenant_confinement::worktrees::WorktreeError> {
+    let mut query = CustodyQuery {
+        project: Some(project),
+        state: Some(StateKind::Retired),
+        ..Default::default()
+    };
+    let mut subjects_by_id = std::collections::BTreeMap::<String, Vec<Subject>>::new();
+    loop {
+        let page = store
+            .custody(&query, request)
+            .map_err(RetirementWriter::error)?;
+        for item in page.items {
+            if let CustodyState::Retired { retirement_id } = item.state {
+                subjects_by_id
+                    .entry(retirement_id)
+                    .or_default()
+                    .push(item.subject);
+            }
+        }
+        match page.next {
+            Some(next) if next > query.after => query.after = next,
+            Some(_) => {
+                return Err(provenant_confinement::worktrees::WorktreeError::InvalidOutput);
+            }
+            None => break,
+        }
+    }
+    let mut pending = Vec::new();
+    for (id, subjects) in subjects_by_id {
+        let Some(record) = store
+            .retirement(project, &id, request)
+            .map_err(RetirementWriter::error)?
+        else {
+            return Err(RetirementWriter::error(
+                provenant_fabric_store::Error::NotFound,
+            ));
+        };
+        if record.id != id
+            || record.project != project
+            || !record.valid_evidence()
+            || subjects.iter().any(|subject| !record.owns_subject(subject))
+        {
+            return Err(provenant_confinement::worktrees::WorktreeError::IdentityChanged);
+        }
+        if record
+            .outcomes
+            .iter()
+            .any(|outcome| !matches!(&outcome.state, RetirementStepState::Completed { .. }))
+        {
+            pending.push(record);
+        }
+    }
+    Ok(pending)
+}
+
+pub(crate) fn presence(
     record: &CustodyRecord,
     roots: &Roots,
     host: provenant_core::HostId,
@@ -794,6 +934,12 @@ pub fn settle_landing(
                         &call,
                     )?;
                 }
+            }
+            if let Err(error) = crate::worktrees::retention_event(&resolved, &artefacts, &evidence)
+            {
+                provenant_fabric_runtime::custody::warning(format!(
+                    "merge retention will retry: {error}"
+                ));
             }
         }
     }

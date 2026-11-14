@@ -294,8 +294,16 @@ mod test_presentation {
             let bases = run.checkpoint.bases.unwrap_or_default();
             human.push_str(&format!(
                 "Graph bases: review={} integration={}\n",
-                bases.review.map(|base| base.to_string()).as_deref().unwrap_or("unavailable"),
-                bases.integration.map(|base| base.to_string()).as_deref().unwrap_or("unavailable")
+                bases
+                    .review
+                    .map(|base| base.to_string())
+                    .as_deref()
+                    .unwrap_or("unavailable"),
+                bases
+                    .integration
+                    .map(|base| base.to_string())
+                    .as_deref()
+                    .unwrap_or("unavailable")
             ));
         }
         if let Some(outcome) = run.outcome {

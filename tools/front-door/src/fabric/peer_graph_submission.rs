@@ -714,7 +714,7 @@ fn retained_lane_settlement_leaves_output_and_cache_for_gc()
     std::fs::write(
         fixture.rig.state.join("config.toml"),
         format!(
-            "schema_version=1\n[gc.projects.\"{}\"]\nregenerable=['build','saved']\nkeep=['saved']\nforeign_worktrees='merged-clean'\n",
+            "schema_version=1\n[gc.projects.\"{}\"]\nregenerable=['build','saved']\nkeep=['saved']\nforeign_worktrees='collect'\n",
             fixture.settled.project_id
         ),
     )?;

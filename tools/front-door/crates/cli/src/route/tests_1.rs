@@ -386,6 +386,7 @@
                 fixture_ref: format!("installed/{adapter}/version"),
                 catalogue_revision: catalogue.revision().into(),
                 account_key: Some("key".into()),
+                plan: None,
                 observed_models: Vec::new(),
                 observed_unix_seconds: now,
                 expires_unix_seconds: now + 300,
@@ -485,6 +486,7 @@
             fixture_ref: "installed/opencode/version".into(),
             catalogue_revision: catalogue.revision().into(),
             account_key: Some("go".into()),
+            plan: Some("go".into()),
             observed_models: Vec::new(),
             observed_unix_seconds: now,
             expires_unix_seconds: now + 300,
@@ -567,6 +569,7 @@
         std::fs::set_permissions(&zen_path, std::fs::Permissions::from_mode(0o600))?;
         let mut zen_available = available.clone();
         zen_available.account_key = Some("zen".into());
+        zen_available.plan = Some("zen".into());
         zen_available.fixture_ref = "installed/opencode/version".into();
         let zen_request = super::RouteRequest {
             read_heavy: false,
@@ -669,6 +672,18 @@
         assert_ne!(data["adapter"], "claude");
         assert_eq!(data["allow_unknown_partial_headroom"]["value"], false);
         assert_eq!(data["allow_unknown_partial_headroom"]["source"], "default");
+        for candidate in data["pool_selection"]["candidates"]
+            .as_array()
+            .ok_or("pool candidates")?
+        {
+            let model = candidate["model"].as_str().ok_or("candidate model")?;
+            let prefix = format!("  {model}: prior=");
+            let line = text
+                .lines()
+                .find(|line| line.starts_with(&prefix))
+                .ok_or("candidate prior explanation")?;
+            assert!(line.contains("evidence_count="), "{line}");
+        }
         std::fs::write(
             roots.state.as_path().join("config.toml"),
             "schema_version=1\n[knobs]\n'routing.allow_unknown_partial_headroom'=true\n",

@@ -60,6 +60,8 @@ fn removal_preparation_allows_shared_launch_lock() -> Result<(), Box<dyn Error>>
         },
         &cancel(),
     )?;
+    let retirement = HostRetirementFixture::new(&test)?;
+    retirement.seed_lane(&context, &info)?;
     let artifact = info.path.join("target/artifact");
     fs::create_dir(info.path.join("target"))?;
     fs::write(&artifact, "output")?;
@@ -80,7 +82,7 @@ fn removal_preparation_allows_shared_launch_lock() -> Result<(), Box<dyn Error>>
         repository_held: Default::default(),
     };
     context.workers = &workers;
-    let result = remove_with_output(
+    let result = remove_with_retirement(
         &context,
         WorktreeRemove::Name {
             name: "removal-launch-lock".into(),
@@ -93,6 +95,8 @@ fn removal_preparation_allows_shared_launch_lock() -> Result<(), Box<dyn Error>>
             regenerable: vec!["target".into()],
             ..Default::default()
         },
+        &retirement,
+        retirement.actor,
     )?;
     assert_eq!(result.removed.len(), 1);
     assert!(
@@ -151,6 +155,8 @@ fn removal_refreshes_session_after_output_preparation() -> Result<(), Box<dyn Er
         },
         &cancel(),
     )?;
+    let retirement = HostRetirementFixture::new(&test)?;
+    retirement.seed_lane(&context, &info)?;
     let artifact = info.path.join("target/artifact");
     fs::create_dir(info.path.join("target"))?;
     fs::write(&artifact, "output")?;
@@ -161,7 +167,7 @@ fn removal_refreshes_session_after_output_preparation() -> Result<(), Box<dyn Er
     };
     let session = CensusSession::new(&observer, &test.clock);
     context.workers = &session;
-    let result = remove_with_output(
+    let result = remove_with_retirement(
         &context,
         WorktreeRemove::Name {
             name: "late-worker".into(),
@@ -174,6 +180,8 @@ fn removal_refreshes_session_after_output_preparation() -> Result<(), Box<dyn Er
             regenerable: vec!["target".into()],
             ..Default::default()
         },
+        &retirement,
+        retirement.actor,
     );
     assert!(
         matches!(
@@ -346,7 +354,14 @@ fn foreign_gc_session_requires_fresh_complete_census() -> Result<(), Box<dyn Err
         &context,
         &lanes,
         &WorktreeGcPolicy {
-            foreign_merged_clean: true,
+            include_foreign: true,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
+            mode: CollectionMode::Worktrees,
+            proof: Some(&evidence),
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
             upstream: Some(fixture.head()?),
             terminal: &|_| false,
             no_live_lanes: &|_| true,
@@ -355,7 +370,6 @@ fn foreign_gc_session_requires_fresh_complete_census() -> Result<(), Box<dyn Err
             written_before_ns: i128::MAX,
             dry_run: false,
         },
-        retirement.apply(&evidence),
         &cancel(),
     )?;
     assert!(report.worktrees.retained.iter().any(|retained| {
@@ -402,7 +416,14 @@ fn gc_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> {
         &context,
         std::slice::from_ref(&lane),
         &WorktreeGcPolicy {
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
+            mode: CollectionMode::Worktrees,
+            proof: Some(&evidence),
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
             upstream: Some(fixture.head()?),
             terminal: &|_| true,
             no_live_lanes: &|_| true,
@@ -411,7 +432,6 @@ fn gc_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> {
             written_before_ns: i128::MAX,
             dry_run: false,
         },
-        retirement.apply(&evidence),
         &cancel(),
     )?;
     assert!(report.worktrees.retained.iter().any(|retained| {
@@ -447,7 +467,14 @@ fn gc_managed_removal_needs_a_fresh_free_census_under_custody() -> Result<(), Bo
                 context,
                 std::slice::from_ref(&lane),
                 &WorktreeGcPolicy {
-                    foreign_merged_clean: false,
+                    include_foreign: false,
+                    retirement_port: Some(&retirement),
+                    retirement_feeds: Some(&retirement),
+                    mode: CollectionMode::Worktrees,
+                    proof: Some(&evidence),
+                    upstream_reference: None,
+                    integration_patterns: &[],
+                    excluded_paths: &[],
                     upstream: Some(upstream),
                     terminal: &|_| true,
                     no_live_lanes: &|_| true,
@@ -456,7 +483,6 @@ fn gc_managed_removal_needs_a_fresh_free_census_under_custody() -> Result<(), Bo
                     written_before_ns: i128::MAX,
                     dry_run: false,
                 },
-                retirement.apply(&evidence),
                 &cancel(),
             )
         };
@@ -522,7 +548,14 @@ fn gc_preview_and_apply_both_retain_a_managed_tree_with_an_unknown_census()
             &context,
             std::slice::from_ref(&lane),
             &WorktreeGcPolicy {
-                foreign_merged_clean: false,
+                include_foreign: false,
+                retirement_port: Some(&retirement),
+                retirement_feeds: Some(&retirement),
+                mode: CollectionMode::Worktrees,
+                proof: Some(&evidence),
+                upstream_reference: None,
+                integration_patterns: &[],
+                excluded_paths: &[],
                 upstream: Some(fixture.head()?),
                 terminal: &|_| true,
                 no_live_lanes: &|_| true,
@@ -530,11 +563,6 @@ fn gc_preview_and_apply_both_retain_a_managed_tree_with_an_unknown_census()
                 keep: &[],
                 written_before_ns: i128::MAX,
                 dry_run,
-            },
-            if dry_run {
-                RetirementMode::Observe
-            } else {
-                retirement.apply(&evidence)
             },
             &cancel(),
         )?;
@@ -562,7 +590,14 @@ fn gc_dry_run_retains_merged_worktree_with_unknown_writer() -> Result<(), Box<dy
         &context,
         &[lane],
         &WorktreeGcPolicy {
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
             upstream: Some(fixture.head()?),
             terminal: &|_| false,
             no_live_lanes: &|_| true,
@@ -571,7 +606,6 @@ fn gc_dry_run_retains_merged_worktree_with_unknown_writer() -> Result<(), Box<dy
             written_before_ns: i128::MAX,
             dry_run: true,
         },
-        RetirementMode::Observe,
         &cancel(),
     )?;
     assert_eq!(report.worktrees.retained.len(), 1);
@@ -601,7 +635,14 @@ fn gc_dry_run_retains_preview_dirty_worktree() -> Result<(), Box<dyn Error>> {
         &context,
         &[lane.clone()],
         &WorktreeGcPolicy {
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
             upstream: Some(fixture.head()?),
             terminal: &|_| true,
             no_live_lanes: &|_| true,
@@ -610,7 +651,6 @@ fn gc_dry_run_retains_preview_dirty_worktree() -> Result<(), Box<dyn Error>> {
             written_before_ns: i128::MAX,
             dry_run: true,
         },
-        RetirementMode::Observe,
         &cancel(),
     )?;
     assert_eq!(report.worktrees.retained.len(), 1);
@@ -641,7 +681,14 @@ fn gc_settlement_error_retains_ref_and_continues() -> Result<(), Box<dyn Error>>
         &context,
         &[first.clone(), second.clone()],
         &WorktreeGcPolicy {
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
+            mode: CollectionMode::Worktrees,
+            proof: Some(&evidence),
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
             upstream: Some(fixture.head()?),
             terminal: &|_| true,
             no_live_lanes: &|_| true,
@@ -650,7 +697,6 @@ fn gc_settlement_error_retains_ref_and_continues() -> Result<(), Box<dyn Error>>
             written_before_ns: i128::MAX,
             dry_run: false,
         },
-        retirement.apply(&evidence),
         &cancel(),
     )?;
     let worktree_subject = |lane: &WorktreeInfo| {

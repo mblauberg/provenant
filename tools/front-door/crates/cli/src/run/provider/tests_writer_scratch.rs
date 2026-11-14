@@ -1151,7 +1151,8 @@ printf 'agy 1.0.0\n'
         &codex_runtime,
         &state,
         &std::collections::BTreeMap::new(),
-    );
+    )
+    .expect("sandboxed lanes receive their optional build-slot shim");
     assert!(
         coordination_reads
             .iter()
@@ -1174,7 +1175,8 @@ printf 'agy 1.0.0\n'
         Path::new("relative-runtime"),
         &state,
         &std::collections::BTreeMap::new(),
-    );
+    )
+    .expect("an unrepresentable shim leaves launch preparation intact");
     assert!(skipped_coordination_reads.is_empty());
     assert_eq!(codex.env, env_before);
     assert_eq!(codex.profile.spec, profile_before);

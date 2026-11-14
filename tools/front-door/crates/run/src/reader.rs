@@ -195,6 +195,7 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         project_id: r.project_id,
         terminal_state: outcome.into(),
         cause_source,
+        settlement_reason: r.settlement_reason,
         account_identity,
         exit_code,
         queued_at: r.queued_at,
@@ -1414,7 +1415,13 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
                 .result
                 .as_ref()
                 .is_none_or(|result| !result.complete || result.bytes == 0)
-                || exit_code != Some(0)
+                || (exit_code != Some(0)
+                    && !r.settlement_reason.is_some_and(|reason| {
+                        matches!(
+                            reason.rule().terminal_outcome,
+                            provenant_records::run::SettlementTerminalOutcome::Succeeded
+                        )
+                    }))
                 || !route_identity(
                     r.resolved_route.as_ref(),
                     r.applied_route.as_ref(),

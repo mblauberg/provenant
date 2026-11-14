@@ -13,7 +13,10 @@ gate it. Policy and defaults are overridable data
 ## Exact selection, no inference
 
 A request names one exact model or route. No adapter, upgrade, effort or
-downgrade is inferred; a family comes only from provider protocol evidence at
+downgrade is inferred. An adapter may declare that a valid but unsupported
+catalogued model effort is dropped before admission; the applied route and
+launch record retain its warning and source. Invalid controls remain errors.
+A family comes only from provider protocol evidence at
 the catalogue revision, never from a name or output text. A pool draw is seeded
 from the operation, so a retry picks the same member without stored state, and
 the receipt names what ran and why. Capability facts never grant filesystem or
@@ -25,7 +28,8 @@ training treatment is excluded.
 - Test: `crates/routing/src/tests/policies.rs::exact_unknown_is_retained_but_requires_availability`;
   `crates/routing/src/tests/selection.rs::table_driven_weighted_pools_record_effort_readiness_roll_and_seed`;
   `crates/routing/src/tests/alternatives.rs::family_requires_provider_answer_evidence_at_the_same_revision`;
-  `crates/routing/src/tests/selection.rs::confidential_pool_excludes_training_models`
+  `crates/routing/src/tests/selection.rs::confidential_pool_excludes_training_models`;
+  `crates/routing/src/tests/policies.rs::opencode_effort_normalisation_is_visible_in_exact_pool_and_launch_routes`
 
 ## Repository confidentiality at launch
 
@@ -57,17 +61,21 @@ preference always expires.
   `crates/routing/src/policy.rs::bundled_fields_and_peak_schedule_can_be_overridden_per_account`;
   `crates/routing/src/tests/preferences.rs::model_choice_selects_only_eligible_pool_members_before_expiry`
 
-## Capability, account load and outcome preferences
+## Capability and selection preferences
 
-Capability and account load affect preferences without excluding otherwise
-eligible members. Outcome priors use attributed comparable quality outcomes,
-with exploration among eligible members; infrastructure failures are not quality
-observations. Missing evidence stays unknown or neutral, never a routing gate.
-Configuration and receipts expose the effective sources.
-Account ranking scales reset-adjusted usable headroom by sourced penalties and divides by one plus live lanes.
+Capability never excludes a listed pool member. Capability preferences rank
+members alongside account load and outcome priors; configuration can adjust
+those weights. Exact model pins remain explicit choices.
 
-- Why: routing can use capability, capacity and experience without starving alternatives.
-- Test: `crates/routing/src/tests/quality.rs::capability_priors_and_exploration_are_preferences_on_nonempty_draws`; `crates/routing/src/tests/quality.rs::account_ranking_uses_reset_adjusted_headroom_and_live_load_independent_of_order`; `crates/telemetry/src/tests.rs::route_priors_count_only_attributed_comparable_quality_outcomes`
+Account load and outcome priors rank eligible members. Priors use attributed,
+comparable quality outcomes, with exploration among eligible members;
+host failures are not quality observations, while a validated successful
+completed-before-budget result remains one. Missing outcome evidence stays
+neutral. Account ranking scales reset-adjusted usable headroom by sourced
+penalties and divides by one plus live lanes.
+
+- Why: capability is a preference, while attributed comparable outcomes supply the evidence that adjusts declared route weights.
+- Test: `crates/routing/src/tests/quality.rs::outcome_priors_and_exploration_rank_eligible_members`; `crates/routing/src/tests/quality.rs::account_ranking_uses_reset_adjusted_headroom_and_live_load_independent_of_order`; `crates/telemetry/src/tests.rs::route_priors_count_only_attributed_comparable_quality_outcomes`
 
 ## Capacity is not quota
 
@@ -127,8 +135,15 @@ Account identity is detected, not guessed; a changed identity around a probe is
 refused. A pin does not switch accounts. Credential custody is owned by
 [supervision](supervisor.md#native-environment-and-sandbox-tool-stores). A registered long-lived lane token is not rotated by the host.
 
+OpenCode models are partitioned by the registered plan, independently of account
+keys and labels. Enumeration keeps one row per registered identity and never
+invents a Zen identity from Go credentials. Plan declarations also own the quota
+source: missing or unrecognised plans retain unknown quota evidence rather than
+using the Go ledger. Free-model pacing and refusals remain
+scoped to the declared free pool.
+
 - Why: misattribution can spend or expose the wrong account.
-- Test: `crates/providers/src/quota_live/claude.rs::current_registration_requires_its_matching_account_fingerprint`; `crates/routing/src/tests/availability.rs::account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks`; `crates/providers/src/tests_account_identity.rs::claude_lane_prefers_the_registered_lane_token_and_never_rotates_the_login`
+- Test: `crates/providers/src/accounts.rs::account_pool_tests::registered_plans_enumerate_once_without_inventing_identities`; `crates/routing/src/tests/availability.rs::registered_opencode_plans_select_independently_of_account_keys`; `crates/providers/src/quota_live/claude.rs::current_registration_requires_its_matching_account_fingerprint`; `crates/routing/src/tests/availability.rs::account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks`; `crates/providers/src/tests_account_identity.rs::claude_lane_prefers_the_registered_lane_token_and_never_rotates_the_login`
 
 ## Launch route and role tiers
 

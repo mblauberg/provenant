@@ -77,6 +77,13 @@ command catalogue owns the list of codes and their meanings.
 Waiting observes work; timeout or cancellation does not stop it. A target
 settles by its own state, so an older settlement cannot satisfy a wait for new
 work. Settlement events are emitted as they are observed.
+Wait budgets clamp to `domains.wait.max_timeout_seconds` (shipped default four
+hours), warning once with the effective limit and source when exceeded. A larger
+request remains a blocking wait. Parsing retains the request so configured
+limits, including limits above the shipped default, take effect in one place.
+- Why: an oversized budget must not turn a blocking call into a retry loop.
+- Test: `crates/cli/src/wait.rs::requested_wait_is_bounded_by_the_effective_maximum`
+
 With `--json`, wait emits JSONL events followed by a terminal command-result envelope, including without `--follow`.
 
 - Why: a reader must neither terminate healthy work nor wake on stale evidence.

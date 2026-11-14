@@ -297,7 +297,7 @@ fn retirement_is_custody_owned_and_resumes_by_revision() {
             .iter()
             .map(|outcome| outcome.step.clone())
             .collect::<Vec<_>>(),
-        RetirementStep::for_subjects(&record.related_subjects)
+        RetirementStep::for_decision(&record.related_subjects, &record.decision)
     );
     assert!(
         record
@@ -313,7 +313,7 @@ fn retirement_is_custody_owned_and_resumes_by_revision() {
             RetirementStepOutcome {
                 step: record.outcomes[0].step.clone(),
                 state: RetirementStepState::Completed {
-                    evidence: RemovalEvidence::ExplicitDiscard,
+                    evidence: RemovalEvidence::ExplicitDiscard { archive: None },
                 },
             },
             &fixture.request(),
@@ -547,90 +547,183 @@ fn retirement_is_custody_owned_and_resumes_by_revision() {
 }
 
 #[test]
-fn explicit_discard_retirement_does_not_claim_landing() {
-    let fixture = Fixture::new();
-    let ledger = HostStore::open(&fixture.root, &fixture.request()).unwrap();
-    let project = project();
-    let reference = RefOwnership {
-        repository: project,
-        endpoint: RefEndpoint::Local,
-        reference: "refs/heads/lane/explicit-discard".into(),
-        generation: 1,
-        origin: RefOrigin::Created,
-    };
-    let ref_subject = reference.custody_subject().unwrap();
-    let worktree = Subject::new(
-        SubjectKind::Worktree,
-        fixture
-            .temp
-            .path()
-            .canonicalize()
-            .unwrap()
-            .join("explicit-discard")
-            .to_string_lossy()
-            .into_owned(),
-    );
-    let holder = holder(1);
-    for subject in [&ref_subject, &worktree] {
-        ledger
-            .acquire_custody(
-                project,
-                subject,
-                &holder,
-                Origin::Provenant,
-                &fixture.request(),
-            )
+fn retirement_decisions_preserve_archive_proof_and_reference_custody() {
+    for (with_worktree, remove_reference, detached) in [
+        (false, true, false),
+        (true, true, false),
+        (true, false, false),
+        (true, false, true),
+    ] {
+        let fixture = Fixture::new();
+        let ledger = HostStore::open(&fixture.root, &fixture.request()).unwrap();
+        let project = project();
+        let worktree = Subject::new(
+            SubjectKind::Worktree,
+            fixture
+                .temp
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("explicit-discard")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let reference = RefOwnership {
+            repository: project,
+            endpoint: if detached {
+                RefEndpoint::Worktree {
+                    path: worktree.id.clone().into(),
+                }
+            } else {
+                RefEndpoint::Local
+            },
+            reference: if detached {
+                "HEAD"
+            } else {
+                "refs/heads/lane/explicit-discard"
+            }
+            .into(),
+            generation: 1,
+            origin: if detached {
+                RefOrigin::Adopted
+            } else {
+                RefOrigin::Created
+            },
+        };
+        let ref_subject = reference.custody_subject().unwrap();
+        let holder = holder(1);
+        let custody_subjects = if detached {
+            vec![&worktree]
+        } else {
+            vec![&ref_subject, &worktree]
+        };
+        for subject in custody_subjects {
+            ledger
+                .acquire_custody(
+                    project,
+                    subject,
+                    &holder,
+                    Origin::Provenant,
+                    &fixture.request(),
+                )
+                .unwrap();
+        }
+        let original_ref = ledger
+            .custody_item(project, &ref_subject, &fixture.request())
             .unwrap();
+        let tip = "3123456789abcdef0123456789abcdef01234567".parse().unwrap();
+        let evidence = if remove_reference {
+            RemovalEvidence::ExplicitDiscard {
+                archive: with_worktree.then(|| ArchiveProof {
+                    id: "discard-fixture".into(),
+                    tip,
+                }),
+            }
+        } else {
+            RemovalEvidence::IdleRetirement { tip }
+        };
+        let decision = if remove_reference {
+            RetirementDecision::Discard {
+                authority: actor(1),
+                evidence: evidence.clone(),
+            }
+        } else {
+            RetirementDecision::RetireWorktree {
+                authority: actor(1),
+                evidence: evidence.clone(),
+            }
+        };
+        let record = RetirementRecord::plan(
+            project,
+            if with_worktree {
+                vec![worktree.clone()]
+            } else {
+                Vec::new()
+            },
+            reference,
+            tip,
+            decision,
+        )
+        .unwrap();
+        let mut current = ledger
+            .start_retirement(&record, &fixture.request())
+            .unwrap();
+        let completion_evidence = if matches!(
+            &evidence,
+            RemovalEvidence::ExplicitDiscard { archive: Some(_) }
+        ) {
+            let substitute = RemovalEvidence::ExplicitDiscard {
+                archive: Some(ArchiveProof {
+                    id: "wrong-tip-archive".into(),
+                    tip: "4123456789abcdef0123456789abcdef01234567".parse().unwrap(),
+                }),
+            };
+            assert!(matches!(
+                ledger.set_retirement_step(
+                    project,
+                    &record.id,
+                    current.revision,
+                    RetirementStepOutcome {
+                        step: current.outcomes[0].step.clone(),
+                        state: RetirementStepState::Completed {
+                            evidence: substitute
+                        }
+                    },
+                    &fixture.request()
+                ),
+                Err(Error::Invalid(_))
+            ));
+            RemovalEvidence::ExplicitDiscard {
+                archive: Some(ArchiveProof {
+                    id: "freshly-captured-archive".into(),
+                    tip,
+                }),
+            }
+        } else {
+            evidence.clone()
+        };
+        for outcome in &record.outcomes {
+            current = ledger
+                .set_retirement_step(
+                    project,
+                    &record.id,
+                    current.revision,
+                    RetirementStepOutcome {
+                        step: outcome.step.clone(),
+                        state: RetirementStepState::Completed {
+                            evidence: completion_evidence.clone(),
+                        },
+                    },
+                    &fixture.request(),
+                )
+                .unwrap();
+        }
+        assert!(current.removals().iter().all(|removal| matches!(
+            &removal.outcome, RemovalOutcome::Removed { evidence: proof, retirement_id }
+                if proof == &completion_evidence && retirement_id == &record.id
+        )));
+        assert_eq!(current.decision, record.decision);
+        assert_eq!(current.id, record.id);
+        let reference_after = ledger
+            .custody_item(project, &ref_subject, &fixture.request())
+            .unwrap();
+        if remove_reference {
+            assert_eq!(
+                reference_after.unwrap().state,
+                CustodyState::Retired {
+                    retirement_id: record.id
+                }
+            );
+        } else {
+            assert_eq!(reference_after, original_ref);
+            assert!(
+                current
+                    .removals()
+                    .iter()
+                    .all(|removal| removal.subject == worktree)
+            );
+        }
     }
-    let record = RetirementRecord::plan(
-        project,
-        vec![worktree],
-        reference,
-        "3123456789abcdef0123456789abcdef01234567".parse().unwrap(),
-        RetirementDecision::Discard {
-            authority: actor(1),
-            evidence: RemovalEvidence::ExplicitDiscard,
-        },
-    )
-    .unwrap();
-    let started = ledger
-        .start_retirement(&record, &fixture.request())
-        .unwrap();
-    let worktree_done = ledger
-        .set_retirement_step(
-            project,
-            &record.id,
-            started.revision,
-            RetirementStepOutcome {
-                step: record.outcomes[0].step.clone(),
-                state: RetirementStepState::Completed {
-                    evidence: RemovalEvidence::ExplicitDiscard,
-                },
-            },
-            &fixture.request(),
-        )
-        .unwrap();
-    let finished = ledger
-        .set_retirement_step(
-            project,
-            &record.id,
-            worktree_done.revision,
-            RetirementStepOutcome {
-                step: RetirementStep::Reference,
-                state: RetirementStepState::Completed {
-                    evidence: RemovalEvidence::ExplicitDiscard,
-                },
-            },
-            &fixture.request(),
-        )
-        .unwrap();
-    assert!(finished.removals().iter().all(|removal| matches!(
-        &removal.outcome,
-        RemovalOutcome::Removed {
-            evidence: RemovalEvidence::ExplicitDiscard,
-            retirement_id,
-        } if retirement_id == &record.id
-    )));
 }
 
 #[test]

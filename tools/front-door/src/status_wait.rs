@@ -466,25 +466,33 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             return crate::fail("wait", Outcome::Error, "ROOT", &error.to_string(), globals);
         }
     };
-    let settings = match provenant_cli::config_reads::read_for(&resolved.roots, "wait") {
-        Ok(config) => config.domains.wait,
-        Err(error) => {
-            return crate::fail(
-                "wait",
-                Outcome::Error,
-                "CONFIG",
-                &error.to_string(),
-                globals,
-            );
-        }
-    };
+    let (settings, max_origin) =
+        match provenant_cli::config_reads::read_for(&resolved.roots, "wait") {
+            Ok(config) => (
+                config.domains.wait,
+                config
+                    .origins
+                    .get("domains.wait.max_timeout_seconds")
+                    .cloned(),
+            ),
+            Err(error) => {
+                return crate::fail(
+                    "wait",
+                    Outcome::Error,
+                    "CONFIG",
+                    &error.to_string(),
+                    globals,
+                );
+            }
+        };
     let edge = provenant_cli::run::Edge {
         roots: &resolved.roots,
         home: &resolved.home,
         assets: &resolved.assets,
         cwd: &resolved.project,
     };
-    let deadline = Instant::now() + Duration::from_secs(settings.timeout(command.timeout));
+    let deadline = Instant::now()
+        + Duration::from_secs(settings.timeout(command.timeout, max_origin.as_ref()));
     let stop = Stop::default();
     let mut sources: Vec<Source> = command.targets.iter().cloned().map(Source::Graph).collect();
     let mut validation = std::collections::BTreeMap::new();

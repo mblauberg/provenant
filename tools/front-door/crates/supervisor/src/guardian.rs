@@ -1460,7 +1460,7 @@ impl Driver<'_> {
                 if let Some(disk) = hooks.disk {
                     let warning = match disk.below_floor(&self.holder_context) {
                         Ok(true) => Some(
-                            "disk space below gc.free_floor; avoid starting new builds; running builds continue",
+                            "disk space below a configured build threshold; avoid starting new builds; running builds continue",
                         ),
                         Ok(false) => None,
                         Err(_) => Some("disk floor observation failed; running builds continue"),

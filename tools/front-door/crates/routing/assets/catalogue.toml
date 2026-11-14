@@ -203,7 +203,7 @@ design = [
     { model = "claude/claude-opus-5-5", weight = 1, efforts = ["low", "medium", "high", "xhigh"] },
 ]
 
-# D8: capability preferences never change eligibility. Empty config tables disable them.
+# Capability preferences affect ranking without excluding pool members.
 [capability_preferences.senior]
 general = 1
 strong = 4

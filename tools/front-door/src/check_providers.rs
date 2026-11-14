@@ -198,7 +198,7 @@ fn inventory(roots: &provenant_core::Roots) -> Result<Vec<Row>, Box<dyn std::err
         };
         for (model, efforts) in &models {
             if model.adapter() != account.adapter
-                || !spec.account_serves_model(&account.key, model.model())
+                || !spec.account_serves_model(account.plan.as_deref(), model.model())
             {
                 continue;
             }

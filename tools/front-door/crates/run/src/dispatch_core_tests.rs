@@ -972,10 +972,6 @@ fn policy_refusal_skips_provider_preparation() -> TestResult {
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    std::fs::write(
-        store.writer_registry.join("config.toml"),
-        "schema_version=1\n[knobs]\n'policy.LAUNCH_DISK'='refuse'\n",
-    )?;
     let prepared = input();
     store.create(&prepared, &call)?;
     let providers = Fake {

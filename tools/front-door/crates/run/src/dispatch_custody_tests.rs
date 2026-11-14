@@ -192,7 +192,7 @@ fn holder_release_retains_temporary_when_verification_fails() -> TestResult {
     holder_release_temporary_fixture(false)
 }
 #[test]
-fn publication_holder_commits_decoded_success_only_with_exit_zero() -> TestResult {
+fn publication_holder_accepts_exit_zero_or_completed_host_budget() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -202,7 +202,7 @@ fn publication_holder_commits_decoded_success_only_with_exit_zero() -> TestResul
         read_only_spacing_ms: 0,
         ..AdmissionPolicy::default()
     });
-    let batch = [input(), lane(8, false)];
+    let batch = [input(), lane(8, false), lane(9, false)];
     for prepared in &batch {
         store.create(prepared, &call)?;
     }
@@ -212,7 +212,7 @@ fn publication_holder_commits_decoded_success_only_with_exit_zero() -> TestResul
         observed: Some(route()),
         ..Fake::default()
     };
-    for (index, code) in [(0, 0), (1, 1)] {
+    for (index, code, budget) in [(0, 0, false), (1, 1, false), (2, 1, true)] {
         let id = batch[index].attempt_id;
         store.mark_starting(
             &store.record(id, &call)?,
@@ -230,6 +230,9 @@ fn publication_holder_commits_decoded_success_only_with_exit_zero() -> TestResul
         observed.scope.generation = 1;
         observed.terminal_observed = false;
         observed.termination = Some(Termination::Exit(code));
+        if budget {
+            observed.stop_reason = Some(provenant_supervisor::machine::StopReason::TokenBudget);
+        }
         if code == 0 {
             observed.cancel_delivered_before_exit = None;
             artifacts::seal(
@@ -256,17 +259,39 @@ fn publication_holder_commits_decoded_success_only_with_exit_zero() -> TestResul
         };
         assert_eq!(
             outcome,
-            if code == 0 {
+            if code == 0 || budget {
                 Outcome::Succeeded
             } else {
                 Outcome::Failed
             }
         );
+        if budget {
+            let reopened = store.record(id, &call)?;
+            assert_eq!(
+                reopened.settlement_reason,
+                Some(provenant_records::run::SettlementReason::CompletedBeforeBudget)
+            );
+            let stop: provenant_records::Stop = serde_json::from_value(match &reopened.state {
+                AttemptState::Terminal { extra, .. } => extra["stop"].clone(),
+                _ => unreachable!(),
+            })?;
+            assert_eq!(stop.cause(), provenant_records::StopCause::TokenBudget);
+            assert_eq!(
+                stop.handoff().unwrap().status,
+                provenant_records::handoff::HandoffStatus::Done
+            );
+            let fact = store.attempt(id, &call)?;
+            assert_eq!(fact.cause_source, provenant_records::run::CauseSource::Host);
+            assert_eq!(
+                fact.settlement_reason,
+                Some(provenant_records::run::SettlementReason::CompletedBeforeBudget)
+            );
+        }
         assert_eq!(store.finish(id, &dir, &observed, &fake, &call)?, record);
         provenant_supervisor::custody::publish_release(&dir, observed.scope)?;
         provenant_supervisor::custody::publish_release(&dir, observed.scope)?;
     }
-    assert_eq!(fake.decoded.get(), 2);
+    assert_eq!(fake.decoded.get(), batch.len());
     let fact = store.attempt(batch[0].attempt_id, &call)?;
     assert_eq!(
         fact.output_refs[0].digest,

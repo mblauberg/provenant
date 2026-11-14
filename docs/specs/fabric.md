@@ -61,12 +61,22 @@ dispatch provenance.
 `LandedEvidence` names its predicate (subsumed or landed) and proof source.
 The custody-owned `RetirementRecord` pins the endpoint-qualified reference
 generation, expected commit, authority and initial proof in the host store.
-Remote endpoint identity keeps only a digest of its bound push URL.
+New intent observes the current tip through the generation allocator under
+removal custody. Replay preserves that identity and initial intent while
+recording freshly validated proof on each completed step.
+Remote endpoint identity keeps only a digest of its bound push URL. Detached
+worktrees identify their real private `HEAD` through a worktree endpoint and the
+same generation allocator. Worktree-only retirement records affect only the
+worktree custody subjects; they preserve the reference and its custody.
 Each completed subject step stores the proof it used: under a landing-based
 intent, a worktree may complete when its tip is subsumed or landed, while
 reference deletion requires a landed proof. Explicit discard remains a distinct
-authority choice and never claims landing. `Removed` projections carry the
-step proof and durable retirement ID. State alone never authorises deletion.
+authority choice and never claims landing. Worktree discard pins the archive
+ID and exact tip captured before removal in that same record. `Removed`
+projections carry the completed step proof and durable retirement ID. Retention
+and evidence owners decide eligibility; the custody-owned lifecycle
+alone records intent, resumable outcomes and removal projections. State alone
+never authorises deletion.
 
 Claims do not expire, lock or refuse overlapping advisory ownership. Acquiring
 another holder's item warns, records the previous holder in the same transaction
@@ -77,7 +87,8 @@ Git isolation. Cursors advance monotonically; an unreachable peer is Unknown.
   another admission boundary.
 - Test: `crates/fabric-store/src/tests/f2.rs::custody_is_durable_advisory_and_queryable_by_declared_kinds`;
   `crates/fabric-store/src/tests/f2.rs::custody_event_failure_rolls_back_the_record`;
-  `crates/fabric-store/src/tests/f2.rs::custody_queries_page_and_include_nested_lanes_without_crossing_chairs`
+  `crates/fabric-store/src/tests/f2.rs::custody_queries_page_and_include_nested_lanes_without_crossing_chairs`;
+  `crates/fabric-store/src/tests/f2.rs::retirement_decisions_preserve_archive_proof_and_reference_custody`
 - Owner: `crates/records/src/custody.rs`, `crates/fabric-store/src/claims.rs`, `crates/config/src/gc.rs`
 
 ### Chair bindings follow graph names

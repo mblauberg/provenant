@@ -51,23 +51,227 @@ fn check_writer_terminal_with_expected_merge(
     Ok(())
 }
 
-/// A gitlink only runs a nested clean filter when its checkout exists. An
-/// uninitialised gitlink has no `.git` marker, so status cannot follow it into
-/// lane-controlled configuration and the tree can be reported as it is.
-pub(super) fn initialised_gitlink(root: &Path, path: &[u8]) -> Result<bool, WorktreeError> {
-    let relative = Path::new(OsStr::from_bytes(path));
-    if relative.is_absolute()
-        || relative
-            .components()
-            .any(|part| !matches!(part, std::path::Component::Normal(_)))
-    {
+#[derive(Clone, Debug, Serialize)]
+pub struct SubmoduleEvidence {
+    pub common_git_dir: PathBuf,
+    pub private_git_dir: PathBuf,
+    pub path: PathBuf,
+    pub head: GitOid,
+    pub evidence: provenant_records::custody::LandedEvidence,
+}
+
+/// Only stores under this project's common Git directory are in cleanup scope.
+/// Their refs/objects survive removal of a linked checkout. Every initialized
+/// child must be clean and independently retained; detached unpushed heads keep.
+pub fn submodule_evidence(
+    context: &WorktreeContext<'_>,
+    repo: &VerifiedRepo,
+    cancel: &CancelToken,
+) -> Result<Vec<SubmoduleEvidence>, WorktreeError> {
+    let mut evidence = Vec::new();
+    inspect_submodules(
+        context,
+        repo,
+        repo.root_path(),
+        repo.private_git_dir(),
+        0,
+        false,
+        &mut Vec::new(),
+        &mut evidence,
+        cancel,
+    )?;
+    Ok(evidence)
+}
+
+pub(super) fn hold_submodules(
+    context: &WorktreeContext<'_>,
+    repo: &VerifiedRepo,
+    cancel: &CancelToken,
+) -> Result<(Vec<LockGuard>, Vec<SubmoduleEvidence>), WorktreeError> {
+    let mut guards = Vec::new();
+    let mut evidence = Vec::new();
+    inspect_submodules(
+        context,
+        repo,
+        repo.root_path(),
+        repo.private_git_dir(),
+        0,
+        true,
+        &mut guards,
+        &mut evidence,
+        cancel,
+    )?;
+    Ok((guards, evidence))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn inspect_submodules(
+    context: &WorktreeContext<'_>,
+    repo: &VerifiedRepo,
+    removed_root: &Path,
+    removed_admin: &Path,
+    depth: usize,
+    hold: bool,
+    guards: &mut Vec<LockGuard>,
+    evidence: &mut Vec<SubmoduleEvidence>,
+    cancel: &CancelToken,
+) -> Result<(), WorktreeError> {
+    if depth >= 32 {
+        return Err(WorktreeError::UnknownWriter);
+    }
+    let index = run_git(
+        context,
+        repo,
+        GitRead::IndexEntries { paths: Vec::new() },
+        cancel,
+    )?;
+    if exit_code(&index)? != 0 {
         return Err(WorktreeError::InvalidOutput);
     }
-    match std::fs::symlink_metadata(root.join(relative).join(".git")) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(_) => Err(WorktreeError::UnknownWriter),
+    for entry in
+        parse_index_entries(&index.stdout.bytes).map_err(|_| WorktreeError::InvalidOutput)?
+    {
+        let entry = entry.map_err(|_| WorktreeError::InvalidOutput)?;
+        if entry.mode != 0o160000 {
+            continue;
+        }
+        let relative = Path::new(OsStr::from_bytes(entry.path));
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        let path = repo.root_path().join(relative);
+        let unknown = |detail: &str| WorktreeError::UnknownOccupancy {
+            path: path.clone(),
+            detail: detail.into(),
+        };
+        let mut directory = repo.root_dir().try_clone()?;
+        let mut absent = false;
+        for component in relative.components() {
+            match directory.open_verified_directory(component.as_os_str()) {
+                Ok(child) => directory = child,
+                Err(error) if error.is_not_found() => {
+                    absent = true;
+                    break;
+                }
+                Err(_) => {
+                    return Err(unknown(
+                        "submodule path cannot be observed without following links",
+                    ));
+                }
+            }
+        }
+        if absent {
+            continue;
+        }
+        match directory.metadata_at(OsStr::new(".git"), false) {
+            Err(error) if error.is_not_found() => {
+                // Git ignores submodule contents in parent status. An uninitialised
+                // directory with manually placed files must therefore be kept.
+                if directory.entries()?.next().is_some() {
+                    return Err(unknown("uninitialised submodule contains untracked data"));
+                }
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
+        }
+        let child = context.utility.open_read_repo(
+            context.executor,
+            directory.current_path()?,
+            context.utility_budget,
+            cancel,
+        )?;
+        let child = &child.0;
+        if child.common_git_dir().starts_with(removed_root)
+            || child.private_git_dir().starts_with(removed_root)
+            || child.common_git_dir().starts_with(removed_admin)
+            || child.private_git_dir().starts_with(removed_admin)
+            || !child
+                .common_git_dir()
+                .starts_with(context.repo.common_git_dir())
+        {
+            return Err(unknown(
+                "submodule Git custody is outside the current project's retained store",
+            ));
+        }
+        if hold {
+            let guard = lock_repository(
+                child.common_dir(),
+                LockMode::Shared,
+                WaitBudget::nonblocking(context.clock.mono_now()),
+                cancel,
+                context.clock,
+            )
+            .map_err(|error| match error {
+                FsError::LockTimeout { .. } => WorktreeError::LockBusy,
+                error => error.into(),
+            })?;
+            guards.push(guard);
+        }
+        check_writer_terminal(child)?;
+        inspect_submodules(
+            context,
+            child,
+            removed_root,
+            removed_admin,
+            depth + 1,
+            hold,
+            guards,
+            evidence,
+            cancel,
+        )?;
+        let status = run_git(context, child, GitRead::StatusIncludingIgnored, cancel)?;
+        if exit_code(&status)? != 0 {
+            return Err(unknown("submodule status is unavailable"));
+        }
+        let status =
+            parse_porcelain_v2_z(&status.stdout.bytes).map_err(|_| WorktreeError::InvalidOutput)?;
+        if !status.is_empty() {
+            return Err(unknown(
+                "submodule has dirty, untracked or ignored working data",
+            ));
+        }
+        let head = run_git(context, child, GitRead::RevParseHead, cancel)?;
+        if exit_code(&head)? != 0 {
+            return Err(unknown("submodule HEAD is unavailable"));
+        }
+        let head = parse_oid(trim_ascii(&head.stdout.bytes))?;
+        let mut references = BTreeMap::new();
+        for read in [GitRead::BranchTips, GitRead::RemoteBranchTips] {
+            let refs = run_git(context, child, read, cancel)?;
+            if exit_code(&refs)? != 0 {
+                return Err(unknown("submodule retained refs are unavailable"));
+            }
+            references.extend(parse_branch_tips(&refs.stdout.bytes)?);
+        }
+        let references: Vec<_> = references
+            .into_iter()
+            .map(|(reference, commit)| EvidenceRef {
+                reference,
+                commit,
+                integration: false,
+            })
+            .collect();
+        match super::evidence::removal_evidence_in(context, child, head, &references, cancel)? {
+            LandingAssessment::Proven(proof) => evidence.push(SubmoduleEvidence {
+                common_git_dir: child.common_git_dir().to_owned(),
+                private_git_dir: child.private_git_dir().to_owned(),
+                path: path.clone(),
+                head,
+                evidence: proof,
+            }),
+            _ => {
+                return Err(unknown(
+                    "submodule HEAD is not independently subsumed by a retained ref",
+                ));
+            }
+        }
     }
+    Ok(())
 }
 
 const DIRTY_PATHS_LISTED: usize = 12;
@@ -136,23 +340,7 @@ pub(super) fn worktree_cleanliness_at(
         }
         Err(error) => return Err(error),
     }
-    let index = run_git(
-        context,
-        repo,
-        GitRead::IndexEntries { paths: Vec::new() },
-        cancel,
-    )?;
-    if exit_code(&index)? != 0 {
-        return Ok(WorktreeCleanliness::Unknown);
-    }
-    for entry in
-        parse_index_entries(&index.stdout.bytes).map_err(|_| WorktreeError::InvalidOutput)?
-    {
-        let entry = entry.map_err(|_| WorktreeError::InvalidOutput)?;
-        if entry.mode == 0o160000 && initialised_gitlink(repo.root_path(), entry.path)? {
-            return Ok(WorktreeCleanliness::Unknown);
-        }
-    }
+    submodule_evidence(context, repo, cancel)?;
     let outcome = run_git(context, repo, GitRead::StatusIncludingIgnored, cancel)?;
     if exit_code(&outcome)? != 0 {
         return Ok(WorktreeCleanliness::Unknown);
@@ -380,31 +568,35 @@ fn lock_worktree_impl(
         });
     }
     let verified = verify_probed_worktree(context, &entry.path, cancel)?;
-    let writer = if preview {
-        cache_writer_probe(context.project_state, verified.path()).map_err(custody_refusal)?
-    } else {
-        let state = writer_directory(context.project_state, verified.path())?;
-        let observation = provenant_supervisor::custody::writer_admission_guard(&state)
-            .map_err(|_| WorktreeError::UnknownWriter)?;
-        let writer = match state.lock(
-            OsStr::new(WRITER_LOCK),
-            LockMode::Exclusive,
-            WaitBudget::nonblocking(context.clock.mono_now()),
-            cancel,
-            context.clock,
-        ) {
-            Ok(guard) => guard,
-            Err(FsError::LockTimeout { .. }) => return Err(WorktreeError::LockBusy),
-            Err(FsError::Cancelled { .. }) => return Err(WorktreeError::Cancelled),
-            Err(_) => return Err(WorktreeError::UnknownWriter),
+    let writer =
+        if preview {
+            cache_writer_probe(context.project_state, verified.path()).map_err(custody_refusal)?
+        } else {
+            let state = writer_directory(context.project_state, verified.path())?;
+            let observation = provenant_supervisor::custody::writer_admission_guard(&state)
+                .map_err(|error| match error {
+                    provenant_supervisor::custody::CustodyError::Busy => WorktreeError::LockBusy,
+                    _ => WorktreeError::UnknownWriter,
+                })?;
+            let writer = match state.lock(
+                OsStr::new(WRITER_LOCK),
+                LockMode::Exclusive,
+                WaitBudget::nonblocking(context.clock.mono_now()),
+                cancel,
+                context.clock,
+            ) {
+                Ok(guard) => guard,
+                Err(FsError::LockTimeout { .. }) => return Err(WorktreeError::LockBusy),
+                Err(FsError::Cancelled { .. }) => return Err(WorktreeError::Cancelled),
+                Err(_) => return Err(WorktreeError::UnknownWriter),
+            };
+            drop(observation);
+            retained_import(&state).map_err(|detail| WorktreeError::UnknownOccupancy {
+                path: verified.path().to_path_buf(),
+                detail,
+            })?;
+            Some(writer)
         };
-        drop(observation);
-        retained_import(&state).map_err(|detail| WorktreeError::UnknownOccupancy {
-            path: verified.path().to_path_buf(),
-            detail,
-        })?;
-        Some(writer)
-    };
     let canonical = canonicalize(verified.path())?;
     if !preview {
         context.workers.invalidate();
@@ -443,39 +635,9 @@ fn lock_worktree_impl(
         }
         return Ok(LockedWorktree { verified, writer });
     }
-    let (mut observations, details) = if reobserve {
-        let keep_going = || {
-            !cancel.is_cancelled()
-                && context
-                    .lock_budget
-                    .remaining(context.clock.mono_now())
-                    .as_micros()
-                    > 0
-        };
-        let result = context
-            .workers
-            .observe_roots_while(std::slice::from_ref(&canonical), &keep_going);
-        if cancel.is_cancelled() {
-            return Err(WorktreeError::Cancelled);
-        }
-        result.ok_or(WorktreeError::LockBusy)?
-    } else {
-        context
-            .workers
-            .observe_roots_with_details(std::slice::from_ref(&canonical))
-    };
-    if reobserve && let Some(observed) = observations.get(&canonical).cloned() {
-        let state = reobserve_held_path(
-            context.workers,
-            &canonical,
-            observed,
-            context.lock_budget,
-            context.clock,
-            cancel,
-            &provenant_core::ThreadPause,
-        )?;
-        observations.insert(canonical.clone(), state);
-    }
+    let (observations, details) = context
+        .workers
+        .observe_roots_with_details(std::slice::from_ref(&canonical));
     // The writer lock establishes exclusion.
     // A census gap does not make a free lease live; only a positive
     // observation of a live process refuses. Landing also needs this root
@@ -507,68 +669,6 @@ fn lock_worktree_impl(
         }
         None => Ok(LockedWorktree { verified, writer }),
     }
-}
-
-/// Only complete evidence of a free root clears an observed holder. A gap,
-/// cancellation or deadline cannot turn that positive evidence into custody.
-fn reobserve_held_path(
-    workers: &dyn WorkerObserver,
-    root: &Path,
-    mut observed: Occupancy,
-    budget: WaitBudget,
-    clock: &dyn Clock,
-    cancel: &CancelToken,
-    pause: &dyn provenant_core::Pause,
-) -> Result<Occupancy, WorktreeError> {
-    loop {
-        // Any positive holder is re-checked within the budget, whatever the
-        // evidence kind: a checkout hook's short-lived process still has its
-        // working directory in a fresh worktree. No process name is exempt;
-        // a holder still present at the deadline refuses.
-        if !matches!(&observed, Occupancy::Observed { .. }) {
-            break;
-        }
-        if cancel.is_cancelled() {
-            return Err(WorktreeError::Cancelled);
-        }
-        let remaining = budget.remaining(clock.mono_now()).as_micros();
-        if remaining == 0 {
-            break;
-        }
-        pause.wait(
-            provenant_core::DurationMicros::from_micros(remaining.min(100_000)),
-            cancel,
-        );
-        if cancel.is_cancelled() {
-            return Err(WorktreeError::Cancelled);
-        }
-        let keep_going =
-            || !cancel.is_cancelled() && budget.remaining(clock.mono_now()).as_micros() > 0;
-        if !keep_going() {
-            break;
-        }
-        workers.invalidate();
-        let Some((states, _)) = workers.reobserve_roots_while(&[root.to_path_buf()], &keep_going)
-        else {
-            if cancel.is_cancelled() {
-                return Err(WorktreeError::Cancelled);
-            }
-            break;
-        };
-        if cancel.is_cancelled() {
-            return Err(WorktreeError::Cancelled);
-        }
-        if !keep_going() {
-            break;
-        }
-        match states.get(root) {
-            Some(state @ (Occupancy::Available | Occupancy::Observed { .. } | Occupancy::Held)) => {
-                observed = state.clone()
-            }
-            Some(Occupancy::Unknown { .. }) | None => break,
-        }
-    }
-    Ok(observed)
 }
 
 pub(super) fn repository_lock<'a>(
@@ -660,6 +760,7 @@ pub(crate) fn disk_writer_state(project_state: &Directory, path: &Path) -> Occup
     }
     let _probe = match provenant_supervisor::custody::writer_observation_guard(&directory) {
         Ok(guard) => guard,
+        Err(provenant_supervisor::custody::CustodyError::Busy) => return Occupancy::Held,
         Err(error) => return Occupancy::custody_unknown(path.to_path_buf(), error.to_string()),
     };
     match cache_writer_probe_under_gate(project_state, path) {
@@ -691,11 +792,21 @@ pub fn cache_writer_probe(
         }
         Err(error) => return Err(unknown(error.to_string())),
         Ok(_) => provenant_supervisor::custody::writer_observation_guard(&directory)
-            .map_err(|error| unknown(error.to_string()))?,
+            .map_err(|error| observation_occupancy(path, error))?,
     };
     let result = cache_writer_probe_under_gate(project_state, path);
     drop(gate);
     result
+}
+
+fn observation_occupancy(
+    path: &Path,
+    error: provenant_supervisor::custody::CustodyError,
+) -> Occupancy {
+    match error {
+        provenant_supervisor::custody::CustodyError::Busy => Occupancy::Held,
+        error => Occupancy::custody_unknown(path.to_path_buf(), error.to_string()),
+    }
 }
 
 fn cache_writer_probe_under_gate(
@@ -746,7 +857,7 @@ pub fn cache_writer_guard(project_state: &Directory, path: &Path) -> Result<Lock
     let directory = writer_directory(project_state, path)
         .map_err(|error| unknown(format!("writer slot could not be opened: {error}")))?;
     let observation = provenant_supervisor::custody::writer_admission_guard(&directory)
-        .map_err(|error| unknown(error.to_string()))?;
+        .map_err(|error| observation_occupancy(path, error))?;
     let guard = directory
         .try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)
         .map_err(|error| match error {
@@ -813,132 +924,5 @@ mod dirty_tests {
         let listed: Vec<_> = names.split(", ").collect();
         assert!(listed.iter().all(|name| name.len() == 202), "{summary}");
         assert_eq!(rest, format!("{} more", 12 - listed.len()), "{summary}");
-    }
-}
-
-#[cfg(test)]
-mod retry_tests {
-    use super::*;
-    use provenant_core::{DurationMicros, MonoTime, Pause, TimeError, WallTime};
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-
-    struct Time(AtomicU64);
-    impl Clock for Time {
-        fn wall_now(&self) -> Result<WallTime, TimeError> {
-            WallTime::from_micros(0)
-        }
-        fn mono_now(&self) -> MonoTime {
-            MonoTime::from_micros(self.0.load(Ordering::SeqCst))
-        }
-        fn wait_until(&self, deadline: MonoTime) -> Result<(), TimeError> {
-            self.0.store(deadline.as_micros(), Ordering::SeqCst);
-            Ok(())
-        }
-    }
-    impl Pause for Time {
-        fn wait(&self, delay: DurationMicros, _: &CancelToken) {
-            self.0.fetch_add(delay.as_micros(), Ordering::SeqCst);
-        }
-    }
-    struct Retry<'a> {
-        result: Option<Occupancy>,
-        time: &'a Time,
-        census_micros: u64,
-        calls: AtomicUsize,
-    }
-    impl WorkerObserver for Retry<'_> {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            self.time.0.fetch_add(self.census_micros, Ordering::SeqCst);
-            self.result
-                .clone()
-                .map(|state| (roots[0].clone(), state))
-                .into_iter()
-                .collect()
-        }
-    }
-    fn holder() -> Occupancy {
-        Occupancy::Observed {
-            process: Some(ObservedProcess::new(
-                42,
-                Some("holder".into()),
-                ProcessEvidenceKind::OtherHeldPath,
-            )),
-        }
-    }
-
-    #[test]
-    fn held_path_requires_positive_free_evidence_after_retry() {
-        let root = Path::new("/worktree");
-        for result in [
-            Some(Occupancy::census_unknown(root.into(), "incomplete census")),
-            None,
-            Some(holder()),
-            Some(Occupancy::Available),
-        ] {
-            let time = Time(AtomicU64::new(0));
-            let workers = Retry {
-                result: result.clone(),
-                time: &time,
-                census_micros: 0,
-                calls: AtomicUsize::new(0),
-            };
-            let budget = WaitBudget::up_to(time.mono_now(), DurationMicros::from_micros(1_000_000));
-            let observed = reobserve_held_path(
-                &workers,
-                root,
-                holder(),
-                budget,
-                &time,
-                &CancelToken::new(),
-                &time,
-            )
-            .unwrap();
-            if result == Some(Occupancy::Available) {
-                assert_eq!(observed, Occupancy::Available);
-            } else {
-                assert_eq!(observed, holder());
-            }
-        }
-    }
-
-    #[test]
-    fn held_path_retry_bounds_pause_and_rejects_census_after_deadline() {
-        for (budget_micros, census_micros, elapsed, calls) in [
-            (0, 0, 0, 0),
-            (50_000, 0, 50_000, 0),
-            (150_000, 60_000, 160_000, 1),
-            (150_000, 0, 100_000, 1),
-        ] {
-            let time = Time(AtomicU64::new(0));
-            let workers = Retry {
-                result: Some(Occupancy::Available),
-                time: &time,
-                census_micros,
-                calls: AtomicUsize::new(0),
-            };
-            let budget =
-                WaitBudget::up_to(time.mono_now(), DurationMicros::from_micros(budget_micros));
-            let observed = reobserve_held_path(
-                &workers,
-                Path::new("/worktree"),
-                holder(),
-                budget,
-                &time,
-                &CancelToken::new(),
-                &time,
-            )
-            .unwrap();
-            assert_eq!(
-                observed,
-                if budget_micros > 100_000 && census_micros == 0 {
-                    Occupancy::Available
-                } else {
-                    holder()
-                }
-            );
-            assert_eq!(time.0.load(Ordering::SeqCst), elapsed);
-            assert_eq!(workers.calls.load(Ordering::SeqCst), calls);
-        }
     }
 }

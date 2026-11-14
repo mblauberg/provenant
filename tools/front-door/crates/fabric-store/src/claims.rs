@@ -143,8 +143,9 @@ fn validate_retirement_identity(record: &RetirementRecord) -> Result<()> {
     )
     .map_err(Error::Encode)?;
     let expected_subject = record.reference.custody_subject().map_err(Error::Encode)?;
-    let expected_steps = RetirementStep::for_subjects(&record.related_subjects);
+    let expected_steps = RetirementStep::for_decision(&record.related_subjects, &record.decision);
     if record.id != identity
+        || !record.valid_evidence()
         || record.schema_version != 2
         || record.revision == 0
         || record.related_subjects.windows(2).any(|subjects| {
@@ -176,15 +177,6 @@ fn validate_retirement_identity(record: &RetirementRecord) -> Result<()> {
             !matches!(&outcome.state, RetirementStepState::Pending)
                 && !outcome.step.prerequisites_complete(&record.outcomes)
         })
-        || record.outcomes.iter().any(|outcome| {
-            matches!(
-                &outcome.state,
-                RetirementStepState::Completed { evidence }
-                    if !outcome
-                        .step
-                        .accepts_completion_evidence(record.decision.evidence(), evidence)
-            )
-        })
     {
         return Err(Error::Invalid("retirement record"));
     }
@@ -201,11 +193,6 @@ fn validate_retirement(record: &RetirementRecord) -> Result<()> {
         return Err(Error::Invalid("retirement record"));
     }
     Ok(())
-}
-fn retirement_authority(decision: &RetirementDecision) -> ActorId {
-    match decision {
-        RetirementDecision::Discard { authority, .. } => *authority,
-    }
 }
 fn same_retirement_intent(existing: &RetirementRecord, requested: &RetirementRecord) -> bool {
     existing.schema_version == requested.schema_version
@@ -279,16 +266,15 @@ impl HostStore {
         request: &Request<'_>,
     ) -> Result<RetirementRecord> {
         validate_retirement(record)?;
-        let mut subjects = Vec::with_capacity(record.related_subjects.len() + 1);
-        subjects.push(canonical(&record.subject)?);
-        subjects.extend(
-            record
-                .related_subjects
-                .iter()
-                .map(canonical)
-                .collect::<Result<Vec<_>>>()?,
-        );
-        if subjects[0] != record.subject || subjects[1..] != record.related_subjects {
+        let subjects = record
+            .subjects()
+            .map(canonical)
+            .collect::<Result<Vec<_>>>()?;
+        if subjects
+            .iter()
+            .zip(record.subjects())
+            .any(|(canonical, subject)| canonical != subject)
+        {
             return Err(Error::Invalid("canonical retirement subjects"));
         }
         if subjects
@@ -334,7 +320,7 @@ impl HostStore {
                         record: item,
                         previous_holder: None,
                     },
-                    Some(retirement_authority(&record.decision)),
+                    Some(record.decision.authority()),
                 )?;
             }
             Ok(record.clone())
@@ -365,9 +351,7 @@ impl HostStore {
             if matches!(
                 &next.state,
                 RetirementStepState::Completed { evidence }
-                    if !next
-                        .step
-                        .accepts_completion_evidence(record.decision.evidence(), evidence)
+                    if !record.accepts_completion_evidence(&next.step, evidence)
             ) {
                 return Err(Error::Invalid("retirement completion evidence"));
             }

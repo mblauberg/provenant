@@ -1,8 +1,8 @@
 use super::*;
 
 #[test]
-fn capability_priors_and_exploration_are_preferences_on_nonempty_draws()
--> Result<(), Box<dyn std::error::Error>> {
+fn outcome_priors_and_exploration_rank_eligible_members() -> Result<(), Box<dyn std::error::Error>>
+{
     let catalogue = Catalogue::bundled()?;
     let mut config: RoutingConfig = serde_json::from_value(serde_json::json!({
         "pools": {"senior": [
@@ -70,6 +70,11 @@ fn capability_priors_and_exploration_are_preferences_on_nonempty_draws()
                 .as_u64()
                 .is_some_and(|factor| factor > 0)
         }));
+        assert!(receipt.candidates.iter().all(|candidate| {
+            candidate.extra["outcome_prior"]["evidence_count"]
+                .as_u64()
+                .is_some()
+        }));
     }
     assert!(picks["gpt-6.1-sol"] > picks["gpt-6-luna"]);
     assert!(
@@ -110,7 +115,6 @@ fn capability_priors_and_exploration_are_preferences_on_nonempty_draws()
     Ok(())
 }
 
-#[test]
 fn account_ranking_uses_reset_adjusted_headroom_and_live_load_independent_of_order()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;

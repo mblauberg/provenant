@@ -1,4 +1,4 @@
-//! Preference inputs are immutable evidence, never admission constraints.
+//! Capability preferences and immutable quality evidence.
 use crate::{ModelId, Workload};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

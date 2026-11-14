@@ -154,6 +154,8 @@ pub struct AvailabilityRecord {
     pub fixture_ref: String,
     pub catalogue_revision: String,
     pub account_key: Option<String>,
+    /// Registered plan identity, independent of the account key.
+    pub plan: Option<String>,
     pub observed_models: Vec<String>,
     pub observed_unix_seconds: i64,
     pub expires_unix_seconds: i64,

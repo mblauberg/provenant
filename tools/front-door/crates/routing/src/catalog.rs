@@ -1996,6 +1996,7 @@ mod tests {
             fixture_ref: "test".into(),
             catalogue_revision: catalogue.revision().into(),
             account_key: Some("go".into()),
+            plan: Some("go".into()),
             observed_models: model_names
                 .iter()
                 .map(|name| format!("opencode-go/{name}"))

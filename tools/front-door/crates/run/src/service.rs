@@ -757,7 +757,7 @@ error_kinds! {
     CredentialRoot => "CREDENTIAL_ROOT", "A requested grant overlaps a credential root.";
     WriterProjectMismatch => "WRITER_PROJECT_MISMATCH", "The writer worktree belongs to a different project than the selected one.";
     Confinement => "CONFINEMENT", "Confinement refused the requested access.";
-    DiskFloor => "DISK_FLOOR", "Free disk space is below gc.free_floor; run `provenant gc --apply`.";
+    DiskFloor => "DISK_FLOOR", "Free disk space is below gc.critical_free; run `provenant gc --apply`.";
     Processes => "HOST_PROCESSES", "The user process limit has insufficient headroom.";
     MemoryPressure => "MEMORY_PRESSURE", "Host memory pressure is too high to admit a lane.";
     MemoryFloor => "MEMORY_FLOOR", "Available host memory is below the advisory admission floor.";

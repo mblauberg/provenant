@@ -385,14 +385,12 @@ fn reviewed_head(
             return None;
         }
     }
-    let base = review_base
-        .map(str::to_owned)
-        .or_else(|| {
-            checkpoint
-                .bases
-                .and_then(|bases| bases.integration)
-                .map(|base| base.to_string())
-        });
+    let base = review_base.map(str::to_owned).or_else(|| {
+        checkpoint
+            .bases
+            .and_then(|bases| bases.integration)
+            .map(|base| base.to_string())
+    });
     Some(ReviewedSubject { head, base })
 }
 

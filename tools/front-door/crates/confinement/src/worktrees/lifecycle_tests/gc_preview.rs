@@ -15,7 +15,7 @@ fn gc_lazy_inventory_still_refuses_a_dirty_candidate() -> Result<(), Box<dyn Err
     )?;
     fs::write(lane.path.join("untracked"), "keep")?;
     let lanes = list_for_gc(&context, &cancel())?;
-    let report = collect_lazy(
+    let report = collect(
         &context,
         &lanes,
         &WorktreeGcPolicy {
@@ -26,9 +26,15 @@ fn gc_lazy_inventory_still_refuses_a_dirty_candidate() -> Result<(), Box<dyn Err
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: true,
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
-        RetirementMode::Observe,
         &cancel(),
     )?;
     assert!(
@@ -87,7 +93,7 @@ fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dy
             if scope == lane.path && evidence.contains("worktree verification failed:")
     ));
     let lanes = list_for_gc(&context, &cancel())?;
-    let report = collect_lazy(
+    let report = collect(
         &context,
         &lanes,
         &WorktreeGcPolicy {
@@ -98,9 +104,15 @@ fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dy
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: false,
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
-        RetirementMode::Observe,
         &cancel(),
     )?;
     assert!(git.rejected.load(Ordering::SeqCst) > 0);
@@ -134,7 +146,7 @@ fn gc_lazy_candidate_never_runs_nested_git_filters() -> Result<(), Box<dyn Error
     assert_raw_git_runs_poison_filter(&fixture, &poison)?;
     poison.arm()?;
     let lanes = list_for_gc(&context, &cancel())?;
-    let report = collect_lazy(
+    let report = collect(
         &context,
         &lanes,
         &WorktreeGcPolicy {
@@ -145,9 +157,15 @@ fn gc_lazy_candidate_never_runs_nested_git_filters() -> Result<(), Box<dyn Error
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: true,
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
-        RetirementMode::Observe,
         &cancel(),
     )?;
     assert!(!marker.exists());
@@ -257,9 +275,15 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
                     _ => i128::MAX,
                 },
                 dry_run: matches!(scenario, "preview" | "no-output" | "unconfigured"),
-                foreign_merged_clean: false,
+                include_foreign: false,
+                retirement_port: None,
+                retirement_feeds: None,
+                mode: CollectionMode::Worktrees,
+                proof: None,
+                upstream_reference: None,
+                integration_patterns: &[],
+                excluded_paths: &[],
             },
-            RetirementMode::Observe,
             &cancel(),
         )?;
         assert!(path.is_dir(), "{scenario}");
@@ -342,15 +366,16 @@ fn gc_native_output_preview_creates_no_writer_state() -> Result<(), Box<dyn Erro
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: true,
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         };
-        let preview = collect(
-            &context,
-            &lanes,
-            &policy,
-            RetirementMode::Observe,
-            &cancel(),
-        )?;
+        let preview = collect(&context, &lanes, &policy, &cancel())?;
         assert_eq!(preview.idle_output.len(), 1);
         assert_eq!(preview.idle_output[0].reason, "would_remove");
         assert!(path.join("target/artifact").is_file());
@@ -363,7 +388,6 @@ fn gc_native_output_preview_creates_no_writer_state() -> Result<(), Box<dyn Erro
                 dry_run: false,
                 ..policy
             },
-            RetirementMode::Observe,
             &cancel(),
         )?;
         assert_eq!(applied.idle_output.len(), 1);
@@ -580,15 +604,16 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
         keep: &[],
         written_before_ns: i128::MAX,
         dry_run: false,
-        foreign_merged_clean: false,
+        include_foreign: false,
+        retirement_port: None,
+        retirement_feeds: None,
+        mode: CollectionMode::Worktrees,
+        proof: None,
+        upstream_reference: None,
+        integration_patterns: &[],
+        excluded_paths: &[],
     };
-    collect(
-        &context,
-        &lanes,
-        &policy,
-        RetirementMode::Observe,
-        &cancel(),
-    )?;
+    collect(&context, &lanes, &policy, &cancel())?;
     assert!(path.join("target/artifact").is_file());
     assert_eq!(
         fs::read_to_string(path.join("uncommitted"))?,
@@ -768,9 +793,15 @@ fn writer_lock_busy_is_distinct_from_observed_live_process() -> Result<(), Box<d
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: true,
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
-        RetirementMode::Observe,
         &cancel(),
     )?;
     assert!(
@@ -828,9 +859,15 @@ fn foreign_gc_retains_unowned_worktree_with_typed_retirement_outcome() -> Result
             keep: &[],
             written_before_ns: 0,
             dry_run: false,
-            foreign_merged_clean: true,
+            include_foreign: true,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
+            mode: CollectionMode::Worktrees,
+            proof: Some(&evidence),
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
-        retirement.apply(&evidence),
         &cancel(),
     )?;
     let subject = provenant_records::custody::Subject::new(

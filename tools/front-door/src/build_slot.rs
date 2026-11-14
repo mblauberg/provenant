@@ -19,7 +19,6 @@
 //! `max_concurrent_builds` observes occupancy across the host. Busy slots warn
 //! and proceed immediately; Cargo owns its own build-lock queue.
 use provenant_os::build_slots::BuildSlots;
-use provenant_records::diagnostic::SettingSource;
 use provenant_supervisor::census::{ProcessObservation, ProcessObserver, SystemProcessObserver};
 use std::{
     ffi::{OsStr, OsString},
@@ -347,78 +346,39 @@ fn check_disk(env: &[(OsString, OsString)]) -> Result<(), String> {
             .find(|(key, _)| key == OsStr::new(name))
             .and_then(|(_, value)| value.to_str())
     };
-    let values = (
-        value("PROVENANT_BUILD_DISK_FREE_FLOOR"),
-        value("PROVENANT_BUILD_DISK_FREE_SOURCE"),
-        value("PROVENANT_BUILD_DISK_CRITICAL_FLOOR"),
-        value("PROVENANT_BUILD_DISK_CRITICAL_SOURCE"),
-    );
-    let (Some(free_floor), Some(free_source), Some(critical_floor), Some(critical_source)) = values
-    else {
-        if values == (None, None, None, None) {
-            return Ok(());
-        }
-        say(
-            "build disk floors are incomplete; the critical floor could not be resolved, so the build may proceed without the disk gate",
-        );
+    let Some(encoded_limits) = value("PROVENANT_BUILD_DISK_LIMITS") else {
         return Ok(());
     };
-    let thresholds = (|| {
-        let free_floor = free_floor
-            .parse::<u64>()
-            .map_err(|error| error.to_string())?;
-        let critical_floor = critical_floor
-            .parse::<u64>()
-            .map_err(|error| error.to_string())?;
-        let source = |value: &str| match value {
-            "host configuration" => Some(SettingSource::Configuration),
-            "shipped default" => Some(SettingSource::ShippedDefault),
-            _ => None,
-        };
-        let free_source = source(free_source).ok_or("unknown free-floor source")?;
-        let critical_source = source(critical_source).ok_or("unknown critical-floor source")?;
-        Ok::<_, String>((free_floor, free_source, critical_floor, critical_source))
+    let observed = (|| {
+        let limits: provenant_config::DiskLimits =
+            serde_json::from_str(encoded_limits).map_err(|error| error.to_string())?;
+        let target = value("CARGO_TARGET_DIR").map_or_else(|| Path::new("."), Path::new);
+        let mut root = target;
+        while !root.exists() {
+            root = root.parent().unwrap_or(Path::new("."));
+        }
+        let free = provenant_os::fs::available_bytes_at(root).map_err(|error| error.to_string())?;
+        Ok::<_, String>((limits, free))
     })();
-    let (free_floor, free_source, critical_floor, critical_source) = match thresholds {
-        Ok(thresholds) => thresholds,
+    match observed {
+        Ok((limits, free)) => match limits.level(free) {
+            provenant_config::DiskLevel::Critical => Err(format!(
+                "{}; refusing to start a new build",
+                limits.detail(free)
+            )),
+            provenant_config::DiskLevel::Warning => {
+                say(&format!("warning: {}; building", limits.detail(free)));
+                Ok(())
+            }
+            provenant_config::DiskLevel::Ready => Ok(()),
+        },
         Err(error) => {
             say(&format!(
-                "build disk floors are invalid ({error}); the critical floor could not be resolved, so the build may proceed without the disk gate"
+                "build disk limits are invalid or the disk observation is unavailable ({error}); the build may proceed without the disk gate"
             ));
-            return Ok(());
+            Ok(())
         }
-    };
-    let target = value("CARGO_TARGET_DIR").map_or_else(|| Path::new("."), Path::new);
-    let mut root = target;
-    while !root.exists() {
-        root = root.parent().unwrap_or(Path::new("."));
     }
-    let free = match provenant_os::fs::available_bytes_at(root) {
-        Ok(free) => free,
-        Err(error) => {
-            say(&format!(
-                "build disk observation unavailable ({error}); gc.free_floor={free_floor} bytes from {}, gc.critical_floor={critical_floor} bytes from {}; the build may proceed without the disk gate",
-                free_source.description(),
-                critical_source.description(),
-            ));
-            return Ok(());
-        }
-    };
-    if free < critical_floor {
-        return Err(format!(
-            "free disk space is {free} bytes, below gc.critical_floor={critical_floor} bytes from {} (gc.free_floor={free_floor} bytes from {}); refusing to start a new build",
-            critical_source.description(),
-            free_source.description(),
-        ));
-    }
-    if free < free_floor {
-        say(&format!(
-            "free disk space is {free} bytes, below gc.free_floor={free_floor} bytes from {} (gc.critical_floor={critical_floor} bytes from {}); starting the build",
-            free_source.description(),
-            critical_source.description(),
-        ));
-    }
-    Ok(())
 }
 
 /// The lane's own stderr is the only place a wait shows; a closed stream is

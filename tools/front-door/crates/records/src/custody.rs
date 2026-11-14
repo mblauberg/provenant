@@ -132,6 +132,7 @@ pub enum LandingSource {
         commit: provenant_core::GitOid,
     },
     TreeEquivalent {
+        reference: String,
         head: provenant_core::GitOid,
         target: provenant_core::GitOid,
         tree: provenant_core::GitOid,
@@ -152,13 +153,43 @@ pub struct LandedEvidence {
     pub source: LandingSource,
 }
 
+/// A durable pointer to the archive captured before an explicit discard.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveProof {
+    /// Archive directory id under the project's declared discard archive root.
+    pub id: String,
+    pub tip: provenant_core::GitOid,
+}
+impl ArchiveProof {
+    pub fn valid_for(&self, expected_tip: provenant_core::GitOid) -> bool {
+        !self.id.is_empty()
+            && self.id.len() <= 255
+            && self.id != "."
+            && self.id != ".."
+            && !self.id.chars().any(|ch| ch == '/' || ch == '\\')
+            && !self.id.chars().any(char::is_control)
+            && self.tip == expected_tip
+    }
+}
+
 /// Evidence accepted for a destructive removal. Explicit discard is an
 /// authority choice, not a claim that the subject landed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RemovalEvidence {
-    Landing { evidence: LandedEvidence },
-    ExplicitDiscard,
+    Landing {
+        evidence: LandedEvidence,
+    },
+    /// The reference generation is discarded by authority. Any associated
+    /// worktree must have an archive proof before removal begins.
+    ExplicitDiscard {
+        archive: Option<ArchiveProof>,
+    },
+    /// A clean idle worktree is removed while its reference remains available.
+    IdleRetirement {
+        tip: provenant_core::GitOid,
+    },
 }
 
 /// Where a reference lives. Remote delivery is pinned to the push URL bound by
@@ -167,7 +198,15 @@ pub enum RemovalEvidence {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RefEndpoint {
     Local,
-    Remote { remote: String, push_url: String },
+    Remote {
+        remote: String,
+        push_url: String,
+    },
+    /// A detached private checkout's actual HEAD, distinguished by its
+    /// canonical worktree path and its RefLedger generation.
+    Worktree {
+        path: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +224,9 @@ pub enum RefEndpointIdentity {
     Remote {
         remote: String,
         push_url_digest: provenant_core::Digest,
+    },
+    Worktree {
+        path_digest: provenant_core::Digest,
     },
 }
 
@@ -241,6 +283,9 @@ impl RefOwnership {
     /// Logical branch custody is an advisory owner source only; endpoint and
     /// generation identity for retirement comes from `custody_subject`.
     pub fn logical_branch_subject(&self) -> Option<Subject> {
+        if matches!(self.endpoint, RefEndpoint::Worktree { .. }) {
+            return None;
+        }
         let id = self.reference.strip_prefix("refs/heads/")?;
         if id.is_empty() || id.len() > 4096 || id.chars().any(char::is_control) {
             return None;
@@ -259,6 +304,18 @@ impl RefOwnership {
                     &(self.repository, remote, push_url),
                 )?,
             },
+            RefEndpoint::Worktree { path } => {
+                if self.reference != "HEAD" || !valid_worktree_path(path) {
+                    return Err(crate::CanonicalError::InvalidKind);
+                }
+                RefEndpointIdentity::Worktree {
+                    path_digest: crate::CanonicalV1::record_digest(
+                        "custody-worktree-head",
+                        2,
+                        &(self.repository, path),
+                    )?,
+                }
+            }
         };
         Ok(RefIdentity {
             repository: self.repository,
@@ -282,22 +339,195 @@ impl RefOwnership {
     }
 }
 
+fn valid_worktree_path(path: &str) -> bool {
+    use std::path::Component;
+    path.len() <= 4096
+        && !path.is_empty()
+        && !path.chars().any(char::is_control)
+        && !path.contains("//")
+        && path
+            .split('/')
+            .skip(1)
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+        && std::path::Path::new(path).is_absolute()
+        && std::path::Path::new(path)
+            .components()
+            .any(|component| matches!(component, Component::Normal(_)))
+        && std::path::Path::new(path)
+            .components()
+            .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
+}
+
 /// The actor's durable decision. Explicit discard is distinct from a landing
 /// claim and remains fenced by the pinned reference generation and tip.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RetirementDecision {
+    /// Remove the reference and its associated worktrees after current landing
+    /// evidence or a previously captured explicit-discard archive.
     Discard {
+        authority: ActorId,
+        evidence: RemovalEvidence,
+    },
+    /// Remove only clean, idle worktrees while preserving the local reference.
+    RetireWorktree {
         authority: ActorId,
         evidence: RemovalEvidence,
     },
 }
 impl RetirementDecision {
-    pub fn evidence(&self) -> &RemovalEvidence {
+    pub fn authority(&self) -> ActorId {
         match self {
-            Self::Discard { evidence, .. } => evidence,
+            Self::Discard { authority, .. } | Self::RetireWorktree { authority, .. } => *authority,
         }
     }
+
+    pub fn evidence(&self) -> &RemovalEvidence {
+        match self {
+            Self::Discard { evidence, .. } | Self::RetireWorktree { evidence, .. } => evidence,
+        }
+    }
+
+    pub fn removes_reference(&self) -> bool {
+        matches!(self, Self::Discard { .. })
+    }
+
+    /// Whether a request can resume this recorded action for the same pinned
+    /// generation. Callers must validate both decisions against the record's
+    /// related subjects and expected tip; this comparison deliberately ignores
+    /// a refreshed authority and refreshed Landing evidence, but keeps the
+    /// action and evidence family fixed.
+    pub fn permits_replay(&self, requested: &Self) -> bool {
+        match (self, requested) {
+            (
+                Self::Discard {
+                    evidence: RemovalEvidence::Landing { .. },
+                    ..
+                },
+                Self::Discard {
+                    evidence: RemovalEvidence::Landing { .. },
+                    ..
+                },
+            )
+            | (
+                Self::RetireWorktree {
+                    evidence: RemovalEvidence::Landing { .. },
+                    ..
+                },
+                Self::RetireWorktree {
+                    evidence: RemovalEvidence::Landing { .. },
+                    ..
+                },
+            ) => true,
+            (
+                Self::Discard {
+                    evidence: RemovalEvidence::ExplicitDiscard { archive: left },
+                    ..
+                },
+                Self::Discard {
+                    evidence: RemovalEvidence::ExplicitDiscard { archive: right },
+                    ..
+                },
+            )
+            | (
+                Self::RetireWorktree {
+                    evidence: RemovalEvidence::ExplicitDiscard { archive: left },
+                    ..
+                },
+                Self::RetireWorktree {
+                    evidence: RemovalEvidence::ExplicitDiscard { archive: right },
+                    ..
+                },
+            ) => matches!((left, right), (None, None) | (Some(_), Some(_))),
+            (
+                Self::RetireWorktree {
+                    evidence: RemovalEvidence::IdleRetirement { tip: left },
+                    ..
+                },
+                Self::RetireWorktree {
+                    evidence: RemovalEvidence::IdleRetirement { tip: right },
+                    ..
+                },
+            ) => left == right,
+            _ => false,
+        }
+    }
+
+    pub fn valid_for(
+        &self,
+        related_subjects: &[Subject],
+        expected_tip: provenant_core::GitOid,
+    ) -> bool {
+        match self {
+            Self::Discard {
+                evidence: RemovalEvidence::Landing { evidence },
+                ..
+            } => valid_landing_evidence(evidence, expected_tip, true),
+            Self::Discard {
+                evidence: RemovalEvidence::ExplicitDiscard { archive },
+                ..
+            } => match archive {
+                Some(archive) => archive.valid_for(expected_tip),
+                None => related_subjects.is_empty(),
+            },
+            Self::Discard {
+                evidence: RemovalEvidence::IdleRetirement { .. },
+                ..
+            } => false,
+            Self::RetireWorktree {
+                evidence: RemovalEvidence::Landing { evidence },
+                ..
+            } => {
+                !related_subjects.is_empty()
+                    && valid_landing_evidence(evidence, expected_tip, false)
+            }
+            Self::RetireWorktree {
+                evidence: RemovalEvidence::IdleRetirement { tip },
+                ..
+            } => !related_subjects.is_empty() && *tip == expected_tip,
+            Self::RetireWorktree {
+                evidence:
+                    RemovalEvidence::ExplicitDiscard {
+                        archive: Some(archive),
+                    },
+                ..
+            } => !related_subjects.is_empty() && archive.valid_for(expected_tip),
+            Self::RetireWorktree { .. } => false,
+        }
+    }
+}
+
+fn valid_landing_evidence(
+    evidence: &LandedEvidence,
+    expected_tip: provenant_core::GitOid,
+    reference_must_be_landed: bool,
+) -> bool {
+    match (&evidence.predicate, &evidence.source) {
+        (LandingPredicate::Subsumed, LandingSource::RetainedRef { reference, .. })
+            if !reference_must_be_landed =>
+        {
+            valid_ref_name(reference)
+        }
+        (
+            LandingPredicate::Subsumed | LandingPredicate::Landed,
+            LandingSource::TreeEquivalent {
+                reference, head, ..
+            },
+        ) if *head == expected_tip && !reference_must_be_landed => valid_ref_name(reference),
+        (LandingPredicate::Landed, LandingSource::IntegrationTarget { reference, .. }) => {
+            valid_ref_name(reference)
+        }
+        (LandingPredicate::Landed, LandingSource::ForgeMerged { pr, head, .. }) => {
+            !pr.is_empty() && *head == expected_tip
+        }
+        _ => false,
+    }
+}
+
+fn valid_ref_name(reference: &str) -> bool {
+    reference.starts_with("refs/")
+        && reference.len() <= 4096
+        && !reference.chars().any(char::is_control)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -307,13 +537,16 @@ pub enum RetirementStep {
     Reference,
 }
 impl RetirementStep {
-    pub fn for_subjects(subjects: &[Subject]) -> Vec<Self> {
-        subjects
+    pub fn for_decision(subjects: &[Subject], decision: &RetirementDecision) -> Vec<Self> {
+        let worktrees = subjects
             .iter()
             .cloned()
-            .map(|subject| Self::Worktree { subject })
-            .chain(std::iter::once(Self::Reference))
-            .collect()
+            .map(|subject| Self::Worktree { subject });
+        if decision.removes_reference() {
+            worktrees.chain(std::iter::once(Self::Reference)).collect()
+        } else {
+            worktrees.collect()
+        }
     }
 
     pub fn prerequisites_complete(&self, outcomes: &[RetirementStepOutcome]) -> bool {
@@ -328,22 +561,45 @@ impl RetirementStep {
 
     /// Worktrees can be discarded once their exact tip is subsumed; deleting
     /// the reference itself requires a current landed proof.
-    pub fn accepts_completion_evidence(
+    fn accepts_completion_evidence(
         &self,
         intent: &RemovalEvidence,
         evidence: &RemovalEvidence,
     ) -> bool {
-        match evidence {
-            RemovalEvidence::ExplicitDiscard => {
-                matches!(intent, RemovalEvidence::ExplicitDiscard)
-            }
-            RemovalEvidence::Landing { evidence } => match self {
-                Self::Worktree { .. } => matches!(
-                    evidence.predicate,
-                    LandingPredicate::Subsumed | LandingPredicate::Landed
-                ),
-                Self::Reference => evidence.predicate == LandingPredicate::Landed,
-            },
+        match (intent, evidence, self) {
+            (
+                RemovalEvidence::ExplicitDiscard {
+                    archive: Some(expected),
+                },
+                RemovalEvidence::ExplicitDiscard {
+                    archive: Some(actual),
+                },
+                Self::Worktree { .. } | Self::Reference,
+            ) => expected.valid_for(expected.tip) && actual.valid_for(expected.tip),
+            (
+                RemovalEvidence::ExplicitDiscard { archive: None },
+                RemovalEvidence::ExplicitDiscard { archive: None },
+                Self::Reference,
+            ) => true,
+            (
+                RemovalEvidence::IdleRetirement { tip: expected },
+                RemovalEvidence::IdleRetirement { tip: actual },
+                Self::Worktree { .. },
+            ) => expected == actual,
+            (
+                RemovalEvidence::Landing { .. },
+                RemovalEvidence::Landing { evidence },
+                Self::Worktree { .. },
+            ) => matches!(
+                evidence.predicate,
+                LandingPredicate::Subsumed | LandingPredicate::Landed
+            ),
+            (
+                RemovalEvidence::Landing { .. },
+                RemovalEvidence::Landing { evidence },
+                Self::Reference,
+            ) => evidence.predicate == LandingPredicate::Landed,
+            _ => false,
         }
     }
 }
@@ -432,7 +688,7 @@ impl RetirementRecord {
             expected_tip,
             &decision,
         )?;
-        let outcomes = RetirementStep::for_subjects(&related_subjects)
+        let outcomes = RetirementStep::for_decision(&related_subjects, &decision)
             .into_iter()
             .map(|step| RetirementStepOutcome {
                 step,
@@ -454,7 +710,7 @@ impl RetirementRecord {
     }
 
     fn projection(&self, subject: &Subject) -> RemovalRecord {
-        let projected_step = if subject == &self.subject {
+        let projected_step = if subject == &self.subject && self.decision.removes_reference() {
             RetirementStep::Reference
         } else {
             RetirementStep::Worktree {
@@ -466,15 +722,12 @@ impl RetirementRecord {
             .iter()
             .find(|outcome| outcome.step == projected_step)
             .map(|outcome| &outcome.state);
-        let outcome = match (&self.decision, state) {
-            (
-                RetirementDecision::Discard { .. },
-                Some(RetirementStepState::Completed { evidence }),
-            ) => RemovalOutcome::Removed {
+        let outcome = match state {
+            Some(RetirementStepState::Completed { evidence }) => RemovalOutcome::Removed {
                 evidence: evidence.clone(),
                 retirement_id: self.id.clone(),
             },
-            (RetirementDecision::Discard { .. }, _) => RemovalOutcome::Kept {
+            _ => RemovalOutcome::Kept {
                 cause: RemovalUncertainty::RetirementIncomplete,
             },
         };
@@ -488,21 +741,121 @@ impl RetirementRecord {
 
     /// Project each affected custody subject into the existing GC report.
     pub fn removals(&self) -> Vec<RemovalRecord> {
-        std::iter::once(self.projection(&self.subject))
-            .chain(
-                self.related_subjects
-                    .iter()
-                    .map(|subject| self.projection(subject)),
-            )
+        self.subjects()
+            .map(|subject| self.projection(subject))
             .collect()
     }
 
+    /// Validate a step proof against this immutable decision and pinned tip.
+    /// Refreshed archive IDs are valid when they remain safe and name the same
+    /// expected tip; confinement verifies the captured archive before mutation.
+    pub fn accepts_completion_evidence(
+        &self,
+        step: &RetirementStep,
+        evidence: &RemovalEvidence,
+    ) -> bool {
+        if !self.outcomes.iter().any(|outcome| &outcome.step == step)
+            || !step.accepts_completion_evidence(self.decision.evidence(), evidence)
+        {
+            return false;
+        }
+        let completion = match step {
+            RetirementStep::Worktree { .. } => RetirementDecision::RetireWorktree {
+                authority: self.decision.authority(),
+                evidence: evidence.clone(),
+            },
+            RetirementStep::Reference => RetirementDecision::Discard {
+                authority: self.decision.authority(),
+                evidence: evidence.clone(),
+            },
+        };
+        completion.valid_for(&self.related_subjects, self.expected_tip)
+    }
+
     pub fn removal(&self) -> RemovalRecord {
-        self.projection(&self.subject)
+        self.subjects()
+            .next()
+            .map(|subject| self.projection(subject))
+            .unwrap_or_else(|| self.projection(&self.subject))
+    }
+
+    pub fn subjects(&self) -> impl Iterator<Item = &Subject> {
+        std::iter::once(&self.subject)
+            .filter(move |_| self.decision.removes_reference())
+            .chain(self.related_subjects.iter())
+    }
+
+    pub fn valid_evidence(&self) -> bool {
+        if !self
+            .decision
+            .valid_for(&self.related_subjects, self.expected_tip)
+        {
+            return false;
+        }
+        if self.outcomes.iter().any(|outcome| {
+            matches!(
+                &outcome.state,
+                RetirementStepState::Completed { evidence }
+                    if !self.accepts_completion_evidence(&outcome.step, evidence)
+            )
+        }) {
+            return false;
+        }
+        match &self.reference.identity.endpoint {
+            RefEndpointIdentity::Worktree { path_digest } => {
+                let [worktree] = self.related_subjects.as_slice() else {
+                    return false;
+                };
+                let expected = crate::CanonicalV1::record_digest(
+                    "custody-worktree-head",
+                    2,
+                    &(self.reference.identity.repository, &worktree.id),
+                );
+                self.reference.identity.reference == "HEAD"
+                    && self.reference.generation > 0
+                    && worktree.kind == SubjectKind::Worktree
+                    && valid_worktree_path(&worktree.id)
+                    && matches!(&self.decision, RetirementDecision::RetireWorktree { .. })
+                    && expected.is_ok_and(|expected| &expected == path_digest)
+            }
+            RefEndpointIdentity::Local => {
+                let refs_valid = self.reference.identity.reference.starts_with("refs/")
+                    && self.reference.identity.reference.len() <= 4096
+                    && !self
+                        .reference
+                        .identity
+                        .reference
+                        .chars()
+                        .any(char::is_control);
+                let related_worktrees = !self.related_subjects.is_empty()
+                    && self
+                        .related_subjects
+                        .iter()
+                        .all(|subject| subject.kind == SubjectKind::Worktree);
+                self.reference.generation > 0
+                    && refs_valid
+                    && match &self.decision {
+                        RetirementDecision::Discard { .. } => true,
+                        RetirementDecision::RetireWorktree { .. } => related_worktrees,
+                    }
+            }
+            RefEndpointIdentity::Remote { .. } => {
+                self.reference.generation > 0
+                    && self.reference.identity.reference.starts_with("refs/")
+                    && self.reference.identity.reference.len() <= 4096
+                    && !self
+                        .reference
+                        .identity
+                        .reference
+                        .chars()
+                        .any(char::is_control)
+                    && matches!(&self.decision, RetirementDecision::Discard { .. })
+            }
+        }
     }
 
     pub fn owns_subject(&self, subject: &Subject) -> bool {
-        &self.subject == subject || self.related_subjects.contains(subject)
+        self.subjects().any(|owned| owned == subject)
     }
 }
 
@@ -525,6 +878,13 @@ removal_uncertainties! {
     UnprovenLanding => "unproven_landing",
     MissingCommit => "missing_commit",
     RetirementIncomplete => "retirement_incomplete",
+    CustodyUnknown => "custody_unknown",
+    CensusUnknown => "census_unknown",
+    RunRecordsUnknown => "run_records_unknown",
+    Busy => "busy",
+    DirtyWorktree => "dirty_worktree",
+    LockedOrUnavailable => "locked_or_unavailable",
+    ObservationFailed => "observation_failed",
 }
 
 /// The outcome of considering one subject and tip for removal.
@@ -548,6 +908,7 @@ pub struct RemovalRecord {
     pub tip: provenant_core::GitOid,
     pub outcome: RemovalOutcome,
 }
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum CustodyState {
@@ -664,6 +1025,7 @@ pub struct CustodyStatus {
 mod tests {
     use super::*;
     #[test]
+
     fn ref_custody_subject_binds_endpoint_reference_and_generation_without_exposing_url() {
         let project = ProjectId::from_bytes([9; 16]);
         let local = RefOwnership {
@@ -713,6 +1075,237 @@ mod tests {
                 .unwrap()
                 .contains(&push_url)
         );
+        let detached = RefOwnership {
+            endpoint: RefEndpoint::Worktree {
+                path: "/fixture/detached".into(),
+            },
+            reference: "HEAD".into(),
+            ..local.clone()
+        };
+        let detached_identity = detached.identity().unwrap();
+        assert!(matches!(
+            detached_identity.endpoint,
+            RefEndpointIdentity::Worktree { .. }
+        ));
+        assert!(detached.logical_branch_subject().is_none());
+        assert!(
+            RefOwnership {
+                endpoint: RefEndpoint::Worktree {
+                    path: "/fixture/../escape".into(),
+                },
+                ..detached
+            }
+            .identity()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn retirement_records_follow_one_declared_decision_and_archive_identity() {
+        let project = ProjectId::from_bytes([12; 16]);
+        let tip = provenant_core::GitOid::parse(&"c3".repeat(20)).unwrap();
+        let reference = RefOwnership {
+            repository: project,
+            endpoint: RefEndpoint::Local,
+            reference: "refs/heads/idle".into(),
+            generation: 4,
+            origin: RefOrigin::Created,
+        };
+        let worktree = Subject::new(SubjectKind::Worktree, "/fixture/idle");
+        let idle = RetirementDecision::RetireWorktree {
+            authority: ActorId::from_bytes([4; 16]),
+            evidence: RemovalEvidence::IdleRetirement { tip },
+        };
+        let mut record = RetirementRecord::plan(
+            project,
+            vec![worktree.clone()],
+            reference.clone(),
+            tip,
+            idle,
+        )
+        .unwrap();
+        assert!(record.valid_evidence());
+        assert_eq!(record.outcomes.len(), 1);
+        assert_eq!(
+            record.subjects().cloned().collect::<Vec<_>>(),
+            [worktree.clone()]
+        );
+        assert_eq!(record.removals().len(), 1);
+        assert_eq!(record.removal().subject, worktree);
+        let completion = record.decision.evidence().clone();
+        record.outcomes[0].state = RetirementStepState::Completed {
+            evidence: completion.clone(),
+        };
+        assert!(matches!(
+            record.removal().outcome,
+            RemovalOutcome::Removed { .. }
+        ));
+        assert!(record.accepts_completion_evidence(&record.outcomes[0].step, &completion));
+
+        let subsumed = RetirementRecord::plan(
+            project,
+            vec![Subject::new(SubjectKind::Worktree, "/fixture/subsumed")],
+            reference.clone(),
+            tip,
+            RetirementDecision::RetireWorktree {
+                authority: ActorId::from_bytes([4; 16]),
+                evidence: RemovalEvidence::Landing {
+                    evidence: LandedEvidence {
+                        predicate: LandingPredicate::Subsumed,
+                        source: LandingSource::RetainedRef {
+                            reference: "refs/heads/retained".into(),
+                            commit: tip,
+                        },
+                    },
+                },
+            },
+        )
+        .unwrap();
+        assert!(subsumed.valid_evidence());
+        assert_eq!(subsumed.outcomes.len(), 1);
+        assert_eq!(subsumed.subjects().count(), 1);
+        let refreshed_subsumed = RetirementDecision::RetireWorktree {
+            authority: ActorId::from_bytes([5; 16]),
+            evidence: RemovalEvidence::Landing {
+                evidence: LandedEvidence {
+                    predicate: LandingPredicate::Subsumed,
+                    source: LandingSource::RetainedRef {
+                        reference: "refs/heads/updated-base".into(),
+                        commit: tip,
+                    },
+                },
+            },
+        };
+        assert!(subsumed.decision.permits_replay(&refreshed_subsumed));
+        assert!(refreshed_subsumed.valid_for(&subsumed.related_subjects, tip));
+
+        let archive = ArchiveProof {
+            id: "archive-123".into(),
+            tip,
+        };
+        let explicit = RetirementDecision::Discard {
+            authority: ActorId::from_bytes([4; 16]),
+            evidence: RemovalEvidence::ExplicitDiscard {
+                archive: Some(archive.clone()),
+            },
+        };
+        let explicit_record = RetirementRecord::plan(
+            project,
+            vec![Subject::new(SubjectKind::Worktree, "/fixture/idle")],
+            reference.clone(),
+            tip,
+            explicit.clone(),
+        )
+        .unwrap();
+        assert!(explicit_record.valid_evidence());
+        assert_eq!(explicit_record.outcomes.len(), 2);
+        let refreshed_archive = RetirementDecision::Discard {
+            authority: ActorId::from_bytes([5; 16]),
+            evidence: RemovalEvidence::ExplicitDiscard {
+                archive: Some(ArchiveProof {
+                    id: "archive-retry".into(),
+                    tip,
+                }),
+            },
+        };
+        assert!(explicit.permits_replay(&refreshed_archive));
+        assert!(refreshed_archive.valid_for(&explicit_record.related_subjects, tip));
+        let worktree_step = RetirementStep::Worktree {
+            subject: explicit_record.related_subjects[0].clone(),
+        };
+        assert!(
+            explicit_record
+                .accepts_completion_evidence(&worktree_step, refreshed_archive.evidence(),)
+        );
+        let wrong_tip_archive = RetirementDecision::Discard {
+            authority: ActorId::from_bytes([5; 16]),
+            evidence: RemovalEvidence::ExplicitDiscard {
+                archive: Some(ArchiveProof {
+                    id: "archive-wrong-tip".into(),
+                    tip: provenant_core::GitOid::parse(&"d4".repeat(20)).unwrap(),
+                }),
+            },
+        };
+        assert!(explicit.permits_replay(&wrong_tip_archive));
+        assert!(!wrong_tip_archive.valid_for(&explicit_record.related_subjects, tip));
+        assert!(
+            !explicit_record
+                .accepts_completion_evidence(&worktree_step, wrong_tip_archive.evidence(),)
+        );
+        assert!(!explicit.permits_replay(&refreshed_subsumed));
+        assert_ne!(
+            explicit_record.id,
+            RetirementRecord::identity(
+                project,
+                &explicit_record.related_subjects,
+                &reference.generation_identity().unwrap(),
+                tip,
+                &RetirementDecision::Discard {
+                    authority: ActorId::from_bytes([4; 16]),
+                    evidence: RemovalEvidence::ExplicitDiscard {
+                        archive: Some(ArchiveProof {
+                            id: "archive-other".into(),
+                            tip,
+                        }),
+                    },
+                },
+            )
+            .unwrap()
+        );
+        let invalid_archive = RetirementDecision::Discard {
+            authority: ActorId::from_bytes([4; 16]),
+            evidence: RemovalEvidence::ExplicitDiscard {
+                archive: Some(ArchiveProof {
+                    id: "../escape".into(),
+                    tip,
+                }),
+            },
+        };
+        assert!(
+            !RetirementRecord::plan(
+                project,
+                explicit_record.related_subjects,
+                reference,
+                tip,
+                invalid_archive,
+            )
+            .unwrap()
+            .valid_evidence()
+        );
+        let detached_path = "/fixture/detached";
+        let detached_worktree = Subject::new(SubjectKind::Worktree, detached_path);
+        let detached_reference = RefOwnership {
+            repository: project,
+            endpoint: RefEndpoint::Worktree {
+                path: detached_path.into(),
+            },
+            reference: "HEAD".into(),
+            generation: 1,
+            origin: RefOrigin::Adopted,
+        };
+        let detached = RetirementRecord::plan(
+            project,
+            vec![detached_worktree.clone()],
+            detached_reference,
+            tip,
+            RetirementDecision::RetireWorktree {
+                authority: ActorId::from_bytes([4; 16]),
+                evidence: RemovalEvidence::ExplicitDiscard {
+                    archive: Some(ArchiveProof {
+                        id: "archive-detached".into(),
+                        tip,
+                    }),
+                },
+            },
+        )
+        .unwrap();
+        assert!(detached.valid_evidence());
+        assert_eq!(detached.outcomes.len(), 1);
+        assert_eq!(
+            detached.subjects().cloned().collect::<Vec<_>>(),
+            [detached_worktree]
+        );
+        assert!(!archive.id.is_empty());
     }
 
     #[test]
@@ -726,6 +1319,7 @@ mod tests {
                 commit: oid,
             },
             LandingSource::TreeEquivalent {
+                reference: "refs/heads/retained".into(),
                 head: oid,
                 target,
                 tree: oid,
@@ -772,7 +1366,12 @@ mod tests {
             subject: Subject::new(SubjectKind::Worktree, "feature"),
             tip: oid,
             outcome: RemovalOutcome::Removed {
-                evidence: RemovalEvidence::ExplicitDiscard,
+                evidence: RemovalEvidence::ExplicitDiscard {
+                    archive: Some(ArchiveProof {
+                        id: "archive-1".into(),
+                        tip: oid,
+                    }),
+                },
                 retirement_id: "retirement-explicit".into(),
             },
         };

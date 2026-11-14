@@ -168,7 +168,7 @@
         );
     }
     #[test]
-    fn override_references_resolve_and_registered_labels_precede_derived_accounts() {
+    fn override_references_resolve_only_registered_identities() {
         use provenant_providers::accounts::Settings;
         use provenant_routing::RoutingConfig;
         let settings: Settings = serde_json::from_value(serde_json::json!({"entries": {
@@ -182,10 +182,12 @@
             super::resolve_account_reference("zen", "test", &settings).unwrap(),
             "opencode/work"
         );
-        assert_eq!(
-            super::resolve_account_reference("opencode/zen", "test", &settings).unwrap(),
-            "opencode/zen"
-        );
+        assert!(matches!(super::resolve_account_reference("opencode/zen", "test", &settings),
+            Err(super::EdgeError::AccountProfile { kind: super::AccountProfileError::Unknown, .. })));
+        for entry in settings.entries.values() {
+            let reference = format!("{}/{}", entry.adapter, entry.key);
+            assert_eq!(super::resolve_account_reference(&reference, "test", &settings).unwrap(), reference);
+        }
         assert!(matches!(
             super::resolve_account_reference("shared", "test", &settings),
             Err(super::EdgeError::AccountProfile {
@@ -297,6 +299,7 @@
             fixture_ref: "fixture".into(),
             catalogue_revision: catalogue.revision().into(),
             account_key: Some("go".into()),
+            plan: Some("go".into()),
             observed_models: vec![
                 "opencode-go/glm-5.3-flash".into(),
                 "opencode-go/deepseek-v4.1-flash".into(),
@@ -418,6 +421,7 @@
                 fixture_ref: "fixture".into(),
                 catalogue_revision: catalogue.revision().into(),
                 account_key: Some(key.into()),
+                plan: None,
                 observed_models: Vec::new(),
                 observed_unix_seconds: now,
                 expires_unix_seconds: now + 300,
@@ -518,6 +522,7 @@
                 fixture_ref: "fixture".into(),
                 catalogue_revision: catalogue.revision().into(),
                 account_key: Some(key.into()),
+                plan: None,
                 observed_models: Vec::new(),
                 observed_unix_seconds: now,
                 expires_unix_seconds: now + 300,
@@ -618,6 +623,7 @@
                 fixture_ref: "fixture".into(),
                 catalogue_revision: catalogue.revision().into(),
                 account_key: Some(key.into()),
+                plan: None,
                 observed_models: vec!["gpt-6-luna".into()],
                 observed_unix_seconds: now,
                 expires_unix_seconds: now + 300,
@@ -731,7 +737,7 @@
             observed_unix_seconds: 100,
             source_ref: "fixture".into(),
             authority_ref: None,
-            details: None,
+            details: Some(provenant_quota::QuotaDetails { plan: Some("go".into()), ..Default::default() }),
             windows: Vec::new(),
         });
         let availability = [provenant_providers::AvailabilityRecord {
@@ -743,6 +749,7 @@
             fixture_ref: "fixture".into(),
             catalogue_revision: "fixture".into(),
             account_key: Some("go".into()),
+            plan: Some("go".into()),
             observed_models: vec![
                 "opencode-go/glm-5.1".into(),
                 "opencode/glm-5.3-flash-free".into(),
@@ -786,7 +793,7 @@
             observed_unix_seconds: 100,
             source_ref: "fixture".into(),
             authority_ref: None,
-            details: None,
+            details: Some(provenant_quota::QuotaDetails { plan: Some("go".into()), ..Default::default() }),
             windows: Vec::new(),
         });
         let availability = [provenant_providers::AvailabilityRecord {
@@ -798,6 +805,7 @@
             fixture_ref: "fixture".into(),
             catalogue_revision: "fixture".into(),
             account_key: Some("go".into()),
+            plan: Some("go".into()),
             observed_models: vec!["opencode-go/glm-5.1".into(), "opencode-go/GPT-OSS 120B (Medium)".into()],
             observed_unix_seconds: 100,
             expires_unix_seconds: 200,

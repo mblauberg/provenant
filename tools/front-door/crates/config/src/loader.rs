@@ -603,7 +603,9 @@ fn inspect<T: DeserializeOwned + Serialize>(
         "gc.schedule",
         "gc.idle_days",
         "gc.graph_checkpoint_days",
+        "gc.discard_archive_days",
         "gc.free_floor",
+        "gc.critical_free",
         "gc.lane_cargo_cache_max",
         "gc.alert_below",
         "gc.projects",
@@ -616,9 +618,17 @@ fn inspect<T: DeserializeOwned + Serialize>(
         });
     }
     for project in gc.projects.keys() {
-        origins
-            .entry(format!("gc.projects.{project}.foreign_worktrees"))
-            .or_insert_with(|| compiled.clone());
+        for key in [
+            "foreign_worktrees",
+            "integration_branches",
+            "keep_paths",
+            "remote_branches",
+            "remote_min_tip_age_days",
+        ] {
+            origins
+                .entry(format!("gc.projects.{project}.{key}"))
+                .or_insert_with(|| compiled.clone());
+        }
     }
     for key in [
         "worktrees.setup",

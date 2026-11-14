@@ -185,9 +185,11 @@ pub(super) fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, Str
             access,
             pool,
             // Missing evidence cannot certify a complete success.
-            partial: record
-                .as_ref()
-                .is_none_or(|record| !record.partial_signals.is_empty()),
+            partial: record.as_ref().is_none_or(|record| {
+                provenant_telemetry::route_outcomes::provider_work_incomplete(
+                    &record.partial_signals,
+                )
+            }),
         });
     }
     let route_outcomes = provenant_telemetry::route_outcomes::report(route_evidence)

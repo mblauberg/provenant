@@ -557,6 +557,15 @@ impl RouteRecord {
         source: &str,
     ) -> Self {
         Self {
+            extra: route
+                .extra
+                .get("effort_warning")
+                .map(|warning| {
+                    [("effort_warning".into(), warning.clone())]
+                        .into_iter()
+                        .collect()
+                })
+                .unwrap_or_default(),
             provider: Some(route.adapter.clone()),
             model: Some(format!("{}/{}", route.adapter, route.model)),
             effort: route.effort.clone(),
@@ -788,7 +797,7 @@ impl TerminalCause {
             Self::AccountLoginRequired => "login required; provenant output ID",
             Self::RouteResolutionRefused => "route refused; provenant output ID",
             Self::AccessPolicyRefused => "access policy refused; provenant output ID",
-            Self::DiskFloor => "disk below gc.free_floor; provenant output ID",
+            Self::DiskFloor => "disk below gc.critical_free; provenant output ID",
             Self::DiskObservationUnavailable => "disk probe unavailable; provenant output ID",
             Self::StoredPromptUnreadable => "stored prompt unreadable; provenant output ID",
             Self::CloudPlacementRemoved => "cloud placement removed; provenant output ID",
@@ -832,7 +841,7 @@ impl TerminalCause {
                 "route resolution refused the lane; check the model, effort, exclusions and availability with `provenant route resolve` and `provenant quota tick`"
             }
             Self::DiskFloor => {
-                "the host writer disk precheck refused launch below gc.free_floor; free disk space or run `provenant gc --apply` before retrying"
+                "the host writer disk precheck refused launch below gc.critical_free; free disk space or run `provenant gc --apply` before retrying"
             }
             Self::DiskObservationUnavailable => {
                 "the host writer disk precheck could not observe free space; restore the host disk observation before retrying"
@@ -1165,7 +1174,7 @@ pub enum TerminalEvidence {
     },
 }
 
-/// Who owns a settlement cause. Route quality uses provider causes only.
+/// Who owns a settlement cause, independently of any completed provider work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CauseSource {
@@ -1197,6 +1206,7 @@ pub struct SettlementRule {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettlementTerminalOutcome {
     Preserve,
+    Succeeded,
     ReviewRequired,
     Uncommitted,
 }
@@ -1205,6 +1215,7 @@ impl SettlementTerminalOutcome {
     fn apply(self, observed: Outcome) -> Outcome {
         match self {
             Self::Preserve => observed,
+            Self::Succeeded => Outcome::Succeeded,
             Self::ReviewRequired if observed == Outcome::Succeeded => Outcome::ReviewRequired,
             Self::ReviewRequired => observed,
             Self::Uncommitted
@@ -1258,6 +1269,8 @@ macro_rules! settlement_reasons {
 settlement_reasons! {
     /// The provider finished and reported its results.
     Completed { source: Provider, node: Succeeded, outcome: Preserve, stop: None },
+    /// A complete handoff preceded the host token-budget stop.
+    CompletedBeforeBudget { source: Host, node: Succeeded, outcome: Succeeded, stop: Some(crate::stop::StopCause::TokenBudget) },
     /// The provider finished without a final handoff, so nothing was reported.
     HandoffMissing { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMissing) },
     /// The writer exited without a final message.
@@ -1306,6 +1319,19 @@ impl SettlementReason {
                 {
                     Self::UncommittedWork
                 }
+                Some(TerminalCause::TokenBudget)
+                    if matches!(
+                        outcome,
+                        Outcome::Succeeded
+                            | Outcome::ReviewRequired
+                            | Outcome::Failed
+                            | Outcome::TimedOut
+                    ) && handoff.is_some_and(|handoff| {
+                        !handoff.unfinished() && handoff.validate().is_ok()
+                    }) =>
+                {
+                    Self::CompletedBeforeBudget
+                }
                 _ if matches!(outcome, Outcome::Succeeded | Outcome::ReviewRequired) => {
                     Self::Completed
                 }
@@ -1314,10 +1340,15 @@ impl SettlementReason {
         }
     }
 
-    /// A typed stop keeps dependants closed even when the terminal provider
-    /// outcome looked successful. With no stop, only Completed releases them.
+    /// A completed budget boundary retains its host stop without closing
+    /// dependants. Other typed stops keep dependants closed.
     pub const fn node_outcome(self, stop: Option<crate::stop::StopCause>) -> SettlementNodeOutcome {
-        if stop.is_some() {
+        if stop.is_some()
+            && !matches!(
+                self.rule().terminal_outcome,
+                SettlementTerminalOutcome::Succeeded
+            )
+        {
             SettlementNodeOutcome::Failed
         } else {
             self.rule().node_outcome
