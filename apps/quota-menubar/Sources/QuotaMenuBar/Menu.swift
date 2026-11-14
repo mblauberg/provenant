@@ -1,4 +1,5 @@
 import Foundation
+import ProvenantDesign
 
 /// What choosing a menu item does.
 enum MenuAction: Equatable {
@@ -128,24 +129,41 @@ enum QuotaMenu {
         return entries
     }
 
+    private static func target(_ kind: String, _ id: String) -> MenuAction? {
+        var components = URLComponents()
+        components.scheme = "provenant-console"
+        components.host = kind
+        components.path = "/" + id
+        return components.url.map(MenuAction.open)
+    }
+
+    private static func age(_ text: String?, now: Date) -> String? {
+        guard let date = Stamp.parse(text) else { return nil }
+        return Fmt.ago(date, now: now)
+    }
+
     static func overviewEntries(_ overview: ConsoleOverview?, error: String?, updatedAt: Date?, now: Date,
                                 observationError: String? = nil) -> [MenuEntry] {
         var entries: [MenuEntry] = []
-        if let overview {
+        if let overview, error == nil {
+            let requests = overview.needsYou.filter { request in
+                guard let date = Stamp.parse(request.deadline) else { return true }
+                return date > now
+            }
             let count: String
-            switch (overview.coverage.inbox, overview.counts.needsYou) {
+            switch (overview.coverage.inbox, overview.counts.needsYou.map { max(0, $0 - (overview.needsYou.count - requests.count)) }) {
             case ("complete", .some(let value)): count = "\(value) needs you"
             case ("partial", .some(let value)): count = "At least \(value) needs you"
             default: count = "Needs you unavailable"
             }
             entries += [.separator, .header(count)]
-            entries += overview.needsYou.prefix(3).map { request in
-                let context = [request.projectLabel, request.taskLabel].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+            entries += requests.prefix(3).map { request in
+                let context = [request.projectLabel, request.taskLabel, age(request.createdAt, now: now)].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
                 return .item(MenuItemSpec(title: clip(request.title ?? "Untitled request"), subtitle: context.isEmpty ? nil : clip(context),
-                                          icon: .mark("questionmark", .blue), enabled: false))
+                                          icon: .mark("questionmark", .blue), action: target("request", request.id)))
             }
-            if overview.needsYou.count > 3 {
-                entries.append(.note("\(overview.needsYou.count - 3) more · use provenant inbox", nil))
+            if requests.count > 3 {
+                entries.append(.note("\(requests.count - 3) more · use provenant inbox", nil))
             }
             if overview.coverage.runs != "complete" { entries.append(.note("Local runs: \(overview.coverage.runs)", .orange)) }
             if overview.coverage.inbox != "complete" { entries.append(.note("Local inbox: \(overview.coverage.inbox)", .orange)) }
@@ -157,10 +175,10 @@ enum QuotaMenu {
                 entries += overview.lanes.prefix(5).map { lane in
                     let title = lane.taskLabel.flatMap { $0.isEmpty ? nil : $0 } ?? "Untitled task"
                     let state = lane.attention ? "Needs attention" : Fmt.human(lane.state)
-                    let context = [lane.projectLabel, state].compactMap { $0 }.joined(separator: " · ")
+                    let context = [lane.projectLabel, state, age(lane.queuedAt, now: now)].compactMap { $0 }.joined(separator: " · ")
                     return .item(MenuItemSpec(title: clip(title), subtitle: clip(context),
                                               icon: .mark(lane.attention ? "exclamationmark" : "circle", lane.attention ? .orange : .secondary),
-                                              enabled: false))
+                                              enabled: lane.attemptId != nil, action: lane.attemptId.flatMap { target("attempt", $0) }))
                 }
                 if overview.lanes.count > 5 { entries.append(.note("More local work available in the console", nil)) }
             }

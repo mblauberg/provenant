@@ -131,7 +131,7 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
         read_prompts: false,
     };
     let mut lanes = Vec::new();
-    let (mut running, mut attention) = (0usize, 0usize);
+    let (mut running, attention) = (0usize, 0usize);
     let run = match RunStore::open_read_only(&context, &run_call) {
         Ok(Some(store)) => match store.overview_attempts(128, remaining_bytes, &run_call) {
             Ok(batch) => {
@@ -139,8 +139,7 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
                     let Some(label) = labels.get(&item.project_id.to_string()) else {
                         continue;
                     };
-                    let active = !matches!(item.state, OverviewState::Terminal(_));
-                    let needs_attention = needs_attention(item.state);
+                    let active = is_live(item.state);
                     let row = crate::run::project_lane(
                         &item.record,
                         &[],
@@ -149,10 +148,9 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
                         false,
                     );
                     running += usize::from(active);
-                    attention += usize::from(needs_attention);
-                    if active || needs_attention {
+                    if active {
                         let key = &item.record.key;
-                        lanes.push(json!({"project_id":item.project_id,"project_label":label,"key":key,"attempt_id":row.attempt_id,"task_label":item.title,"state":row.state,"cause":row.cause,"retry_of":row.retry_of,"superseded_by":row.superseded_by,"attention":needs_attention}));
+                        lanes.push(json!({"project_id":item.project_id,"project_label":label,"key":key,"attempt_id":row.attempt_id,"task_label":item.title,"state":row.state,"queued_at":item.record.queued_at,"cause":row.cause,"retry_of":row.retry_of,"superseded_by":row.superseded_by,"attention":false}));
                     }
                 }
                 if batch.truncated {
@@ -175,8 +173,8 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
     )
 }
 
-fn needs_attention(state: OverviewState) -> bool {
-    matches!(state, OverviewState::Terminal(outcome) if !matches!(outcome, provenant_run::Outcome::Succeeded | provenant_run::Outcome::Cancelled))
+fn is_live(state: OverviewState) -> bool {
+    !matches!(state, OverviewState::Terminal(_))
 }
 
 #[cfg(test)]
@@ -184,14 +182,23 @@ mod comparison_tests {
     use super::*;
 
     #[test]
-    fn terminal_failures_need_attention() {
-        assert!(needs_attention(OverviewState::Terminal(
-            provenant_run::Outcome::TimedOut
-        )));
-        assert!(!needs_attention(OverviewState::Terminal(
-            provenant_run::Outcome::Succeeded
-        )));
-        assert!(!needs_attention(OverviewState::Running));
+    fn overview_only_contains_unsettled_attempts() {
+        for state in [
+            OverviewState::Queued,
+            OverviewState::Starting,
+            OverviewState::Running,
+            OverviewState::Settling,
+        ] {
+            assert!(is_live(state));
+        }
+        for outcome in [
+            provenant_run::Outcome::Succeeded,
+            provenant_run::Outcome::Failed,
+            provenant_run::Outcome::TimedOut,
+            provenant_run::Outcome::Cancelled,
+        ] {
+            assert!(!is_live(OverviewState::Terminal(outcome)));
+        }
     }
 
     use provenant_fabric_runtime::inbox::{OverviewBatch, OverviewItem};
