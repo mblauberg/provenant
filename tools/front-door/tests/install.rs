@@ -1631,179 +1631,144 @@ fn upgrade_requires_a_receipt_before_download_or_build() -> Result {
     Ok(())
 }
 
-#[test]
-fn upgrade_pins_one_release_replays_settings_and_reports_peer_failure() -> Result {
-    let mut rig = TestRig::new()?;
-    let first = staged(&rig)?;
-    let second = staged_named(&rig, "next-release", b"upgraded release")?;
-    let installed = rig.command(&[
-        "install",
-        "--source",
-        first.to_str().ok_or("stage")?,
-        "--harness",
-        "codex",
-        "--json",
-    ])?;
-    assert_eq!(code(&installed), 0);
-    let archive = rig.root.join("package.tar.gz");
+/// Archives `dir` as a gzip tarball at `archive` and returns its sha256.
+fn tar_digest(rig: &TestRig, dir: PathBuf, archive: &Path) -> Result<String> {
     let tar = rig.execute_os(
         Path::new("/usr/bin/tar"),
         &[
             "-czf".into(),
-            archive.clone().into(),
+            archive.into(),
             "-C".into(),
-            second.into(),
+            dir.into(),
             ".".into(),
         ],
         None,
     )?;
     assert_eq!(code(&tar), 0);
+    file_digest(rig, archive)
+}
+
+fn file_digest(rig: &TestRig, file: &Path) -> Result<String> {
     let hash = rig.execute_os(
         Path::new("/usr/bin/shasum"),
-        &["-a".into(), "256".into(), archive.clone().into()],
+        &["-a".into(), "256".into(), file.into()],
         None,
     )?;
-    let digest = String::from_utf8(hash.stdout.bytes)?
+    Ok(String::from_utf8(hash.stdout.bytes)?
         .split_whitespace()
         .next()
         .ok_or("digest")?
-        .to_owned();
-    let apps = rig.root.join("apps");
-    for binary in APP_EXECUTABLES {
-        let path = apps.join("Provenant Console.app").join(binary);
-        fs::create_dir_all(path.parent().ok_or("app executable parent")?)?;
-        fs::write(&path, APP_FIXTURE)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
-    }
-    let apps_archive = rig.root.join("apps.tar.gz");
-    let tar = rig.execute_os(
-        Path::new("/usr/bin/tar"),
-        &[
-            "-czf".into(),
-            apps_archive.clone().into(),
-            "-C".into(),
-            apps.into(),
-            ".".into(),
-        ],
-        None,
-    )?;
-    assert_eq!(code(&tar), 0);
-    let hash = rig.execute_os(
-        Path::new("/usr/bin/shasum"),
-        &["-a".into(), "256".into(), apps_archive.clone().into()],
-        None,
-    )?;
-    let apps_digest = String::from_utf8(hash.stdout.bytes)?
-        .split_whitespace()
-        .next()
-        .ok_or("apps digest")?
-        .to_owned();
-    let invalid_apps_archive = rig.root.join("invalid-apps.tar.gz");
-    fs::write(&invalid_apps_archive, b"not a gzip archive")?;
-    let hash = rig.execute_os(
-        Path::new("/usr/bin/shasum"),
-        &[
-            "-a".into(),
-            "256".into(),
-            invalid_apps_archive.clone().into(),
-        ],
-        None,
-    )?;
-    let invalid_apps_digest = String::from_utf8(hash.stdout.bytes)?
-        .split_whitespace()
-        .next()
-        .ok_or("invalid archive digest")?
-        .to_owned();
-    let incomplete_apps = rig.root.join("incomplete-apps");
-    let incomplete_binary =
-        incomplete_apps.join("Provenant Console.app/Contents/MacOS/provenant-console");
-    fs::create_dir_all(incomplete_binary.parent().ok_or("incomplete app parent")?)?;
-    fs::write(&incomplete_binary, "#!/bin/sh\nexit 0\n")?;
-    fs::set_permissions(&incomplete_binary, fs::Permissions::from_mode(0o755))?;
-    let incomplete_apps_archive = rig.root.join("incomplete-apps.tar.gz");
-    let tar = rig.execute_os(
-        Path::new("/usr/bin/tar"),
-        &[
-            "-czf".into(),
-            incomplete_apps_archive.clone().into(),
-            "-C".into(),
-            incomplete_apps.into(),
-            ".".into(),
-        ],
-        None,
-    )?;
-    assert_eq!(code(&tar), 0);
-    let hash = rig.execute_os(
-        Path::new("/usr/bin/shasum"),
-        &[
-            "-a".into(),
-            "256".into(),
-            incomplete_apps_archive.clone().into(),
-        ],
-        None,
-    )?;
-    let incomplete_apps_digest = String::from_utf8(hash.stdout.bytes)?
-        .split_whitespace()
-        .next()
-        .ok_or("incomplete app digest")?
-        .to_owned();
-    let invalid_apps_archive_path = invalid_apps_archive.display().to_string();
-    let incomplete_apps_archive_path = incomplete_apps_archive.display().to_string();
-    let home = rig
-        .env
-        .iter()
-        .find(|(key, _)| key == "HOME")
-        .ok_or("HOME")?
-        .1
-        .clone();
-    let home = PathBuf::from(home);
-    let installed_app = home.join("Applications/Provenant Console.app");
-    fs::create_dir_all(&installed_app)?;
-    fs::write(installed_app.join("old-build"), "stale")?;
-    let agent = home.join("Library/LaunchAgents/dev.provenant.quota-menubar.plist");
-    fs::create_dir_all(agent.parent().ok_or("agent parent")?)?;
-    if cfg!(target_os = "macos") {
+        .to_owned())
+}
+
+/// One installed release plus fake network, launchd and peer tools. Each
+/// upgrade scenario builds its own, so scenarios run in parallel and never
+/// inherit each other's state.
+struct UpgradeRig {
+    rig: TestRig,
+    first: PathBuf,
+    home: PathBuf,
+    installed_app: PathBuf,
+    agent: PathBuf,
+    fake_bin: PathBuf,
+    launch_log: PathBuf,
+    curl_log: PathBuf,
+    ssh_args: PathBuf,
+}
+
+impl UpgradeRig {
+    fn new() -> Result<Self> {
+        let mut rig = TestRig::new()?;
+        let first = staged(&rig)?;
+        let second = staged_named(&rig, "next-release", b"upgraded release")?;
+        let installed = rig.command(&[
+            "install",
+            "--source",
+            first.to_str().ok_or("stage")?,
+            "--harness",
+            "codex",
+            "--json",
+        ])?;
+        assert_eq!(code(&installed), 0);
+        let archive = rig.root.join("package.tar.gz");
+        let digest = tar_digest(&rig, second, &archive)?;
+        let apps = rig.root.join("apps");
+        for binary in APP_EXECUTABLES {
+            let path = apps.join("Provenant Console.app").join(binary);
+            fs::create_dir_all(path.parent().ok_or("app executable parent")?)?;
+            fs::write(&path, APP_FIXTURE)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+        }
+        let apps_archive = rig.root.join("apps.tar.gz");
+        let apps_digest = tar_digest(&rig, apps, &apps_archive)?;
+        let invalid_apps_archive = rig.root.join("invalid-apps.tar.gz");
+        fs::write(&invalid_apps_archive, b"not a gzip archive")?;
+        let invalid_apps_digest = file_digest(&rig, &invalid_apps_archive)?;
+        let incomplete_apps = rig.root.join("incomplete-apps");
+        let incomplete_binary =
+            incomplete_apps.join("Provenant Console.app/Contents/MacOS/provenant-console");
+        fs::create_dir_all(incomplete_binary.parent().ok_or("incomplete app parent")?)?;
+        fs::write(&incomplete_binary, "#!/bin/sh\nexit 0\n")?;
+        fs::set_permissions(&incomplete_binary, fs::Permissions::from_mode(0o755))?;
+        let incomplete_apps_archive = rig.root.join("incomplete-apps.tar.gz");
+        let incomplete_apps_digest = tar_digest(&rig, incomplete_apps, &incomplete_apps_archive)?;
+        let invalid_apps_archive_path = invalid_apps_archive.display().to_string();
+        let incomplete_apps_archive_path = incomplete_apps_archive.display().to_string();
+        let home = rig
+            .env
+            .iter()
+            .find(|(key, _)| key == "HOME")
+            .ok_or("HOME")?
+            .1
+            .clone();
+        let home = PathBuf::from(home);
+        let installed_app = home.join("Applications/Provenant Console.app");
+        fs::create_dir_all(&installed_app)?;
+        fs::write(installed_app.join("old-build"), "stale")?;
+        let agent = home.join("Library/LaunchAgents/dev.provenant.quota-menubar.plist");
+        fs::create_dir_all(agent.parent().ok_or("agent parent")?)?;
+        if cfg!(target_os = "macos") {
+            fs::write(
+                &agent,
+                r#"<?xml version="1.0"?><plist version="1.0"><dict><key>Label</key><string>dev.provenant.quota-menubar</string><key>ProgramArguments</key><array><string>/old/build/quota-menubar</string><string>--kept</string></array></dict></plist>"#,
+            )?;
+        }
+        let fake_bin = rig.root.join("fake-bin");
+        fs::create_dir(&fake_bin)?;
+        let launch_log = rig.root.join("launchctl-log");
+        let launchctl = fake_bin.join("launchctl");
         fs::write(
-            &agent,
-            r#"<?xml version="1.0"?><plist version="1.0"><dict><key>Label</key><string>dev.provenant.quota-menubar</string><key>ProgramArguments</key><array><string>/old/build/quota-menubar</string><string>--kept</string></array></dict></plist>"#,
+            &launchctl,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{0}'\nif [ \"$1\" = bootstrap ] && [ -n \"${{PROVENANT_TEST_BOOTSTRAP_FAIL:-}}\" ]; then exit 5; fi\nif [ \"$1\" = bootstrap ] && [ ! -f '{0}.bootstrapped' ]; then touch '{0}.bootstrapped'; exit 5; fi\n",
+                launch_log.display(),
+            ),
         )?;
-    }
-    let fake_bin = rig.root.join("fake-bin");
-    fs::create_dir(&fake_bin)?;
-    let launch_log = rig.root.join("launchctl-log");
-    let launchctl = fake_bin.join("launchctl");
-    fs::write(
-        &launchctl,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{0}'\nif [ \"$1\" = bootstrap ] && [ -n \"${{PROVENANT_TEST_BOOTSTRAP_FAIL:-}}\" ]; then exit 5; fi\nif [ \"$1\" = bootstrap ] && [ ! -f '{0}.bootstrapped' ]; then touch '{0}.bootstrapped'; exit 5; fi\n",
-            launch_log.display(),
-        ),
-    )?;
-    fs::set_permissions(launchctl, fs::Permissions::from_mode(0o755))?;
-    let ssh = fake_bin.join("ssh");
-    let ssh_args = rig.root.join("ssh-args");
-    fs::write(
-        &ssh,
-        format!(
-            "#!/bin/sh\nprintf '%s\n' \"$@\" > '{}'\ncat >/dev/null\ncase \"$*\" in *--preflight-only*) [ -z \"${{PROVENANT_TEST_PEER_REFUSE:-}}\" ] && exit 0 ;; esac\nexit 17\n",
-            ssh_args.display()
-        ),
-    )?;
-    fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755))?;
-    fs::write(
-        rig.state.join("config.toml"),
-        format!(
-            "schema_version=1\n[domains.fabric]\nssh_executable={:?}\n[domains.fabric.peers.worker]\nhost='{}'\ndestination='worker.example'\n",
-            ssh.to_str().ok_or("ssh")?,
-            provenant_core::HostId::from_bytes([1; 16])
-        ),
-    )?;
-    let curl = fake_bin.join("curl");
-    let curl_log = rig.root.join("curl-log");
-    fs::write(
-        &curl,
-        format!(
-            r#"#!/bin/sh
+        fs::set_permissions(launchctl, fs::Permissions::from_mode(0o755))?;
+        let ssh = fake_bin.join("ssh");
+        let ssh_args = rig.root.join("ssh-args");
+        fs::write(
+            &ssh,
+            format!(
+                "#!/bin/sh\nprintf '%s\n' \"$@\" > '{}'\ncat >/dev/null\ncase \"$*\" in *--preflight-only*) [ -z \"${{PROVENANT_TEST_PEER_REFUSE:-}}\" ] && exit 0 ;; esac\nexit 17\n",
+                ssh_args.display()
+            ),
+        )?;
+        fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755))?;
+        fs::write(
+            rig.state.join("config.toml"),
+            format!(
+                "schema_version=1\n[domains.fabric]\nssh_executable={:?}\n[domains.fabric.peers.worker]\nhost='{}'\ndestination='worker.example'\n",
+                ssh.to_str().ok_or("ssh")?,
+                provenant_core::HostId::from_bytes([1; 16])
+            ),
+        )?;
+        let curl = fake_bin.join("curl");
+        let curl_log = rig.root.join("curl-log");
+        fs::write(
+            &curl,
+            format!(
+                r#"#!/bin/sh
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) out=$2; shift 2 ;;
@@ -1832,140 +1797,143 @@ case "$url" in
   *) exit 99 ;;
 esac
 "#,
-            apps_archive.display(),
-            archive.display(),
-            curl_log.display()
-        ),
-    )?;
-    fs::set_permissions(curl, fs::Permissions::from_mode(0o755))?;
-    fake_supported_uname(&fake_bin)?;
-    for (key, value) in &mut rig.env {
-        if key == "PATH" {
-            *value = format!("{}:/usr/bin:/bin", fake_bin.display()).into();
+                apps_archive.display(),
+                archive.display(),
+                curl_log.display()
+            ),
+        )?;
+        fs::set_permissions(curl, fs::Permissions::from_mode(0o755))?;
+        fake_supported_uname(&fake_bin)?;
+        for (key, value) in &mut rig.env {
+            if key == "PATH" {
+                *value = format!("{}:/usr/bin:/bin", fake_bin.display()).into();
+            }
         }
+        Ok(Self {
+            rig,
+            first,
+            home,
+            installed_app,
+            agent,
+            fake_bin,
+            launch_log,
+            curl_log,
+            ssh_args,
+        })
     }
-    rig.env
-        .push(("PROVENANT_TEST_CHECKSUM".into(), "0".repeat(64).into()));
-    let rejected = rig.command(&["upgrade", "--hosts", "all", "--json"])?;
-    let rejected_value: serde_json::Value = serde_json::from_slice(&rejected.stdout.bytes)?;
-    assert_ne!(code(&rejected), 0, "{rejected_value}");
-    assert_eq!(
-        rejected_value["data"][0]["success"], false,
-        "{rejected_value}"
-    );
-    assert!(
-        rejected_value["data"][0]["output"]
-            .as_str()
-            .ok_or("output")?
-            .contains("Release checksum mismatch"),
-        "{rejected_value}"
-    );
-    let before: provenant_records::InstallReceipt = provenant_records::decode_v1(
-        fs::read(rig.state.join("install/receipt.json"))?.as_slice(),
-        provenant_records::Limits::CONFIG,
-    )?;
-    assert_eq!(
-        before.source_digest,
-        Release::read(&first, env!("PROVENANT_TARGET_TRIPLE"))?
-            .manifest()
-            .source_digest
-    );
-    rig.env.retain(|(key, _)| key != "PROVENANT_TEST_CHECKSUM");
-    rig.env
-        .push(("PROVENANT_TEST_APPS_CHECKSUM".into(), "0".repeat(64).into()));
-    let rejected = rig.command(&["upgrade", "--json"])?;
-    let rejected_value: serde_json::Value = serde_json::from_slice(&rejected.stdout.bytes)?;
-    assert_eq!(rejected_value["data"][0]["success"], false);
-    assert!(
-        rejected_value["data"][0]["output"]
-            .as_str()
-            .ok_or("output")?
-            .contains("Bundled app checksum mismatch")
-    );
-    assert!(installed_app.join("old-build").exists());
-    assert!(!launch_log.exists());
-    rig.env
-        .retain(|(key, _)| key != "PROVENANT_TEST_APPS_CHECKSUM");
-    rig.env
-        .push(("PROVENANT_TEST_APPS_STATUS".into(), "503".into()));
-    let unavailable = rig.command(&["upgrade", "--json"])?;
-    let unavailable_value: serde_json::Value = serde_json::from_slice(&unavailable.stdout.bytes)?;
-    assert_eq!(unavailable_value["data"][0]["success"], false);
-    assert!(
-        unavailable_value["data"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("HTTP 503")
-    );
-    assert!(installed_app.join("old-build").exists());
-    rig.env
-        .retain(|(key, _)| key != "PROVENANT_TEST_APPS_STATUS");
-    rig.env
-        .push(("PROVENANT_TEST_APPS_CHECKSUM_FAIL".into(), "1".into()));
-    let checksum_failure = rig.command(&["upgrade", "--json"])?;
-    let checksum_failure_value: serde_json::Value =
-        serde_json::from_slice(&checksum_failure.stdout.bytes)?;
-    assert_eq!(checksum_failure_value["data"][0]["success"], false);
-    assert!(
-        checksum_failure_value["data"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("Cannot download bundled app checksum")
-    );
-    assert!(installed_app.join("old-build").exists());
-    rig.env
-        .retain(|(key, _)| key != "PROVENANT_TEST_APPS_CHECKSUM_FAIL");
-    rig.env
-        .push(("PROVENANT_TEST_APPS_BAD_TAR".into(), "1".into()));
-    let bad_tar = rig.command(&["upgrade", "--json"])?;
-    let bad_tar_value: serde_json::Value = serde_json::from_slice(&bad_tar.stdout.bytes)?;
-    assert_eq!(bad_tar_value["data"][0]["success"], false);
-    assert!(
-        bad_tar_value["data"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("Cannot unpack bundled app archive")
-    );
-    assert!(installed_app.join("old-build").exists());
-    rig.env
-        .retain(|(key, _)| key != "PROVENANT_TEST_APPS_BAD_TAR");
-    rig.env
-        .push(("PROVENANT_TEST_APPS_INCOMPLETE".into(), "1".into()));
-    let incomplete = rig.command(&["upgrade", "--json"])?;
-    let incomplete_value: serde_json::Value = serde_json::from_slice(&incomplete.stdout.bytes)?;
-    assert_eq!(incomplete_value["data"][0]["success"], false);
-    assert!(
-        incomplete_value["data"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("executable is missing")
-    );
-    assert!(installed_app.join("old-build").exists());
-    rig.env
-        .retain(|(key, _)| key != "PROVENANT_TEST_APPS_INCOMPLETE");
-    let mv = fake_bin.join("mv");
+
+    fn set_env(&mut self, key: &str, value: &str) {
+        self.rig.env.push((key.into(), value.into()));
+    }
+
+    /// Runs `provenant upgrade` and decodes its JSON report.
+    fn upgrade(
+        &self,
+        args: &[&str],
+    ) -> Result<(provenant_os::exec::ExecOutcome, serde_json::Value)> {
+        let mut argv = vec!["upgrade"];
+        argv.extend_from_slice(args);
+        argv.push("--json");
+        let outcome = self.rig.command(&argv)?;
+        let value = serde_json::from_slice(&outcome.stdout.bytes)?;
+        Ok((outcome, value))
+    }
+
+    fn receipt(&self) -> Result<provenant_records::InstallReceipt> {
+        Ok(provenant_records::decode_v1(
+            fs::read(self.rig.state.join("install/receipt.json"))?.as_slice(),
+            provenant_records::Limits::CONFIG,
+        )?)
+    }
+
+    /// Whether the committed receipt still names the originally installed release.
+    fn receipt_is_first_release(&self) -> Result<bool> {
+        let first = Release::read(&self.first, env!("PROVENANT_TARGET_TRIPLE"))?;
+        Ok(self.receipt()?.source_digest == first.manifest().source_digest)
+    }
+
+    fn fetched_artifacts(&self) -> Result<Vec<String>> {
+        Ok(fs::read_to_string(&self.curl_log)?
+            .lines()
+            .filter(|url| url.contains("/download/"))
+            .map(str::to_owned)
+            .collect())
+    }
+
+    fn assert_old_app_untouched(&self) {
+        assert!(self.installed_app.join("old-build").exists());
+        assert!(!self.installed_app.join(MENU_EXECUTABLE).exists());
+    }
+}
+
+#[test]
+fn upgrade_rejects_release_checksum_mismatch_and_keeps_the_installed_release() -> Result {
+    let mut rig = UpgradeRig::new()?;
+    rig.set_env("PROVENANT_TEST_CHECKSUM", &"0".repeat(64));
+    let (outcome, value) = rig.upgrade(&["--hosts", "all"])?;
+    assert_ne!(code(&outcome), 0, "{value}");
+    assert_eq!(value["data"][0]["success"], false, "{value}");
+    assert!(rig.receipt_is_first_release()?);
+    rig.assert_old_app_untouched();
+    Ok(())
+}
+
+/// A bundled-app failure must leave the installed app and launch agent alone.
+fn assert_app_fetch_failure_keeps_installed_app(key: &str, value: &str) -> Result {
+    let mut rig = UpgradeRig::new()?;
+    rig.set_env(key, value);
+    let (outcome, report) = rig.upgrade(&[])?;
+    assert_ne!(code(&outcome), 0, "{report}");
+    assert_eq!(report["data"][0]["success"], false, "{report}");
+    rig.assert_old_app_untouched();
+    assert!(!rig.launch_log.exists());
+    Ok(())
+}
+
+#[test]
+fn upgrade_app_checksum_mismatch_keeps_installed_app() -> Result {
+    assert_app_fetch_failure_keeps_installed_app("PROVENANT_TEST_APPS_CHECKSUM", &"0".repeat(64))
+}
+
+#[test]
+fn upgrade_app_unavailable_keeps_installed_app() -> Result {
+    assert_app_fetch_failure_keeps_installed_app("PROVENANT_TEST_APPS_STATUS", "503")
+}
+
+#[test]
+fn upgrade_app_checksum_download_failure_keeps_installed_app() -> Result {
+    assert_app_fetch_failure_keeps_installed_app("PROVENANT_TEST_APPS_CHECKSUM_FAIL", "1")
+}
+
+#[test]
+fn upgrade_app_bad_archive_keeps_installed_app() -> Result {
+    assert_app_fetch_failure_keeps_installed_app("PROVENANT_TEST_APPS_BAD_TAR", "1")
+}
+
+#[test]
+fn upgrade_app_missing_executable_keeps_installed_app() -> Result {
+    assert_app_fetch_failure_keeps_installed_app("PROVENANT_TEST_APPS_INCOMPLETE", "1")
+}
+
+#[test]
+fn upgrade_failed_app_swap_keeps_installed_app_and_leaves_no_retained_copy() -> Result {
+    let rig = UpgradeRig::new()?;
+    let mv = rig.fake_bin.join("mv");
     fs::write(
         &mv,
         format!(
             "#!/bin/sh\ncase \"$1\" in */.provenant-retained.*/*) if [ ! -f '{0}' ]; then touch '{0}'; exit 1; fi ;; esac\nexec /bin/mv \"$@\"\n",
-            rig.root.join("mv-failed-once").display()
+            rig.rig.root.join("mv-failed-once").display()
         ),
     )?;
     fs::set_permissions(&mv, fs::Permissions::from_mode(0o755))?;
-    let failed_swap = rig.command(&["upgrade", "--json"])?;
-    let failed_swap_value: serde_json::Value = serde_json::from_slice(&failed_swap.stdout.bytes)?;
-    assert_eq!(failed_swap_value["data"][0]["success"], false);
-    assert!(installed_app.join("old-build").exists());
-    let committed_after_app_failure: provenant_records::InstallReceipt =
-        provenant_records::decode_v1(
-            fs::read(rig.state.join("install/receipt.json"))?.as_slice(),
-            provenant_records::Limits::CONFIG,
-        )?;
-    assert_ne!(
-        committed_after_app_failure.source_digest,
-        before.source_digest
-    );
-    assert!(fs::read_dir(home.join("Applications"))?.all(|entry| {
+    let (outcome, value) = rig.upgrade(&[])?;
+    assert_ne!(code(&outcome), 0, "{value}");
+    assert_eq!(value["data"][0]["success"], false, "{value}");
+    rig.assert_old_app_untouched();
+    // The release itself was applied; only the app swap failed.
+    assert!(!rig.receipt_is_first_release()?);
+    assert!(fs::read_dir(rig.home.join("Applications"))?.all(|entry| {
         entry.is_ok_and(|entry| {
             !entry
                 .file_name()
@@ -1973,52 +1941,56 @@ esac
                 .starts_with(".provenant-retained.")
         })
     }));
-    fs::remove_file(mv)?;
-    if cfg!(target_os = "macos") {
-        // A failed agent restart rolls back both the app and the migrated agent plist.
-        let before_plist = fs::read_to_string(&agent)?;
-        rig.env
-            .push(("PROVENANT_TEST_BOOTSTRAP_FAIL".into(), "1".into()));
-        let failed = rig.command(&["upgrade", "--json"])?;
-        let failed_value: serde_json::Value = serde_json::from_slice(&failed.stdout.bytes)?;
-        assert_eq!(failed_value["data"][0]["success"], false, "{failed_value}");
-        rig.env
-            .retain(|(key, _)| key != "PROVENANT_TEST_BOOTSTRAP_FAIL");
-        assert_eq!(fs::read_to_string(&agent)?, before_plist);
-        assert!(installed_app.join("old-build").exists());
-        assert!(!installed_app.join(MENU_EXECUTABLE).exists());
+    Ok(())
+}
+
+#[test]
+fn upgrade_failed_agent_restart_rolls_back_app_and_agent() -> Result {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
     }
-    fs::write(&curl_log, "")?;
-    rig.env
-        .push(("PROVENANT_TEST_PEER_REFUSE".into(), "1".into()));
-    let before_peer_refusal = snapshot(&rig.state)?;
-    let result = rig.command(&["upgrade", "--hosts", "all", "--json"])?;
-    let value: serde_json::Value = serde_json::from_slice(&result.stdout.bytes)?;
+    let mut rig = UpgradeRig::new()?;
+    let before_plist = fs::read_to_string(&rig.agent)?;
+    rig.set_env("PROVENANT_TEST_BOOTSTRAP_FAIL", "1");
+    let (outcome, value) = rig.upgrade(&[])?;
+    assert_ne!(code(&outcome), 0, "{value}");
+    assert_eq!(value["data"][0]["success"], false, "{value}");
+    assert_eq!(fs::read_to_string(&rig.agent)?, before_plist);
+    rig.assert_old_app_untouched();
+    Ok(())
+}
+
+#[test]
+fn upgrade_peer_preflight_refusal_changes_nothing() -> Result {
+    let mut rig = UpgradeRig::new()?;
+    rig.set_env("PROVENANT_TEST_PEER_REFUSE", "1");
+    let before = snapshot(&rig.rig.state)?;
+    let (outcome, value) = rig.upgrade(&["--hosts", "all"])?;
     assert_eq!(value["data"][0]["host"], "worker", "{value}");
-    assert_eq!(value["data"][0]["success"], false);
-    assert_ne!(code(&result), 0);
-    assert_eq!(snapshot(&rig.state)?, before_peer_refusal);
-    rig.env
-        .retain(|(key, _)| key != "PROVENANT_TEST_PEER_REFUSE");
-    fs::write(&curl_log, "")?;
-    let result = rig.command(&["upgrade", "--hosts", "all", "--json"])?;
-    let value: serde_json::Value = serde_json::from_slice(&result.stdout.bytes)?;
+    assert_eq!(value["data"][0]["success"], false, "{value}");
+    assert_ne!(code(&outcome), 0);
+    assert_eq!(snapshot(&rig.rig.state)?, before);
+    assert!(rig.receipt_is_first_release()?);
+    rig.assert_old_app_untouched();
+    Ok(())
+}
+
+#[test]
+fn upgrade_pins_one_release_replays_settings_and_reports_peer_failure() -> Result {
+    let rig = UpgradeRig::new()?;
+    let (outcome, value) = rig.upgrade(&["--hosts", "all"])?;
     assert_eq!(value["data"][0]["host"], "local", "{value}");
     assert_eq!(value["data"][0]["success"], true, "{value}");
-    assert_eq!(value["data"][1]["host"], "worker");
-    assert_eq!(value["data"][1]["success"], false);
-    assert_ne!(code(&result), 0);
-    let arguments = fs::read_to_string(ssh_args)?;
+    assert_eq!(value["data"][1]["host"], "worker", "{value}");
+    assert_eq!(value["data"][1]["success"], false, "{value}");
+    assert_ne!(code(&outcome), 0);
+    let arguments = fs::read_to_string(&rig.ssh_args)?;
     assert!(arguments.contains("worker.example\n"));
     assert!(arguments.contains("'--tag' 'v9.8.7'"));
     assert!(arguments.contains("-oBatchMode=yes"));
-    let downloads = fs::read_to_string(&curl_log)?;
     // Preflight and apply may each fetch artifacts. Every fetch must stay
     // pinned, and the app archive must always have its checksum available.
-    let artifacts: Vec<_> = downloads
-        .lines()
-        .filter(|url| url.contains("/download/"))
-        .collect();
+    let artifacts = rig.fetched_artifacts()?;
     assert!(!artifacts.is_empty());
     assert!(
         artifacts
@@ -2031,26 +2003,26 @@ esac
     ] {
         assert!(artifacts.iter().any(|url| url.ends_with(artifact)));
     }
-    assert!(!installed_app.join("old-build").exists());
+    assert!(!rig.installed_app.join("old-build").exists());
     assert!(
-        installed_app
+        rig.installed_app
             .join("Contents/MacOS/provenant-console")
             .is_file()
     );
-    assert!(installed_app.join(MENU_EXECUTABLE).is_file());
+    assert!(rig.installed_app.join(MENU_EXECUTABLE).is_file());
     if cfg!(target_os = "macos") {
-        let plist = fs::read_to_string(&agent)?;
-        let agent_path = agent.to_str().ok_or("agent")?;
+        let plist = fs::read_to_string(&rig.agent)?;
+        let agent_path = rig.agent.to_str().ok_or("agent")?;
         assert!(
             plist.contains(
-                installed_app
+                rig.installed_app
                     .join(MENU_EXECUTABLE)
                     .to_str()
                     .ok_or("agent path")?
             )
         );
         assert!(plist.contains("--kept"));
-        let launches = fs::read_to_string(&launch_log)?;
+        let launches = fs::read_to_string(&rig.launch_log)?;
         assert!(launches.contains("bootout gui/"));
         assert!(launches.contains("bootstrap gui/"));
         assert!(
@@ -2063,35 +2035,33 @@ esac
         assert!(launches.contains("kickstart -k gui/"));
         assert!(launches.contains(agent_path));
     }
-    rig.env
-        .push(("PROVENANT_TEST_MISSING_APPS".into(), "1".into()));
-    let older = rig.command(&["upgrade", "--json"])?;
-    let older_value: serde_json::Value = serde_json::from_slice(&older.stdout.bytes)?;
-    assert_eq!(older_value["data"][0]["success"], true, "{older_value}");
-    assert!(String::from_utf8_lossy(&older.stdout.bytes).contains("no bundled app archive"));
-    assert!(installed_app.join(MENU_EXECUTABLE).is_file());
-    if cfg!(target_os = "macos") {
-        // A repeated upgrade leaves the already-migrated agent pointing at the same helper.
-        let again = fs::read_to_string(&agent)?;
-        assert_eq!(again.matches(MENU_EXECUTABLE).count(), 1, "{again}");
-    }
-    rig.env
-        .retain(|(key, _)| key != "PROVENANT_TEST_MISSING_APPS");
-    let receipt: provenant_records::InstallReceipt = provenant_records::decode_v1(
-        fs::read(rig.state.join("install/receipt.json"))?.as_slice(),
-        provenant_records::Limits::CONFIG,
-    )?;
+    let receipt = rig.receipt()?;
     assert_eq!(receipt.harnesses, vec![provenant_records::Harness::Codex]);
     assert_eq!(
         receipt.harness_targets[0].skills_dir.to_path_buf()?,
-        rig.root.join("codex/skills")
+        rig.rig.root.join("codex/skills")
     );
-    assert_ne!(
-        receipt.source_digest,
-        provenant_config::Release::read(&first, env!("PROVENANT_TARGET_TRIPLE"))?
-            .manifest()
-            .source_digest
-    );
+    assert!(!rig.receipt_is_first_release()?);
+    Ok(())
+}
+
+#[test]
+fn upgrade_to_a_release_without_an_app_archive_keeps_the_migrated_app_and_agent() -> Result {
+    let mut rig = UpgradeRig::new()?;
+    // The configured peer is upgraded too and fails by design, so judge the local host.
+    let (_, value) = rig.upgrade(&[])?;
+    assert_eq!(value["data"][0]["host"], "local", "{value}");
+    assert_eq!(value["data"][0]["success"], true, "{value}");
+    rig.set_env("PROVENANT_TEST_MISSING_APPS", "1");
+    let (_, older_value) = rig.upgrade(&[])?;
+    assert_eq!(older_value["data"][0]["host"], "local", "{older_value}");
+    assert_eq!(older_value["data"][0]["success"], true, "{older_value}");
+    assert!(rig.installed_app.join(MENU_EXECUTABLE).is_file());
+    if cfg!(target_os = "macos") {
+        // A repeated upgrade leaves the already-migrated agent pointing at the same helper.
+        let again = fs::read_to_string(&rig.agent)?;
+        assert_eq!(again.matches(MENU_EXECUTABLE).count(), 1, "{again}");
+    }
     Ok(())
 }
 
@@ -3166,137 +3136,114 @@ fn reset_install(
     rig.command(&args)
 }
 
-// Every receipt row exercises the install boundary and preserves bytes on refusal.
-fn check_receipt_header_decisions(receipt: Option<u64>) -> Result {
-    for (store, old, intermediate, current) in [
-        ("run.sqlite3", 10, 5, provenant_run::RUN_SCHEMA_VERSION),
-        (
-            "fabric/fabric.sqlite3",
-            15,
-            8,
-            provenant_fabric_store::CURRENT_SCHEMA_VERSION as u32,
-        ),
-        (
-            "fabric/host.sqlite3",
-            15,
-            8,
-            provenant_fabric_store::CURRENT_SCHEMA_VERSION as u32,
-        ),
-        (
-            "admission.sqlite3",
-            6,
-            3,
-            provenant_run::ADMISSION_SCHEMA_VERSION,
-        ),
-        (
-            "pr-contributions.sqlite3",
-            4,
-            2,
-            provenant_run::CONTRIBUTIONS_SCHEMA_VERSION,
-        ),
-    ] {
+/// One mixed state per receipt kind at the install boundary. The exhaustive
+/// store x header-version x receipt matrix lives in `state_reset::tests`.
+/// `refusal` holds a store the receipt cannot vouch for, so nothing may move;
+/// `reset` seeds a mix where only the `removed` stores are positively format 1.
+fn check_mixed_reset(
+    receipt: Option<u64>,
+    refusal: &[(&str, u32)],
+    reset: &[(&str, u32)],
+    removed: &[&str],
+) -> Result {
+    let seed = |stores: &[(&str, u32)]| -> Result<(TestRig, PathBuf)> {
         let (rig, stage) = reset_fixture()?;
         fs::remove_file(rig.state.join("run.sqlite3"))?;
         match receipt {
             Some(format) => set_receipt_format(&rig, format)?,
             None => fs::remove_file(rig.state.join("install/receipt.json"))?,
         }
-        let path = rig.state.join(store);
-        fs::create_dir_all(path.parent().ok_or("store parent")?)?;
-        for version in [0, old, intermediate, current - 1, current, current + 1] {
-            old_sqlite_header(&path, version)?;
-            let before = snapshot(&rig.state)?;
-            let output = reset_install(&rig, &stage, &["--upgrade-preflight"])?;
-            let expected = match receipt {
-                Some(1) if version < current => Some(6),
-                Some(1) => None,
-                _ if version == old => Some(6),
-                _ if version == 0 => Some(0),
-                Some(2) if version > old => Some(0),
-                _ => None,
-            };
-            if let Some(expected) = expected {
-                assert_eq!(
-                    code(&output),
-                    expected,
-                    "{store} {version} {receipt:?}: {output:?}"
-                );
-            } else {
-                let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-                assert_eq!(
-                    value["error"]["code"], "STATE_RESET_UNSAFE",
-                    "{store} {version} {receipt:?}: {output:?}"
-                );
-            }
-            assert_eq!(snapshot(&rig.state)?, before);
+        for (store, version) in stores {
+            let path = rig.state.join(store);
+            fs::create_dir_all(path.parent().ok_or("store parent")?)?;
+            old_sqlite_header(&path, *version)?;
         }
-        old_sqlite_header(&path, 0)?;
-        let zero_header = fs::read(&path)?;
-        for (bytes, companion, unknown) in [
-            (Vec::new(), None, false),
-            (Vec::new(), Some("-wal"), false),
-            (vec![0; 12], Some("-wal"), true),
-            (vec![0; 12], Some("-shm"), true),
-            (zero_header.clone(), Some("-wal"), false),
-            (zero_header, Some("-shm"), false),
-            (b"not a database".to_vec(), None, true),
-        ] {
-            fs::write(&path, &bytes)?;
-            let companion_path = companion.map(|suffix| {
-                path.with_file_name(format!(
-                    "{}{suffix}",
-                    path.file_name().expect("store name").to_string_lossy()
-                ))
-            });
-            if let Some(companion) = &companion_path {
-                fs::write(companion, "uncheckpointed")?;
-            }
-            let before = snapshot(&rig.state)?;
-            let output = reset_install(&rig, &stage, &["--upgrade-preflight"])?;
-            if unknown {
-                let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-                assert_eq!(value["error"]["code"], "STATE_RESET_UNSAFE", "{output:?}");
-            } else {
-                assert_eq!(
-                    code(&output),
-                    if receipt == Some(1) { 6 } else { 0 },
-                    "{output:?}"
-                );
-            }
-            assert_eq!(snapshot(&rig.state)?, before);
-            if let Some(companion) = companion_path {
-                fs::remove_file(companion)?;
-            }
-        }
-        // Each identified store can be removed without a sibling authorising it.
-        old_sqlite_header(
-            &path,
-            if receipt == Some(1) {
-                intermediate
-            } else {
-                old
-            },
-        )?;
-        let output = reset_install(&rig, &stage, &["--reset-state"])?;
-        assert_eq!(code(&output), 0, "{output:?}");
-        assert!(!path.exists());
+        Ok((rig, stage))
+    };
+    let (rig, stage) = seed(refusal)?;
+    let before = snapshot(&rig.state)?;
+    let output = reset_install(&rig, &stage, &["--reset-state"])?;
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_ne!(code(&output), 0, "{receipt:?}: {output:?}");
+    assert_eq!(value["error"]["code"], "STATE_RESET_UNSAFE", "{value}");
+    assert_eq!(snapshot(&rig.state)?, before, "{receipt:?}");
+
+    let (rig, stage) = seed(reset)?;
+    let kept: Vec<_> = reset
+        .iter()
+        .filter(|(store, _)| !removed.contains(store))
+        .map(|(store, _)| Ok((*store, fs::read(rig.state.join(store))?)))
+        .collect::<Result<_>>()?;
+    let output = reset_install(&rig, &stage, &["--reset-state"])?;
+    assert_eq!(code(&output), 0, "{receipt:?}: {output:?}");
+    for store in removed {
+        assert!(!rig.state.join(store).exists(), "{receipt:?}: {store}");
+    }
+    for (store, bytes) in kept {
+        assert_eq!(
+            fs::read(rig.state.join(store))?,
+            bytes,
+            "{receipt:?}: {store}"
+        );
     }
     Ok(())
 }
 
 #[test]
-fn reset_without_receipt_requires_shipped_headers_per_store() -> Result {
-    check_receipt_header_decisions(None)
+fn reset_without_receipt_resets_only_shipped_stores_and_refuses_unshipped_headers() -> Result {
+    check_mixed_reset(
+        None,
+        &[
+            ("run.sqlite3", 10),
+            ("fabric/fabric.sqlite3", 8),
+            ("admission.sqlite3", 6),
+        ],
+        &[
+            ("run.sqlite3", 10),
+            ("fabric/fabric.sqlite3", 15),
+            ("admission.sqlite3", 6),
+            ("pr-contributions.sqlite3", 0),
+        ],
+        &["run.sqlite3", "fabric/fabric.sqlite3", "admission.sqlite3"],
+    )
 }
 
 #[test]
-fn reset_with_format_one_receipt_checks_each_store_against_its_current_version() -> Result {
-    check_receipt_header_decisions(Some(1))
+fn reset_with_format_one_receipt_resets_stores_below_current_and_refuses_current_ones() -> Result {
+    check_mixed_reset(
+        Some(1),
+        &[
+            ("run.sqlite3", 10),
+            ("admission.sqlite3", provenant_run::ADMISSION_SCHEMA_VERSION),
+        ],
+        &[
+            ("run.sqlite3", 5),
+            ("fabric/fabric.sqlite3", 15),
+            ("fabric/host.sqlite3", 0),
+            ("admission.sqlite3", 3),
+        ],
+        &["run.sqlite3", "fabric/fabric.sqlite3", "admission.sqlite3"],
+    )
 }
 
 #[test]
-fn reset_with_format_two_receipt_requires_shipped_headers_and_preserves_current_stores() -> Result {
-    check_receipt_header_decisions(Some(2))
+fn reset_with_format_two_receipt_resets_shipped_stores_and_preserves_current_ones() -> Result {
+    let fabric = provenant_fabric_store::CURRENT_SCHEMA_VERSION as u32;
+    check_mixed_reset(
+        Some(2),
+        &[("run.sqlite3", 5), ("admission.sqlite3", 6)],
+        &[
+            ("run.sqlite3", 10),
+            ("admission.sqlite3", 6),
+            ("fabric/fabric.sqlite3", fabric),
+            ("fabric/host.sqlite3", fabric + 1),
+            (
+                "pr-contributions.sqlite3",
+                provenant_run::CONTRIBUTIONS_SCHEMA_VERSION,
+            ),
+        ],
+        &["run.sqlite3", "admission.sqlite3"],
+    )
 }
 
 #[test]
