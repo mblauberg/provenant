@@ -12,6 +12,7 @@ pub(super) struct Context<'a> {
     pub writer: bool,
     pub settings: Option<&'a crate::domains::ProjectLanesConfig>,
     pub project: &'a str,
+    pub policy: &'a provenant_records::policy::Policy,
 }
 
 fn display_path(path: &Path, primary: &Path, home: &Path) -> String {
@@ -101,7 +102,7 @@ pub(super) fn apply(
     spec: &mut provenant_providers::LaunchSpec,
     plan: &ConfinedPlan,
     context: Context<'_>,
-) -> Value {
+) -> Result<Value, provenant_providers::ProviderError> {
     // Resolve against a copy of the current profile, then transfer only the
     // validated additions to the provider-owned requirements resolver.
     let mut candidate = provenant_confinement::permissions::ProviderProfile {
@@ -120,10 +121,11 @@ pub(super) fn apply(
         candidate.spec.tool_writes[write_start..].to_vec(),
         receipt,
     );
-    spec.complete_tool_requirements(plan, home, cwd);
-    spec.project_requirements_receipt()
+    spec.complete_tool_requirements(plan, home, cwd)?;
+    Ok(spec
+        .project_requirements_receipt()
         .cloned()
-        .unwrap_or(serde_json::Value::Null)
+        .unwrap_or(serde_json::Value::Null))
 }
 
 fn apply_to(
@@ -219,12 +221,25 @@ fn apply_to(
                             shared.push(record);
                         }
                     }
-                    Err(reason) => warnings.push(json!({
-                        "code": if is_exec { "exec_root_ignored" } else { "shared_path_ignored" },
-                        "key": key,
-                        "reason": reason,
-                        "path": display_path(entry, primary, context.home),
-                    })),
+                    Err(reason) => {
+                        if let provenant_records::policy::Effect::Warn(message) =
+                            context.policy.check(
+                                "PROJECT_PATHS_RESOLVE_NONE",
+                                provenant_records::policy::Facts::violation(format!(
+                                    "configured project path {key} was omitted: {reason}"
+                                )),
+                            )
+                        {
+                            warnings.push(json!({
+                                "code": if is_exec { "exec_root_ignored" } else { "shared_path_ignored" },
+                                "policy_code": "PROJECT_PATHS_RESOLVE_NONE",
+                                "source": format!("{:?}", context.policy.rule("PROJECT_PATHS_RESOLVE_NONE").source),
+                                "key": key,
+                                "reason": message,
+                                "path": display_path(entry, primary, context.home),
+                            }));
+                        }
+                    }
                 }
             }
         }
@@ -341,6 +356,7 @@ mod tests {
                     writer,
                     settings: Some(&settings),
                     project: "example",
+                    policy: &provenant_records::policy::Policy::default(),
                 },
             );
             assert_eq!(
@@ -442,6 +458,7 @@ mod tests {
                 writer: false,
                 settings: None,
                 project: "example",
+                policy: &provenant_records::policy::Policy::default(),
             },
         );
         assert!(
@@ -530,6 +547,7 @@ mod tests {
                     writer,
                     settings: Some(&settings),
                     project: "example",
+                    policy: &provenant_records::policy::Policy::default(),
                 },
             );
             assert!(profile.spec.tool_exec_roots.is_empty());
@@ -599,6 +617,7 @@ mod tests {
                 writer: false,
                 settings: Some(&settings),
                 project: "example",
+                policy: &provenant_records::policy::Policy::default(),
             },
         );
         assert!(profile.spec.tool_exec_roots.is_empty());
@@ -708,6 +727,7 @@ mod tests {
                     writer,
                     settings: Some(&settings),
                     project: "example",
+                    policy: &provenant_records::policy::Policy::default(),
                 },
             );
             assert_eq!(receipt["exec_roots"].as_array().ok_or("roots")?.len(), 1);
@@ -854,6 +874,7 @@ mod tests {
                 writer: true,
                 settings: Some(settings),
                 project: "example",
+                policy: &provenant_records::policy::Policy::default(),
             },
         );
         assert_eq!(record["shared_paths"][0]["path"], "./.agent-run/locks");

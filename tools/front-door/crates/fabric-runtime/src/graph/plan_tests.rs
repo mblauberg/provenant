@@ -281,11 +281,12 @@ fn pattern_definition() -> Value {
         "parameters": {
             "label": {"type": "string", "default": "the slice"},
             "scope": {"type": "list", "default": ["src"]},
+            "worktree": {"type": "string", "default": ".worktrees/impl"},
             "retries": {"type": "integer", "default": 1, "min": 0, "max": 2}
         },
         "nodes": [
             {"id": "write", "prompt": "Do ${label}", "access": "worktree_write",
-             "worktree": ".worktrees/impl", "write_scope": "${scope}",
+             "worktree": "${worktree}", "write_scope": "${scope}",
              "acceptance_checks": ["Verify the slice"]},
             {"id": "review", "prompt": "Review the work", "access": "read_only",
              "depends_on": ["write"], "write_scope": ["src"],
@@ -918,7 +919,10 @@ fn fenced_handoff_examples_do_not_control_continuations() {
                 assert_eq!(run.checkpoint.expansions.len(), usize::from(genuine));
                 // Only a genuine handoff reaches the in-place restart's brief.
                 assert_eq!(
-                    owner.prompts.get(1).is_some_and(|prompt| prompt.contains("First half committed")),
+                    owner
+                        .prompts
+                        .get(1)
+                        .is_some_and(|prompt| prompt.contains("First half committed")),
                     genuine
                 );
             }
@@ -1051,7 +1055,7 @@ fn malformed_optional_handoff_warns_and_still_delivers() {
 }
 
 #[test]
-fn original_writers_fence_overlapping_and_unspecified_scopes() {
+fn different_worktrees_ignore_relative_scope_metadata_but_same_worktree_is_fenced() {
     for scope in [
         vec!["src".into()],
         Vec::new(),
@@ -1061,6 +1065,7 @@ fn original_writers_fence_overlapping_and_unspecified_scopes() {
         let mut first = writer_graph().nodes.remove(0);
         first.required_verdict = None;
         first.write_scope = scope;
+        first.worktree = Some(".worktrees/first".into());
         let mut second = first.clone();
         second.id = "second".into();
         second.worktree = Some(".worktrees/second".into());
@@ -1070,9 +1075,12 @@ fn original_writers_fence_overlapping_and_unspecified_scopes() {
         owner.observations.push_back(AttemptObservation::Pending {
             attempt_ref: Some("first".into()),
         });
+        owner.observations.push_back(AttemptObservation::Pending {
+            attempt_ref: Some("second".into()),
+        });
         let mut journal = MemoryJournal::default();
         let run = advance(&doc, &mut owner, &mut journal).unwrap();
-        assert_eq!(owner.calls.len(), 1);
+        assert_eq!(owner.calls.len(), 2);
         assert_eq!(run.checkpoint.nodes[1].state, NodeState::Pending);
         owner.observations.extend(
             ["done", "done"].map(|text| terminal_with_result(AttemptOutcome::Succeeded, text)),
@@ -1084,6 +1092,19 @@ fn original_writers_fence_overlapping_and_unspecified_scopes() {
                 .successful()
         );
     }
+
+    let mut first = writer_graph().nodes.remove(0);
+    first.required_verdict = None;
+    let mut second = first.clone();
+    second.id = "second".into();
+    let doc = graph(vec![first, second]);
+    let mut owner = FakeOwner::default();
+    owner.observations.push_back(AttemptObservation::Pending {
+        attempt_ref: Some("first".into()),
+    });
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(owner.calls.len(), 1);
+    assert_eq!(run.checkpoint.nodes[1].state, NodeState::Pending);
 }
 
 #[test]
@@ -1178,7 +1199,7 @@ fn planner_prompt_names_only_the_nodes_allow_listed_patterns() {
 }
 
 #[test]
-fn planner_requires_write_scope_only_for_writers() {
+fn planner_treats_write_scope_as_advisory_metadata() {
     let doc = planner(1);
     let reader =
         json!({"id":"read","prompt":"Read","access":"read_only","acceptance_checks":["check"]});
@@ -1193,16 +1214,22 @@ fn planner_requires_write_scope_only_for_writers() {
     );
     assert_eq!(run.status, GraphStatus::Complete);
 
-    let writer = json!({"id":"write","prompt":"Write","access":"worktree_write","worktree":".worktrees/write","acceptance_checks":["check"]});
-    let mut owner = fixture_owner(&[&result(vec![writer])]);
-    let mut journal = MemoryJournal::default();
-    let run = advance(&doc, &mut owner, &mut journal).unwrap();
-    assert_eq!(run.status, GraphStatus::Paused);
-    assert_eq!(
-        run.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidPlanExpansion)
-    );
-    assert!(run.checkpoint.expansions.is_empty());
+    for scope in [None, Some(json!(["../outside"]))] {
+        let mut writer = json!({"id":"write","prompt":"Write","access":"worktree_write","worktree":".worktrees/write","acceptance_checks":["check"]});
+        if let Some(scope) = scope {
+            writer["write_scope"] = scope;
+        }
+        let mut owner = fixture_owner(&[&result(vec![writer]), "writer", "checked"]);
+        let mut journal = MemoryJournal::default();
+        let run = advance(&doc, &mut owner, &mut journal).unwrap();
+        assert_eq!(
+            run.status,
+            GraphStatus::Complete,
+            "{:?}",
+            run.checkpoint.pause_reason()
+        );
+        assert_eq!(run.checkpoint.expansions.len(), 1);
+    }
 }
 
 #[test]
@@ -1242,7 +1269,6 @@ fn plan_rejects_invalid_and_over_bound_fragments_without_admitting_consumers() {
         (result(vec![cyclic]), "dependency"),
         (result(vec![undeclared]), "not declared"),
         (result(vec![no_checks]), "acceptance_checks"),
-        (result(vec![slice("escape", &["../other"])]), "write_scope"),
     ] {
         let mut owner = fixture_owner(&[&output]);
         let mut journal = MemoryJournal::default();
@@ -2396,13 +2422,33 @@ fn two_instances(first: Value, second: Value) -> String {
 }
 
 #[test]
-fn disjoint_waves_refuse_overlapping_scopes_unless_a_dependency_orders_them() {
+fn disjoint_waves_use_worktree_identity_and_ignore_relative_scope_overlap() {
     let mut doc = pattern_planner(8);
     doc.integration_branch = Some("integration".into());
     doc.nodes[0].plan.as_mut().unwrap().disjoint_waves = true;
-    let one = json!({"id":"one", "pattern":"generator", "parameters":{"scope":["src/a"]}});
-    let clash = json!({"id":"two", "pattern":"generator", "parameters":{"scope":["src/a/b"]}});
-    let mut owner = fixture_owner(&[&two_instances(one.clone(), clash.clone())]);
+    let one = json!({"id":"one", "pattern":"generator", "parameters":{"scope":["src/a"], "worktree":".worktrees/one"}});
+    let clash = json!({"id":"two", "pattern":"generator", "parameters":{"scope":["src/a/b"], "worktree":".worktrees/two"}});
+    let results = [
+        "implemented",
+        "reviewed",
+        "implemented",
+        "reviewed",
+        "checked",
+    ];
+    let fragment = two_instances(one.clone(), clash.clone());
+    let mut owner = fixture_owner(&[&[fragment.as_str()][..], &results[..]].concat());
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(
+        run.status,
+        GraphStatus::Complete,
+        "{:?}",
+        run.checkpoint.pause_reason()
+    );
+    assert_eq!(run.checkpoint.expansions.len(), 1);
+
+    let mut same_worktree = clash.clone();
+    same_worktree["parameters"]["worktree"] = json!(".worktrees/one");
+    let mut owner = fixture_owner(&[&two_instances(one.clone(), same_worktree)]);
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
@@ -2412,8 +2458,9 @@ fn disjoint_waves_refuse_overlapping_scopes_unless_a_dependency_orders_them() {
     assert!(run.checkpoint.expansions.is_empty());
     assert_eq!(owner.calls.len(), 1);
 
-    let disjoint = json!({"id":"two", "pattern":"generator", "parameters":{"scope":["src/b"]}});
+    let disjoint = json!({"id":"two", "pattern":"generator", "parameters":{"scope":["src/b"], "worktree":".worktrees/two"}});
     let mut ordered = clash.clone();
+    ordered["parameters"]["worktree"] = json!(".worktrees/one");
     ordered["depends_on"] = json!(["one"]);
     for second in [disjoint, ordered] {
         let results = [
@@ -2440,7 +2487,7 @@ fn disjoint_waves_refuse_overlapping_scopes_unless_a_dependency_orders_them() {
         assert_eq!(run.checkpoint.expansions[0].uses.len(), 2);
     }
 
-    // Without the switch, overlapping instances keep sharing one checkout.
+    // Without the wave switch, relative overlap still cannot connect trees.
     let mut plain = pattern_planner(8);
     plain.integration_branch = Some("integration".into());
     plain.nodes[0].plan.as_mut().unwrap().disjoint_waves = false;
@@ -2634,9 +2681,10 @@ fn assert_refused_into_fallback(run: &GraphRun) {
 fn planned_fixture(name: &str) -> GraphDocument {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(format!("assets/test-fixtures/plans/{name}.plan.json"));
-    let text = std::fs::read_to_string(&path)
-        .unwrap()
-        .replace("\"commit\": \"HEAD\"", "\"commit\": \"0123456789abcdef0123456789abcdef01234567\"");
+    let text = std::fs::read_to_string(&path).unwrap().replace(
+        "\"commit\": \"HEAD\"",
+        "\"commit\": \"0123456789abcdef0123456789abcdef01234567\"",
+    );
     serde_json::from_str(&text).unwrap()
 }
 
@@ -2885,12 +2933,12 @@ fn pattern_result_all(instances: Vec<Value>) -> String {
 fn planned_big_batch_refuses_overlapping_waves_and_budgets_over_the_lane_deadline() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("assets/test-fixtures/plans/big-batch.plan.json");
-    let mut doc: GraphDocument = serde_json::from_str(
-        &std::fs::read_to_string(&path)
-            .unwrap()
-            .replace("\"commit\": \"HEAD\"", "\"commit\": \"0123456789abcdef0123456789abcdef01234567\""),
-    )
-    .unwrap();
+    let mut doc: GraphDocument =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap().replace(
+            "\"commit\": \"HEAD\"",
+            "\"commit\": \"0123456789abcdef0123456789abcdef01234567\"",
+        ))
+        .unwrap();
     doc.nodes.retain(|node| node.id == "plan");
     doc.nodes[0].depends_on.clear();
     doc.nodes[0].inputs.clear();
@@ -2898,14 +2946,20 @@ fn planned_big_batch_refuses_overlapping_waves_and_budgets_over_the_lane_deadlin
         json!({"id":id, "pattern":"writer-lane", "parameters":{
         "lane":id, "worktree":tree, "scope":[scope], "acceptance":["works"], "budget_seconds":budget}})
     };
+    let overlap = pattern_result_all(vec![
+        lane("a", "/repo/lane1", "src", 600),
+        lane("b", "/repo/lane2", "src/b", 600),
+    ]);
+    let mut owner = fixture_owner(&[&overlap, "a", "b"]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(
+        run.checkpoint.expansions.len(),
+        1,
+        "{:?}",
+        run.checkpoint.pause_reason()
+    );
+
     let cases = [
-        (
-            "overlap",
-            vec![
-                lane("a", "/repo/lane1", "src", 600),
-                lane("b", "/repo/lane2", "src/b", 600),
-            ],
-        ),
         ("budget", vec![lane("a", "/repo/lane1", "src/a", 3601)]),
         ("worktree", vec![lane("a", "/elsewhere", "src/a", 600)]),
     ];
@@ -2925,10 +2979,10 @@ fn planned_big_batch_refuses_overlapping_waves_and_budgets_over_the_lane_deadlin
         assert!(run.checkpoint.expansions.is_empty(), "{label}");
         assert_eq!(owner.calls.len(), 1, "{label}");
     }
-    // The same two lanes are admitted once they are ordered or disjoint.
+    // Relative scope is not used to connect distinct worktrees.
     let fragment = format!(
         "```fragment\n{}\n```",
-        json!({"schema_version":1,"nodes":[],"patterns":[lane("a", "/repo/lane1", "src/a", 3600), lane("b", "/repo/lane2", "src/b", 60)]})
+        json!({"schema_version":1,"nodes":[],"patterns":[lane("a", "/repo/lane1", "src", 3600), lane("b", "/repo/lane2", "src/b", 60)]})
     );
     let mut owner = fixture_owner(&[&fragment, "a", "b"]);
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
@@ -3157,8 +3211,14 @@ fn admit_patch_confines_lane_edits_but_allows_owner_and_planner_edits() {
         json!({"schema_version":1, "replace":[{"id":"b", "use":"task", "brief":"Replacement"}]}),
     ] {
         let mut refused = checkpoint.clone();
-        let error = admit_with(&document, &mut refused, Some("a"), edit.clone(), &|_| Ok(()))
-            .unwrap_err();
+        let error = admit_with(
+            &document,
+            &mut refused,
+            Some("a"),
+            edit.clone(),
+            &|_| Ok(()),
+        )
+        .unwrap_err();
         assert_eq!(error.code, "edit_scope");
         assert!(error.message.contains("b"));
         assert_eq!(refused, checkpoint);
@@ -3169,9 +3229,12 @@ fn admit_patch_confines_lane_edits_but_allows_owner_and_planner_edits() {
         let mut planned = document.clone();
         let library = TemplateLibrary::bundled();
         let resolvers = Default::default();
-        planned.nodes[0] = Compiler { library: &library, resolvers: &resolvers }
-            .compile(&json!({"id":"a", "use":"plan"}))
-            .unwrap();
+        planned.nodes[0] = Compiler {
+            library: &library,
+            resolvers: &resolvers,
+        }
+        .compile(&json!({"id":"a", "use":"plan"}))
+        .unwrap();
         let mut planner = checkpoint.clone();
         admit_with(&planned, &mut planner, Some("a"), edit, &|_| Ok(())).unwrap();
     }
@@ -3179,16 +3242,23 @@ fn admit_patch_confines_lane_edits_but_allows_owner_and_planner_edits() {
 
 #[test]
 fn admitted_nodes_name_their_admitter_for_the_sandbox_floor() {
-    let admitted_by = |node: &GraphNode| node.attempt.as_ref().and_then(|spec| spec.admitted_by.clone());
+    let admitted_by = |node: &GraphNode| {
+        node.attempt
+            .as_ref()
+            .and_then(|spec| spec.admitted_by.clone())
+    };
     // A planner's replace of a node outside its subtree, carrying a forged
     // admitter, is named after the planner; so is a node it adds.
     let (document, checkpoint) = running_graph();
     let library = TemplateLibrary::bundled();
     let resolvers = Default::default();
     let mut planned = document.clone();
-    planned.nodes[0] = Compiler { library: &library, resolvers: &resolvers }
-        .compile(&json!({"id":"a", "use":"plan"}))
-        .unwrap();
+    planned.nodes[0] = Compiler {
+        library: &library,
+        resolvers: &resolvers,
+    }
+    .compile(&json!({"id":"a", "use":"plan"}))
+    .unwrap();
     let mut planner = checkpoint.clone();
     admit_with(&planned, &mut planner, Some("a"), json!({"schema_version":1,
         "nodes":[{"id":"child", "use":"task", "brief":"Child"}],
@@ -3196,12 +3266,32 @@ fn admitted_nodes_name_their_admitter_for_the_sandbox_floor() {
         &|_| Ok(())).unwrap();
     let expansion = planner.expansions.last().unwrap();
     assert_eq!(admitted_by(&expansion.nodes[0]).as_deref(), Some("a"));
-    assert_eq!(admitted_by(&expansion.patch.as_ref().unwrap().replaced[0]).as_deref(), Some("a"));
+    assert_eq!(
+        admitted_by(&expansion.patch.as_ref().unwrap().replaced[0]).as_deref(),
+        Some("a")
+    );
     // The host admits on its own authority and names no admitter.
     let mut owner = checkpoint.clone();
-    admit(&document, &mut owner, json!({"schema_version":1,
-        "replace":[{"id":"b", "use":"task", "brief":"Replacement"}]})).unwrap();
-    assert_eq!(admitted_by(&owner.expansions.last().unwrap().patch.as_ref().unwrap().replaced[0]), None);
+    admit(
+        &document,
+        &mut owner,
+        json!({"schema_version":1,
+        "replace":[{"id":"b", "use":"task", "brief":"Replacement"}]}),
+    )
+    .unwrap();
+    assert_eq!(
+        admitted_by(
+            &owner
+                .expansions
+                .last()
+                .unwrap()
+                .patch
+                .as_ref()
+                .unwrap()
+                .replaced[0]
+        ),
+        None
+    );
     // Nested members, loop bodies and fallback stages expand later and carry it too.
     let mut nested: GraphNode = serde_json::from_value(json!({
         "id":"c", "access":"read_only", "kind":"composite",
@@ -3213,17 +3303,23 @@ fn admitted_nodes_name_their_admitter_for_the_sandbox_floor() {
     let member = &nested.composite.as_ref().unwrap().nodes[0];
     assert_eq!(admitted_by(&nested).as_deref(), Some("lane"));
     assert_eq!(admitted_by(member).as_deref(), Some("lane"));
-    assert_eq!(admitted_by(&member.loop_body.as_ref().unwrap().body[0]).as_deref(), Some("lane"));
+    assert_eq!(
+        admitted_by(&member.loop_body.as_ref().unwrap().body[0]).as_deref(),
+        Some("lane")
+    );
 }
 
 #[test]
 fn admit_patch_allows_lane_edits_in_its_subtree() {
     let (document, mut checkpoint) = running_graph();
     admit_with(
-        &document, &mut checkpoint, Some("a"),
+        &document,
+        &mut checkpoint,
+        Some("a"),
         json!({"schema_version":1,"nodes":[{"id":"child", "use":"task", "brief":"Child"}]}),
         &|_| Ok(()),
-    ).unwrap();
+    )
+    .unwrap();
     for edit in [
         json!({"schema_version":1, "skip":["a--child"]}),
         json!({"schema_version":1, "replace":[{"id":"a--child", "use":"task", "brief":"Replacement"}]}),
@@ -3684,7 +3780,9 @@ fn planner_admits_bundled_delivery_composites_without_rewriting_them() {
     let library = TemplateLibrary::bundled();
     let resolvers = std::collections::BTreeMap::from([
         ("review-panel".into(), vec!["correctness".into()]),
-        ("review-frame".into(), vec!["false".into()]), ("review-verify".into(), vec!["false".into()]), ("review-synthesis".into(), vec!["false".into()]),
+        ("review-frame".into(), vec!["false".into()]),
+        ("review-verify".into(), vec!["false".into()]),
+        ("review-synthesis".into(), vec!["false".into()]),
         ("review-verifiers".into(), vec!["1".into()]),
         ("review-advice-correctness".into(), vec![String::new()]),
     ]);
@@ -3853,10 +3951,7 @@ fn planner_template_overrides_cannot_invent_capabilities() {
         assert_eq!(run.status, GraphStatus::Paused);
         assert!(run.checkpoint.expansions.is_empty());
         assert!(
-            run.checkpoint
-                .pause_reason()
-                .unwrap()
-                .contains("postgres"),
+            run.checkpoint.pause_reason().unwrap().contains("postgres"),
             "{:?}",
             run.checkpoint.pause_reason()
         );
@@ -3868,7 +3963,9 @@ fn planner_admits_bundled_batch_and_deliver_through_the_patch_path() {
     let library = TemplateLibrary::bundled();
     let resolvers = std::collections::BTreeMap::from([
         ("review-panel".into(), vec!["correctness".into()]),
-        ("review-frame".into(), vec!["false".into()]), ("review-verify".into(), vec!["false".into()]), ("review-synthesis".into(), vec!["false".into()]),
+        ("review-frame".into(), vec!["false".into()]),
+        ("review-verify".into(), vec!["false".into()]),
+        ("review-synthesis".into(), vec!["false".into()]),
         ("review-verifiers".into(), vec!["1".into()]),
         ("review-advice-correctness".into(), vec![String::new()]),
     ]);
@@ -3924,11 +4021,15 @@ fn raw_submission_preserves_raw_reporting_label() {
             "id": "custom", "kind": "task", "access":"read_only", "prompt": "Work",
             "route": {"alias": "junior"}
         }]
-    })).unwrap();
+    }))
+    .unwrap();
     patch::submission(&mut document, "raw-reporting", &plans::generous()).unwrap();
     assert_eq!(document.nodes[0].extra["template"], "raw");
     assert_eq!(document.extra["submission_patch"]["nodes"][0]["use"], "raw");
-    assert_eq!(document.extra["submission_patch"]["nodes"][0]["extensions"]["template"], "raw");
+    assert_eq!(
+        document.extra["submission_patch"]["nodes"][0]["extensions"]["template"],
+        "raw"
+    );
 }
 
 #[test]
@@ -3940,9 +4041,20 @@ fn planner_writer_without_worktree_is_provisioned_before_launch_and_replayed() {
     let mut owner = fixture_owner(&[&output, "written", "checked"]);
     let mut journal = MemoryJournal::default();
     let run = advance(&doc, &mut owner, &mut journal).unwrap();
-    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason());
-    assert_eq!(owner.provisioned, vec![(".worktrees/planned-plan--write".into(), "a".repeat(40))]);
-    assert_eq!(owner.permissions[1].1.as_deref(), Some("/fixture/.worktrees/planned-plan--write"));
+    assert_eq!(
+        run.status,
+        GraphStatus::Complete,
+        "{:?}",
+        run.checkpoint.pause_reason()
+    );
+    assert_eq!(
+        owner.provisioned,
+        vec![(".worktrees/planned-plan--write".into(), "a".repeat(40))]
+    );
+    assert_eq!(
+        owner.permissions[1].1.as_deref(),
+        Some("/fixture/.worktrees/planned-plan--write")
+    );
     assert!(relay::pending_provisioning(&run.checkpoint).is_empty());
     let launches = owner.calls.len();
     let replay = advance(&doc, &mut owner, &mut journal).unwrap();
@@ -3960,14 +4072,29 @@ fn planner_writer_provisioning_recovers_fenced_source_after_crash() {
     let mut owner = fixture_owner(&[&output, "written", "checked"]);
     owner.provision_fail_once = true;
     let mut journal = MemoryJournal::default();
-    assert!(matches!(advance(&doc, &mut owner, &mut journal), Err(GraphError::Run(_))));
+    assert!(matches!(
+        advance(&doc, &mut owner, &mut journal),
+        Err(GraphError::Run(_))
+    ));
     let saved = journal.0.as_ref().unwrap();
-    assert_eq!(relay::pending_provisioning(saved), vec![("plan--write".into(), ".worktrees/planned-plan--write".into(), "a".repeat(40))]);
+    assert_eq!(
+        relay::pending_provisioning(saved),
+        vec![(
+            "plan--write".into(),
+            ".worktrees/planned-plan--write".into(),
+            "a".repeat(40)
+        )]
+    );
     owner.implicit_head = Some("b".repeat(40));
     let recovered = advance(&doc, &mut owner, &mut journal).unwrap();
     assert_eq!(recovered.status, GraphStatus::Complete);
     assert_eq!(owner.provisioned.len(), 2);
-    assert!(owner.provisioned.iter().all(|(_, source)| source == &"a".repeat(40)));
+    assert!(
+        owner
+            .provisioned
+            .iter()
+            .all(|(_, source)| source == &"a".repeat(40))
+    );
     assert!(relay::pending_provisioning(&recovered.checkpoint).is_empty());
 }
 
@@ -3975,7 +4102,13 @@ fn planner_writer_provisioning_recovers_fenced_source_after_crash() {
 fn pending_writer_continuation_reopens_and_excludes_its_predecessor_model() {
     let doc = writer_graph();
     let mut owner = FakeOwner {
-        observations: [terminal_from(STOP, "stopped-writer"), AttemptObservation::Pending { attempt_ref: Some("fresh-writer".into()) }].into(),
+        observations: [
+            terminal_from(STOP, "stopped-writer"),
+            AttemptObservation::Pending {
+                attempt_ref: Some("fresh-writer".into()),
+            },
+        ]
+        .into(),
         models: [("stopped-writer".into(), "codex/previous".into())].into(),
         ..Default::default()
     };
@@ -3986,7 +4119,10 @@ fn pending_writer_continuation_reopens_and_excludes_its_predecessor_model() {
     assert_eq!(owner.calls[1].0.node_id, "write");
     let saved = serde_json::to_vec(&run.checkpoint).unwrap();
     journal.0 = Some(serde_json::from_slice(&saved).unwrap());
-    owner.observations.extend([terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: PASS"), terminal_with_result(AttemptOutcome::Succeeded, "checked")]);
+    owner.observations.extend([
+        terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: PASS"),
+        terminal_with_result(AttemptOutcome::Succeeded, "checked"),
+    ]);
     let reopened = advance(&doc, &mut owner, &mut journal).unwrap();
     assert_eq!(reopened.status, GraphStatus::Complete);
     assert_eq!(owner.prior_attempts[2], ["codex/previous"]);
@@ -4001,7 +4137,12 @@ fn declared_writer_stop_restarts_with_handoff_and_excludes_the_used_pool_model()
         *outcome = AttemptOutcome::DeclaredStop;
     }
     let mut owner = FakeOwner {
-        observations: [observation, terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: PASS"), terminal_with_result(AttemptOutcome::Succeeded, "checked")].into(),
+        observations: [
+            observation,
+            terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: PASS"),
+            terminal_with_result(AttemptOutcome::Succeeded, "checked"),
+        ]
+        .into(),
         models: [("stopped-writer".into(), "codex/previous".into())].into(),
         ..Default::default()
     };

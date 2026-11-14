@@ -206,7 +206,38 @@ const SOURCED_KNOBS: [&str; 5] = [
 pub(crate) fn registry() -> Result<&'static Registry, ConfigError> {
     static PARSED: OnceLock<Option<Registry>> = OnceLock::new();
     PARSED
-        .get_or_init(|| serde_json::from_str(REGISTRY).ok())
+        .get_or_init(|| {
+            let mut registry: Registry = serde_json::from_str(REGISTRY).ok()?;
+            for rule in provenant_records::policy::table()
+                .iter()
+                .filter(|rule| rule.knob.is_some())
+            {
+                let values = rule
+                    .strengths()
+                    .into_iter()
+                    .map(|strength| match strength {
+                        provenant_records::policy::Strength::Refuse => "refuse".to_owned(),
+                        provenant_records::policy::Strength::Queue => "queue".to_owned(),
+                        provenant_records::policy::Strength::Warn => "warn".to_owned(),
+                        provenant_records::policy::Strength::Off => "off".to_owned(),
+                    })
+                    .collect();
+                registry.knobs.insert(
+                    rule.knob.clone()?,
+                    Spec {
+                        kind: Kind::Enum,
+                        min: None,
+                        max: None,
+                        values,
+                        default: serde_json::to_value(rule.strength).ok()?,
+                        strict: false,
+                        safe: None,
+                        host_only: false,
+                    },
+                );
+            }
+            Some(registry)
+        })
         .as_ref()
         .ok_or(ConfigError::KnobRegistry)
 }
@@ -620,6 +651,29 @@ mod ceiling_tests {
         assert_eq!(
             registry["provider_updates"]["runtime_deadline_seconds"]["max"],
             provenant_core::MAX_LANE_RUNTIME_SECONDS
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod policy_action_tests {
+    use super::*;
+
+    #[test]
+    fn generated_policy_knobs_offer_only_supported_strengths() {
+        let registry = registry().unwrap();
+        assert_eq!(
+            registry.knobs["policy.PROCESS_CENSUS"].values,
+            ["warn", "off"]
+        );
+        assert_eq!(
+            registry.knobs["policy.ARGV_PROMPT"].values,
+            ["refuse", "warn", "off"]
+        );
+        assert_eq!(
+            registry.knobs["policy.ADMISSION_WRITERS"].values,
+            ["refuse", "queue", "warn", "off"]
         );
     }
 }

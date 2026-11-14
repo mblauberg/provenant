@@ -1003,21 +1003,16 @@ fn owned_cleanup_refuses_dirty_unmerged_and_adopted_trees() -> Result<(), Box<dy
 }
 
 #[test]
-fn transient_held_path_is_reobserved_but_persistent_holder_refuses() -> Result<(), Box<dyn Error>> {
-    transient_holder_is_reobserved_but_persistent_holder_refuses(ProcessEvidenceKind::OtherHeldPath)
+fn observed_held_path_is_advisory_for_launch() -> Result<(), Box<dyn Error>> {
+    observed_holder_is_advisory_for_launch(ProcessEvidenceKind::OtherHeldPath)
 }
 
 #[test]
-fn transient_working_directory_holder_is_reobserved_but_persistent_holder_refuses()
--> Result<(), Box<dyn Error>> {
-    transient_holder_is_reobserved_but_persistent_holder_refuses(
-        ProcessEvidenceKind::WorkingDirectory,
-    )
+fn observed_working_directory_is_advisory_for_launch() -> Result<(), Box<dyn Error>> {
+    observed_holder_is_advisory_for_launch(ProcessEvidenceKind::WorkingDirectory)
 }
 
-fn transient_holder_is_reobserved_but_persistent_holder_refuses(
-    kind: ProcessEvidenceKind,
-) -> Result<(), Box<dyn Error>> {
+fn observed_holder_is_advisory_for_launch(kind: ProcessEvidenceKind) -> Result<(), Box<dyn Error>> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct Holder {
         calls: AtomicUsize,
@@ -1074,24 +1069,9 @@ fn transient_holder_is_reobserved_but_persistent_holder_refuses(
         Err(WorktreeError::LiveWriter | WorktreeError::LiveProcess(_))
     ));
     assert_eq!(transient.calls.load(Ordering::SeqCst), 1);
-    transient.calls.store(0, Ordering::SeqCst);
     fast_forward(&context, &info.path, info.head, &cancel())?;
-    assert_eq!(transient.calls.load(Ordering::SeqCst), 5);
-    let persistent = Holder {
-        calls: AtomicUsize::new(0),
-        persistent: true,
-        kind,
-    };
-    context.workers = &persistent;
-    context.lock_budget = WaitBudget::up_to(
-        context.clock.mono_now(),
-        provenant_core::DurationMicros::from_micros(350_000),
-    );
-    assert!(matches!(
-        fast_forward(&context, &info.path, info.head, &cancel()),
-        Err(WorktreeError::LiveWriter | WorktreeError::LiveProcess(_))
-    ));
-    assert!(persistent.calls.load(Ordering::SeqCst) >= 1);
+    let held = lock_worktree_for_launch(&context, entry, &cancel())?;
+    drop(held);
     Ok(())
 }
 
@@ -1242,5 +1222,51 @@ fn writer_git_preparation_leaves_the_shared_registry_free() -> Result<(), Box<dy
     fixture.run(&["commit", "--allow-empty", "-m", "source"])?;
     fast_forward(&context, &info.path, fixture.head()?, &cancel())?;
     assert!(probe.calls.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    Ok(())
+}
+
+#[test]
+fn unknown_unrelated_process_does_not_block_a_writer() -> Result<(), Box<dyn Error>> {
+    struct Unknown;
+    impl WorkerObserver for Unknown {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| {
+                    (
+                        root.clone(),
+                        Occupancy::census_unknown(root, "unrelated process unavailable"),
+                    )
+                })
+                .collect()
+        }
+        fn requires_complete_census(&self) -> bool {
+            true
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "advisory-census".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    context.workers = &Unknown;
+    let entries = context.facts.fresh_inventory(&context, &cancel())?;
+    let entry = entries
+        .iter()
+        .find(|entry| entry.path == info.path)
+        .ok_or("worktree entry")?;
+    let writer = lock_worktree_for_launch(&context, entry, &cancel())?;
+    assert!(matches!(
+        lock_worktree_for_launch(&context, entry, &cancel()),
+        Err(WorktreeError::LockBusy)
+    ));
+    drop(writer);
     Ok(())
 }

@@ -34,10 +34,14 @@ fn prepare(
     session: Session,
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
-    input.prompt.check_argv()?;
+    input.prompt.check_argv(input.policy)?;
     let plan = input.confined.permissions();
     if plan.selected_authentication.as_deref() != Some("login") {
-        return Err(ProviderError::UnsupportedPolicy);
+        return Err(input.boundary_error(
+            "CURSOR_PREPARE_CREDENTIALS",
+            "Cursor requires its selected login authentication",
+            ProviderError::UnsupportedPolicy,
+        ));
     }
     let mut argv = vec![
         input.executable.into(),
@@ -56,7 +60,13 @@ fn prepare(
         Access::WorktreeWrite => argv.push("--force".into()),
     }
     if session == Session::Resume {
-        let continuation = input.continuation.ok_or(ProviderError::UnknownIdentity)?;
+        let continuation = input.continuation.ok_or_else(|| {
+            input.boundary_error(
+                "CURSOR_PREPARE_AUTHORITY",
+                "resumed Cursor invocation has no validated continuation identity",
+                ProviderError::UnknownIdentity,
+            )
+        })?;
         argv.extend(["--resume".into(), continuation.session().into()]);
     }
     if !input.route.model.is_empty() {
@@ -64,7 +74,7 @@ fn prepare(
     }
     argv.extend(["--".into(), input.prompt.text().into()]);
     let mut package_omissions = Vec::new();
-    let package = package_grant(input.executable, &mut package_omissions);
+    let package = package_grant(input.executable, &mut package_omissions, input.policy)?;
     let mut authentication = vec![exact(input.home.join(".cursor/cli-config.json"))];
     let config = input.home.join(".config/cursor");
     if config.is_dir() {
@@ -82,9 +92,10 @@ fn prepare(
         &mut optional_reads,
         0,
         input.home,
+        input.policy,
         crate::launch::OmissionSource::Toolchain,
         &mut omitted_discovery,
-    );
+    )?;
     let mut env = base_env(input, &plan.scratch.path, "/usr/bin:/bin");
     if input.sandboxed() {
         env.extend([
@@ -137,6 +148,7 @@ fn prepare(
         user_skills: staged_skills,
         tool_requirements: Default::default(),
         git_wrapper: Default::default(),
+        policy: input.policy.clone(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],

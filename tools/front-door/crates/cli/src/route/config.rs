@@ -25,6 +25,7 @@ pub(super) fn list_data_and_accounts(
         "local-preview",
         &[],
         false,
+        None,
         |context, _, _, accounts| {
             Ok((
                 Box::new(provenant_routing::list(
@@ -811,6 +812,7 @@ pub(super) fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<D
             "local-preview",
             &[],
             false,
+            None,
             |context, records, policies, accounts| {
                 let context = &RoutingContext {
                     policy_account_hint: query.account.as_deref(),

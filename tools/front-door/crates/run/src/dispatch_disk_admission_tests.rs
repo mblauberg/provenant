@@ -64,7 +64,7 @@ fn prepared_write_grants_hold_admission_on_the_disk_floor() -> TestResult {
         std::fs::DirBuilder::new().mode(0o700).create(&registry)?;
         std::fs::write(
             registry.join("config.toml"),
-            "schema_version=1\n[gc]\nfree_floor='100B'\n",
+            "schema_version=1\n[knobs]\n'policy.ADMISSION_DISK'='refuse'\n[gc]\nfree_floor='100B'\n",
         )?;
         let mut store = RunStore::open(&context, &call)?.with_writer_registry(&registry);
         store.set_admission_policy(AdmissionPolicy {

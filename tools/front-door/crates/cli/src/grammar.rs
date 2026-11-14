@@ -454,8 +454,8 @@ fn host_alias(value: &str) -> Result<String, &'static str> {
 pub enum Config {
     /// List configuration warnings with their source file and key.
     Check(Page),
-    /// Print the effective configuration and knobs with their source layer
-    /// and the configuration revision.
+    /// Print effective configuration and knobs, plus the resolved launch
+    /// policy table and its sources.
     Show,
     /// List each editable field with its type, bounds, default, effective
     /// value, source layer and whether a restart is needed.
@@ -594,7 +594,7 @@ pub struct GraphRunArgs {
     /// Git base for a new writer branch
     #[arg(long, requires = "branch")]
     pub base: Option<String>,
-    /// Paths the writer may change, relative to its worktree; repeatable
+    /// Advisory relative paths; empty or unset means the whole worktree; repeatable
     #[arg(long = "write-scope")]
     pub write_scope: Vec<String>,
     /// Copy the node over comma-separated items, or a resolver such as @review-panel

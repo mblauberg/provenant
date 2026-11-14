@@ -37,6 +37,7 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
         "local-preview",
         &[],
         false,
+        None,
         |context, records, policies, _| {
             let request = resolve_request(&query, context)?;
             let rules = effective_exclusion_rules(exclude, roots)?;

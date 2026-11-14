@@ -66,7 +66,7 @@ min_ok = { type = "integer", default = 1, min = 1 }
 brief = { type = "string", default = "Meet the acceptance checks." }
 integration_branch = { type = "string", default = "batch/integration" }
 worktree = { type = "string" }
-write_scope = { type = "list", min = 1 }
+write_scope = { type = "list", default = [] }
 
 [deliver]
 exports = [
@@ -88,7 +88,7 @@ bounded = { type = "boolean", default = false, doc = "The implementation brief i
 max_repair_cycles = { type = "integer", default = 3, min = 1 }
 brief = { type = "string", default = "Meet the acceptance checks." }
 worktree = { type = "string" }
-write_scope = { type = "list", min = 1 }
+write_scope = { type = "list", default = [] }
 
 [task-once]
 nodes = [{ id = "task", use = "task", brief = "${brief}" }]
@@ -135,7 +135,7 @@ nodes = [
 [plan-then-deliver.parameters]
 brief = { type = "string", default = "Meet the acceptance checks." }
 worktree = { type = "string" }
-write_scope = { type = "list", min = 1 }
+write_scope = { type = "list", default = [] }
 
 [findings-panel]
 doc = "Collect qualified findings without treating reported defects as an execution failure."
@@ -159,7 +159,7 @@ nodes = [
 [review-repair.parameters]
 max_repair_cycles = { type = "integer", default = 3, min = 1 }
 worktree = { type = "string", default = "" }
-write_scope = { type = "list", min = 1 }
+write_scope = { type = "list", default = [] }
 writer = { type = "string", default = "" }
 lenses = { type = "list", default = ["correctness", "security", "tests", "contract", "design", "adversarial"], min = 1 }
 integration_branch = { type = "string", default = "" }

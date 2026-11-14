@@ -29,6 +29,7 @@ mod knobs;
 mod loader;
 mod managed;
 pub use harness::{InstallSettings, TargetSettings, apply_install_config_with_domains};
+pub mod policy;
 mod presets;
 mod providers;
 pub use providers::{ProviderSettings, ProviderUpdate};

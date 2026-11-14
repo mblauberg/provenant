@@ -384,6 +384,34 @@ Lane-writable missing child records alone cannot authorise deletion.
 - Owner: `crates/fabric-runtime/src/chairs.rs`, `crates/fabric-store/src/chairs.rs`,
   `crates/cli/src/run.rs`, `crates/cli/src/fabric/graph_relay.rs`
 
+## Launch policy
+
+`crates/run/assets/policy.toml` owns executable launch rules. The records API
+resolves each rule to code, boundary, strength, source, knob and justification;
+`Policy::check(code, facts)` returns proceed, warn, queue or refuse. Only
+credentials, Git isolation, data integrity and authority default to refuse.
+All other defaults warn (or are off), with explicit knobs. `provenant config
+show` includes `policy.rules`, and lane preambles render the same resolved table.
+`config set policy.CODE refuse` or dispatch `--set policy.CODE=refuse` selects
+strict enforcement where that rule supports refusal. Warning-only rules accept
+warn or off; queue is available only at admission sites that can wait. Unsupported
+strengths are diagnosed and retain the prior effective strength.
+`[domains.policy.projects."PROJECT_ID".rules]` overrides host strengths, and
+dispatch overrides win. Sources are compiled default, host, project or dispatch.
+
+Writer census observations warn; they do not grant or withhold writer authority.
+The exclusive writer lease and retained-import/unlanded-work fences remain.
+Graph write scope is carried into the sealed attempt profile; paths inside the
+worktree remain writable. Absent or empty scope means the whole worktree.
+Settlement seals `policy-write-scope.json` with Git-visible committed and
+uncommitted out-of-scope paths, including both sides of renames. Ignored files
+have no per-attempt baseline and are outside this report. Handoff views include
+the list or a bounded artifact reference without rewriting the sealed handoff.
+`policy.WRITE_SCOPE=refuse` checks before publication and retains private work
+on refusal. Relative path overlap across different worktrees does not prevent
+parallel writers. The worktree and its protected Git controls remain the
+Git-isolation boundary.
+
 ## Atomic admission
 
 Writer custody is exclusive per verified worktree, including retained-import
@@ -399,13 +427,12 @@ waits or supervisor calls. Optional total and writer-specific host/project caps
 are independent. Build slots gate compiling Cargo commands rather than idle
 writers. Configuration and bounds belong to `provenant config schema --all`.
 
-Known kernel memory pressure may defer either class. Low available memory alone
-is advisory. The disk floor holds lanes with write authority, including prepared
-tool/project grants; private bookkeeping/scratch alone warns and proceeds.
-Expiry reports the actual limiting condition and configuration source, with disk
-refusal taking precedence over pressure for writers. Invalid parsed settings
-fail immediately; unreadable configuration retries rather than admitting with an
-unknown disk policy.
+Memory pressure, free-space floors and configured lane caps are observations
+under the policy table. Their defaults warn and admit; supported explicit queue
+or refuse strengths enforce the corresponding threshold. Process counts remain
+Warn/Off observations. Failed optional probes warn rather than inventing a
+boundary. Guardian identity and writer custody still fail closed independently
+of these observations.
 
 Host leases bind the boot, guardian identity and owner-store identity. A changed
 boot or proven absence releases a lease; busy, replaced, corrupt or unreadable

@@ -195,9 +195,16 @@ fn writer_gc_settings_use_defaults_when_configuration_is_unreadable()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     std::os::unix::fs::symlink(temp.path().join("missing"), temp.path().join("config.toml"))?;
+    let policy = provenant_records::policy::Policy::default();
     assert_eq!(
-        writer_gc_settings(temp.path()),
+        writer_gc_settings(temp.path(), &policy),
         provenant_config::GcSettings::default()
+    );
+    let rule = policy.rule("RUN_WRITER_GC_SETTINGS_NONE");
+    assert_eq!(rule.rule.code, "RUN_WRITER_GC_SETTINGS_NONE");
+    assert_eq!(
+        rule.rule.strength,
+        provenant_records::policy::Strength::Warn
     );
     Ok(())
 }
@@ -378,6 +385,7 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
     .ok_or("writer accepted insufficient disk")?;
     let refusal = disk_policy_refusal(check);
     assert_eq!(refusal.terminal_cause, TerminalCause::DiskFloor);
+    assert_eq!(refusal.policy_code.as_deref(), Some("LAUNCH_DISK"));
     assert_eq!(
         refusal.resource,
         Some(provenant_records::diagnostic::ResourceFact::Disk {
@@ -393,6 +401,10 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
     );
     assert!(!TerminalCause::DiskFloor.detail().contains("access grants"));
     let unobserved = disk_policy_refusal(DiskCheck::Unobserved("HOST_ERROR_SENTINEL".into()));
+    assert_eq!(
+        unobserved.policy_code.as_deref(),
+        Some("SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE")
+    );
     assert_eq!(
         unobserved.terminal_cause,
         TerminalCause::DiskObservationUnavailable

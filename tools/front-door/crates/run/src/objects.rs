@@ -16,12 +16,12 @@ mod view;
 pub(crate) mod worktree;
 #[cfg(test)]
 use view::object_binding;
+pub(crate) use view::{
+    ObjectSource, bound_source, copy_index, merge_head, merge_objects, prepare_bound,
+    prepare_read_only, private_tip, restore_index, set_private_tip,
+};
 #[cfg(test)]
 pub(crate) use view::{bind, prepare_refs};
-pub(crate) use view::{
-    bound_source, copy_index, merge_head, merge_objects, prepare_bound, prepare_read_only,
-    private_tip, restore_index, set_private_tip,
-};
 
 fn invalid() -> RunError {
     RunError::Validation("lane Git import failed")

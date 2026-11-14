@@ -250,6 +250,7 @@ fn account_placement() -> Result {
             cwd: &rig.project,
             git_context: false,
             nonce: [1; 16],
+            policy: &provenant_records::policy::Policy::default(),
             provenant: provenant_providers::LaneRuntime {
                 executable: &executable,
                 git: &std::fs::canonicalize(

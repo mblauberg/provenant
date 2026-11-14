@@ -156,6 +156,7 @@ fn capture(root: &Path, churn: bool) -> Result {
         &clock,
     )?;
     let command = ProviderCommand {
+        policy: Default::default(),
         profile_file: None,
         priority: 0,
         lane_ports: None,

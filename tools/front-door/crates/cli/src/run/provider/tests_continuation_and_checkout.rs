@@ -1,4 +1,3 @@
-
 #[test]
 fn writer_continuation_preserves_and_reports_uncommitted_edits()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -142,7 +141,8 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         binding.project_id(),
         &Default::default(),
     )?;
-    let context = writer_source_context(&writer, &task, &git)?.ok_or("retained paths missing")?;
+    let policy = provenant_records::policy::Policy::default();
+    let context = writer_source_context(&writer, &task, &git, &policy)?.ok_or("retained paths missing")?;
     assert!(context.contains("uncommitted_leftover.txt"), "{context}");
     assert_eq!(
         std::fs::read_to_string(worktree.join("uncommitted_leftover.txt"))?,
@@ -152,7 +152,7 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
     // A source mismatch still refuses and names both commits and retained edits.
     let mut bad_task = task.clone();
     bad_task.source_head = Some("0".repeat(40));
-    let error = writer_source_context(&writer, &bad_task, &git)
+    let error = writer_source_context(&writer, &bad_task, &git, &policy)
         .err()
         .ok_or("mismatched continuation should refuse")?;
     let error_text = error.to_string();
@@ -164,7 +164,7 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
     );
     let mut moved_task = task.clone();
     moved_task.head = Some("1".repeat(40));
-    assert!(writer_source_context(&writer, &moved_task, &git).is_err());
+    assert!(writer_source_context(&writer, &moved_task, &git, &policy).is_err());
 
     // Inject a Git that works for ancestry but refuses status. Exercise both
     // the brief path and the mismatch path: neither may hide missing evidence.
@@ -178,7 +178,7 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
     )?;
     std::fs::set_permissions(&status_git, std::fs::Permissions::from_mode(0o700))?;
     for candidate in [&task, &bad_task] {
-        let error = writer_source_context(&writer, candidate, &status_git)
+        let error = writer_source_context(&writer, candidate, &status_git, &policy)
             .err()
             .ok_or("status failure must refuse preparation")?;
         assert!(
@@ -485,8 +485,8 @@ fn credential_authority_never_follows_links_below_the_host_root()
 }
 
 #[test]
-fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result<(), Box<dyn std::error::Error>>
-{
+fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
+-> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, Digest};
     use provenant_records::{
         FileDigest, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness,
@@ -574,7 +574,8 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
             };
             store.create(&request, &call)?;
             let candidate = context.state_root.as_path().join(format!(
-                "attempts/{}/provider-state/candidate-0", prior.attempt_id
+                "attempts/{}/provider-state/candidate-0",
+                prior.attempt_id
             ));
             std::fs::DirBuilder::new()
                 .recursive(true)
@@ -686,6 +687,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
             )?)?;
             use provenant_providers::{Adapter, ProviderEvent, codex::Codex};
             let prompt = Prompt::new("continue".into());
+            let launch_policy = provenant_records::policy::Policy::default();
             let account = provenant_providers::identity::RegisteredAccount::new(
                 "codex",
                 "local",
@@ -693,6 +695,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
             )?;
             let launch = Codex.prepare(PrepareInput {
                 images: &[],
+                policy: &launch_policy,
                 command: None,
                 route: &route,
                 confined: &plan,
@@ -778,7 +781,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
             std::fs::rename(host.join("attempts"), nested.join("attempts"))?;
             std::fs::write(
                 host.join("config.toml"),
-                "schema_version=1\n[domains.run]\ncontinuation_copy_entries=1\n",
+                "schema_version=1\n[knobs]\n'policy.COPY_ENTRIES'='refuse'\n'policy.SEARCH_ENTRIES'='refuse'\n[domains.run]\ncontinuation_copy_entries=1\n",
             )?;
             std::fs::write(
                 nested.join("config.toml"),
@@ -825,27 +828,58 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
                 let db = rusqlite::Connection::open(data.join("opencode.db"))?;
                 db.execute_batch("CREATE TABLE session (id TEXT PRIMARY KEY); CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)")?;
                 db.execute("INSERT INTO session VALUES (?1)", ["fixture-session"])?;
-                db.execute("INSERT INTO session_message VALUES (?1, 'assistant', ?2)", ("fixture-session", r#"{"model":{"providerID":"fixture","id":"model"}}"#))?;
+                db.execute(
+                    "INSERT INTO session_message VALUES (?1, 'assistant', ?2)",
+                    (
+                        "fixture-session",
+                        r#"{"model":{"providerID":"fixture","id":"model"}}"#,
+                    ),
+                )?;
                 drop(db);
                 let copied = root.join("copy");
                 let resumed = continuation_for(&prior, &route, "fixture", &root, &root, &copied)?;
                 assert_eq!(resumed.session(), "fixture-session");
-                assert_eq!(provenant_providers::opencode::observe_model(&copied.join("data/opencode"), "fixture-session")?, "opencode/fixture/model");
+                assert_eq!(
+                    provenant_providers::opencode::observe_model(
+                        &copied.join("data/opencode"),
+                        "fixture-session"
+                    )?,
+                    "opencode/fixture/model"
+                );
                 let db = rusqlite::Connection::open(data.join("opencode.db"))?;
-                db.execute("INSERT INTO session_message VALUES (?1, 'assistant', ?2)", ("fixture-session", r#"{"model":{"providerID":"other","id":"model"}}"#))?;
+                db.execute(
+                    "INSERT INTO session_message VALUES (?1, 'assistant', ?2)",
+                    (
+                        "fixture-session",
+                        r#"{"model":{"providerID":"other","id":"model"}}"#,
+                    ),
+                )?;
                 for case in ["ambiguous", "absent"] {
-                    if case == "absent" { db.execute("DELETE FROM session_message", [])?; }
-                    assert!(provenant_providers::opencode::observe_model(&data, "fixture-session").is_err());
+                    if case == "absent" {
+                        db.execute("DELETE FROM session_message", [])?;
+                    }
+                    assert!(
+                        provenant_providers::opencode::observe_model(&data, "fixture-session")
+                            .is_err()
+                    );
                     let target = root.join(format!("copy-{case}"));
-                    assert_eq!(continuation_for(&prior, &route, "fixture", &root, &root, &target)?.session(), "fixture-session");
+                    assert_eq!(
+                        continuation_for(&prior, &route, "fixture", &root, &root, &target)?
+                            .session(),
+                        "fixture-session"
+                    );
                 }
                 let other = state.join("candidate-1/data/opencode");
                 std::fs::create_dir_all(&other)?;
                 std::fs::copy(data.join("opencode.db"), other.join("opencode.db"))?;
-                assert!(super::observation::find_opencode_session(&state, "fixture-session").is_err());
+                assert!(
+                    super::observation::find_opencode_session(&state, "fixture-session").is_err()
+                );
                 std::fs::remove_dir_all(state.join("candidate-1"))?;
                 db.execute("DELETE FROM session", [])?;
-                assert!(super::observation::find_opencode_session(&state, "fixture-session").is_err());
+                assert!(
+                    super::observation::find_opencode_session(&state, "fixture-session").is_err()
+                );
             }
             prior.session = None;
             assert!(continuation_for(&prior, &route, "fixture", state, state, state).is_err());

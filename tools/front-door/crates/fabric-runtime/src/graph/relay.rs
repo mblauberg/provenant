@@ -578,14 +578,6 @@ fn child_patch(
         if !request.write_scope.is_empty() {
             node.insert("write_scope".into(), request.write_scope.clone().into());
         }
-    } else if !request.write_scope.is_empty() {
-        return Err(PatchError {
-            cause: None,
-            admission: None,
-            parameter: None,
-            code: "invalid",
-            message: "write_scope requires a writer child".into(),
-        });
     }
     if request.detached {
         node.insert("extensions".into(), serde_json::json!({DETACHED:true}));

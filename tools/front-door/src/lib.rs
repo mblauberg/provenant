@@ -554,7 +554,8 @@ fn read_patch(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::
 fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::Globals) -> u8 {
     use provenant_config as config;
     let result = (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-        let roots = roots::resolve(globals, Workspace::Project, Product::Required)?.roots;
+        let context = roots::resolve(globals, Workspace::Project, Product::Required)?;
+        let roots = context.roots;
         let sections = &provenant_cli::domains::SECTIONS;
         let options = config::EditOptions::new("cli");
         Ok(match action {
@@ -562,6 +563,25 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                 let (resolved, revision) = config::show(&roots, sections)?;
                 let mut value = serde_json::to_value(&resolved)?;
                 value["revision"] = revision.into();
+                let policy = resolved.domains.policy.resolve_with_knobs(
+                    &provenant_os::git::repository_path(
+                        &context.project,
+                        provenant_os::git::RepositoryPath::CommonDir,
+                    )
+                    .ok()
+                    .and_then(|path| provenant_config::ProjectLocation::new(path).ok())
+                    .and_then(|location| {
+                        provenant_config::lookup_project(&roots, &location)
+                            .ok()
+                            .flatten()
+                    })
+                    .map(|p| p.project_id().to_string())
+                    .unwrap_or_default(),
+                    &resolved.knobs,
+                    &Default::default(),
+                );
+                value["policy"] = serde_json::to_value(&policy)?;
+                value["policy_render"] = policy.render().into();
                 value
             }
             ConfigAction::Schema { all } => {

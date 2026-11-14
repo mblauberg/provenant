@@ -571,6 +571,27 @@ fn submit_with_launcher(
                     &writer.project,
                     edge.home,
                 )
+                .or_else(|check| {
+                    let profile = config.dispatch_profile(&submission.knobs);
+                    let dispatch = profile.as_ref().map(provenant_config::policy::dispatch).unwrap_or_default();
+                    let policy = config.domains.policy.resolve_with_knobs(&session.context.project_id.to_string(), &config.knobs, &dispatch);
+                    let (code, detail) = match &check {
+                        DiskCheck::Low { .. } => (
+                            "LAUNCH_DISK",
+                            "writer disk observation is below its configured floor",
+                        ),
+                        DiskCheck::Unobserved(_) => (
+                            "SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE",
+                            "writer disk space could not be observed",
+                        ),
+                    };
+                    let effect = policy.check(code, provenant_records::policy::Facts::violation(detail));
+                    if effect.blocks() { Err(check) } else {
+                        use std::io::Write;
+                        if let Some(message) = effect.message() { let _ = writeln!(std::io::stderr().lock(), "warning: {message}"); }
+                        Ok(())
+                    }
+                })
                 .map_err(|check| {
                     let (kind, status) = match &check {
                         DiskCheck::Low { .. } => (ErrorKind::DiskFloor, Status::Refused),
@@ -603,11 +624,36 @@ fn submit_with_launcher(
         let task = submission.task;
         {
             let mut task_profile = profile.clone();
+            task_profile.extra.insert(
+                "policy_project".into(),
+                serde_json::json!(session.context.project_id.to_string()),
+            );
             task_profile.require_skill_location = task.require_skill_location;
             task_profile.settlement_retry_limit = task
                 .settlement_retry_limit
                 .map(|limit| limit.min(provenant_routing::MAX_SETTLEMENT_RETRIES));
             let attempt = task.attempt;
+            for key in ["write_scope", "policy_overrides"] {
+                if let Some(value) = attempt.extra.get(key) {
+                    task_profile.extra.insert(key.into(), value.clone());
+                }
+            }
+            let mut dispatch_policy = provenant_config::policy::dispatch(&task_profile);
+            if let Some(value) = attempt.extra.get("policy_overrides")
+                && let Ok(values) = serde_json::from_value::<
+                    std::collections::BTreeMap<String, provenant_records::policy::Strength>,
+                >(value.clone())
+            {
+                dispatch_policy.extend(values);
+            }
+            let policy = config.domains.policy.resolve_with_knobs(
+                &session.context.project_id.to_string(),
+                &config.knobs,
+                &dispatch_policy,
+            );
+            task_profile
+                .extra
+                .insert("launch_policy".into(), serde_json::json!(policy));
             if attempt.confidential {
                 task_profile
                     .extra

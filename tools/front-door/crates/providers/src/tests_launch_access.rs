@@ -58,6 +58,12 @@ pub(super) fn fixture_token() -> crate::claude::OauthToken {
     crate::claude::OauthToken::parse(item.as_bytes(), 1_000).expect("fixture token")
 }
 
+pub(super) fn fixture_policy() -> &'static provenant_records::policy::Policy {
+    static POLICY: std::sync::OnceLock<provenant_records::policy::Policy> =
+        std::sync::OnceLock::new();
+    POLICY.get_or_init(provenant_records::policy::Policy::default)
+}
+
 pub(super) fn fixture_input<'a>(
     route: &'a ResolvedRoute,
     confined: &'a provenant_confinement::ConfinedPlan,
@@ -74,6 +80,7 @@ pub(super) fn fixture_input<'a>(
         prompt,
         continuation: None,
         grant_digest: "fixture",
+        policy: fixture_policy(),
         executable,
         home: std::path::Path::new("/fixture/home"),
         user: std::ffi::OsStr::new("fixture"),
@@ -852,14 +859,18 @@ fn cursor_launches_fresh_and_resume_with_edits_only_for_writers() -> Result<(), 
     }
     let plan = read_only_plan("/fixture", Some("login"));
     let prompt = Prompt::new("x".repeat(65_537));
+    let mut strict = provenant_records::policy::Policy::default();
+    strict.overlay(
+        &std::collections::BTreeMap::from([(
+            "ARGV_PROMPT".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]),
+        provenant_records::policy::Source::Project,
+    );
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.policy = &strict;
     assert!(matches!(
-        cursor::Cursor.prepare(fixture_input(
-            &route,
-            &plan,
-            &prompt,
-            Path::new("/fixture/repo"),
-            None
-        )),
+        cursor::Cursor.prepare(input),
         Err(ProviderError::PromptTooLarge { .. })
     ));
     Ok(())

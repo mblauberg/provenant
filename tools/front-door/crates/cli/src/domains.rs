@@ -7,6 +7,8 @@ use std::path::PathBuf;
 #[serde(deny_unknown_fields)]
 pub struct Domains {
     #[serde(default)]
+    pub policy: provenant_config::policy::Settings,
+    #[serde(default)]
     pub steward: crate::steward::Settings,
     #[serde(default)]
     pub wait: crate::wait::Settings,
@@ -669,7 +671,8 @@ const LANES_SECTION: DomainSection = DomainSection::new::<LanesSettings>(
     FieldMetadata::new("projects.{project}.exec_roots", "array"),
 ]);
 
-static ENTRIES: [DomainSection; 9] = [
+static ENTRIES: [DomainSection; 10] = [
+    provenant_config::policy::SECTION,
     crate::wait::SECTION,
     provenant_providers::accounts::SECTION,
     provenant_quota::SECTION,

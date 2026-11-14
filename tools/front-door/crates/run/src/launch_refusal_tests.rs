@@ -22,6 +22,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             if self.disk {
                 return Err(PrepareRefusal {
                     boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                    policy_code: None,
                     resource: None,
                     terminal_cause: TerminalCause::DiskFloor,
                     terminal_note: Some("99 bytes available; gc.free_floor is 100 bytes (source: host configuration)".into()),

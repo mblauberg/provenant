@@ -1,5 +1,5 @@
 doc = "Meet acceptance, commit and hand off."
-brief = "Meet the acceptance checks inside the write scope, commit with a conventional message and end with a handoff block."
+brief = "Meet the acceptance checks in the writer's worktree. Optional write-scope paths are advisory; list out-of-scope edits in the handoff. Commit with a conventional message and end with a handoff block."
 tier = "junior"
 access = "worktree_write"
 outputs = ["result", "branch", "commit"]

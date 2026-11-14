@@ -102,6 +102,7 @@ pub(super) fn prepare_command(
     let project = registry
         .project_id
         .ok_or("selected project identity is unavailable")?;
+    let launch_policy = run::launch_policy(roots.state.as_path(), &project.to_string(), task);
     let git = canonical(&match registry.host {
         Some(host) => host.git.clone(),
         None => provenant_os::git::git_executable().ok_or("Git unavailable")?,
@@ -199,6 +200,7 @@ pub(super) fn prepare_command(
     let mut spec = adapter
         .prepare(PrepareInput {
             images: &[],
+            policy: &launch_policy,
             route: &route,
             command: Some(provenant_providers::command::Invocation {
                 argv: &command.argv,
@@ -264,8 +266,9 @@ pub(super) fn prepare_command(
             writer: false,
             settings: config.domains.lanes.projects.get(&project_key),
             project: &project_key,
+            policy: &launch_policy,
         },
-    );
+    )?;
     let process_tree_read = configure_process_tree(&mut spec, paths)?;
     let settings = config.domains.fabric.lanes.build_settings();
     let coordination_reads = configure_build_slots(
@@ -292,7 +295,7 @@ pub(super) fn prepare_command(
             settings.jobs(),
         );
     }
-    spec.complete_tool_requirements(&plan, &home, &cwd);
+    spec.complete_tool_requirements(&plan, &home, &cwd)?;
     if isolated {
         super::source_tree::ensure_profile_isolated(&source, &spec.profile.spec)?;
         super::source_tree::ensure_view_read_only(

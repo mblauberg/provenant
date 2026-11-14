@@ -93,6 +93,7 @@ pub(crate) fn prepare_lease(
 /// transaction that checks and records spacing, so lock order is clock order
 /// across every process on the host. A clock or boot identity that cannot be
 /// read refuses the claim. A retried claim finds its own lease already held.
+#[cfg(test)]
 pub(crate) fn lease(
     db: &Connection,
     store: &Path,
@@ -101,6 +102,28 @@ pub(crate) fn lease(
     time: &dyn Clock,
     request: &Request<'_>,
     owner: &LeaseOwner,
+) -> Result<Option<WallTime>> {
+    lease_with_policy(
+        db,
+        store,
+        ticket,
+        caps,
+        time,
+        request,
+        owner,
+        &provenant_records::policy::Policy::default(),
+    )
+}
+
+pub(crate) fn lease_with_policy(
+    db: &Connection,
+    store: &Path,
+    ticket: &AdmissionTicket,
+    caps: LaneCaps,
+    time: &dyn Clock,
+    request: &Request<'_>,
+    owner: &LeaseOwner,
+    policy: &provenant_records::policy::Policy,
 ) -> Result<Option<WallTime>> {
     let (project, class) = (ticket.project_id, ticket.lane_class);
     let spacing = spacing_micros(ticket.startup_spacing_ms)?;
@@ -134,14 +157,24 @@ pub(crate) fn lease(
         if tx.execute("UPDATE leases SET yielded=0 WHERE attempt=?1", [&id])? > 0 {
             return Ok(Some(now));
         }
-        let identity = owner
-            .identity
-            .as_ref()
-            .ok_or(RunError::Admission(AdmissionError::GuardianIdentity))?;
-        let owner_id = owner
-            .store
-            .as_ref()
-            .ok_or(RunError::Admission(AdmissionError::GuardianIdentity))?;
+        let identity = owner.identity.as_ref().ok_or_else(|| {
+            policy.boundary_error(
+                "ADMISSION_RUNSTORE_ADMIT_AUTHORITY",
+                provenant_records::policy::Facts::violation(
+                    "guardian process identity is unavailable for lease ownership",
+                ),
+                RunError::Admission(AdmissionError::GuardianIdentity),
+            )
+        })?;
+        let owner_id = owner.store.as_ref().ok_or_else(|| {
+            policy.boundary_error(
+                "ADMISSION_RUNSTORE_ADMIT_AUTHORITY",
+                provenant_records::policy::Facts::violation(
+                    "run-store identity is unavailable for lease ownership",
+                ),
+                RunError::Admission(AdmissionError::GuardianIdentity),
+            )
+        })?;
         tx.execute(
             "INSERT INTO leases(attempt,project,store,class,boot,guardian,owner_id) VALUES (?1,?2,?3,?4,?5,?6,?7)",
             params![
@@ -250,6 +283,48 @@ pub(crate) struct LaneCaps {
     project_source: provenant_records::diagnostic::SettingSource,
 }
 impl LaneCaps {
+    pub(crate) fn under_strength(
+        mut self,
+        policy: &provenant_records::policy::Policy,
+        strength: provenant_records::policy::Strength,
+    ) -> Self {
+        use provenant_records::policy::{Effect, Facts, Strength};
+        for (code, value) in [
+            ("ADMISSION_WRITERS", &mut self.host_writers),
+            ("ADMISSION_PROJECT_WRITERS", &mut self.project_writers),
+            ("ADMISSION_LANES", &mut self.host_total),
+            ("ADMISSION_PROJECT_LANES", &mut self.project_total),
+        ] {
+            let effect = policy.check(code, Facts::violation("configured lane cap"));
+            let applies = match strength {
+                Strength::Refuse => matches!(effect, Effect::Refuse(_)),
+                Strength::Queue => matches!(effect, Effect::Queue(_)),
+                Strength::Warn => matches!(effect, Effect::Warn(_)),
+                Strength::Off => false,
+            };
+            if !applies {
+                *value = u64::MAX;
+            }
+        }
+        self
+    }
+    pub(crate) fn under_policy(mut self, policy: &provenant_records::policy::Policy) -> Self {
+        use provenant_records::policy::Facts;
+        for (code, value) in [
+            ("ADMISSION_WRITERS", &mut self.host_writers),
+            ("ADMISSION_PROJECT_WRITERS", &mut self.project_writers),
+            ("ADMISSION_LANES", &mut self.host_total),
+            ("ADMISSION_PROJECT_LANES", &mut self.project_total),
+        ] {
+            if !policy
+                .check(code, Facts::violation("configured lane cap"))
+                .blocks()
+            {
+                *value = u64::MAX;
+            }
+        }
+        self
+    }
     pub(crate) fn of(settings: &provenant_config::LaneBuildSettings) -> Self {
         Self {
             host_writers: settings.writer_lanes(),

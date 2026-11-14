@@ -209,7 +209,6 @@ pub enum GraphRelayCause {
     WriterParentRequired,
     WriterWorktree,
     WriterComposite,
-    WriteScope,
     TargetOutsideGraph,
     RelayUnavailable,
     InvalidFrame,
@@ -252,7 +251,6 @@ impl GraphRelayCause {
             Self::WriterComposite => {
                 "writer composite children require explicit per-node worktree bindings"
             }
-            Self::WriteScope => "write_scope requires a writer child; select --mode worktree-write",
             Self::TargetOutsideGraph => {
                 "the target is outside the calling lane's graph or permitted subtree"
             }

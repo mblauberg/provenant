@@ -210,6 +210,13 @@ impl RunStore {
         resources: &dyn Resources,
     ) -> Result<bool> {
         let ledger = crate::ledger::open(&self.writer_registry, call)?;
+        let request = self.request(id, call)?;
+        let policy = crate::launch_policy(
+            &self.writer_registry,
+            &self.context.project_id.to_string(),
+            &request.task,
+        );
+        let caps = self.lane_caps().under_policy(&policy);
         let owner = if waiting {
             None
         } else {
@@ -217,7 +224,7 @@ impl RunStore {
                 &ledger,
                 self.context.state_root.as_path(),
                 &self.ticket(&self.db, id)?,
-                self.lane_caps(),
+                caps,
                 call.clock,
                 resources,
             )?)
@@ -241,14 +248,15 @@ impl RunStore {
             } else {
                 // The ledger may have committed a yield before a failed store
                 // commit. Always recheck it, even if this ticket says active.
-                let reclaimed = crate::ledger::lease(
+                let reclaimed = crate::ledger::lease_with_policy(
                     &ledger,
                     self.context.state_root.as_path(),
                     &ticket,
-                    self.lane_caps(),
+                    caps,
                     call.clock,
                     call,
                     owner.as_ref().ok_or(RunError::Conflict)?,
+                    &policy,
                 )?
                 .is_some();
                 ticket.active = reclaimed;
@@ -837,6 +845,14 @@ impl RunStore {
         clock: &dyn Clock,
         cancel: &CancelToken,
     ) -> Result<AttemptRecord> {
+        let call = Request { clock, cancel };
+        let request = self.request(id, &call)?;
+        let policy = crate::launch_policy(
+            &self.writer_registry,
+            &self.context.project_id.to_string(),
+            &request.task,
+        );
+        let mut warned_policy = std::collections::BTreeSet::new();
         let backoff = Backoff::new(Duration::from_millis(100), 2, Duration::from_secs(2));
         let mut retries = 0_u64;
         let mut refusal = None;
@@ -876,7 +892,9 @@ impl RunStore {
                 .as_ref()
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::InvalidInput)
             {
-                return Err(RunError::Admission(AdmissionError::BuildSettings));
+                eprintln!(
+                    "warning: optional lane build settings unavailable; using compiled defaults"
+                );
             }
             // Like pressure, an unreadable process budget is logged and does
             // not hold the lane: the limit is unknown, not exceeded.
@@ -991,6 +1009,50 @@ impl RunStore {
                     false
                 }
             };
+            let fits = if let Some(error) = refusal.as_ref() {
+                use provenant_records::policy::{Effect, Facts};
+                let code = match error {
+                    RunError::Admission(AdmissionError::Disk { .. }) => "ADMISSION_DISK",
+                    RunError::Admission(AdmissionError::MemoryPressure { .. }) => {
+                        "ADMISSION_PRESSURE"
+                    }
+                    RunError::Admission(AdmissionError::Processes { .. }) => "PROCESS_CENSUS",
+                    _ => "ADMISSION_DISK",
+                };
+                match policy.check(code, Facts::violation(error.to_string())) {
+                    Effect::Proceed => {
+                        refusal = None;
+                        true
+                    }
+                    Effect::Warn(message) => {
+                        if warned_policy.insert(code) {
+                            eprintln!("warning: {message}");
+                        }
+                        refusal = None;
+                        true
+                    }
+                    Effect::Queue(_) => false,
+                    Effect::Refuse(_) => return Err(refusal.take().ok_or(RunError::Refused)?),
+                }
+            } else if !fits {
+                // Unavailable resource probes are observations, not authority.
+                use provenant_records::policy::{Effect, Facts};
+                match policy.check(
+                    "ADMISSION_DISK",
+                    Facts::violation("resource observation unavailable"),
+                ) {
+                    Effect::Proceed => true,
+                    Effect::Warn(message) => {
+                        if warned_policy.insert("ADMISSION_DISK") {
+                            eprintln!("warning: {message}");
+                        }
+                        true
+                    }
+                    Effect::Queue(_) | Effect::Refuse(_) => false,
+                }
+            } else {
+                true
+            };
             if fits {
                 match self.claim_observed(id, clock, &call, resources) {
                     Ok(Some(record)) => return Ok(record),
@@ -1072,7 +1134,50 @@ impl RunStore {
         resources: &dyn Resources,
     ) -> Result<Option<AttemptRecord>> {
         let ledger = crate::ledger::open(&self.writer_registry, call)?;
-        let caps = self.lane_caps();
+        let request = self.request(id, call)?;
+        let policy = crate::launch_policy(
+            &self.writer_registry,
+            &self.context.project_id.to_string(),
+            &request.task,
+        );
+        use provenant_records::diagnostic::LaneLimit;
+        use provenant_records::policy::{Effect, Facts, Strength};
+        let configured = self.lane_caps();
+        let ticket = self.ticket(&self.db, id)?;
+        for strength in [Strength::Refuse, Strength::Queue, Strength::Warn] {
+            let caps = configured.under_strength(&policy, strength);
+            let Some(hit) =
+                crate::ledger::cap_hit(&ledger, self.context.project_id, ticket.lane_class, caps)?
+            else {
+                continue;
+            };
+            let code = match hit.kind {
+                LaneLimit::HostWriters => "ADMISSION_WRITERS",
+                LaneLimit::ProjectWriters => "ADMISSION_PROJECT_WRITERS",
+                LaneLimit::HostTotal => "ADMISSION_LANES",
+                LaneLimit::ProjectTotal => "ADMISSION_PROJECT_LANES",
+            };
+            match policy.check(
+                code,
+                Facts::violation(format!("active={}, limit={}", hit.active, hit.limit)),
+            ) {
+                Effect::Proceed => {}
+                Effect::Warn(message) => {
+                    use std::io::Write;
+                    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                }
+                Effect::Queue(_) => return Ok(None),
+                Effect::Refuse(_) => {
+                    return Err(RunError::Admission(AdmissionError::LaneCap {
+                        active: hit.active,
+                        limit: hit.limit,
+                        kind: hit.kind,
+                        origin: hit.origin,
+                    }));
+                }
+            }
+        }
+        let caps = configured.under_policy(&policy);
         let owner = crate::ledger::prepare_lease(
             &ledger,
             self.context.state_root.as_path(),
@@ -1091,7 +1196,7 @@ impl RunStore {
             // namespace, so they live in the host ledger, not this store.
             // The ledger reads the clock under its own lock; the lane starts at
             // the time spacing was judged and recorded.
-            let Some(now) = crate::ledger::lease(
+            let Some(now) = crate::ledger::lease_with_policy(
                 &ledger,
                 self.context.state_root.as_path(),
                 &ticket,
@@ -1099,6 +1204,7 @@ impl RunStore {
                 clock,
                 call,
                 &owner,
+                &policy,
             )?
             else {
                 return Ok(None);

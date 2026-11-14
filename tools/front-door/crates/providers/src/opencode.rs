@@ -157,13 +157,20 @@ fn prepare(
     let plan = input.confined.permissions();
     let mut tool_requirements = crate::launch::ToolRequirements::default();
     if plan.selected_authentication.as_deref() != Some("login") {
-        return Err(ProviderError::UnsupportedPolicy);
+        return Err(input.boundary_error(
+            "OPENCODE_PREPARE_CREDENTIALS",
+            "OpenCode requires its selected login authentication",
+            ProviderError::UnsupportedPolicy,
+        ));
     }
-    let private = &plan
-        .private_state
-        .as_ref()
-        .ok_or(ProviderError::UnsupportedPolicy)?
-        .path;
+    let private = crate::launch::private_state_or_scratch(
+        plan.private_state
+            .as_ref()
+            .map(|state| state.path.as_path()),
+        &plan.scratch.path,
+        input.policy,
+        "OPENCODE_PREPARE_NONE",
+    )?;
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "run".as_ref(),
@@ -180,7 +187,13 @@ fn prepare(
     .map(OsString::from)
     .to_vec();
     if session == Session::Resume {
-        let continuation = input.continuation.ok_or(ProviderError::UnknownIdentity)?;
+        let continuation = input.continuation.ok_or_else(|| {
+            input.boundary_error(
+                "OPENCODE_PREPARE_AUTHORITY",
+                "resumed OpenCode invocation has no validated continuation identity",
+                ProviderError::UnknownIdentity,
+            )
+        })?;
         argv.extend(["-s".into(), continuation.session().into()]);
     }
     let model = match &input.route.effort {
@@ -215,10 +228,13 @@ fn prepare(
             // https://opencode.ai/docs/permissions/#external-directories
             let scratch = format!(
                 "{}/**",
-                plan.scratch
-                    .path
-                    .to_str()
-                    .ok_or(ProviderError::InvalidPath)?
+                plan.scratch.path.to_str().ok_or_else(|| {
+                    input.boundary_error(
+                        "OPENCODE_PREPARE_AUTHORITY_2",
+                        "Git-context scratch path cannot be represented by OpenCode",
+                        ProviderError::InvalidPath,
+                    )
+                })?
             );
             external.insert(scratch.clone(), "allow".into());
             reads.insert(scratch, "allow".into());
@@ -248,24 +264,32 @@ fn prepare(
         "permission": permission,
     })
     .to_string();
-    let package = package_grant(input.executable, &mut omitted_discovery);
+    let package = package_grant(input.executable, &mut omitted_discovery, input.policy)?;
     // Bypass Apple's Git shim, including when the selected binary is Homebrew's.
     let bin = plan.scratch.path.join("bin");
     let shell = access == Access::WorktreeWrite;
-    let defaults = crate::launch::tool_search_path(input.home, shell);
+    let defaults = crate::launch::tool_search_path(input.home, shell, input.policy)?;
     let path = match std::env::join_paths(
         std::iter::once(bin.clone()).chain(std::env::split_paths(&defaults)),
     ) {
         Ok(path) => path,
         Err(_) if !shell => {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: the OpenCode Git launcher cannot be included in PATH; continuing without it"
-            );
+            crate::launch::policy_warning(
+                input.policy,
+                "OPENCODE_PREPARE_NONE_2",
+                "the optional read-only Git launcher cannot be encoded in PATH; the selected Git remains explicitly granted",
+            )?;
             defaults
         }
-        Err(_) => return Err(ProviderError::InvalidPath),
+        Err(_) => {
+            return Err(input.policy.boundary_error(
+                "OPENCODE_PREPARE_GIT_ISOLATION",
+                provenant_records::policy::Facts::violation(
+                    "the private Git launcher cannot be placed first in PATH",
+                ),
+                ProviderError::InvalidPath,
+            ));
+        }
     };
     let mut env = base_env(input, &plan.scratch.path, path);
     let xdg = |key, fallback| {
@@ -287,9 +311,10 @@ fn prepare(
             &mut runtime_reads,
             start,
             input.home,
+            input.policy,
             crate::launch::OmissionSource::Toolchain,
             &mut omitted_discovery,
-        );
+        )?;
     }
     // Preserve the existing provider configuration without making skills
     // readable when discovery is off. Do not follow unrelated config links.
@@ -329,9 +354,10 @@ fn prepare(
         &mut runtime_reads,
         optional_start,
         input.home,
+        input.policy,
         crate::launch::OmissionSource::ProviderConfig,
         &mut omitted_discovery,
-    );
+    )?;
     let mut authentication_roots = runtime_reads.split_off(optional_start);
     authentication_roots.push(exact(host_data.join("auth.json")));
     runtime_reads.extend(skill_reads);
@@ -463,6 +489,7 @@ fn prepare(
         user_skills: staged_skills,
         tool_requirements,
         git_wrapper: Default::default(),
+        policy: input.policy.clone(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 process_executables,
@@ -500,7 +527,7 @@ fn prepare(
         },
         stream,
     };
-    crate::launch::prepare_tool_requirements(input, &mut spec);
+    crate::launch::prepare_tool_requirements(input, &mut spec)?;
     Ok(spec)
 }
 

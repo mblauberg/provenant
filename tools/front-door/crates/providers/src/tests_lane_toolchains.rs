@@ -1378,7 +1378,7 @@ fn native_adapter_finalisation_supplies_cargo_environment_without_tool_discovery
         &plan,
         Path::new("/fixture/home"),
         Path::new("/fixture/repo"),
-    );
+    )?;
     for (name, expected) in [
         (
             "CARGO_HOME",

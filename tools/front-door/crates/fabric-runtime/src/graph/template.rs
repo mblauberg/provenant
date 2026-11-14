@@ -2304,7 +2304,7 @@ impl<'a> Compiler<'a> {
             .unwrap_or_else(|| serde_json::json!([]));
         let planner = self.lower_in(&serde_json::json!({
             "id": "plan", "use": "plan", "tier": "senior",
-            "brief": format!("Size and split this implementation brief before the writer starts. Return a plan artefact with bounded slices, their acceptance evidence, literal write scopes and dependency order. The writer will implement those slices in order in the supplied worktree. Keep every slice within these authorised write roots: {scope}.\n\n{brief}")
+            "brief": format!("Size and split this implementation brief before the writer starts. Return a plan artefact with bounded slices, their acceptance evidence, optional write-scope metadata and dependency order. The writer will implement those slices in order in the supplied worktree. Changed paths outside declared scope are reported at settlement. Declared write-scope metadata: {scope}.\n\n{brief}")
         }), &Map::new(), stack)?;
         writer.insert("id".into(), Value::String("writer".into()));
         writer.insert("after".into(), serde_json::json!(["plan"]));

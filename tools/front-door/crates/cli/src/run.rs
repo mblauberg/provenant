@@ -319,13 +319,20 @@ fn capacity_reason(reason: &str) -> bool {
         .is_some_and(|rest| rest.starts_with(": "))
 }
 
-fn writer_gc_settings(state: &Path) -> provenant_config::GcSettings {
+fn writer_gc_settings(
+    state: &Path,
+    policy: &provenant_records::policy::Policy,
+) -> provenant_config::GcSettings {
     provenant_config::GcSettings::read(state).unwrap_or_else(|error| {
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: gc.free_floor configuration unavailable ({error}); using compiled gc defaults"
-        );
+        if let provenant_records::policy::Effect::Warn(message) = policy.check(
+            "RUN_WRITER_GC_SETTINGS_NONE",
+            provenant_records::policy::Facts::violation(format!(
+                "gc.free_floor configuration unavailable ({error}); using compiled GC defaults"
+            )),
+        ) {
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+        }
         provenant_config::GcSettings::default()
     })
 }
@@ -350,13 +357,21 @@ fn disk_policy_refusal(error: DiskCheck) -> run::PrepareRefusal {
             provenant_records::run::TerminalCause::DiskObservationUnavailable
         }
     };
+    let policy_code = match &error {
+        DiskCheck::Low { .. } => "LAUNCH_DISK",
+        DiskCheck::Unobserved(_) => "SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE",
+    };
     let mut refusal = run::PrepareRefusal::new(cause, String::from(error));
+    refusal.policy_code = Some(policy_code.into());
     refusal.resource = resource;
     refusal
 }
 
 impl run::Providers for Registry<'_> {
-    fn write_grant_limit(&self) -> run::WriteGrantLimit {
+    fn write_grant_limit(
+        &self,
+        policy: &provenant_records::policy::Policy,
+    ) -> run::WriteGrantLimit {
         let Some(roots) = self.roots else {
             return run::WriteGrantLimit::default();
         };
@@ -376,11 +391,15 @@ impl run::Providers for Registry<'_> {
                 }
             }
             Err(error) => {
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: domains.run.write_grant_limit_bytes unavailable ({error}); using compiled default"
-                );
+                if let provenant_records::policy::Effect::Warn(message) = policy.check(
+                    "WRITE_GRANT_LIMIT_READ_NONE",
+                    provenant_records::policy::Facts::violation(format!(
+                        "domains.run.write_grant_limit_bytes unavailable ({error}); using compiled default"
+                    )),
+                ) {
+                    use std::io::Write;
+                    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                }
                 run::WriteGrantLimit::default()
             }
         }
@@ -402,15 +421,32 @@ impl run::Providers for Registry<'_> {
         let Some(writer) = &task.writer else {
             return Ok(());
         };
+        let project = task
+            .profile
+            .extra
+            .get("policy_project")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| self.project_id.map(|project| project.to_string()))
+            .unwrap_or_default();
+        let policy = self
+            .roots
+            .map_or_else(provenant_records::policy::Policy::default, |roots| {
+                run::launch_policy(roots.state.as_path(), &project, task)
+            });
         let (Some(roots), Some(home)) = (self.roots, self.home) else {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: writer disk policy context unavailable; continuing without a disk check"
-            );
+            if let provenant_records::policy::Effect::Warn(message) = policy.check(
+                "RUN_WRITER_GC_SETTINGS_NONE",
+                provenant_records::policy::Facts::violation(
+                    "writer disk policy context unavailable; continuing without a disk check",
+                ),
+            ) {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            }
             return Ok(());
         };
-        let settings = writer_gc_settings(roots.state.as_path());
+        let settings = writer_gc_settings(roots.state.as_path(), &policy);
         check_writer_disk(
             &settings,
             roots.state.as_path(),

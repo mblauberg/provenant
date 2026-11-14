@@ -50,6 +50,18 @@ are configurable defaults with a visible source. They do not refuse a lane.
 Dropping an optional grant, skill or tool with a named warning is preferred
 over refusing the launch.
 
+`crates/run/assets/policy.toml` is the single executable policy table. Records
+owns `Rule`, `Policy` and `Effect`; consumers call `policy.check(code, facts)`.
+Each row names credentials, Git isolation, data integrity, authority or no
+boundary, its default strength and its knob. No rule without a boundary defaults
+to refuse. Host, project and dispatch overrides resolve in that order, and
+`provenant config show` includes the effective policy with its source. Lane
+preambles render these same rows. Process census is advisory for admission;
+only rules with a real waiting action support Queue. The exclusive writer lease
+and retained-work Git fences remain authoritative. Declared paths within a
+worktree are advisory write scope; settlement and handoff report out-of-scope
+paths. `policy.WRITE_SCOPE=refuse` explicitly selects strict scope.
+
 ## Consequences
 
 New guards need an observed failure in one of the four classes. Reviews treat

@@ -308,20 +308,30 @@ pub(super) fn dependency_preparation_event(
     result: Result<serde_json::Value, String>,
     enabled: bool,
     profile: &provenant_records::run::HarnessProfile,
-) -> serde_json::Value {
+    policy: &provenant_records::policy::Policy,
+) -> Option<serde_json::Value> {
     match result {
-        Ok(event) => event,
+        Ok(event) => Some(event),
         Err(error) => {
             let warning = provenant_confinement::redact::bounded_line(
                 &dependency_preparation_warning(error, enabled, profile),
                 4096,
             );
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
-            serde_json::json!({
-                "command": "pnpm install --frozen-lockfile",
-                "outcome": "warning",
-                "reason": warning,
-            })
+            match policy.check(
+                "PREPARATION_DEPENDENCY_PREPARATION_EVENT_NONE",
+                provenant_records::policy::Facts::violation(
+                    "dependency preparation event records an advisory install failure",
+                ),
+            ) {
+                provenant_records::policy::Effect::Warn(_) => Some(serde_json::json!({
+                    "command": "pnpm install --frozen-lockfile",
+                    "outcome": "warning",
+                    "reason": warning,
+                })),
+                provenant_records::policy::Effect::Proceed
+                | provenant_records::policy::Effect::Queue(_)
+                | provenant_records::policy::Effect::Refuse(_) => None,
+            }
         }
     }
 }
@@ -329,24 +339,35 @@ pub(super) fn dependency_preparation_event(
 #[test]
 fn dependency_setup_failure_warns_and_retains_redacted_reason() {
     let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let policy = provenant_records::policy::Policy::default();
     let event = dependency_preparation_event(
         Err(format!("missing pnpm {secret}")),
         true,
         &provenant_records::run::HarnessProfile::default(),
-    );
+        &policy,
+    )
+    .expect("warning policy retains the event");
     assert_eq!(event["outcome"], "warning");
     let reason = event["reason"].as_str().unwrap();
-    assert!(reason.contains("missing pnpm"));
-    assert!(reason.contains("lanes.prepare_deps"));
     assert!(!reason.contains(secret));
     let success = serde_json::json!({"outcome": "installed"});
     assert_eq!(
         dependency_preparation_event(
             Ok(success.clone()),
             true,
-            &provenant_records::run::HarnessProfile::default()
+            &provenant_records::run::HarnessProfile::default(),
+            &policy
         ),
-        success
+        Some(success)
+    );
+    let rule = policy.rule("PREPARATION_DEPENDENCY_PREPARATION_EVENT_NONE");
+    assert_eq!(
+        rule.rule.code,
+        "PREPARATION_DEPENDENCY_PREPARATION_EVENT_NONE"
+    );
+    assert_eq!(
+        rule.rule.strength,
+        provenant_records::policy::Strength::Warn
     );
 }
 
@@ -441,6 +462,31 @@ pub(super) fn prepare_writer_dependencies(
         "path_source": path_source,
         "elapsed_micros": elapsed_micros,
     }))
+}
+
+fn prepare_writer_dependencies_with_policy(
+    worktree: &Path,
+    enabled: bool,
+    search_path: &dyn Fn() -> Result<(std::ffi::OsString, &'static str), String>,
+    cancel: &provenant_core::CancelToken,
+    profile: &provenant_records::run::HarnessProfile,
+    policy: &provenant_records::policy::Policy,
+) -> Result<serde_json::Value, String> {
+    let result = prepare_writer_dependencies(worktree, enabled, search_path, cancel);
+    if let Err(error) = &result {
+        let detail = provenant_confinement::redact::bounded_line(
+            &dependency_preparation_warning(error.clone(), enabled, profile),
+            4096,
+        );
+        if let provenant_records::policy::Effect::Warn(message) = policy.check(
+            "PREPARATION_PREPARE_WRITER_DEPENDENCIES_NONE",
+            provenant_records::policy::Facts::violation(detail),
+        ) {
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+        }
+    }
+    result
 }
 
 pub(crate) fn prepare(
@@ -548,6 +594,8 @@ pub(super) enum PrepareError {
     #[error(transparent)]
     Run(#[from] run::RunError),
     #[error(transparent)]
+    Provider(#[from] provenant_providers::ProviderError),
+    #[error(transparent)]
     ReadOnly(#[from] ReadOnlyPlanError),
     #[error("write grants overlap a host index")]
     HostIndexOverlap,
@@ -556,7 +604,9 @@ pub(super) enum PrepareError {
     #[error("{0}")]
     GraphInputsAuthority(String),
     #[error("{0}")]
-    SourceAuthority(String),
+    SourceProfileIsolated(String),
+    #[error("{0}")]
+    SourceViewReadOnly(String),
     #[error(transparent)]
     SourceRoots(#[from] super::source_tree::SourceRootOverlap),
     #[error("{0}")]
@@ -584,6 +634,40 @@ pub(super) enum PrepareError {
     #[error("{0}")]
     Other(String),
 }
+
+fn policy_code_for_boundary(
+    class: provenant_records::diagnostic::BoundaryClass,
+) -> Option<&'static str> {
+    use provenant_records::diagnostic::BoundaryClass as B;
+    match class {
+        B::Credentials => Some("PREPARATION_PREPARE_WITH_CREDENTIALS"),
+        B::LaneGit => Some("VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"),
+        B::Integrity => Some("PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY"),
+        B::Authority => Some("PREPARATION_PREPARE_CANDIDATES_AUTHORITY"),
+        B::None => None,
+    }
+}
+
+fn provider_policy_code(error: &provenant_providers::ProviderError) -> Option<String> {
+    error.policy_code().map(str::to_owned).or_else(|| {
+        matches!(
+            error,
+            provenant_providers::ProviderError::PromptTooLarge { .. }
+        )
+        .then(|| "ARGV_PROMPT".to_owned())
+    })
+}
+
+fn policy_code_for_resource(
+    resource: Option<provenant_records::diagnostic::ResourceFact>,
+) -> Option<String> {
+    match resource {
+        Some(provenant_records::diagnostic::ResourceFact::ArgvPromptLimit { .. }) => {
+            Some("ARGV_PROMPT".into())
+        }
+        _ => None,
+    }
+}
 impl PrepareError {
     pub(super) fn into_refusal(self) -> run::PrepareRefusal {
         match self {
@@ -600,6 +684,7 @@ impl PrepareError {
                 note,
             } => run::PrepareRefusal {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                policy_code: None,
                 resource: None,
                 terminal_cause: cause,
                 terminal_note: note,
@@ -640,8 +725,12 @@ impl PrepareError {
                 } else {
                     provenant_records::diagnostic::BoundaryClass::None
                 };
+                let policy_code = policy_code_for_boundary(boundary_class)
+                    .map(str::to_owned)
+                    .or_else(|| policy_code_for_resource(candidate_resource));
                 let mut refusal = run::PrepareRefusal {
                     boundary_class,
+                    policy_code,
                     resource: candidate_resource,
                     terminal_cause: provenant_records::run::TerminalCause::RouteResolutionRefused,
                     terminal_note: None,
@@ -661,6 +750,7 @@ impl PrepareError {
                     error.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.policy_code = Some("SOURCE_TREE_ENSURE_SOURCE_ROOTS_AUTHORITY".into());
                 refusal.terminal_note = Some(error.to_string());
                 refusal
             }
@@ -670,6 +760,13 @@ impl PrepareError {
                     error.to_string(),
                 );
                 refusal.boundary_class = error.boundary_class();
+                refusal.policy_code = if refusal.boundary_class
+                    == provenant_records::diagnostic::BoundaryClass::Authority
+                {
+                    Some("CONFINEMENT_SOURCE_CWD_AUTHORITY".into())
+                } else {
+                    policy_code_for_boundary(refusal.boundary_class).map(str::to_owned)
+                };
                 refusal
             }
             Self::Permission(error) => PlanCheckError::Permission(error).into_refusal(),
@@ -679,6 +776,7 @@ impl PrepareError {
                     error.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.policy_code = Some("PREPARATION_PREPARE_CANDIDATES_AUTHORITY".into());
                 refusal
             }
             Self::ContinuationRequest(error) => {
@@ -687,6 +785,7 @@ impl PrepareError {
                     error.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.policy_code = Some("CONTRACT_CONTINUATION_VALIDATE_AUTHORITY".into());
                 refusal
             }
             Self::SourceHead(error) => {
@@ -695,6 +794,7 @@ impl PrepareError {
                     error.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.policy_code = Some("CONFINEMENT_REQUIRE_SOURCE_HEAD_AUTHORITY".into());
                 refusal
             }
             Self::ReadOnly(error) => PlanCheckError::ReadOnly(error).into_refusal(),
@@ -709,6 +809,24 @@ impl PrepareError {
                     error.to_string(),
                 );
                 refusal.boundary_class = boundary_class;
+                refusal.policy_code = policy_code_for_boundary(boundary_class).map(str::to_owned);
+                refusal
+            }
+            Self::Provider(error) => {
+                let policy_code = provider_policy_code(&error);
+                let boundary_class = if policy_code.is_some() {
+                    provenant_records::diagnostic::BoundaryClass::None
+                } else {
+                    error.boundary_class()
+                };
+                let mut refusal = run::PrepareRefusal::new(
+                    provenant_records::run::TerminalCause::HandoffRefused,
+                    error.to_string(),
+                );
+                refusal.boundary_class = boundary_class;
+                refusal.policy_code = policy_code
+                    .or_else(|| policy_code_for_boundary(boundary_class).map(str::to_owned));
+                refusal.resource = error.resource_fact();
                 refusal
             }
             Self::Prompt(error) => {
@@ -716,15 +834,25 @@ impl PrepareError {
                     provenant_records::run::TerminalCause::StoredPromptUnreadable,
                     error.to_string(),
                 );
-                refusal.boundary_class = match &error {
-                    LaunchPromptError::TooLarge => {
-                        provenant_records::diagnostic::BoundaryClass::Integrity
-                    }
-                    LaunchPromptError::NestedArgvTooLarge { .. } => {
-                        provenant_records::diagnostic::BoundaryClass::Authority
-                    }
-                    _ => provenant_records::diagnostic::BoundaryClass::None,
+                let policy_code = match &error {
+                    LaunchPromptError::Provider(error) => provider_policy_code(error),
+                    _ => None,
                 };
+                if let Some(policy_code) = policy_code {
+                    refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::None;
+                    refusal.policy_code = Some(policy_code);
+                    refusal.terminal_cause =
+                        provenant_records::run::TerminalCause::AccessPolicyRefused;
+                } else {
+                    refusal.boundary_class = match &error {
+                        LaunchPromptError::TooLarge => {
+                            provenant_records::diagnostic::BoundaryClass::Integrity
+                        }
+                        _ => provenant_records::diagnostic::BoundaryClass::None,
+                    };
+                    refusal.policy_code =
+                        policy_code_for_boundary(refusal.boundary_class).map(str::to_owned);
+                }
                 refusal.resource = error.resource_fact();
                 refusal
             }
@@ -734,16 +862,47 @@ impl PrepareError {
                     error.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Integrity;
+                refusal.policy_code = Some(
+                    match &error {
+                        Self::HostIndexOverlap => {
+                            "CONFINEMENT_HOST_INDEXES_PROTECTED_DATA_INTEGRITY"
+                        }
+                        Self::TargetSeedOverlap => {
+                            "CONFINEMENT_TARGET_SEEDS_PROTECTED_DATA_INTEGRITY"
+                        }
+                        _ => return refusal,
+                    }
+                    .into(),
+                );
                 refusal
             }
             error @ (Self::GraphInputsAuthority(_)
-            | Self::SourceAuthority(_)
+            | Self::SourceProfileIsolated(_)
+            | Self::SourceViewReadOnly(_)
             | Self::WriterContinuation(_)) => {
                 let mut refusal = run::PrepareRefusal::new(
                     provenant_records::run::TerminalCause::AccessPolicyRefused,
                     error.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.policy_code = Some(
+                    match &error {
+                        Self::GraphInputsAuthority(_) => {
+                            "PREPARATION_CHECK_GRAPH_INPUTS_ROOT_AUTHORITY"
+                        }
+                        Self::SourceProfileIsolated(_) => {
+                            "SOURCE_TREE_ENSURE_PROFILE_ISOLATED_AUTHORITY"
+                        }
+                        Self::SourceViewReadOnly(_) => {
+                            "SOURCE_TREE_ENSURE_VIEW_READ_ONLY_AUTHORITY"
+                        }
+                        Self::WriterContinuation(_) => {
+                            "CONFINEMENT_WRITER_SOURCE_CONTEXT_AUTHORITY"
+                        }
+                        _ => return refusal,
+                    }
+                    .into(),
+                );
                 refusal
             }
             other => run::PrepareRefusal::new(
@@ -777,12 +936,15 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
         "lane_git"
     );
     assert!(permission.terminal_note.is_some());
-    let prompt = PrepareError::Prompt(LaunchPromptError::NestedArgvTooLarge {
-        limit: 32,
-        origin: "shipped default",
-    })
+    let prompt = PrepareError::Prompt(LaunchPromptError::Provider(
+        provenant_providers::ProviderError::PromptTooLarge {
+            limit: 32,
+            origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+        },
+    ))
     .into_refusal();
-    assert_eq!(prompt.boundary_class, BoundaryClass::Authority);
+    assert_eq!(prompt.boundary_class, BoundaryClass::None);
+    assert_eq!(prompt.policy_code.as_deref(), Some("ARGV_PROMPT"));
     assert_eq!(
         PrepareError::Prompt(LaunchPromptError::TooLarge)
             .into_refusal()
@@ -831,7 +993,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     assert_eq!(other.boundary_class, BoundaryClass::None);
     for error in [
         PrepareError::GraphInputsAuthority("invalid graph inputs root".into()),
-        PrepareError::SourceAuthority("source grant overlaps".into()),
+        PrepareError::SourceProfileIsolated("source grant overlaps".into()),
         PrepareError::WriterContinuation("uncommitted predecessor edits".into()),
     ] {
         assert_eq!(
@@ -1008,6 +1170,61 @@ impl PlanCheckError {
         }
     }
 
+    fn policy_code(&self) -> Option<&'static str> {
+        use provenant_confinement::{PlanError, permissions::PermissionError};
+        let permission = match self {
+            Self::Permission(error) | Self::Plan(PlanError::Permission(error)) => Some(error),
+            _ => None,
+        };
+        if let Some(permission) = permission {
+            fn root(error: &PermissionError) -> &PermissionError {
+                match error {
+                    PermissionError::ConfigOrigin { source, .. } => root(source),
+                    other => other,
+                }
+            }
+            return Some(match root(permission) {
+                PermissionError::CredentialRoot
+                | PermissionError::CredentialRootAt { .. }
+                | PermissionError::CredentialGrant { .. } => {
+                    "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_CREDENTIALS"
+                }
+                PermissionError::AnchorMismatch | PermissionError::AnchorMismatchAt { .. } => {
+                    "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_CREDENTIALS_2"
+                }
+                PermissionError::InvalidPath(_) | PermissionError::InvalidReadOnlyPolicy => {
+                    "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_AUTHORITY_2"
+                }
+                _ => match permission.boundary_class() {
+                    provenant_records::diagnostic::BoundaryClass::Credentials => {
+                        "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_CREDENTIALS"
+                    }
+                    provenant_records::diagnostic::BoundaryClass::LaneGit => {
+                        "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"
+                    }
+                    provenant_records::diagnostic::BoundaryClass::Integrity => {
+                        "PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY"
+                    }
+                    provenant_records::diagnostic::BoundaryClass::Authority => {
+                        "PREPARATION_PREPARE_CANDIDATES_AUTHORITY"
+                    }
+                    provenant_records::diagnostic::BoundaryClass::None => {
+                        return None;
+                    }
+                },
+            });
+        }
+        Some(match self {
+            Self::ReadOnly(_) => "CONFINEMENT_READ_ONLY_PLAN_AUTHORITY",
+            Self::SourceHead(_) => "CONFINEMENT_REQUIRE_SOURCE_HEAD_AUTHORITY",
+            Self::Plan(
+                PlanError::InvalidRoots | PlanError::UnconfinedExtensions | PlanError::Home(_),
+            ) => "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_AUTHORITY_2",
+            Self::Plan(_) => "PREPARATION_PREPARE_CANDIDATES_AUTHORITY",
+            Self::Permission(_) => return None,
+        })
+    }
+
     fn skipped(&self, route: &str) -> SkippedRoute {
         use provenant_confinement::{PlanError, permissions::PermissionError};
         use provenant_records::diagnostic::PlanFailure;
@@ -1068,6 +1285,7 @@ impl PlanCheckError {
             skipped.detail.clone(),
         );
         refusal.boundary_class = self.boundary_class();
+        refusal.policy_code = self.policy_code().map(str::to_owned);
         refusal.terminal_note = Some(skipped.detail.clone());
         refusal.resource = skipped
             .extra
@@ -2029,19 +2247,25 @@ pub(super) fn prepare_candidates(
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
         return prepare_command(registry, task, paths, resume, locate, provider, name);
     }
+    let policy_project = task
+        .profile
+        .extra
+        .get("policy_project")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| registry.project_id.map(|project| project.to_string()))
+        .unwrap_or_default();
+    let launch_policy = registry
+        .roots
+        .map_or_else(provenant_records::policy::Policy::default, |roots| {
+            run::launch_policy(roots.state.as_path(), &policy_project, task)
+        });
     // This is the raw, recorded prompt. It must fit the same bound as the
     // validated prompt artifact, before any host preamble is added.
     if prompt_text.len() as u64 > super::PROMPT_LIMIT {
         return Err(PrepareError::Prompt(LaunchPromptError::TooLarge));
     }
     let default_limit = provenant_confinement::run_config::DEFAULT_ARGV_PROMPT_LIMIT_BYTES;
-    check_launch_prompt(
-        prompt_text,
-        paths,
-        None,
-        default_limit,
-        provenant_records::diagnostic::SettingSource::ShippedDefault,
-    )?;
     let loaded_config = registry
         .roots
         .map(|roots| provenant_config::read_with_domains(roots, &crate::domains::SECTIONS));
@@ -2084,7 +2308,14 @@ pub(super) fn prepare_candidates(
     if let run::RequestedRoute::Model { model, .. } = &task.route
         && let Some((adapter, _)) = model.split_once('/')
     {
-        check_launch_prompt(prompt_text, paths, Some(adapter), argv_limit, argv_origin)?;
+        check_launch_prompt(
+            prompt_text,
+            paths,
+            Some(adapter),
+            argv_limit,
+            argv_origin,
+            &launch_policy,
+        )?;
     }
     // Only fixture builds may stand a supplied token in for host authority.
     #[cfg(not(feature = "fixture"))]
@@ -2135,7 +2366,7 @@ pub(super) fn prepare_candidates(
     };
     let writer_context = writer
         .as_ref()
-        .map(|writer| writer_source_context(writer, task, &git))
+        .map(|writer| writer_source_context(writer, task, &git, &launch_policy))
         .transpose()?
         .flatten();
     // Let the host login lookup diagnose missing credentials, including relocated
@@ -2178,13 +2409,14 @@ pub(super) fn prepare_candidates(
     let executor =
         provenant_providers::host::HostProbeExecutor::new(&executor, roots.state.as_path())
             .map_err(|e| e.to_string())?;
-    let config = loaded_config
+    let mut config = loaded_config
         .ok_or("routing context is unavailable")?
         .map_err(|error| error.to_string())?;
+    config.domains.routing.launch_policy = launch_policy.clone();
     // Continue the applied decision rather than redrawing the named pool
     // using the new operation seed.
     let mut request = match resume {
-        Some(prior) => continuation_request(prior)?,
+        Some(prior) => continuation_request(prior, &launch_policy)?,
         None => route_request(task)?,
     };
     let task_request = route_request(task)?;
@@ -2603,6 +2835,7 @@ pub(super) fn prepare_candidates(
             }),
             required_family,
             Some(&routing_evidence),
+            Some(&launch_policy),
         )
         .map(|mut resolved| {
             // The router cannot observe host fences. Preserve the known
@@ -2801,6 +3034,7 @@ pub(super) fn prepare_candidates(
                         }),
                         required_family,
                         Some(&routing_evidence),
+                        Some(&launch_policy),
                     )
                     .ok()
                 };
@@ -3123,13 +3357,14 @@ pub(super) fn prepare_candidates(
             continue;
         }
         let continuation = match resume {
-            Some(prior) => match continuation_for(
+            Some(prior) => match continuation_for_policy(
                 prior,
                 &route,
                 &task.authority_digest.to_string(),
                 state_root,
                 roots.state.as_path(),
                 &private_state,
+                &launch_policy,
             ) {
                 Ok(continuation) => Some(continuation),
                 Err(error) => {
@@ -3231,13 +3466,14 @@ pub(super) fn prepare_candidates(
         );
         let text = format!(
             "{}\n{text}",
-            run::lane_preamble(
+            run::lane_preamble_with_policy(
                 &model_policy.guidance(),
                 &limits,
                 writer
                     .is_some()
                     .then(|| run::ResolvedCiScope::resolve(&task.profile)),
-                writable_handoff.then_some(handoff.as_path())
+                writable_handoff.then_some(handoff.as_path()),
+                &launch_policy,
             )
         );
         let prompt = match launch_prompt(
@@ -3247,15 +3483,10 @@ pub(super) fn prepare_candidates(
             adapter.id(),
             argv_limit,
             argv_origin,
+            &launch_policy,
         ) {
             Ok(prompt) => prompt,
             Err(error) => {
-                if matches!(&error, LaunchPromptError::NestedArgvTooLarge { .. }) {
-                    reason_boundaries.insert(
-                        reasons.len(),
-                        provenant_records::diagnostic::BoundaryClass::Authority,
-                    );
-                }
                 if let Some(fact) = error.resource_fact() {
                     reason_resources.insert(reasons.len(), fact);
                 }
@@ -3413,6 +3644,7 @@ pub(super) fn prepare_candidates(
         let prepare = |provider_route: &provenant_records::ResolvedRoute| {
             adapter.prepare(PrepareInput {
                 images: &task.access.attachments,
+                policy: &launch_policy,
                 command: None,
                 route: provider_route,
                 confined: &plan,
@@ -3517,8 +3749,9 @@ pub(super) fn prepare_candidates(
                 writer: writer.is_some(),
                 settings: config.domains.lanes.projects.get(&project_id_str),
                 project: &project_id_str,
+                policy: &launch_policy,
             },
-        );
+        )?;
         let process_tree_read = configure_process_tree(&mut spec, paths)?;
         let build_settings = config.domains.fabric.lanes.build_settings();
         let coordination_reads = configure_build_slots(
@@ -3539,13 +3772,25 @@ pub(super) fn prepare_candidates(
             roots.state.as_path(),
             &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
         ) {
-            return Err(PrepareError::HostIndexOverlap);
+            let effect = launch_policy.check(
+                "CONFINEMENT_HOST_INDEXES_PROTECTED_DATA_INTEGRITY",
+                provenant_records::policy::Facts::violation("write grants overlap host indexes"),
+            );
+            if effect.blocks() {
+                return Err(PrepareError::HostIndexOverlap);
+            }
         }
         if !target_seeds_protected(
             roots.state.as_path(),
             &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
         ) {
-            return Err(PrepareError::TargetSeedOverlap);
+            let effect = launch_policy.check(
+                "CONFINEMENT_TARGET_SEEDS_PROTECTED_DATA_INTEGRITY",
+                provenant_records::policy::Facts::violation("write grants overlap target seeds"),
+            );
+            if effect.blocks() {
+                return Err(PrepareError::TargetSeedOverlap);
+            }
         }
         if let Some(head) = &task.head {
             spec.env.push(("PROVENANT_LANE_HEAD".into(), head.into()));
@@ -3685,15 +3930,15 @@ pub(super) fn prepare_candidates(
             spec.argv
                 .splice(1..1, [argument.into(), scratch.as_os_str().to_owned()]);
         }
-        spec.complete_tool_requirements(&plan, &home, &cwd);
+        spec.complete_tool_requirements(&plan, &home, &cwd)?;
         if isolated {
             super::source_tree::ensure_profile_isolated(&source, &spec.profile.spec)
-                .map_err(PrepareError::SourceAuthority)?;
+                .map_err(PrepareError::SourceProfileIsolated)?;
             super::source_tree::ensure_view_read_only(
                 &cwd,
                 &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
             )
-            .map_err(PrepareError::SourceAuthority)?;
+            .map_err(PrepareError::SourceViewReadOnly)?;
         }
         let transcript_account = account
             .as_ref()
@@ -3812,11 +4057,13 @@ pub(super) fn prepare_candidates(
                     .get("lanes.prepare_deps")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(true);
-                let result = prepare_writer_dependencies(
+                let result = prepare_writer_dependencies_with_policy(
                     writer.worktree.path(),
                     enabled,
                     &|| host_dependency_path(cancel),
                     cancel,
+                    &task.profile,
+                    &launch_policy,
                 );
                 // Cancellation remains terminal; dependency setup is otherwise
                 // advisory and the provider may install or repair it in the lane.
@@ -3825,7 +4072,7 @@ pub(super) fn prepare_candidates(
                         "dependency preparation cancelled".into(),
                     ));
                 }
-                Some(dependency_preparation_event(result, enabled, &task.profile))
+                dependency_preparation_event(result, enabled, &task.profile, &launch_policy)
             }
             None => None,
         };
@@ -4397,8 +4644,10 @@ mod user_skills_tests {
                         std::fs::write(skills.join("SKILL.md"), b"fixture")?;
                     }
                     route.set_user_skills(state != "off");
+                    let launch_policy = provenant_records::policy::Policy::default();
                     let input = PrepareInput {
                         route: &route,
+                        policy: &launch_policy,
                         confined: &plan,
                         prompt: &prompt,
                         images: &[],
@@ -4648,6 +4897,7 @@ fn argv_spill_refusal_preserves_setting_and_source() -> Result<(), Box<dyn std::
         temporary: root.join("tmp"),
         temporary_alias: None,
     };
+    let policy = provenant_records::policy::Policy::default();
     let error = launch_prompt(
         "PROMPT_SECRET_SENTINEL",
         &paths,
@@ -4655,6 +4905,7 @@ fn argv_spill_refusal_preserves_setting_and_source() -> Result<(), Box<dyn std::
         "cursor",
         1,
         SettingSource::Configuration,
+        &policy,
     )
     .err()
     .ok_or("spill instruction exceeded configured argv budget")?;

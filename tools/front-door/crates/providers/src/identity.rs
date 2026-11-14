@@ -141,7 +141,13 @@ impl RegisteredAccount {
         route: &provenant_records::ResolvedRoute,
     ) -> Result<(), crate::ProviderError> {
         if route.adapter != self.adapter || route.account_key.as_deref() != Some(&self.key) {
-            return Err(crate::ProviderError::IdentityMismatch);
+            return Err(provenant_records::policy::Policy::default().boundary_error(
+                "IDENTITY_REGISTEREDACCOUNT_VALIDATE_ROUTE_AUTHORITY",
+                provenant_records::policy::Facts::violation(
+                    "the registered account does not match the resolved provider route",
+                ),
+                crate::ProviderError::IdentityMismatch,
+            ));
         }
         Ok(())
     }
@@ -170,9 +176,23 @@ impl Accounts {
         &self,
         route: &provenant_records::ResolvedRoute,
     ) -> Result<&RegisteredAccount, crate::ProviderError> {
-        self.0
+        let account = self
+            .0
             .iter()
-            .find(|a| a.validate_route(route).is_ok())
-            .ok_or(crate::ProviderError::UnknownIdentity)
+            .find(|account| {
+                account.adapter == route.adapter
+                    && route.account_key.as_deref() == Some(account.key.as_str())
+            })
+            .ok_or_else(|| {
+                provenant_records::policy::Policy::default().boundary_error(
+                    "IDENTITY_REGISTEREDACCOUNT_VALIDATE_ROUTE_AUTHORITY",
+                    provenant_records::policy::Facts::violation(
+                        "no registered account matches the resolved provider route",
+                    ),
+                    crate::ProviderError::UnknownIdentity,
+                )
+            })?;
+        account.validate_route(route)?;
+        Ok(account)
     }
 }

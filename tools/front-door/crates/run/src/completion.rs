@@ -22,7 +22,7 @@ impl RunStore {
     /// Read the host's immutable settlement snapshot, never provider history.
     pub fn handoff(&self, record: &AttemptRecord) -> Result<Option<Handoff>> {
         let attempt = self.attempt_dir(record.attempt_id, false)?;
-        read_snapshot(&attempt)
+        Ok(read_snapshot(&attempt)?.map(|handoff| attach_scope_report(&attempt, &handoff)))
     }
 
     pub(crate) fn capture_handoff(
@@ -32,7 +32,7 @@ impl RunStore {
         decoded: &Decoded,
     ) -> Result<Option<Handoff>> {
         if let Some(handoff) = read_snapshot(attempt)? {
-            return Ok(Some(handoff));
+            return Ok(Some(attach_scope_report(attempt, &handoff)));
         }
         let interrupted = !decoded.complete
             || matches!(
@@ -121,6 +121,47 @@ pub fn sanitise_handoff(handoff: &Handoff) -> Result<Handoff> {
     })
 }
 
+/// Attach the sealed write-scope evidence to the in-memory handoff view. The
+/// original `handoff.json` is an immutable provider snapshot, so derived scope
+/// facts are never resealed over it. Oversized full reports fall back to a
+/// pointer to the bounded artifact; if even that does not fit, retain the
+/// original safe handoff.
+pub(crate) fn attach_scope_report(attempt: &Directory, handoff: &Handoff) -> Handoff {
+    let Ok(Some(raw)) = read_sealed(
+        attempt,
+        "policy-write-scope.json",
+        provenant_records::run::TERMINAL_RECORD_LIMIT,
+    ) else {
+        return handoff.clone();
+    };
+    let Ok(report) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+        return handoff.clone();
+    };
+    let mut full = handoff.clone();
+    full.extra.insert("write_scope".into(), report.clone());
+    if let Ok(safe) = sanitise_handoff(&full) {
+        return safe;
+    }
+
+    let count = report
+        .get("out_of_scope_paths")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let mut compact = handoff.clone();
+    compact.extra.insert(
+        "write_scope".into(),
+        serde_json::json!({
+            "code": report.get("code").cloned().unwrap_or(serde_json::json!("WRITE_SCOPE")),
+            "strength": report.get("strength"),
+            "source": report.get("source"),
+            "paths_artifact": "policy-write-scope.json",
+            "out_of_scope_count": count,
+            "paths_omitted_from_handoff": true,
+        }),
+    );
+    sanitise_handoff(&compact).unwrap_or_else(|_| handoff.clone())
+}
+
 /// Transform decoded values and object keys, including nested forward fields,
 /// then revalidate both field and total bounds after any replacement growth.
 pub(crate) fn transform_handoff(
@@ -205,6 +246,21 @@ pub fn lane_preamble(
     )
 }
 
+/// Effective guards are rendered by the same table used by enforcement.
+pub fn lane_preamble_with_policy(
+    model_guidance: &str,
+    limits: &provenant_records::LaneLimits,
+    ci_scope: Option<crate::ResolvedCiScope>,
+    handoff: Option<&Path>,
+    policy: &provenant_records::policy::Policy,
+) -> String {
+    format!(
+        "{}Launch policy (code, boundary, strength, source, knob):\n{}",
+        lane_preamble(model_guidance, limits, ci_scope, handoff),
+        policy.render()
+    )
+}
+
 pub fn handoff_progress_guidance(path: &Path) -> String {
     format!(
         "Progress handoff JSON: {}. Update this file throughout the task by writing a temporary file beside it and renaming it into place (hard links are denied), and repeat its current value in the final handoff fence. A failed update never blocks the work: carry on and report the value in the fence. It is lane state, never a repository file or a commit.\n",
@@ -272,6 +328,49 @@ mod tests {
             path: AbsolutePath::new(candidate)?,
             scope: PathScope::Subtree,
         }];
+        Ok(())
+    }
+
+    #[test]
+    fn scope_report_falls_back_to_its_artifact_without_replacing_snapshot() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let input = input();
+        store.create(&input, &call)?;
+        let record = store.record(input.attempt_id, &call)?;
+        let attempt = store.attempt_dir(record.attempt_id, false)?;
+        let raw = snapshot("done");
+        let original = Handoff::from_json(&raw).map_err(std::io::Error::other)?;
+        seal(
+            &attempt,
+            AttemptFile::Handoff.name(),
+            &raw,
+            HANDOFF_BYTES as u64,
+        )?;
+        let report = serde_json::json!({
+            "code": "WRITE_SCOPE",
+            "strength": "warn",
+            "source": "project",
+            "out_of_scope_paths": ["x".repeat(HANDOFF_BYTES * 2)],
+        });
+        seal(
+            &attempt,
+            "policy-write-scope.json",
+            &crate::db::bytes(&report)?,
+            provenant_records::run::TERMINAL_RECORD_LIMIT,
+        )?;
+
+        let attached = attach_scope_report(&attempt, &original);
+        assert_eq!(
+            attached.extra["write_scope"]["paths_artifact"],
+            "policy-write-scope.json"
+        );
+        assert_eq!(attached.extra["write_scope"]["out_of_scope_count"], 1);
+        assert_eq!(read_snapshot(&attempt)?, Some(original));
+        assert_eq!(store.handoff(&record)?, Some(attached));
         Ok(())
     }
 

@@ -312,7 +312,7 @@ impl<'a> Service<'a> {
             )
             .map_err(|error| input_error(ErrorKind::Io, error.to_string()))?;
 
-            let request = TaskRequest {
+            let mut request = TaskRequest {
                 context: task.context,
                 extra: Default::default(),
                 build_heavy: task.build_heavy,
@@ -332,6 +332,18 @@ impl<'a> Service<'a> {
                 deliver: task.deliver,
                 access: task.access,
             };
+            let policy_project = self.store.context.project_id.to_string();
+            request.profile.extra.insert(
+                "policy_project".into(),
+                serde_json::json!(policy_project.clone()),
+            );
+            let policy =
+                crate::launch_policy(self.store.writer_registry(), &policy_project, &request);
+            request.profile.extra.insert(
+                "launch_policy".into(),
+                serde_json::to_value(policy)
+                    .map_err(|_| RunError::Validation("launch policy snapshot"))?,
+            );
             (request, task.prompt)
         };
         let prepared = PreparedRun {

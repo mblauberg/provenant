@@ -510,10 +510,6 @@ pub(super) fn credential_authority(
 pub(super) enum LaunchPromptError {
     #[error("invalid input: recorded prompt exceeds 1 MiB; shorten the prompt")]
     TooLarge,
-    #[error(
-        "invalid input: nested argv launch prompt exceeds domains.run.argv_prompt_limit_bytes ({limit} bytes, {origin}); route the child to a stdin adapter or shorten the prompt"
-    )]
-    NestedArgvTooLarge { limit: usize, origin: &'static str },
     #[error(transparent)]
     Provider(#[from] provenant_providers::ProviderError),
     #[error("{0}")]
@@ -544,23 +540,16 @@ pub(super) fn check_launch_prompt(
     adapter: Option<&str>,
     argv_limit: usize,
     argv_origin: provenant_records::diagnostic::SettingSource,
+    policy: &provenant_records::policy::Policy,
 ) -> Result<(), LaunchPromptError> {
     if paths.lane_depth > 1
         && adapter
             .and_then(AdapterSpec::get)
             .is_some_and(|spec| spec.argv_prompt)
-        && Prompt::new(text.to_owned())
-            .with_argv_limit(argv_limit, argv_origin)
-            .check_argv()
-            .is_err()
     {
-        return Err(LaunchPromptError::NestedArgvTooLarge {
-            limit: argv_limit,
-            origin: match argv_origin {
-                provenant_records::diagnostic::SettingSource::Configuration => "host configuration",
-                provenant_records::diagnostic::SettingSource::ShippedDefault => "compiled default",
-            },
-        });
+        Prompt::new(text.to_owned())
+            .with_argv_limit(argv_limit, argv_origin)
+            .check_argv(policy)?;
     }
     Ok(())
 }
@@ -572,20 +561,33 @@ pub(super) fn launch_prompt(
     adapter: &str,
     argv_limit: usize,
     argv_origin: provenant_records::diagnostic::SettingSource,
+    policy: &provenant_records::policy::Policy,
 ) -> Result<Prompt, LaunchPromptError> {
     if text.len() as u64 > super::PROMPT_LIMIT {
         // Admission bounds the caller's raw prompt, not host additions.
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: INVALID: launch prompt including the preamble exceeds 1 MiB; shorten the prompt"
-        );
+        if let provenant_records::policy::Effect::Warn(message) = policy.check(
+            "OBSERVATION_LAUNCH_PROMPT_NONE",
+            provenant_records::policy::Facts::violation(
+                "host-added launch prompt text exceeds 1 MiB",
+            ),
+        ) {
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+        }
     }
-    check_launch_prompt(text, paths, Some(adapter), argv_limit, argv_origin)?;
+    check_launch_prompt(text, paths, Some(adapter), argv_limit, argv_origin, policy)?;
     let prompt = Prompt::new(text.to_owned()).with_argv_limit(argv_limit, argv_origin);
-    if !AdapterSpec::get(adapter).is_some_and(|spec| spec.argv_prompt)
-        || prompt.check_argv().is_ok()
-    {
+    if !AdapterSpec::get(adapter).is_some_and(|spec| spec.argv_prompt) {
+        return Ok(prompt);
+    }
+    if let Err(error) = prompt.check_argv(policy) {
+        // Nested lanes cannot use the parent-writable attempt directory for a
+        // prompt artifact. Warn/Off already proceed with the immutable argv;
+        // a strict policy keeps the typed refusal.
+        if paths.lane_depth > 1 {
+            return Err(error.into());
+        }
+    } else {
         return Ok(prompt);
     }
     let attempt = paths
@@ -626,6 +628,6 @@ pub(super) fn launch_prompt(
         Err(error) => return Err(error.to_string().into()),
     }
     let prompt = Prompt::from_file(attempt.join(name)).with_argv_limit(argv_limit, argv_origin);
-    prompt.check_argv()?;
+    prompt.check_argv(policy)?;
     Ok(prompt)
 }

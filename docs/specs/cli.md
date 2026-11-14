@@ -115,8 +115,8 @@ with `--set bounded=true`; a `batch` item, `implement.plan`, a planner-produced
 implementation node, or an implementation consuming a sibling plan's `result`
 is also bounded. Otherwise expansion adds a read-only senior `plan` upstream
 of the junior writer. The planner sizes the brief into ordered slices with
-acceptance evidence and write scopes; the writer consumes that plan in its
-existing worktree. `--explain` shows the planner, writer, dependency and input
+acceptance evidence and optional advisory write-scope metadata; each writer may
+use its whole Git-isolated worktree. `--explain` shows the planner, writer, dependency and input
 edge. Delivery consumers retain the implementation boundary's branch and commit.
 
 `--route` takes a tier (`junior`, `senior`, `principal`) for every node, or a

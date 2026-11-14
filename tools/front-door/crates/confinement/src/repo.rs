@@ -4,6 +4,7 @@
 //! cwd. Every use reopens the path and compares it with the held
 //! descriptor identity. Git metadata is read through the held `Directory`s.
 use provenant_os::fs::{Directory, FileKind, FsError, Metadata, canonicalize, effective_uid};
+use provenant_records::policy::{Facts, Policy};
 use sha2::{Digest as _, Sha256};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -14,6 +15,11 @@ const GIT_MARKER: &str = ".git";
 const GITFILE_LIMIT: u64 = 4096;
 const ALTERNATES_LIMIT: u64 = 1024 * 1024;
 const CONFIG_LIMIT: u64 = 1024 * 1024;
+
+fn git_boundary_error(code: &str, error: RepoError) -> RepoError {
+    let detail = error.to_string();
+    Policy::default().boundary_error(code, Facts::violation(detail), error)
+}
 
 #[derive(Debug, Error)]
 pub enum RepoError {
@@ -307,6 +313,15 @@ pub(crate) struct ConfigDigest {
 
 impl VerifiedRepo {
     fn open_structure(path: impl AsRef<Path>, native_alternates: bool) -> Result<Self, RepoError> {
+        Self::open_structure_inner(path, native_alternates).map_err(|error| {
+            git_boundary_error("REPO_VERIFIEDREPO_OPEN_STRUCTURE_GIT_ISOLATION", error)
+        })
+    }
+
+    fn open_structure_inner(
+        path: impl AsRef<Path>,
+        native_alternates: bool,
+    ) -> Result<Self, RepoError> {
         let (root_path, root) = open_canonical_anchor(path.as_ref(), false)?;
         let root_identity = root.metadata()?;
         if root_identity.kind != FileKind::Directory
@@ -596,6 +611,12 @@ impl VerifiedRepo {
     }
 
     pub fn revalidate(&self) -> Result<(), RepoError> {
+        self.revalidate_inner().map_err(|error| {
+            git_boundary_error("REPO_VERIFIEDREPO_REVALIDATE_GIT_ISOLATION", error)
+        })
+    }
+
+    fn revalidate_inner(&self) -> Result<(), RepoError> {
         let mut current = Self::open_structure(&self.root_path, self.native_alternates)?;
         self.check_identity(&current)?;
         // The included files to digest are the ones this handle was probed on.
@@ -617,6 +638,12 @@ impl VerifiedRepo {
     /// setup. This does not validate Git configuration and cannot authorise a
     /// Git operation or replace the full revalidation at the point of use.
     pub fn revalidate_identity(&self) -> Result<(), RepoError> {
+        self.revalidate_identity_inner().map_err(|error| {
+            git_boundary_error("REPO_VERIFIEDREPO_REVALIDATE_GIT_ISOLATION", error)
+        })
+    }
+
+    fn revalidate_identity_inner(&self) -> Result<(), RepoError> {
         let current = Self::open_structure(&self.root_path, self.native_alternates)?;
         self.check_identity(&current)
     }
@@ -699,6 +726,11 @@ pub fn verify_worktree(
     repo: &VerifiedRepo,
     path: impl AsRef<Path>,
 ) -> Result<VerifiedWorktree, RepoError> {
+    verify_worktree_inner(repo, path.as_ref())
+        .map_err(|error| git_boundary_error("REPO_VERIFY_WORKTREE_GIT_ISOLATION", error))
+}
+
+fn verify_worktree_inner(repo: &VerifiedRepo, path: &Path) -> Result<VerifiedWorktree, RepoError> {
     repo.revalidate()?;
     let mut worktree = VerifiedRepo::open_structure(path, false)?;
     if repo.probe_data.is_none() || repo.config_digest.is_none() {
@@ -971,6 +1003,17 @@ fn verify_git_directory(metadata: Metadata, owner: u32) -> Result<(), RepoError>
 }
 
 fn reject_alternates(common: &Directory) -> Result<(), RepoError> {
+    reject_alternates_inner(common).map_err(|error| {
+        let code = if matches!(&error, RepoError::AlternateObjects) {
+            "REPO_REJECT_ALTERNATES_DATA_INTEGRITY"
+        } else {
+            "REPO_REJECT_ALTERNATES_DATA_INTEGRITY_2"
+        };
+        git_boundary_error(code, error)
+    })
+}
+
+fn reject_alternates_inner(common: &Directory) -> Result<(), RepoError> {
     let objects = match common.open_verified_directory(OsStr::new("objects")) {
         Ok(directory) => directory,
         Err(error) if error.is_not_found() => return Ok(()),
@@ -1008,6 +1051,7 @@ fn read_bounded(directory: &Directory, name: &OsStr, limit: u64) -> Result<Vec<u
     crate::stable_read::read_regular(directory, name, limit)
         .map(|(bytes, _)| bytes)
         .map_err(|error| git_read_error(error, name))
+        .map_err(|error| git_boundary_error("REPO_READ_BOUNDED_GIT_ISOLATION", error))
 }
 
 fn git_read_error(error: crate::stable_read::ReadError, name: &OsStr) -> RepoError {
@@ -1131,6 +1175,7 @@ mod tests {
         GitRefName, GitRevision, GitRevisionError, RepoError, RepoObjectFormat, RepoProbeData,
         SiblingTrackingKeys, VerifiedRepo, verify_worktree,
     };
+    use provenant_records::policy::{Facts, Policy};
     use std::fs;
 
     /// Each row is `git check-ref-format --branch <name>` (git-check-ref-format(1),
@@ -1247,9 +1292,26 @@ mod tests {
         })
         .unwrap();
 
+        let error = verify_worktree(&repo, temp.path())
+            .err()
+            .expect("primary checkout is not a lane");
+        assert!(matches!(error, RepoError::InvalidRegistration));
+        let policy = Policy::default();
+        let rule = policy.rule("REPO_VERIFY_WORKTREE_GIT_ISOLATION");
+        assert_eq!(
+            rule.rule.boundary,
+            provenant_records::policy::Boundary::GitIsolation
+        );
+        assert_eq!(
+            rule.rule.strength,
+            provenant_records::policy::Strength::Refuse
+        );
         assert!(matches!(
-            verify_worktree(&repo, temp.path()),
-            Err(RepoError::InvalidRegistration)
+            policy.check(
+                "REPO_VERIFY_WORKTREE_GIT_ISOLATION",
+                Facts::violation("guard failed"),
+            ),
+            provenant_records::policy::Effect::Refuse(_)
         ));
     }
 

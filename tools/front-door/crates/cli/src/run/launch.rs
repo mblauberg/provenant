@@ -307,9 +307,45 @@ pub(super) struct PreparedProvider<'a> {
     provider_lease_wait: Option<u64>,
 }
 
+impl PreparedProvider<'_> {
+    fn identity_refusal(&self, task: &run::TaskRequest, detail: &str) -> run::PrepareRefusal {
+        let project = task
+            .profile
+            .extra
+            .get("policy_project")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| self.fallback.project_id.map(|project| project.to_string()))
+            .unwrap_or_default();
+        let state = self
+            .fallback
+            .roots
+            .map(|roots| roots.state.as_path())
+            .or(self.fallback.state_root);
+        let policy = state.map_or_else(provenant_records::policy::Policy::default, |state| {
+            run::launch_policy(state, &project, task)
+        });
+        let code = "DISPATCH_PREPAREDPROVIDER_CHECK_POLICY_AUTHORITY";
+        let mut refusal = policy.boundary_error(
+            code,
+            provenant_records::policy::Facts::violation(detail),
+            run::PrepareRefusal::new(
+                provenant_records::run::TerminalCause::HandoffRefused,
+                detail,
+            ),
+        );
+        refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+        refusal.policy_code = Some(code.to_owned());
+        refusal
+    }
+}
+
 impl run::Providers for PreparedProvider<'_> {
-    fn write_grant_limit(&self) -> run::WriteGrantLimit {
-        self.fallback.write_grant_limit()
+    fn write_grant_limit(
+        &self,
+        policy: &provenant_records::policy::Policy,
+    ) -> run::WriteGrantLimit {
+        self.fallback.write_grant_limit(policy)
     }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
         self.fallback.priority(task)
@@ -317,10 +353,9 @@ impl run::Providers for PreparedProvider<'_> {
     fn check_policy(&self, task: &run::TaskRequest) -> Result<(), run::PrepareRefusal> {
         if let Some(ready) = self.ready {
             if ready.task != *task {
-                return Err(run::PrepareRefusal::new(
-                    provenant_records::run::TerminalCause::HandoffRefused,
-                    "prepared continuation task changed",
-                ));
+                return Err(
+                    self.identity_refusal(&ready.task, "prepared continuation task changed")
+                );
             }
             return Ok(());
         }
@@ -335,16 +370,12 @@ impl run::Providers for PreparedProvider<'_> {
     ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
         if let Some(ready) = self.ready {
             if ready.attempt != paths.attempt_id || ready.task != *task || resume.is_some() {
-                return Err(run::PrepareRefusal::new(
-                    provenant_records::run::TerminalCause::HandoffRefused,
-                    "prepared continuation identity changed",
-                ));
+                return Err(
+                    self.identity_refusal(&ready.task, "prepared continuation identity changed")
+                );
             }
             return ready.plan.borrow_mut().take().ok_or_else(|| {
-                run::PrepareRefusal::new(
-                    provenant_records::run::TerminalCause::HandoffRefused,
-                    "prepared continuation consumed",
-                )
+                self.identity_refusal(&ready.task, "prepared continuation consumed")
             });
         }
         self.fallback

@@ -864,7 +864,21 @@ fn pacing_factor_basis_points(
                 context.catalogue.quota_pool(model),
             )
         })
-        .map(|window| format!(" reserve warning window={}", window.pool))
+        .map(|window| {
+            context
+                .config
+                .launch_policy
+                .check(
+                    pacing_rule(profile, model),
+                    provenant_records::policy::Facts::violation(format!(
+                        "pacing reserve window={}",
+                        window.pool
+                    )),
+                )
+                .message()
+                .map(|message| format!(" {message}"))
+                .unwrap_or_default()
+        })
         .unwrap_or_default();
     let detail = format!("{detail}{reserve_detail}");
     let neutral_detail = match profile.and_then(|p| p.deadline.as_ref()) {
@@ -977,6 +991,18 @@ struct ReserveWindow {
     percent: u8,
     profile: bool,
     seven_day: bool,
+}
+
+fn pacing_rule(profile: Option<&PacingProfile>, model: &ModelId) -> &'static str {
+    if profile.is_some() {
+        if model.model().contains("free") {
+            "PACING_FREE"
+        } else {
+            "PACING_ACCOUNT"
+        }
+    } else {
+        "PACING_ADAPTER"
+    }
 }
 
 fn pacing_reserve_window(
@@ -1120,9 +1146,44 @@ fn account_reason<'q>(
             None
         };
     }
-    let (policy, _, _, _) = effective_profile(context, model, availability.account_key.as_deref());
+    let (policy, profile, _, _) =
+        effective_profile(context, model, availability.account_key.as_deref());
     if reason.is_none() && policy == PacingPolicy::Off {
         reason = Some(RouteExclusionReason::Disabled);
+    }
+    if reason.is_none()
+        && policy == PacingPolicy::Pace
+        && let Some(q) = quota
+        && matches!(
+            q.snapshot.status,
+            QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
+        )
+        && pacing_reserve_window(
+            &q.snapshot,
+            context.now_seconds(),
+            context
+                .config
+                .pacing_reserve
+                .get(model.adapter())
+                .copied()
+                .unwrap_or_default(),
+            profile,
+            model.adapter(),
+            context.catalogue.quota_pool(model),
+        )
+        .is_some()
+        && context
+            .config
+            .launch_policy
+            .check(
+                pacing_rule(profile, model),
+                provenant_records::policy::Facts::violation(
+                    "selected pacing reserve threshold reached",
+                ),
+            )
+            .blocks()
+    {
+        reason = Some(RouteExclusionReason::PacingReserve);
     }
     (reason, quota)
 }
@@ -1540,10 +1601,22 @@ fn account_load(
             } else {
                 "default:pacing_reserve"
             };
-            warnings.push(format!(
+            let detail = format!(
                 "pacing reserve {}% window={}; ranking penalty; source={source}",
                 window.percent, window.pool
-            ));
+            );
+            if context
+                .config
+                .launch_policy
+                .check(
+                    pacing_rule(profile, model),
+                    provenant_records::policy::Facts::violation(detail.clone()),
+                )
+                .message()
+                .is_some()
+            {
+                warnings.push(detail);
+            }
         }
     }
     AccountLoad {
