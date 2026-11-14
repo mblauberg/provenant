@@ -1,5 +1,75 @@
 use super::*;
 
+struct PendingGraphCommand {
+    child: provenant_supervisor::fixture::ChildGuard,
+    stdout: PathBuf,
+    stderr: PathBuf,
+}
+
+fn spawn_graph_command(
+    rig: &TestRig,
+    id: &str,
+    worktree: &std::path::Path,
+    delivery: &str,
+) -> Result<PendingGraphCommand> {
+    let file = rig.root.join(format!("{id}.json"));
+    fs::write(
+        &file,
+        serde_json::to_vec(&serde_json::json!({
+            "graph_id":id, "nodes":[{"id":"writer", "use":"task", "brief":"reply OK",
+                "access":"worktree_write", "worktree":worktree, "delivery":delivery,
+                "route":{"adapter":"codex", "model":"codex/gpt-6-luna", "account":"preparation"}}]
+        }))?,
+    )?;
+    let stdout = rig.root.join(format!("{id}.stdout"));
+    let stderr = rig.root.join(format!("{id}.stderr"));
+    let child = rig.with_process_spawn_lock(|| {
+        let mut command = std::process::Command::new(std::env::current_exe()?);
+        command
+            .arg("--state-dir")
+            .arg(&rig.state)
+            .args(["run", "--file"])
+            .arg(&file)
+            .arg("--json")
+            .current_dir(&rig.project)
+            .env_clear()
+            .envs(rig.env.iter().cloned())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(fs::File::create(&stdout)?))
+            .stderr(std::process::Stdio::from(fs::File::create(&stderr)?));
+        Ok(command.spawn()?)
+    })?;
+    Ok(PendingGraphCommand {
+        child: provenant_supervisor::fixture::ChildGuard::new(child),
+        stdout,
+        stderr,
+    })
+}
+
+fn finish_graph_command(mut pending: PendingGraphCommand, phase: &str) -> Result<Value> {
+    let exited = provenant_test_support::wait_for(
+        "graph submission after stop",
+        Duration::from_secs(4),
+        || pending.child.try_wait(),
+        |status| matches!(status, Ok(Some(_)) | Err(_)),
+    )?;
+    let status = exited?.ok_or("graph submission did not exit")?;
+    let stdout = fs::read(&pending.stdout)?;
+    let stderr = fs::read(&pending.stderr)?;
+    assert!(
+        status.success(),
+        "{phase}: stdout={} stderr={}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    );
+    let mut records = serde_json::Deserializer::from_slice(&stdout)
+        .into_iter::<Value>()
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    records
+        .pop()
+        .ok_or_else(|| "graph command emitted no JSON result".into())
+}
+
 pub(super) fn graph_run_refuses_low_disk_writers() -> Result {
     let rig = repository()?;
     ok(&rig, &["worktree", "create", "low-disk", "--json"])?;
@@ -166,31 +236,10 @@ pub(super) fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> R
                 gate.clone().into_os_string(),
             ));
         }
-        let submit = |rig: &TestRig, id: &str, delivery: &str| -> Result<Value> {
-            let file = rig.root.join(format!("{id}.json"));
-            fs::write(
-                &file,
-                serde_json::to_vec(&serde_json::json!({
-                    "graph_id":id, "nodes":[{"id":"writer", "use":"task", "brief":"reply OK",
-                        "access":"worktree_write", "worktree":worktree, "delivery":delivery,
-                        "route":{"adapter":"codex", "model":"codex/gpt-6-luna", "account":"preparation"}}]
-                }))?,
-            )?;
-            let output = command(
-                rig,
-                &[
-                    "run",
-                    "--file",
-                    file.to_str().ok_or("graph file")?,
-                    "--json",
-                ],
-            )?;
-            assert_eq!(code(&output), 0, "{phase}: {output:?}");
-            json(&output)
-        };
-        let first = submit(
+        let first = spawn_graph_command(
             &rig,
             "preparation-first",
+            &worktree,
             if phase == "delivery" { "push" } else { "none" },
         )?;
         provenant_test_support::wait_for(
@@ -199,16 +248,17 @@ pub(super) fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> R
             || gate.join("entered").exists(),
             |ready| *ready,
         )?;
-        assert!(
-            first["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"].is_string(),
-            "{phase}: {first}"
-        );
         let before = std::time::Instant::now();
         ok(&rig, &["stop", "preparation-first", "--json"])?;
         ok(
             &rig,
             &["wait", "preparation-first", "--timeout", "3s", "--json"],
         )?;
+        let first = finish_graph_command(first, phase)?;
+        assert!(
+            first["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"].is_string(),
+            "{phase}: {first}"
+        );
         let stopped = ok(&rig, &["status", "preparation-first", "--json"])?;
         assert!(
             before.elapsed() < Duration::from_secs(4),
@@ -229,22 +279,23 @@ pub(super) fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> R
             "PROVENANT_FIXTURE_HOLD_SEED".into(),
             next_gate.clone().into_os_string(),
         ));
-        let next = submit(&rig, "preparation-next", "none")?;
+        let next = spawn_graph_command(&rig, "preparation-next", &worktree, "none")?;
         provenant_test_support::wait_for(
             "next graph acquired the writer and entered seeding",
             Duration::from_secs(20),
             || next_gate.join("entered").exists(),
             |ready| *ready,
         )?;
-        assert!(
-            next["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"].is_string(),
-            "{phase}: {next}"
-        );
         ok(&rig, &["stop", "preparation-next", "--json"])?;
         ok(
             &rig,
             &["wait", "preparation-next", "--timeout", "3s", "--json"],
         )?;
+        let next = finish_graph_command(next, phase)?;
+        assert!(
+            next["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"].is_string(),
+            "{phase}: {next}"
+        );
         let stopped = ok(&rig, &["status", "preparation-next", "--json"])?;
         assert_eq!(
             stopped["data"]["rows"][0]["state"], "cancelled",

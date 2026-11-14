@@ -523,6 +523,10 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                 br#"{"baseRefName":"main","url":"https://github.com/owner/repo/pull/1668"}"#,
             )?;
         }
+        value if value.starts_with("api repos/{owner}/{repo}/git/commits/") => {
+            let body = serde_json::json!({"tree":{"sha":OTHER}});
+            io::stdout().write_all(&serde_json::to_vec(&body)?)?;
+        }
         "api repos/owner/repo/branches/main" => {
             if Path::new("rate-read-once").exists() {
                 fs::remove_file("rate-read-once")?;

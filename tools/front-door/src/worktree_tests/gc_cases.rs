@@ -1252,17 +1252,29 @@ pub(super) fn gc_collects_a_fast_forwarded_lane_its_settlement_missed() -> Resul
         let lane = fixture.worktree.to_str().ok_or("lane path")?;
         let lane_head = git(rig, &["-C", lane, "rev-parse", "HEAD"])?;
         publish_upstream(rig, &lane_head)?;
-        let attempt = fixture.settled.attempt_id.to_string();
-        let delivered = ok(rig, &["lane", "deliver", &attempt, "--json"])?;
-        assert_eq!(delivered["data"]["delivery"]["state"]["state"], "delivered");
-        assert_eq!(
-            delivered["data"]["delivery"]["integration"]["target"],
-            "refs/heads/trunk"
+        let clock = provenant_os::clock::SystemClock;
+        let cancel = provenant_core::CancelToken::new();
+        let call = writer_call(&clock, &cancel)?;
+        let delivered = fixture.store.deliver(
+            fixture.settled.attempt_id,
+            None,
+            provenant_run::HostDeliveryContext::new(rig.env.clone()),
+            false,
+            &call,
+        )?;
+        assert!(
+            matches!(
+                &delivered.state,
+                provenant_run::WriterDeliveryState::Delivered { .. }
+            ),
+            "{delivered:?}"
         );
-        assert_eq!(
-            delivered["data"]["delivery"]["integration"]["integrated"],
-            lane_head
-        );
+        let integration = delivered
+            .integration
+            .as_ref()
+            .ok_or("integration receipt")?;
+        assert_eq!(integration.target, "refs/heads/trunk");
+        assert_eq!(integration.integrated.to_string(), lane_head);
         if busy {
             SPAWNED.set(Ok(Vec::new()));
             crate::fabric::settle_owned_worktree(

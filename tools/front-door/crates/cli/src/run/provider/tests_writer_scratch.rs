@@ -818,11 +818,19 @@ printf 'agy 1.0.0\n'
                     &["rev-parse", "--absolute-git-dir"],
                 )?)?;
                 let admin = std::fs::canonicalize(admin.trim())?;
-                let private = paths.temporary.join("candidate-0/git-common");
-                std::fs::create_dir_all(private.join("objects"))?;
-                std::fs::create_dir_all(private.join("refs"))?;
-                std::fs::write(private.join("HEAD"), b"ref: refs/heads/writer\n")?;
-                std::fs::copy(project.join(".git/config"), private.join("config"))?;
+                let private_env = |name: &str| {
+                    environment
+                        .iter()
+                        .find(|(key, _)| key == name)
+                        .map(|(_, value)| std::path::PathBuf::from(value))
+                };
+                let private = private_env("GIT_COMMON_DIR").ok_or("prepared GIT_COMMON_DIR")?;
+                assert_eq!(private_env("GIT_DIR"), Some(private.clone()));
+                let private_objects =
+                    private_env("GIT_OBJECT_DIRECTORY").ok_or("prepared GIT_OBJECT_DIRECTORY")?;
+                std::fs::create_dir_all(&private)?;
+                provenant_os::fixture::run_git(&private, &["init", "--bare"])?;
+                std::fs::create_dir_all(private_objects)?;
                 environment.push(("IDENTITY_PROBE".into(), "writer".into()));
                 environment.push(("EXPECTED_ADMIN".into(), admin.into_os_string()));
                 environment.push(("EXPECTED_PRIVATE".into(), private.into_os_string()));

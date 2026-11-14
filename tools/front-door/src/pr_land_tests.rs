@@ -889,6 +889,18 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
             });
             io::stdout().write_all(&serde_json::to_vec(&response)?)?;
         }
+        value if value.starts_with("api --method PUT repos/{owner}/{repo}/pulls/") && value.contains("/merge ") => {
+            fs::write(dir.join("merge-args"), args.join("\n") + "\n")?;
+            let mut view: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("view.json"))?)?;
+            if dir.join("merge-completes").exists() {
+                view["state"] = "MERGED".into();
+                let sha = view["mergeCommit"]["oid"].clone();
+                fs::write(dir.join("view.json"), serde_json::to_vec(&view)?)?;
+                io::stdout().write_all(&serde_json::to_vec(&serde_json::json!({"merged":true,"sha":sha}))?)?;
+            } else {
+                io::stdout().write_all(br#"{"merged":false}"#)?;
+            }
+        }
         value if value.starts_with("api --method PUT repos/{owner}/{repo}/pulls/") && value.contains("/merge-async ") => {
             fs::write(dir.join("merge-args"), args.join("\n") + "\n")?;
             if dir.join("merge-completes").exists() {
@@ -1127,6 +1139,10 @@ fn branch_exists(rig: &TestRig, branch: &str) -> Result<bool> {
 pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
     let landing = landing().map_err(|error| format!("prepare landing fixture: {error}"))?;
     let rig = &landing.rig;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.pr.land]\npublish='rest_ordered'\n",
+    )?;
     let mut view: serde_json::Value = serde_json::from_slice(
         &fs::read(rig.project.join("view.json"))
             .map_err(|error| format!("read fixture view.json: {error}"))?,
