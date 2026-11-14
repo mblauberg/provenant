@@ -330,27 +330,31 @@ fn path_rules(scan: &mut Scan, path: &str) -> Result<(), CheckError> {
 }
 
 type Match = (&'static str, usize, &'static str);
-type ByteRule = (&'static str, &'static str, fn(&[u8]) -> bool);
-const RULES: &[ByteRule] = &[
-    (
-        "release.home-path",
-        "personal absolute home path",
-        home_path,
-    ),
-    ("release.private-key", "possible private key", private_key),
-    (
-        "release.github-token",
-        "possible GitHub token",
-        github_token,
-    ),
-    ("release.openai-key", "possible OpenAI key", openai_key),
-    (
-        "release.anthropic-key",
-        "possible Anthropic key",
-        anthropic_key,
-    ),
-    ("release.aws-key", "possible AWS access key", aws_key),
+const BYTE_RULES: &[(&str, &str)] = &[
+    ("release.home-path", "personal absolute home path"),
+    ("release.private-key", "possible private key"),
+    ("release.github-token", "possible GitHub token"),
+    ("release.openai-key", "possible OpenAI key"),
+    ("release.anthropic-key", "possible Anthropic key"),
+    ("release.aws-key", "possible AWS access key"),
 ];
+static BYTE_MATCHERS: std::sync::LazyLock<regex::bytes::RegexSet> = std::sync::LazyLock::new(
+    || {
+        // Keep the private-key marker assembled at runtime so the scanner does
+        // not find its own literal pattern in the executable it inspects.
+        let kinds = ["", "RSA ", "EC ", "OPENSSH ", "DSA ", "ENCRYPTED "];
+        let private_key = format!("(?-u)-----BEGIN (?:{})PRIVATE KEY-----", kinds.join("|"));
+        regex::bytes::RegexSet::new([
+            r"(?-u)(?:^|[^A-Za-z0-9._-])/(?:Users|home)/[A-Za-z0-9._-]+/",
+            private_key.as_str(),
+            r"(?-u)(?:^|[^A-Za-z0-9_])(?:gho_|ghp_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]{20,}(?:$|[^A-Za-z0-9_])",
+            r"(?-u)(?:^|[^A-Za-z0-9_])sk-[A-Za-z0-9_-]{20,}(?:$|[^A-Za-z0-9_])",
+            r"(?-u)(?:^|[^A-Za-z0-9_])sk-ant-[A-Za-z0-9_-]{20,}(?:$|[^A-Za-z0-9_])",
+            r"(?-u)(?:^|[^A-Za-z0-9_])AKIA[A-Z0-9]{16}(?:$|[^A-Za-z0-9_])",
+        ])
+        .expect("release byte rules are valid")
+    },
+);
 fn identity_email(identity: &str) -> Option<&str> {
     let open = identity.rfind('<')?;
     let close = identity[open + 1..].find('>')? + open + 1;
@@ -404,86 +408,14 @@ fn emit_matches(scan: &mut Scan, path: &str, matches: &[Match]) -> Result<(), Ch
     Ok(())
 }
 fn byte_matches(bytes: &[u8]) -> Vec<Match> {
-    let mut matches = Vec::new();
-    for line in bytes.split(|b| *b == b'\n') {
-        for &(id, message, matches_rule) in RULES {
-            if matches_rule(line) && !matches.iter().any(|(rule, _, _)| *rule == id) {
-                // Artifacts have no meaningful source line; report one finding
-                // per rule against the artifact itself.
-                matches.push((id, 1, message));
-            }
-        }
-    }
-    matches
-}
-fn contains(bytes: &[u8], needle: &[u8]) -> bool {
-    bytes.windows(needle.len()).any(|part| part == needle)
-}
-fn home_path(bytes: &[u8]) -> bool {
-    [b"/Users/".as_slice(), b"/home/".as_slice()]
+    BYTE_MATCHERS
+        .matches(bytes)
         .iter()
-        .any(|prefix| {
-            bytes.windows(prefix.len()).enumerate().any(|(at, part)| {
-                // A home directory starts a path; `/fixture/home/` is a
-                // directory named `home` inside another path.
-                if part != *prefix || at > 0 && path_byte(bytes[at - 1]) {
-                    return false;
-                }
-                let tail = &bytes[at + prefix.len()..];
-                let count = tail
-                    .iter()
-                    .take_while(|b| b.is_ascii_alphanumeric() || b"._-".contains(b))
-                    .count();
-                count > 0 && tail.get(count) == Some(&b'/')
-            })
+        .map(|index| {
+            let (rule, message) = BYTE_RULES[index];
+            (rule, 1, message)
         })
-}
-fn path_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || b"._-".contains(&byte)
-}
-fn private_key(bytes: &[u8]) -> bool {
-    ["", "RSA ", "EC ", "OPENSSH ", "DSA ", "ENCRYPTED "]
-        .iter()
-        .any(|kind| {
-            let marker = ["-----BEGIN ", kind, "PRIVATE KEY-----"].concat();
-            contains(bytes, marker.as_bytes())
-        })
-}
-fn word(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
-}
-fn token(bytes: &[u8], prefix: &[u8], min: usize, allowed: fn(u8) -> bool, exact: bool) -> bool {
-    bytes.windows(prefix.len()).enumerate().any(|(at, part)| {
-        if part != prefix || at > 0 && word(bytes[at - 1]) {
-            return false;
-        }
-        let tail = &bytes[at + prefix.len()..];
-        let count = tail.iter().take_while(|b| allowed(**b)).count();
-        count >= min && (!exact || count == min) && tail.get(count).is_none_or(|b| !word(*b))
-    })
-}
-fn github_token(bytes: &[u8]) -> bool {
-    ["gho_", "ghp_", "ghu_", "ghs_", "ghr_", "github_pat_"]
-        .iter()
-        .any(|prefix| token(bytes, prefix.as_bytes(), 20, word, false))
-}
-fn key_byte(byte: u8) -> bool {
-    word(byte) || byte == b'-'
-}
-fn openai_key(bytes: &[u8]) -> bool {
-    token(bytes, b"sk-", 20, key_byte, false)
-}
-fn anthropic_key(bytes: &[u8]) -> bool {
-    token(bytes, b"sk-ant-", 20, key_byte, false)
-}
-fn aws_key(bytes: &[u8]) -> bool {
-    token(
-        bytes,
-        b"AKIA",
-        16,
-        |b| b.is_ascii_uppercase() || b.is_ascii_digit(),
-        true,
-    )
+        .collect()
 }
 
 #[cfg(test)]
@@ -502,11 +434,25 @@ mod tests {
         let matches = byte_matches(&input);
         assert!(matches.iter().any(|m| m.0 == "release.home-path"));
         assert!(matches.iter().any(|m| m.0 == "release.github-token"));
-        assert!(!github_token(b"ghp_too_short"));
-        assert!(!home_path(b"/home/"));
-        assert!(!home_path(b"(subpath \"/fixture/home/.claude/projects\")"));
-        assert!(home_path(b"(subpath \"/home/person/.claude\")"));
-        assert!(home_path(b"/Users/person/x"));
+        let has_rule =
+            |bytes: &[u8], rule: &str| byte_matches(bytes).iter().any(|finding| finding.0 == rule);
+        assert!(!has_rule(b"ghp_too_short", "release.github-token"));
+        assert!(!has_rule(b"/home/", "release.home-path"));
+        assert!(!has_rule(
+            b"(subpath \"/fixture/home/.claude/projects\")",
+            "release.home-path"
+        ));
+        assert!(has_rule(
+            b"(subpath \"/home/person/.claude\")",
+            "release.home-path"
+        ));
+        assert!(has_rule(b"/Users/person/x", "release.home-path"));
+        assert!(!has_rule(
+            b"xghp_aaaaaaaaaaaaaaaaaaaa",
+            "release.github-token"
+        ));
+        let private_key = ["-----BEGIN ", "RSA ", "PRIVATE KEY-----"].concat();
+        assert!(has_rule(private_key.as_bytes(), "release.private-key"));
         assert!(byte_matches(&[0xff]).is_empty());
         let binary = [
             &[0x89, b'P', b'N', b'G', 0xff, b'\n'][..],
