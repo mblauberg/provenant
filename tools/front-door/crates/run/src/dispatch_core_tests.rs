@@ -513,7 +513,14 @@ fn launch_records_plan_write_grants_and_git_digest() -> TestResult {
         drop(store);
         let store = RunStore::open(&context, &call)?;
         let record = store.record(id, &call)?;
-        let mut expected = vec![
+        // A writer plan without writer authority is refused before applied grants
+        // are recorded. A valid reader plan retains its grants even if handoff fails.
+        if writer {
+            assert!(record.write_grants.is_empty());
+            assert!(record.git_grants_digest.is_none());
+            continue;
+        }
+        let expected = vec![
             (
                 WriteSource::StateWrite,
                 "/fixture/state/session",
@@ -531,9 +538,6 @@ fn launch_records_plan_write_grants_and_git_digest() -> TestResult {
                 PathScope::Subtree,
             ),
         ];
-        if writer {
-            expected.push((WriteSource::LaneCache, "/fixture/cache", PathScope::Subtree));
-        }
         let expected = expected
             .into_iter()
             .map(|(source, path, scope)| {
@@ -894,6 +898,24 @@ fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
             let run = lane(seed, true);
             let id = starting(&store, &run, &call)?;
             let dir = store.attempt_dir(id, false)?;
+            if scope == "host" && seed == 82 {
+                // A storage failure can occur after the independent host
+                // ledger commits. Retrying must reuse that lease at the cap.
+                store.db.execute_batch("CREATE TEMP TRIGGER fail_claim BEFORE UPDATE OF active ON admission WHEN NEW.active=1 BEGIN SELECT RAISE(ABORT, 'fixture claim failure'); END")?;
+                assert!(store.admit(id, &dir, &facts, &clock, &cancel).is_err());
+                store.db.execute_batch("DROP TRIGGER fail_claim")?;
+                assert!(matches!(
+                    store.record(id, &call)?.state,
+                    AttemptState::Starting { .. }
+                ));
+                let ledger = crate::ledger::open(&store.writer_registry, &call)?;
+                let held: bool = ledger.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM leases WHERE attempt=?1 AND yielded=0)",
+                    [id.to_string()],
+                    |row| row.get(0),
+                )?;
+                assert!(held);
+            }
             last = Some(store.admit(id, &dir, &facts, &clock, &cancel));
             if seed < 83 {
                 assert_eq!(

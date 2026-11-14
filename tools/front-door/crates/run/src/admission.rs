@@ -194,7 +194,8 @@ impl RunStore {
             &self.context.project_id.to_string(),
             &request.task,
         );
-        let caps = self.lane_caps().under_policy(&policy);
+        let configured = self.lane_caps();
+        let caps = configured.under_policy(&policy);
         let owner = if waiting {
             None
         } else {
@@ -233,6 +234,7 @@ impl RunStore {
                     call.clock,
                     call,
                     owner.as_ref().ok_or(RunError::Conflict)?,
+                    configured,
                     &policy,
                 )?
                 .is_some();
@@ -754,8 +756,6 @@ impl RunStore {
             &self.context.project_id.to_string(),
             &request.task,
         );
-        use provenant_records::diagnostic::LaneLimit;
-        use provenant_records::policy::{Effect, Facts, Strength};
         let configured = self.lane_caps();
         let ticket = self.ticket(&self.db, id)?;
         // Prune dead leases before a hard cap can refuse this admission.
@@ -769,38 +769,6 @@ impl RunStore {
             clock,
             resources,
         )?;
-        for strength in [Strength::Refuse, Strength::Warn] {
-            let caps = configured.under_strength(&policy, strength);
-            let Some(hit) =
-                crate::ledger::cap_hit(&ledger, self.context.project_id, ticket.lane_class, caps)?
-            else {
-                continue;
-            };
-            let code = match hit.kind {
-                LaneLimit::HostWriters => "ADMISSION_WRITERS",
-                LaneLimit::ProjectWriters => "ADMISSION_PROJECT_WRITERS",
-                LaneLimit::HostTotal => "ADMISSION_LANES",
-                LaneLimit::ProjectTotal => "ADMISSION_PROJECT_LANES",
-            };
-            match policy.check(
-                code,
-                Facts::violation(format!("active={}, limit={}", hit.active, hit.limit)),
-            ) {
-                Effect::Proceed => {}
-                Effect::Warn(message) => {
-                    use std::io::Write;
-                    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
-                }
-                Effect::Refuse(_) => {
-                    return Err(RunError::Admission(AdmissionError::LaneCap {
-                        active: hit.active,
-                        limit: hit.limit,
-                        kind: hit.kind,
-                        origin: hit.origin,
-                    }));
-                }
-            }
-        }
         self.write(call, |tx| {
             let old = self.record(id, call)?;
             if !matches!(old.state, AttemptState::Starting { .. }) {
@@ -818,6 +786,7 @@ impl RunStore {
                 clock,
                 call,
                 &owner,
+                configured,
                 &policy,
             )?
             else {

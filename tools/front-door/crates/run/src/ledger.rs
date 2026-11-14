@@ -102,10 +102,12 @@ pub(crate) fn lease(
         time,
         request,
         owner,
+        LaneCaps::of(&provenant_config::LaneBuildSettings::default()),
         &provenant_records::policy::Policy::default(),
     )
 }
 
+#[allow(clippy::too_many_arguments)] // Store ownership, clocks and resolved policy remain explicit.
 pub(crate) fn lease_with_policy(
     db: &Connection,
     store: &Path,
@@ -113,6 +115,7 @@ pub(crate) fn lease_with_policy(
     time: &dyn Clock,
     request: &Request<'_>,
     owner: &LeaseOwner,
+    configured: LaneCaps,
     policy: &provenant_records::policy::Policy,
 ) -> Result<Option<WallTime>> {
     let (project, class) = (ticket.project_id, ticket.lane_class);
@@ -129,6 +132,42 @@ pub(crate) fn lease_with_policy(
         if held {
             return Ok(Some(now));
         }
+        // Reusing this attempt's lease adds no capacity. For new leases, count
+        // and publish in this same transaction so concurrent stores cannot
+        // both take the last strict slot.
+        use provenant_records::diagnostic::LaneLimit;
+        use provenant_records::policy::{Effect, Facts, Strength};
+        for strength in [Strength::Refuse, Strength::Warn] {
+            let caps = configured.under_strength(policy, strength);
+            let Some(hit) = cap_hit(tx, project, class, caps)? else {
+                continue;
+            };
+            let code = match hit.kind {
+                LaneLimit::HostWriters => "ADMISSION_WRITERS",
+                LaneLimit::ProjectWriters => "ADMISSION_PROJECT_WRITERS",
+                LaneLimit::HostTotal => "ADMISSION_LANES",
+                LaneLimit::ProjectTotal => "ADMISSION_PROJECT_LANES",
+            };
+            match policy.check(
+                code,
+                Facts::violation(format!("active={}, limit={}", hit.active, hit.limit)),
+            ) {
+                Effect::Proceed => {}
+                Effect::Warn(message) => {
+                    use std::io::Write;
+                    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                }
+                Effect::Refuse(_) => {
+                    return Err(RunError::Admission(AdmissionError::LaneCap {
+                        active: hit.active,
+                        limit: hit.limit,
+                        kind: hit.kind,
+                        origin: hit.origin,
+                    }));
+                }
+            }
+        }
+
         let host = HostInstant::read(time)?;
         tx.execute(
             "INSERT INTO spacing(class,boot,last_start) VALUES (?1,?2,?3) ON CONFLICT(class) DO UPDATE SET boot=excluded.boot, last_start=excluded.last_start",
