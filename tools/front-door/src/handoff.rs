@@ -1274,17 +1274,14 @@ pub(crate) fn receive(
     launcher: &dyn Launcher,
 ) -> HandoffReceipt {
     // A config that cannot be read counts as off.
-    let accepted = provenant_config::read_with_domains(
-        &target.context.roots,
-        &provenant_cli::domains::SECTIONS,
-    )
-    .ok()
-    .and_then(|config| {
-        config
-            .knobs
-            .get("fabric.accept_handoff")
-            .and_then(|k| k.value.as_bool())
-    });
+    let accepted = provenant_cli::config_reads::read_for(&target.context.roots, "knobs")
+        .ok()
+        .and_then(|config| {
+            config
+                .knobs
+                .get("fabric.accept_handoff")
+                .and_then(|k| k.value.as_bool())
+        });
     let context = target.context;
     let lease_dir = handoff_dir(context.roots.state.as_path(), context.identity.project);
     let (attachments, account, dir) =

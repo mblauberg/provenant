@@ -134,7 +134,7 @@ pub(super) fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, Str
         .transpose()?
         .unwrap_or_default();
     let unfinished = unfinished_attempts(store.as_ref(), &call)?;
-    let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
+    let config = crate::config_reads::read_for(edge.roots, "telemetry")
         .map_err(|error| Fail::config(Status::Invalid, error))?;
     let selected: Vec<_> = facts
         .iter()

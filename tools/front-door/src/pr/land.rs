@@ -1155,8 +1155,7 @@ fn append_land_log(
     let Some(session) = session else {
         return Ok(());
     };
-    let config =
-        provenant_config::read_with_domains(&resolved.roots, &provenant_cli::domains::SECTIONS)?;
+    let config = provenant_cli::config_reads::read_for(&resolved.roots, "knobs")?;
     append_land_entry(
         &resolved.roots,
         LandEntry {

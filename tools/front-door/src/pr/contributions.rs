@@ -322,10 +322,7 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
         } else {
             "captured"
         };
-        let config = provenant_config::read_with_domains(
-            &resolved.roots,
-            &provenant_cli::domains::SECTIONS,
-        )?;
+        let config = provenant_cli::config_reads::read_for(&resolved.roots, "pr contributions")?;
         let local = provenant_config::lookup_host(&resolved.roots)?;
         let peers: Vec<_> = config
             .domains

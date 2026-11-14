@@ -466,10 +466,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             return crate::fail("wait", Outcome::Error, "ROOT", &error.to_string(), globals);
         }
     };
-    let settings = match provenant_config::read_with_domains(
-        &resolved.roots,
-        &provenant_cli::domains::SECTIONS,
-    ) {
+    let settings = match provenant_cli::config_reads::read_for(&resolved.roots, "wait") {
         Ok(config) => config.domains.wait,
         Err(error) => {
             return crate::fail(

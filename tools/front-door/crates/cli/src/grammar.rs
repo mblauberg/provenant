@@ -551,7 +551,7 @@ impl Access {
 #[derive(Debug, Args)]
 pub struct GraphRunArgs {
     /// Template to run (see `provenant templates`)
-    #[arg(required_unless_present = "file", conflicts_with = "file")]
+    #[arg(catalog_required_unless = "file", conflicts_with = "file")]
     pub template: Option<String>,
     /// Brief for the template
     #[arg(conflicts_with_all = ["file", "brief_file", "brief_text"])]
@@ -589,10 +589,10 @@ pub struct GraphRunArgs {
     #[arg(long, conflicts_with = "branch")]
     pub worktree: Option<PathBuf>,
     /// Create an owned writer worktree on this branch
-    #[arg(long, requires = "base")]
+    #[arg(long, catalog_requires = "base")]
     pub branch: Option<String>,
     /// Git base for a new writer branch
-    #[arg(long, requires = "branch")]
+    #[arg(long, catalog_requires = "branch")]
     pub base: Option<String>,
     /// Advisory relative paths; empty or unset means the whole worktree; repeatable
     #[arg(long = "write-scope")]
@@ -967,7 +967,7 @@ pub struct Gc {
 #[derive(Debug, Args)]
 pub struct Remove {
     /// Worktree to remove
-    #[arg(required_unless_present = "merged", conflicts_with_all = ["merged", "branch", "since"])]
+    #[arg(catalog_required_unless = "merged", conflicts_with_all = ["merged", "branch", "since"])]
     pub name: Option<String>,
     /// With NAME: also delete the branch when it is not merged (clean worktree only)
     #[arg(long, conflicts_with = "merged")]

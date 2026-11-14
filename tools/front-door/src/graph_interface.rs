@@ -57,6 +57,32 @@ fn cli_input_error(detail: &str) -> Box<provenant_records::diagnostic::Diagnosti
     )
 }
 
+fn config_cause<'a>(
+    mut error: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a provenant_config::ConfigError> {
+    loop {
+        if let Some(config) = error.downcast_ref::<provenant_config::ConfigError>() {
+            return Some(config);
+        }
+        if let Some(provenant_cli::fabric::EdgeError::Config(config)) =
+            error.downcast_ref::<provenant_cli::fabric::EdgeError>()
+        {
+            return Some(config);
+        }
+        error = error.source()?;
+    }
+}
+
+fn config_repair(globals: &Globals) -> String {
+    let mut command = String::from("provenant");
+    if let Some(state) = &globals.state_dir {
+        let path = state.to_string_lossy().replace('\'', "'\\''");
+        command.push_str(&format!(" --state-dir '{path}'"));
+    }
+    command.push_str(" check config --json");
+    command
+}
+
 fn file_input_error(path: &Path) -> Box<provenant_records::diagnostic::Diagnostic> {
     file_error("--file", path, "input could not be read")
 }
@@ -324,18 +350,35 @@ fn invoke(
             crate::emit(&result, globals, &human, command == "templates")
         }
         Err(error) => {
+            let config = config_cause(error.as_ref());
             let facade =
                 error.downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>();
             let projection = facade
                 .map(|error| error.diagnostic())
                 .or_else(|| {
+                    config.map(|cause| {
+                        provenant_records::diagnostic::Diagnostic::new("CONFIG")
+                            .category("configuration")
+                            .detail(cause.to_string())
+                            .next(config_repair(globals))
+                    })
+                })
+                .or_else(|| {
                     error
                         .downcast_ref::<provenant_cli::fabric::EdgeError>()
                         .and_then(provenant_cli::fabric::edge_diagnostic)
                 })
-                .unwrap_or_else(|| *cli_input_error("graph input could not be processed"));
+                .unwrap_or_else(|| {
+                    provenant_records::diagnostic::Diagnostic::new("graph_error")
+                        .detail(error.to_string())
+                        .next(format!("provenant help {command} --json"))
+                });
             let outcome = facade.map_or(
-                Outcome::Invalid,
+                if config.is_some() {
+                    Outcome::Invalid
+                } else {
+                    Outcome::Error
+                },
                 provenant_cli::fabric::coordination_outcome,
             );
             let mut result = CommandResult::new(command, outcome, Value::Null);
@@ -346,7 +389,11 @@ fn invoke(
                     .detail
                     .clone()
                     .unwrap_or_else(|| "graph input could not be processed".into()),
-                cause: facade.and_then(|error| error.cause()).map(str::to_owned),
+                cause: Some(
+                    facade
+                        .and_then(|error| error.cause())
+                        .map_or_else(|| error.to_string(), str::to_owned),
+                ),
                 repair: projection.next,
             });
             crate::emit(&result, globals, "", false)
@@ -634,6 +681,22 @@ pub(crate) fn templates(
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configuration_cause_and_selected_state_survive_projection() {
+        let error = provenant_cli::fabric::EdgeError::Config(
+            provenant_config::ConfigError::Refused("typed cause".into()),
+        );
+        assert!(config_cause(&error).is_some());
+        let globals = Globals {
+            state_dir: Some("/tmp/state with 'quote".into()),
+            ..Globals::default()
+        };
+        let repair = config_repair(&globals);
+        assert!(repair.contains("--state-dir"));
+        assert!(repair.ends_with(" check config --json"));
+        assert!(repair.contains("'\\''"));
+    }
 
     #[allow(
         dead_code,

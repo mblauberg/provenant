@@ -140,6 +140,14 @@ fn emit_summarised<T: Serialize>(
     read_only: bool,
     summary: Option<&provenant_cli::Summary>,
 ) -> u8 {
+    let explanation = if summary.is_none() && result.command == "land" {
+        serde_json::to_value(&result.data)
+            .ok()
+            .and_then(|data| land_explanation(&data, globals))
+    } else {
+        None
+    };
+    let summary = summary.or(explanation.as_ref());
     let mode = if !globals.json && matches!(result.command.as_str(), "help" | "version") {
         RenderMode::Human {
             text: human,
@@ -170,6 +178,70 @@ fn emit_summarised<T: Serialize>(
             3
         }
     }
+}
+
+/// A policy explanation is a structured result. Its compact transport projects
+/// complete policy facts rather than cutting the owner's pretty JSON mid-field.
+fn land_explanation(
+    data: &serde_json::Value,
+    globals: &provenant_cli::Globals,
+) -> Option<provenant_cli::Summary> {
+    let fields = data.get("fields")?.as_object()?;
+    let mut rows = Vec::new();
+    for (key, label) in [
+        ("gate.kind", "gate"),
+        ("gate.checks", "checks"),
+        ("gate.commands", "commands"),
+        ("approval_sources", "approval"),
+        ("approval_tier", "approval tier"),
+        ("local_gate.mode", "local gate"),
+        ("integration", "integration"),
+        ("publish", "publication"),
+        ("budget.advisory_micros", "budget advisory (millionths)"),
+        ("budget.cap_micros", "budget cap (millionths)"),
+    ] {
+        if let Some(field) = fields.get(key) {
+            let value = field.get("value")?;
+            let value = value
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| value.to_string());
+            let source = field
+                .pointer("/source/layer")
+                .and_then(serde_json::Value::as_str)?;
+            rows.push(format!("{label}: {value} ({source})"));
+        }
+    }
+    if let Some(patience) = data.get("ci_patience_seconds") {
+        let source = data["ci_patience_source"].as_str()?;
+        rows.push(format!("CI patience: {patience}s ({source})"));
+    }
+    if let Some(warnings) = data["warnings"].as_array() {
+        rows.extend(
+            warnings
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(|warning| format!("warning: {warning}")),
+        );
+    }
+    let mut detail = String::from("provenant");
+    for (flag, path) in [
+        ("--state-dir", globals.state_dir.as_ref()),
+        ("--project", globals.project.as_ref()),
+    ] {
+        if let Some(path) = path {
+            detail.push_str(&format!(
+                " {flag} '{}'",
+                path.to_string_lossy().replace('\'', "'\\''")
+            ));
+        }
+    }
+    detail.push_str(" land --explain --json");
+    Some(provenant_cli::Summary::complete(
+        "Landing policy",
+        rows,
+        Some(detail),
+    ))
 }
 /// `emit_summarised` for a result the caller narrows rather than reads from an
 /// artefact: oversize is `RESULT_TOO_LARGE` with a repair, never published, so
@@ -410,7 +482,7 @@ fn probe_registered_account(
     {
         return;
     }
-    let result = provenant_config::read_with_domains(edge.roots, &provenant_cli::domains::SECTIONS)
+    let result = provenant_cli::config_reads::read_for(edge.roots, "quota")
         .map(|config| config.domains.quota)
         .map_err(|error| error.to_string())
         .and_then(|settings| {
@@ -669,8 +741,7 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
 /// Unsupported pool efforts are advisory at load and remain visible in
 /// routine diagnostics with the origin recorded for each configured value.
 pub(crate) fn pool_effort_warnings(roots: &provenant_core::Roots) -> Vec<String> {
-    let Ok(config) = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
-    else {
+    let Ok(config) = provenant_cli::config_reads::read_for(roots, "route preferences") else {
         return Vec::new();
     };
     let Ok(catalogue) = provenant_routing::Catalogue::bundled() else {
@@ -693,8 +764,7 @@ pub(crate) fn pool_effort_warnings(roots: &provenant_core::Roots) -> Vec<String>
 fn account_settings(
     roots: &provenant_core::Roots,
 ) -> Result<provenant_providers::accounts::Settings, provenant_config::ConfigError> {
-    provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
-        .map(|config| config.domains.accounts)
+    provenant_cli::config_reads::read_for(roots, "accounts").map(|config| config.domains.accounts)
 }
 /// Explicit Claude registrations only, never implicit directory discovery.
 pub(crate) fn registered_claude(
@@ -705,9 +775,7 @@ pub(crate) fn registered_claude(
 fn live_quota(
     resolved: &roots::Resolved,
 ) -> Result<provenant_providers::quota_live::LiveQuota, Box<dyn std::error::Error>> {
-    let settings =
-        provenant_config::read_with_domains(&resolved.roots, &provenant_cli::domains::SECTIONS)?
-            .domains;
+    let settings = provenant_cli::config_reads::read_for(&resolved.roots, "quota")?.domains;
     Ok(provenant_providers::quota_live::LiveQuota::new(
         &resolved.roots,
         &resolved.home,
@@ -1662,6 +1730,34 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
 
 #[cfg(test)]
 mod unpublished_result_tests {
+    #[test]
+    fn landing_explanation_projects_sourced_facts_and_preserves_warnings() {
+        let data = serde_json::json!({
+            "fields": {
+                "gate.kind": {"value": "commands", "source": {"layer": "project"}},
+                "approval_sources": {"value": ["forge"], "source": {"layer": "host"}}
+            },
+            "ci_patience_seconds": 45,
+            "ci_patience_source": "--wait",
+            "warnings": ["inspect the selected gate"]
+        });
+        let summary = super::land_explanation(&data, &provenant_cli::Globals::default()).unwrap();
+        let text = summary.lines.join("\n");
+        for field in data["fields"].as_object().unwrap().values() {
+            assert!(text.contains(field["source"]["layer"].as_str().unwrap()));
+        }
+        for warning in data["warnings"].as_array().unwrap() {
+            assert!(text.contains(warning.as_str().unwrap()));
+        }
+        assert!(
+            summary
+                .next
+                .as_deref()
+                .is_some_and(|next| next.ends_with("land --explain --json"))
+        );
+        assert_eq!(summary.omitted, 0);
+    }
+
     #[test]
     fn an_oversized_result_is_refused_and_writes_nothing() {
         let result = provenant_records::CommandResult::new(

@@ -443,13 +443,10 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
             crate::roots::Product::Required,
         )?;
         let mut rows = select(inventory(&resolved.roots)?, &args.routes)?;
-        let interval = provenant_config::read_with_domains(
-            &resolved.roots,
-            &provenant_cli::domains::SECTIONS,
-        )?
-        .domains
-        .wait
-        .local_interval_ms;
+        let interval = provenant_cli::config_reads::read_for(&resolved.roots, "check providers")?
+            .domains
+            .wait
+            .local_interval_ms;
         let interval = DurationMicros::from_micros(interval.saturating_mul(1000));
         if args.live {
             // Factories and SQLite connections belong to their worker, never

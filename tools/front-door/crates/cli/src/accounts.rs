@@ -173,7 +173,7 @@ fn execute_inner(
     home: &Path,
     kind: &mut Option<provenant_run::ErrorKind>,
 ) -> Result<Settings, String> {
-    let settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+    let settings = crate::config_reads::read_for(roots, "accounts")
         .map_err(|error| {
             if error.refusal_code().is_some() {
                 *kind = Some(provenant_run::ErrorKind::SharedSettingsNeverSynced);
@@ -373,7 +373,7 @@ pub fn set_quota_display(
     let mut refusal = None;
     let edited = provenant_config::edit_config(
         roots,
-        &crate::domains::SECTIONS,
+        &crate::config_reads::sections_for("accounts set").map_err(|error| error.to_string())?,
         &provenant_config::EditOptions::new("cli"),
         |doc, current| {
             let icon = match icon {
@@ -527,7 +527,7 @@ fn edit_accounts(
     let mut refusal = None;
     let edited = provenant_config::edit_config(
         roots,
-        &crate::domains::SECTIONS,
+        &crate::config_reads::sections_for("accounts").map_err(|error| error.to_string())?,
         &provenant_config::EditOptions::new("cli"),
         |doc, current| match change(current.domains.accounts.clone())
             .and_then(|settings| apply_settings(doc, &settings))

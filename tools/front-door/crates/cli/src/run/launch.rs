@@ -43,7 +43,7 @@ pub(super) fn project_id_for_lane_gitdir(
 pub fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fail> {
     let parent_depth = environment_text(run::LANE_DEPTH_ENV)?;
     let parent_attempt = environment_text(run::PARENT_ATTEMPT_ENV)?;
-    let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+    let config = crate::config_reads::read_for(roots, "knobs")
         .map_err(|error| Fail::config(Status::Error, error))?;
     let max_depth = config
         .knobs

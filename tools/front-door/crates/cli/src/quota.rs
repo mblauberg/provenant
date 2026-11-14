@@ -1361,7 +1361,7 @@ pub fn recorded_login_rows(roots: &Roots) -> Result<Vec<AccountRow>, String> {
     recorded_login_rows_inner(roots).map_err(|error| error.to_string())
 }
 fn recorded_login_rows_inner(roots: &Roots) -> Result<Vec<AccountRow>, EdgeError> {
-    let domains = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?.domains;
+    let domains = crate::config_reads::read_for(roots, "quota")?.domains;
     let accounts = domains.accounts.with_derived_accounts();
     let mut configured: Vec<_> = accounts
         .entries
@@ -1521,7 +1521,7 @@ pub(crate) fn execute(
     {
         return Err(EdgeError::Adapter);
     }
-    let domains = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?.domains;
+    let domains = crate::config_reads::read_for(roots, "quota")?.domains;
     let (settings, entries) = (domains.quota, domains.accounts);
     let clock = SystemClock::new();
     let now = clock
@@ -1859,7 +1859,7 @@ pub(crate) fn chair_sessions_with_usage(
     until: jiff::Timestamp,
 ) -> Result<Vec<provenant_telemetry::usage::ChairSession>, EdgeError> {
     use std::path::Component;
-    let accounts = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+    let accounts = crate::config_reads::read_for(roots, "quota")?
         .domains
         .accounts;
     let mut chairs = provenant_telemetry::usage::chair_sessions(roots, since, until)?;
@@ -1905,7 +1905,7 @@ fn history_report(
         .map_err(|_| EdgeError::Time)?
         .as_timestamp()
         .as_second();
-    let accounts = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+    let accounts = crate::config_reads::read_for(roots, "quota")?
         .domains
         .accounts;
     let mut records = crate::quota_history::read(roots.state.as_path(), query)?;

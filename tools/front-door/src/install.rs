@@ -108,7 +108,7 @@ fn account_config(
     roots: &provenant_core::Roots,
     home: &Path,
 ) -> Result<(Vec<AccountHome>, Option<SharedSettings>), InstallError> {
-    let config = provenant_config::read_with_domains(roots, &cli::domains::SECTIONS)?;
+    let config = provenant_cli::config_reads::read_for(roots, "install")?;
     let accounts = &config.domains.accounts;
     Ok((
         cli::accounts::homes(accounts),
@@ -1498,7 +1498,7 @@ fn adopt_settings(globals: &cli::Globals, account: &str) -> Result<Vec<String>, 
         .shared_settings
         .as_ref()
         .ok_or("no shared settings are configured")?;
-    let config = provenant_config::read_with_domains(&targets.roots, &cli::domains::SECTIONS)
+    let config = provenant_cli::config_reads::read_for(&targets.roots, "install")
         .map_err(|error| error.to_string())?;
     let accounts = &config.domains.accounts;
     let id = cli::accounts::resolve(accounts, account)?;
@@ -1817,7 +1817,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         Err(error) => return install_error("upgrade", &error, globals),
     }
     let upgraded = (|| -> Result<Vec<HostUpgrade>, String> {
-        let config = provenant_config::read_with_domains(&targets.roots, &cli::domains::SECTIONS)
+        let config = provenant_cli::config_reads::read_for(&targets.roots, "install")
             .map_err(|error| error.to_string())?;
         let fabric = config.domains.fabric;
         let runner = UpgradeRunner {

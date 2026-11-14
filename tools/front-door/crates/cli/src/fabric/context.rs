@@ -140,7 +140,7 @@ fn prompt_limit_source(
 impl Context {
     pub fn open(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
         // Validate configuration before allocating identities or opening SQLite.
-        let resolved = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let config = resolved.domains.fabric;
         private_dir(roots.state.as_path(), roots.state.as_path())?;
@@ -205,7 +205,7 @@ impl Context {
     }
     /// Resolve existing identity and configuration without creating state.
     pub fn open_read_only(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
-        let resolved = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let config = resolved.domains.fabric;
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
@@ -249,7 +249,7 @@ impl Context {
     /// Inspect templates and compile explanations before this host has an identity.
     /// The placeholder identity is never persisted or used to launch work.
     pub fn open_inspection(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
-        let resolved = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let config = resolved.domains.fabric;
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
@@ -313,7 +313,7 @@ impl Context {
     ) -> Result<Self, EdgeError> {
         // Its working directory is the project's, as if started there.
         let cwd = binding.common_dir().parent().ok_or(EdgeError::Invalid)?;
-        let resolved = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let config = resolved.domains.fabric;
         let host = provenant_config::lookup_host(&roots)?.ok_or(EdgeError::Invalid)?;

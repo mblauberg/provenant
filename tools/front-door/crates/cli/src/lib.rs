@@ -5,6 +5,7 @@ pub mod accounts;
 pub mod brief;
 pub mod check;
 pub mod cloud;
+pub mod config_reads;
 pub mod console;
 pub mod domains;
 pub mod fabric;
@@ -140,6 +141,11 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
                         } else {
                             expanded_scoped_help(&scope)
                         };
+                        let text = if is_core_scope(&model, &scope) {
+                            append_child_index(text, &scope)
+                        } else {
+                            text
+                        };
                         ParseOutcome::Help {
                             text,
                             catalog,
@@ -203,16 +209,20 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
                 }
             };
         }
+        let text = if command.is_empty() && !all {
+            core_help(&model)
+        } else if command.is_empty() && *all {
+            all_command_help(selected)
+        } else {
+            selected.render_long_help().to_string()
+        };
+        let text = if !command.is_empty() && !all && is_core_scope(&model, &scope) {
+            append_child_index(text, &scope)
+        } else {
+            text
+        };
         return ParseOutcome::Help {
-            text: if command.is_empty() && !all {
-                core_help(&model)
-            } else {
-                if command.is_empty() && *all {
-                    all_command_help(selected)
-                } else {
-                    selected.render_long_help().to_string()
-                }
-            },
+            text,
             catalog: scoped(
                 catalog(if command.is_empty() && !all {
                     &model
@@ -719,6 +729,9 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
                 command = command.arg(global.clone());
             }
         }
+        if path == "provenant wait" {
+            command = command.after_help(WAIT_JSON_CONTRACT);
+        }
         command = command
             .disable_help_flag(true)
             .disable_version_flag(true)
@@ -916,8 +929,48 @@ fn scoped(mut catalogue: HelpCatalogue, scope: &str) -> HelpCatalogue {
     });
     catalogue
 }
+fn command_at_path<'a>(root: &'a clap::Command, path: &str) -> Option<&'a clap::Command> {
+    path.split_whitespace()
+        .skip(1)
+        .try_fold(root, |command, part| command.find_subcommand(part))
+}
+fn append_child_index(mut text: String, scope: &str) -> String {
+    let full = expanded_model();
+    let Some(command) = command_at_path(&full, scope) else {
+        return text;
+    };
+    let children: Vec<_> = command
+        .get_subcommands()
+        .filter(|child| !child.is_hide_set())
+        .collect();
+    if children.is_empty() {
+        return text;
+    }
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str("\nSubcommands:\n");
+    for child in children {
+        let description = child
+            .get_about()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        text.push_str(&format!("  {:<14} {}\n", child.get_name(), description));
+    }
+    text.push_str(&format!(
+        "For focused help, run `provenant help {} SUBCOMMAND`.\n",
+        scope.trim_start_matches("provenant ")
+    ));
+    text
+}
 fn catalog(model: &clap::Command) -> HelpCatalogue {
-    fn walk(command: &clap::Command, path: String, commands: &mut Vec<HelpCommand>) {
+    let full = expanded_model();
+    fn walk(
+        command: &clap::Command,
+        path: String,
+        commands: &mut Vec<HelpCommand>,
+        full: &clap::Command,
+    ) {
         if command.is_hide_set() {
             return;
         }
@@ -952,6 +1005,10 @@ fn catalog(model: &clap::Command) -> HelpCatalogue {
                     },
                     requires: arg
                         .get::<metadata::Requirements>()
+                        .map(|value| value.0.clone())
+                        .unwrap_or_default(),
+                    required_unless: arg
+                        .get::<metadata::RequiredUnless>()
                         .map(|value| value.0.clone())
                         .unwrap_or_default(),
                     name,
@@ -997,19 +1054,35 @@ fn catalog(model: &clap::Command) -> HelpCatalogue {
                 multiple: group.clone().is_multiple(),
             })
             .collect();
+        let full_command = command_at_path(full, &path);
         commands.push(HelpCommand {
             command: path.clone(),
             description: command.get_about().map(ToString::to_string),
+            subcommands: full_command
+                .into_iter()
+                .flat_map(|command| command.get_subcommands())
+                .filter(|child| !child.is_hide_set())
+                .map(|child| child.get_name().to_owned())
+                .collect(),
+            config_domains: crate::config_reads::domains_for(&path)
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
             arguments,
             groups,
             constraints: constraints(&path),
         });
         for child in command.get_subcommands() {
-            walk(child, format!("{path} {}", child.get_name()), commands);
+            walk(
+                child,
+                format!("{path} {}", child.get_name()),
+                commands,
+                full,
+            );
         }
     }
     let mut commands = Vec::new();
-    walk(model, "provenant".into(), &mut commands);
+    walk(model, "provenant".into(), &mut commands, &full);
     let error_codes = provenant_run::ErrorKind::ALL
         .iter()
         .map(|kind| HelpErrorCode {
@@ -1052,6 +1125,8 @@ pub fn usage_verbs() -> Vec<String> {
     walk(&command_model(), String::new(), &mut verbs);
     verbs
 }
+const WAIT_JSON_CONTRACT: &str = "With --json, wait writes JSONL: zero or more event objects followed by one terminal command-result envelope. Events have an `event` field; the terminal envelope has `command`, `status` and `data`. Settlement events are emitted without --follow; --follow also emits each observed transition.";
+
 fn constraints(path: &str) -> Vec<String> {
     if path == "provenant output" {
         return vec![
@@ -1099,7 +1174,7 @@ fn constraints(path: &str) -> Vec<String> {
         "provenant wait" => &[
             "every target resolves before the wait starts; no target waits for this project's running graphs",
             "exit 0 success, 1 settled without success, 2 invalid or not found, 5 needs input, 124 timeout, 130 cancelled",
-            "with --json, --follow emits one newline-delimited transition event per change",
+            WAIT_JSON_CONTRACT,
         ],
         "provenant hook" | "provenant internal" => &["json transport is invalid for execution"],
         _ => &[],
@@ -1682,17 +1757,97 @@ mod tests {
                 "{name}"
             );
         }
+        let branch = run.arguments.iter().find(|a| a.name == "branch").unwrap();
+        assert_eq!(branch.requires, ["base"]);
+        let base = run.arguments.iter().find(|a| a.name == "base").unwrap();
+        assert_eq!(base.requires, ["branch"]);
+        let route_set = catalog
+            .commands
+            .iter()
+            .find(|c| c.command == "provenant route override set")
+            .unwrap();
+        assert_eq!(
+            route_set
+                .arguments
+                .iter()
+                .find(|a| a.name == "model")
+                .unwrap()
+                .requires,
+            ["risk_tier", "task_kind", "until"]
+        );
+        assert_eq!(
+            route_set
+                .arguments
+                .iter()
+                .find(|a| a.name == "risk_tier")
+                .unwrap()
+                .requires,
+            ["model"]
+        );
+        assert_eq!(
+            route_set
+                .arguments
+                .iter()
+                .find(|a| a.name == "task_kind")
+                .unwrap()
+                .requires,
+            ["model"]
+        );
+        assert_eq!(
+            route_set
+                .arguments
+                .iter()
+                .find(|a| a.name == "policy")
+                .unwrap()
+                .required_unless,
+            ["model"]
+        );
         let wait = catalog
             .commands
             .iter()
             .find(|c| c.command == "provenant wait")
             .unwrap();
-        assert!(
-            wait.constraints
-                .iter()
-                .any(|c| c.contains("newline-delimited"))
-        );
+        assert!(wait.constraints.iter().any(|c| c == WAIT_JSON_CONTRACT));
     }
+    #[test]
+    fn focused_wait_help_documents_jsonl_events_and_terminal_envelope() {
+        let ParseOutcome::Help { text, catalog, .. } = parsed(&["help", "wait"]) else {
+            panic!("wait help");
+        };
+        assert!(text.contains("JSONL"), "{text}");
+        assert!(text.contains("terminal command-result envelope"), "{text}");
+        let wait = catalog
+            .commands
+            .iter()
+            .find(|c| c.command == "provenant wait")
+            .unwrap();
+        assert!(wait.constraints.iter().any(|c| c == WAIT_JSON_CONTRACT));
+    }
+
+    #[test]
+    fn compact_quota_help_indexes_children_from_the_full_grammar() {
+        let ParseOutcome::Help { text, catalog, .. } = parsed(&["help", "quota"]) else {
+            panic!("quota help");
+        };
+        let model = expanded_model();
+        let expected: Vec<_> = model
+            .find_subcommand("quota")
+            .unwrap()
+            .get_subcommands()
+            .filter(|child| !child.is_hide_set())
+            .map(|child| child.get_name().to_owned())
+            .collect();
+        for child in &expected {
+            assert!(text.contains(child), "missing {child} from {text}");
+        }
+        let quota = catalog
+            .commands
+            .iter()
+            .find(|c| c.command == "provenant quota")
+            .unwrap();
+        assert_eq!(quota.subcommands, expected);
+    }
+
     #[test]
     fn help_constraints_name_only_options_the_command_has() {
         let ParseOutcome::Help { catalog, .. } = parsed(&["help", "--all"]) else {

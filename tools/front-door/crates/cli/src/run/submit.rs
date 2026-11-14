@@ -555,7 +555,7 @@ fn submit_with_launcher(
     launch: impl FnOnce(&run::AttemptRecord, bool) -> Result<Vec<run::Started>, Fail>,
 ) -> Result<(run::AttemptRecord, Vec<run::Started>), Fail> {
     let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
-    let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
+    let config = crate::config_reads::read_for(edge.roots, "run")
         .map_err(|error| Fail::config(Status::Invalid, error))?;
     // Nested proposals are checked by the host before provider preparation.
     // A confined parent cannot open a sibling worktree to sample its volume.

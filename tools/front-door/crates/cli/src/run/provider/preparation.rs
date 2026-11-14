@@ -1448,8 +1448,8 @@ pub(super) fn prepare_with_wait(
                 ..Default::default()
             })?;
         let roots = registry.roots.ok_or("routing context is unavailable")?;
-        let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-            .map_err(|error| error.to_string())?;
+        let config =
+            crate::config_reads::read_for(roots, "run").map_err(|error| error.to_string())?;
         let native =
             config
                 .domains
@@ -2286,7 +2286,7 @@ pub(super) fn prepare_candidates(
     let default_limit = provenant_confinement::run_config::DEFAULT_ARGV_PROMPT_LIMIT_BYTES;
     let loaded_config = registry
         .roots
-        .map(|roots| provenant_config::read_with_domains(roots, &crate::domains::SECTIONS));
+        .map(|roots| crate::config_reads::read_for(roots, "run"));
     const ARGV_LIMIT_KEY: &str = "domains.run.argv_prompt_limit_bytes";
     let (argv_limit, argv_origin, argv_origin_record) = match &loaded_config {
         Some(Ok(config)) => {

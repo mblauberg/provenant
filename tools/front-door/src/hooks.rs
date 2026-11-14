@@ -211,10 +211,9 @@ fn guard_reply(
             crate::roots::Workspace::At(&cwd),
             crate::roots::Product::Optional,
         )?;
-        let config =
-            provenant_config::config_show(&resolved.roots, &provenant_cli::domains::SECTIONS)?
-                .domains
-                .fabric;
+        let config = provenant_cli::config_reads::show_for(&resolved.roots, "hook")?
+            .domains
+            .fabric;
         let label = std::env::var_os("PROVENANT_AGENT_LABEL");
         let reader = crate::local_answers::LocalReader {
             root: &resolved.roots.state,
@@ -822,7 +821,7 @@ fn push_conflict_markers(globals: &Globals, cwd: &Path) -> bool {
     ) else {
         return true;
     };
-    provenant_config::config_show(&resolved.roots, &provenant_cli::domains::SECTIONS)
+    provenant_cli::config_reads::show_for(&resolved.roots, "hook")
         .map(|read| read.domains.run.push_conflict_markers)
         .unwrap_or(true)
 }
@@ -892,9 +891,7 @@ fn local_gate_settings(
     ) else {
         return Ok(None);
     };
-    let Ok(config) =
-        provenant_config::config_show(&resolved.roots, &provenant_cli::domains::SECTIONS)
-    else {
+    let Ok(config) = provenant_cli::config_reads::show_for(&resolved.roots, "hook") else {
         return Ok(None);
     };
     let land = &config.domains.pr.land;
@@ -1146,8 +1143,7 @@ mod answer_delivery_tests {
             crate::roots::Workspace::At(temp.path()),
             crate::roots::Product::Optional,
         )?;
-        let snapshot =
-            provenant_config::config_show(&resolved.roots, &provenant_cli::domains::SECTIONS)?;
+        let snapshot = provenant_cli::config_reads::show_for(&resolved.roots, "hook")?;
         assert!(
             snapshot
                 .warnings

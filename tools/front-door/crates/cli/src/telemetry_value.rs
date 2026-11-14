@@ -200,8 +200,7 @@ fn value_inner(command: &TelemetryValue, edge: &Edge<'_>) -> Output {
         .filter(|row| seconds(row) >= since)
         .collect();
     let (accepted_json, accepted_line) = accepted_section(edge, since, &in_window)?;
-    let config =
-        provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS).map_err(io)?;
+    let config = crate::config_reads::read_for(edge.roots, "telemetry").map_err(io)?;
     let history = crate::quota_history::read(
         edge.roots.state.as_path(),
         &crate::quota_history::Query {

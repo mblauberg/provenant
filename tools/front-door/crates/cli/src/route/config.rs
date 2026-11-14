@@ -199,7 +199,7 @@ pub(super) fn edit_config(
 ) -> Result<(), EdgeError> {
     let _ = provenant_config::edit_config::<crate::domains::Domains>(
         roots,
-        &crate::domains::SECTIONS,
+        &crate::config_reads::sections_for("route")?,
         &provenant_config::EditOptions::new("cli"),
         |document, _| {
             edit(document).map_err(|reason| provenant_config::ConfigError::Edit { reason })
@@ -541,7 +541,7 @@ pub(super) fn set_override(
             "invalid schedule: --starts must precede --until, --tz must be an IANA time zone, windows need distinct start and end hours from 0 to 24, and at most 16 windows",
         ));
     }
-    let settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+    let settings = crate::config_reads::read_for(roots, "route")?
         .domains
         .accounts;
     let account = request
@@ -646,7 +646,7 @@ pub(super) fn clear_override(
     if let (Some(risk), Some(task)) = (&request.risk_tier, &request.task_kind) {
         return clear_model_choice(roots, risk, task, now);
     }
-    let settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+    let settings = crate::config_reads::read_for(roots, "route")?
         .domains
         .accounts;
     let account = request
@@ -682,18 +682,16 @@ pub(super) fn clear_override(
 
 /// What was repaired or ignored in the persisted model exclusions.
 pub(super) fn exclusion_notes(roots: &Roots) -> Result<Vec<String>, EdgeError> {
-    Ok(
-        provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
-            .domains
-            .routing
-            .model_exclusions
-            .notes()
-            .to_vec(),
-    )
+    Ok(crate::config_reads::read_for(roots, "route")?
+        .domains
+        .routing
+        .model_exclusions
+        .notes()
+        .to_vec())
 }
 /// Every recorded pacing override, then every scheduled model policy rule.
 pub(super) fn list_overrides(roots: &Roots, now: WallTime) -> Result<Vec<OverrideRow>, EdgeError> {
-    let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+    let config = crate::config_reads::read_for(roots, "route")?
         .domains
         .routing;
     let mut overrides: Vec<OverrideRow> = config
