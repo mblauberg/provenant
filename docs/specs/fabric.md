@@ -40,11 +40,12 @@ mutations refuse. A caller-supplied sender is rejected at the relay boundary.
 
 ### Private, versioned, atomic store
 
-Coordination and the host custody ledger use private SQLite databases; symlinked or shared components and a
-future schema are refused before any mutation, and config may lower limits but
-never raise them. A mutation and its event commit together, and no transaction
+Coordination and the host custody ledger use private SQLite databases. Symlinked
+or shared components and a different SQLite format major are refused before any
+mutation, and config may lower limits but never raise them. A mutation and its event commit together, and no transaction
 stays open across waits, spawns, Git or SSH. A retried operation ID returns its
 stored receipt; the same ID with a different digest conflicts.
+Same-major additive schema steps follow the [SQLite store rule](state.md#sqlite-stores).
 - Why: a swapped database could forge fences, and agents retry after timeouts.
 - Test: `crates/fabric-store/src/tests.rs::state_symlinks_and_non_private_components_are_refused`;
   `crates/fabric-store/src/tests.rs::event_failure_rolls_back_mail_mutations`;

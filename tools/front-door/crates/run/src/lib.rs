@@ -192,6 +192,15 @@ impl From<provenant_sqlite::VersionError> for RunError {
         match error {
             provenant_sqlite::VersionError::Refused { found, .. } => Self::Version(found),
             provenant_sqlite::VersionError::Sqlite(error) => error.into(),
+            provenant_sqlite::VersionError::MissingBaseTable { .. } => {
+                Self::Validation("STATE_RESET_REQUIRED: missing known base table")
+            }
+            provenant_sqlite::VersionError::MissingStep { .. } => {
+                Self::Validation("missing schema step; a writable open applies it")
+            }
+            provenant_sqlite::VersionError::InvalidStep { .. } => {
+                Self::Validation("invalid additive schema step declaration")
+            }
         }
     }
 }

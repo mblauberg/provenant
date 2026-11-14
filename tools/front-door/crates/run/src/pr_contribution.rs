@@ -9,10 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::Path};
 
 const FILE: &str = "pr-contributions.sqlite3";
-pub(crate) const SCHEMA: provenant_sqlite::Schema = provenant_sqlite::Schema {
-    sql: include_str!("pr_contribution_schema.sql"),
-    version: 5,
-};
+pub(crate) const SCHEMA: provenant_sqlite::Schema = include!("pr_contribution_schema.rs");
 /// Allocation is represented in millionths for exact validation.
 pub const WEIGHT_ONE: u32 = 1_000_000;
 const MAX_LINKS: usize = 256;
@@ -210,7 +207,7 @@ impl Contributions {
         Ok(Some(Self(db)))
     }
     pub fn open(host: &Path, call: &Request<'_>) -> Result<Self> {
-        let (_, db, _lock) = open_database(host, FILE, call)?;
+        let (_, db, _lock) = open_database(host, FILE, SCHEMA, call)?;
         provenant_sqlite::ensure_schema(&db, SCHEMA)?;
         Ok(Self(db))
     }
@@ -369,7 +366,7 @@ impl Contributions {
                         )?;
                         if unlinked > 0 {
                             tx.execute(
-                                "INSERT INTO reassignments VALUES (?1,?2,?3) ON CONFLICT DO NOTHING",
+                                "INSERT INTO reassignments (attempt, repository, number) VALUES (?1,?2,?3) ON CONFLICT DO NOTHING",
                                 params![attempt, pr.repository, number],
                             )?;
                         }
@@ -388,7 +385,7 @@ impl Contributions {
                      ON CONFLICT DO NOTHING",
                     params![project.to_string(), branch, generation],
                 )?;
-                tx.execute("INSERT INTO branch_generations VALUES (?1,?2,?3) ON CONFLICT(project,branch) DO UPDATE SET generation=excluded.generation", params![project.to_string(), branch, generation+1])?;
+                tx.execute("INSERT INTO branch_generations (project, branch, generation) VALUES (?1,?2,?3) ON CONFLICT(project,branch) DO UPDATE SET generation=excluded.generation", params![project.to_string(), branch, generation+1])?;
             }
             Ok(closed)
         })
@@ -462,7 +459,7 @@ impl Contributions {
         )?;
         if count >= MAX_LINKS as i64 {
             tx.execute(
-                "INSERT INTO truncations VALUES (?1) ON CONFLICT DO NOTHING",
+                "INSERT INTO truncations (attempt) VALUES (?1) ON CONFLICT DO NOTHING",
                 [attempt],
             )?;
         } else {

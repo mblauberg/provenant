@@ -23,14 +23,11 @@ const FILE: &str = "admission.sqlite3";
 /// Each lease carries the lane class. Each class's last start is a reading of
 /// the host's monotonic clock since boot, kept with the boot it was read in:
 /// wall time is never recorded, so no clock step can move it.
-pub(crate) const SCHEMA: provenant_sqlite::Schema = provenant_sqlite::Schema {
-    sql: include_str!("admission_schema.sql"),
-    version: 7,
-};
+pub(crate) const SCHEMA: provenant_sqlite::Schema = include!("admission_schema.rs");
 
 /// Open, creating if needed, the ledger under the trusted host state root.
 pub(crate) fn open(host: &Path, request: &Request<'_>) -> Result<Connection> {
-    let (_, db, _initialisation) = open_database(host, FILE, request)?;
+    let (_, db, _initialisation) = open_database(host, FILE, SCHEMA, request)?;
     provenant_sqlite::ensure_schema(&db, SCHEMA)?;
     Ok(db)
 }
@@ -730,7 +727,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("run.sqlite3");
             let original = Connection::open(&path).unwrap();
-            original.execute_batch("PRAGMA journal_mode=DELETE; CREATE TABLE admission (attempt TEXT); INSERT INTO admission VALUES ('live');").unwrap();
+            original.execute_batch("PRAGMA journal_mode=DELETE; CREATE TABLE admission (attempt TEXT); INSERT INTO admission (attempt) VALUES ('live');").unwrap();
             let db = Connection::open_in_memory().unwrap();
             db.execute_batch(SCHEMA.sql).unwrap();
             let clock = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(0));
@@ -742,7 +739,7 @@ mod tests {
             let identity = serde_json::to_string(&live).unwrap();
             let owner_id = store_identity(&path).unwrap();
             db.execute(
-                "INSERT INTO leases VALUES ('live','p',?1,'writer',?2,?3,?4,0)",
+                "INSERT INTO leases (attempt, project, store, class, boot, guardian, owner_id, yielded) VALUES ('live','p',?1,'writer',?2,?3,?4,0)",
                 params![dir.path().as_os_str().as_bytes(), boot, identity, owner_id],
             )
             .unwrap();
@@ -799,7 +796,7 @@ mod tests {
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let path = root.join("run.sqlite3");
         let owner = Connection::open(&path).unwrap();
-        owner.execute_batch("CREATE TABLE admission (attempt TEXT); INSERT INTO admission VALUES ('old'), ('live');").unwrap();
+        owner.execute_batch("CREATE TABLE admission (attempt TEXT); INSERT INTO admission (attempt) VALUES ('old'), ('live');").unwrap();
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(SCHEMA.sql).unwrap();
         let clock = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(0));
@@ -812,17 +809,17 @@ mod tests {
         let store = root.as_os_str().as_bytes();
         let owner_id = store_identity(&path).unwrap();
         db.execute(
-            "INSERT INTO leases VALUES ('old','p',?1,'writer','old boot',?2,?3,0)",
+            "INSERT INTO leases (attempt, project, store, class, boot, guardian, owner_id, yielded) VALUES ('old','p',?1,'writer','old boot',?2,?3,0)",
             params![store, guardian, owner_id],
         )
         .unwrap();
         db.execute(
-            "INSERT INTO leases VALUES ('live','p',?1,'writer',?2,?3,?4,0)",
+            "INSERT INTO leases (attempt, project, store, class, boot, guardian, owner_id, yielded) VALUES ('live','p',?1,'writer',?2,?3,?4,0)",
             params![store, boot, guardian, owner_id],
         )
         .unwrap();
         db.execute(
-            "INSERT INTO leases VALUES ('malformed','p',?1,'writer',?2,'bad',?3,0)",
+            "INSERT INTO leases (attempt, project, store, class, boot, guardian, owner_id, yielded) VALUES ('malformed','p',?1,'writer',?2,'bad',?3,0)",
             params![store, boot, owner_id],
         )
         .unwrap();

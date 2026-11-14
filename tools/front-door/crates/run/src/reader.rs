@@ -1234,7 +1234,7 @@ impl RunStore {
         let sequence = sql_int(sequence)?;
         self.write(call, |tx| {
             tx.execute(
-                "INSERT INTO cursors VALUES (?1,?2,?3,?4) ON CONFLICT(project,actor,selection) DO UPDATE SET sequence=MAX(sequence,excluded.sequence)",
+                "INSERT INTO cursors (project, actor, selection, sequence) VALUES (?1,?2,?3,?4) ON CONFLICT(project,actor,selection) DO UPDATE SET sequence=MAX(sequence,excluded.sequence)",
                 params![self.context.project_id.to_string(), self.context.actor_id.to_string(), selection, sequence],
             )?;
             Ok(())

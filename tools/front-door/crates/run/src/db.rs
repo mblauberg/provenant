@@ -183,7 +183,7 @@ impl RunStore {
     pub fn open(context: &ExecutionContext, request: &Request<'_>) -> Result<Self> {
         request.check()?;
         let (root, db, _initialisation) =
-            open_database(context.state_root.as_path(), "run.sqlite3", request)?;
+            open_database(context.state_root.as_path(), "run.sqlite3", SCHEMA, request)?;
         provenant_sqlite::ensure_schema(&db, SCHEMA)?;
         Ok(Self {
             db,
@@ -231,6 +231,7 @@ pub(crate) fn immediate<T>(
 pub(crate) fn open_database(
     path: &Path,
     name: &str,
+    schema: provenant_sqlite::Schema,
     request: &Request<'_>,
 ) -> Result<(Directory, Connection, LockGuard)> {
     let mut root = Directory::root(true)?;
@@ -282,6 +283,7 @@ pub(crate) fn open_database(
     }
     companions(&root, name)?;
     let db = provenant_sqlite::open_connection(&path.join(name), false)?;
+    provenant_sqlite::check_format(&db, schema)?;
     match provenant_sqlite::enable_wal(&db) {
         Ok(()) => {}
         Err(provenant_sqlite::WalError::Unavailable(_)) => {
@@ -291,11 +293,8 @@ pub(crate) fn open_database(
     }
     Ok((root, db, initialisation))
 }
-/// The run store's only schema.
-pub(crate) const SCHEMA: provenant_sqlite::Schema = provenant_sqlite::Schema {
-    sql: include_str!("schema.sql"),
-    version: 12,
-};
+/// The run store's format-major base and additive steps.
+pub(crate) const SCHEMA: provenant_sqlite::Schema = include!("schema.rs");
 
 pub(crate) fn private(directory: &Directory) -> Result<()> {
     let m = directory.metadata()?;

@@ -27,7 +27,8 @@ pub fn validate_work(
     call: &Request<'_>,
 ) -> Result<WorkCoverage> {
     call.check()?;
-    let (_, db, initialisation) = open_database(host.as_path(), "run.sqlite3", call)?;
+    let (_, db, initialisation) =
+        open_database(host.as_path(), "run.sqlite3", crate::db::SCHEMA, call)?;
     provenant_sqlite::ensure_schema(&db, crate::db::SCHEMA)?;
     drop(initialisation);
     // Exact predicates let SQLite use the key index even when a selector is

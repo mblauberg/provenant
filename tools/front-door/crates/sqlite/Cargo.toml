@@ -10,6 +10,9 @@ provenant-os = { workspace = true }
 provenant-core = { workspace = true }
 rusqlite = { workspace = true }
 
+[dev-dependencies]
+regex = { workspace = true }
+
 # Native VFS callbacks live only in read_only_vfs. Mirror workspace lints.
 [lints.rust]
 unsafe_code = "deny"
