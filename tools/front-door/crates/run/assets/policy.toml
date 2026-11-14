@@ -1056,7 +1056,7 @@ justification = "The raw prompt must fit RECORD_LIMIT, the same bound reader::va
 
 [[rule]]
 code = "WRITE_SCOPE"
-site = "run/src/writer.rs#WriterLaunch::finish"
+site = "run/src/writer.rs#WriterLaunch::report_write_scope"
 boundary = "none"
 strength = "warn"
 refusable = true
