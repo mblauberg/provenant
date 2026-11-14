@@ -1251,7 +1251,7 @@ pub struct Wait {
     #[arg(long)]
     pub follow: bool,
     /// Wait budget (default domains.wait.timeout_seconds; at most 4 hours)
-    #[arg(long, value_name = "SPAN", catalog_observation_wait())]
+    #[arg(long, value_name = "SPAN", catalog_duration())]
     pub timeout: Option<u64>,
 }
 /// `trace`: a graph's revisions and attempt timeline.
