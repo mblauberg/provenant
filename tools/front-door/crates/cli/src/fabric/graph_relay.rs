@@ -1169,7 +1169,7 @@ fn provision_in_context(
 ) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
     use provenant_confinement::worktrees::{self, WorktreeCreate, WorktreeError};
     let expected = resolve_managed_writer_path(
-        context.host_state()?,
+        &context.host_state()?,
         context.repo.root_path(),
         path,
         branch,
