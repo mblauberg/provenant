@@ -299,6 +299,25 @@ fn observation_text_with_remote(
     text
 }
 
+#[derive(Default)]
+struct ObservationHistory {
+    remote_source_seen: bool,
+}
+impl ObservationHistory {
+    fn record(&mut self, reading: &Reading, host: Option<&provenant_core::HostId>) {
+        self.remote_source_seen |= !reading_locally_represented(reading, host);
+    }
+
+    fn render(
+        &self,
+        watcher: Option<&provenant_os::changes::watch::Watcher>,
+        interval: Duration,
+        fallback: Option<&str>,
+    ) -> String {
+        observation_text_with_remote(watcher, interval, fallback, self.remote_source_seen)
+    }
+}
+
 /// Only terminal node/attempt states produce settlement events. In particular
 /// pending -> running is progress, not a reason for --any to return.
 fn digest_settle(digest: &Value) -> Option<Settle> {
@@ -735,16 +754,22 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                     })
                 })
                 .collect::<std::collections::BTreeSet<_>>();
+            let mut observation_history = ObservationHistory::default();
+            for index in &pending {
+                if let Some(reading) = latest[*index].as_ref() {
+                    observation_history.record(reading, local_host.as_ref());
+                }
+            }
             if let Ok(mut current) = observation.lock() {
-                *current = observation_text_with_remote(
+                *current = observation_history.render(
                     watcher.as_ref(),
                     interval,
                     fallback_reason.as_deref(),
-                    !remote_indices.is_empty(),
                 );
             }
             scope.spawn(move || {
                 let mut session = None;
+                let mut observation_history = observation_history;
                 let mut pending = pending;
                 // Read once for rows that arrived after preflight or were not
                 // represented in its sample before waiting for an event.
@@ -763,6 +788,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         pr_read_timeout,
                         &stop.cancel,
                     );
+                    observation_history.record(&reading, local_host.as_ref());
                     let locally_represented =
                         reading_locally_represented(&reading, local_host.as_ref());
                     if locally_represented {
@@ -776,11 +802,10 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         pending.retain(|candidate| *candidate != index);
                     }
                     if let Ok(mut current) = observation.lock() {
-                        *current = observation_text_with_remote(
+                        *current = observation_history.render(
                             watcher.as_ref(),
                             interval,
                             fallback_reason.as_deref(),
-                            !remote_indices.is_empty(),
                         );
                     }
                     if sender
@@ -819,11 +844,10 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                 watcher = None;
                                 fallback_reason = Some(format!("event source failed: {error}"));
                                 if let Ok(mut current) = observation.lock() {
-                                    *current = observation_text_with_remote(
+                                    *current = observation_history.render(
                                         None,
                                         interval,
                                         fallback_reason.as_deref(),
-                                        !remote_indices.is_empty(),
                                     );
                                 }
                                 let left = deadline.saturating_duration_since(Instant::now());
@@ -860,6 +884,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             pr_read_timeout,
                             &stop.cancel,
                         );
+                        observation_history.record(&reading, local_host.as_ref());
                         let locally_represented =
                             reading_locally_represented(&reading, local_host.as_ref());
                         if locally_represented {
@@ -873,11 +898,10 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             pending.retain(|candidate| *candidate != index);
                         }
                         if let Ok(mut current) = observation.lock() {
-                            *current = observation_text_with_remote(
+                            *current = observation_history.render(
                                 watcher.as_ref(),
                                 interval,
                                 fallback_reason.as_deref(),
-                                !remote_indices.is_empty(),
                             );
                         }
                         if sender
@@ -1032,6 +1056,26 @@ mod tests {
         ));
         assert!(!rows_local(&[row("aa/1"), row("bb/2")], Some(&here)));
         assert!(!rows_local::<String>(&[row("aa/1")], None));
+    }
+
+    #[test]
+    fn completed_peer_source_remains_in_final_observation() {
+        let host = "aa".to_owned();
+        let completed_peer = Reading {
+            settle: Settle::Succeeded,
+            line: "peer settled".into(),
+            data: json!({"rows":[{"kind":"attempt","attempt_id":"bb/2"}]}),
+        };
+        let mut history = ObservationHistory::default();
+        history.record(&completed_peer, Some(&host));
+
+        let final_observation = history.render(
+            None,
+            Duration::from_millis(500),
+            Some("event source unavailable: fixture parent missing"),
+        );
+        assert!(completed_peer.done());
+        assert!(final_observation.contains("peer/relay or unrepresented rows reread every 500 ms"));
     }
 
     #[test]
