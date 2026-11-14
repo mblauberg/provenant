@@ -1122,20 +1122,27 @@ fn branch_exists(rig: &TestRig, branch: &str) -> Result<bool> {
 }
 
 pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
-    let landing = landing()?;
+    let landing = landing().map_err(|error| format!("prepare landing fixture: {error}"))?;
     let rig = &landing.rig;
-    let mut view: serde_json::Value =
-        serde_json::from_slice(&fs::read(rig.project.join("view.json"))?)?;
+    let mut view: serde_json::Value = serde_json::from_slice(
+        &fs::read(rig.project.join("view.json"))
+            .map_err(|error| format!("read fixture view.json: {error}"))?,
+    )?;
     view["state"] = "OPEN".into();
-    fs::write(rig.project.join("view.json"), serde_json::to_vec(&view)?)?;
-    fs::write(rig.project.join("merge-completes"), "")?;
+    fs::write(rig.project.join("view.json"), serde_json::to_vec(&view)?)
+        .map_err(|error| format!("write open fixture view.json: {error}"))?;
+    fs::write(rig.project.join("merge-completes"), "")
+        .map_err(|error| format!("write fake merge completion: {error}"))?;
     // Build output the worktree owns, which would otherwise block removal.
-    fs::create_dir_all(landing.worktree.join("crate/target/debug"))?;
+    fs::create_dir_all(landing.worktree.join("crate/target/debug"))
+        .map_err(|error| format!("create fixture build output: {error}"))?;
     fs::write(
         landing.worktree.join("crate/target/debug/artifact"),
         "built",
-    )?;
-    let output = command(rig, &["land", NUMBER, "--head", &landing.head, "--json"])?;
+    )
+    .map_err(|error| format!("write fixture build output: {error}"))?;
+    let output = command(rig, &["land", NUMBER, "--head", &landing.head, "--json"])
+        .map_err(|error| format!("run land command: {error}"))?;
     let value = json(&output)?;
     assert_eq!(code(&output), 0, "{value}");
     assert_eq!(value["data"]["merged"], true);
@@ -1143,7 +1150,8 @@ pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
         assert_eq!(status(&value, step)?, "done", "{step}: {value}");
     }
     // The merge went through the existing repository workflow at this head.
-    let merge = fs::read_to_string(rig.project.join("merge-args"))?;
+    let merge = fs::read_to_string(rig.project.join("merge-args"))
+        .map_err(|error| format!("read fake forge merge arguments: {error}"))?;
     assert_eq!(
         merge,
         format!(
@@ -1152,7 +1160,8 @@ pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
         )
     );
     assert!(!rig.project.join("watched").exists());
-    let calls = fs::read_to_string(rig.project.join("gh-calls"))?;
+    let calls = fs::read_to_string(rig.project.join("gh-calls"))
+        .map_err(|error| format!("read fake forge call log: {error}"))?;
     assert!(
         !calls.lines().any(|line| {
             line.starts_with("pr ") || line.split_whitespace().any(|arg| arg == "graphql")
@@ -1167,7 +1176,8 @@ pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
     assert!(!landing.worktree.exists());
     assert!(!branch_exists(rig, "feat")?);
     // Landing again finds nothing left to prune, and the text form names each step.
-    let text = command(rig, &["land", NUMBER, "--full"])?;
+    let text = command(rig, &["land", NUMBER, "--full"])
+        .map_err(|error| format!("run text land command: {error}"))?;
     assert_eq!(code(&text), 0);
     let text = String::from_utf8(text.stdout.bytes)?;
     assert!(
@@ -1475,6 +1485,27 @@ fn pr_land_writer_cases(cases: &[&str]) -> Result {
             &landing.rig.project,
             &landing.worktree,
         )?;
+        let store = super::worktree_tests::open_writer_store(&context)?;
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let prepared = super::worktree_tests::writer_run(
+            request.clone(),
+            "land-writer-custody",
+            81,
+            "terminal writer fixture",
+        )?;
+        store.create(&prepared, &call)?;
+        contribution_terminal(
+            &store,
+            &context,
+            prepared.attempt_id,
+            &landing.head,
+            provenant_run::Outcome::Succeeded,
+            &call,
+        )?;
+        let generation = store.record(prepared.attempt_id, &call)?.generation;
         let writer = provenant_run::prepare_writer(
             &request,
             context.state_root.as_path(),
@@ -1501,8 +1532,8 @@ fn pr_land_writer_cases(cases: &[&str]) -> Result {
         let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
             provenant_os::fs::Directory::open_anchor(&state)?,
             Scope {
-                attempt: provenant_core::AttemptId::from_bytes([82; 16]),
-                generation: 1,
+                attempt: prepared.attempt_id,
+                generation,
             },
             binding,
             provenant_core::WaitBudget::nonblocking(clock.mono_now()),
@@ -1518,14 +1549,14 @@ fn pr_land_writer_cases(cases: &[&str]) -> Result {
         if case == "malformed" {
             fs::write(
                 state
-                    .join(provenant_core::AttemptId::from_bytes([82; 16]).to_string())
+                    .join(prepared.attempt_id.to_string())
                     .join("reservation.json"),
                 b"malformed reservation",
             )?;
         }
         let reservation = fs::read(
             state
-                .join(provenant_core::AttemptId::from_bytes([82; 16]).to_string())
+                .join(prepared.attempt_id.to_string())
                 .join("reservation.json"),
         )?;
         match case {
@@ -1549,10 +1580,7 @@ fn pr_land_writer_cases(cases: &[&str]) -> Result {
             _ => {}
         }
         let value = land(&landing)?;
-        let removed = matches!(
-            case,
-            "abandoned" | "malformed" | "wrong_binding" | "allowed_output"
-        );
+        let removed = matches!(case, "abandoned" | "allowed_output");
         assert_eq!(
             status(&value, "worktree")?,
             if removed { "done" } else { "refused" },
@@ -1563,7 +1591,7 @@ fn pr_land_writer_cases(cases: &[&str]) -> Result {
         assert_eq!(
             fs::read(
                 state
-                    .join(provenant_core::AttemptId::from_bytes([82; 16]).to_string())
+                    .join(prepared.attempt_id.to_string())
                     .join("reservation.json")
             )?,
             reservation

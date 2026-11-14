@@ -229,7 +229,13 @@ pub(super) fn member_outcomes(
         .iter()
         .map(|member| {
             let reason = report.exclusion_reasons.get(&member.pr).cloned();
+            let cleanup_unsettled = report.local_steps.get(&member.pr).is_some_and(|local| {
+                local["cleanup_pending"] == true || local["error"].is_string()
+            });
             let outcome = match report.outcomes.get(&member.pr) {
+                Some(Outcome::Landed) if cleanup_unsettled => MemberOutcome::Pending {
+                    reason: "local cleanup is pending; resubmit to retry it".into(),
+                },
                 Some(Outcome::Landed) => MemberOutcome::Landed {
                     commit: member.head.as_ref().and_then(|head| {
                         report

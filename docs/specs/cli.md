@@ -738,6 +738,8 @@ before the merge changes nothing. After it, each step refuses and reports
 instead of forcing. A successful merge exits 0 with `merged: true`; incomplete
 cleanup adds `cleanup_pending: true` and keeps each refused step's reason.
 Retrying an already-merged PR bypasses CI and merge and retries safe cleanup.
+The durable member remains pending while local cleanup is unsettled, so a
+resubmission reaches the cleanup owner instead of replaying a completed member.
 - Why (default): a landing is four routine steps, and none of them may widen what was
   reviewed or delete work that is not merged.
 - Test: `src/pr_land_tests.rs::pr_land_merges_then_fetches_fast_forwards_and_prunes`;
