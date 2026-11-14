@@ -159,6 +159,42 @@ pub(super) fn graph_run_refuses_low_disk_writers() -> Result {
     Ok(())
 }
 
+fn wait_graph_gate(
+    pending: &mut PendingGraphCommand,
+    marker: &Path,
+    name: &str,
+) -> Result {
+    let observed = provenant_test_support::wait_for(
+        name,
+        Duration::from_secs(20),
+        || (marker.exists(), pending.child.try_wait()),
+        |(entered, status)| *entered || matches!(status, Ok(Some(_)) | Err(_)),
+    );
+    let output = || {
+        let stdout = fs::read(&pending.stdout).unwrap_or_default();
+        let stderr = fs::read(&pending.stderr).unwrap_or_default();
+        format!(
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr),
+        )
+    };
+    match observed {
+        Ok((true, _)) => Ok(()),
+        Ok((false, status)) => Err(format!(
+            "{name}: graph child exited before the fixture gate ({status:?}); {}",
+            output(),
+        )
+        .into()),
+        Err(error) => Err(format!(
+            "{error}; graph child status: {:?}; {}",
+            pending.child.try_wait(),
+            output(),
+        )
+        .into()),
+    }
+}
+
 pub(super) fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> Result {
     use std::os::unix::fs::PermissionsExt;
     if !writer_backend_available()? {
@@ -242,11 +278,10 @@ pub(super) fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> R
             &worktree,
             if phase == "delivery" { "push" } else { "none" },
         )?;
-        provenant_test_support::wait_for(
+        wait_graph_gate(
+            &mut first,
+            &gate.join("entered"),
             "graph preparation entered",
-            Duration::from_secs(20),
-            || gate.join("entered").exists(),
-            |ready| *ready,
         )?;
         let before = std::time::Instant::now();
         ok(&rig, &["stop", "preparation-first", "--json"])?;
@@ -280,11 +315,10 @@ pub(super) fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> R
             next_gate.clone().into_os_string(),
         ));
         let next = spawn_graph_command(&rig, "preparation-next", &worktree, "none")?;
-        provenant_test_support::wait_for(
+        wait_graph_gate(
+            &mut next,
+            &next_gate.join("entered"),
             "next graph acquired the writer and entered seeding",
-            Duration::from_secs(20),
-            || next_gate.join("entered").exists(),
-            |ready| *ready,
         )?;
         ok(&rig, &["stop", "preparation-next", "--json"])?;
         ok(
