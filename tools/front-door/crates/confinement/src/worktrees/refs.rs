@@ -8,36 +8,17 @@
 //! earlier proof. A ref without a record is unobserved; consumers retain it.
 use super::*;
 use provenant_core::{OperationId, ProjectId, WallTime};
+use provenant_records::custody::{RefEndpoint, RefOrigin, RefOwnership};
 
 const LEDGER: &str = "refs";
 const LEDGER_LOCK: &str = "refs.lock";
+const GENERATION_SEQUENCE: &str = "last-generation";
 const LEDGER_LOCK_SECONDS: u64 = 5;
 const MAX_REMOTE: usize = 256;
 const MAX_PUSH_URL: usize = 4096;
 /// Bound on records a listing reads; far above any one repository's lanes.
 const MAX_LEDGER_RECORDS: usize = 65_536;
-
-/// Where the ref lives. A remote endpoint names the remote and push URL the
-/// host bound for delivery; it is never inferred from a default remote name.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum RefEndpoint {
-    /// The repository's own ref store.
-    Local,
-    Remote {
-        remote: String,
-        push_url: String,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RefOrigin {
-    /// Provenant created the ref; no one else had it at that name.
-    Created,
-    /// The ref existed before Provenant used it.
-    Adopted,
-}
+const MAX_LEDGER_ENTRIES: usize = MAX_LEDGER_RECORDS + 2;
 
 /// The durable ownership record for one ref generation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,7 +30,7 @@ pub struct RefRecord {
     pub endpoint: RefEndpoint,
     /// Full ref name, such as `refs/heads/lane/x`.
     pub reference: String,
-    /// Starts at 1 and increases with every creation or adoption.
+    /// Repository-wide generation token; it is never reused after forgetting.
     pub generation: u64,
     pub origin: RefOrigin,
     /// The ref's commit when this generation was recorded.
@@ -59,6 +40,14 @@ pub struct RefRecord {
     pub attempt_id: Option<AttemptId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<OperationId>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GenerationSequence {
+    schema_version: u64,
+    repository: ProjectId,
+    last_generation: u64,
 }
 
 impl RefRecord {
@@ -72,17 +61,6 @@ impl RefRecord {
             origin: self.origin,
         }
     }
-}
-
-/// A worktree owner's reference to the ledger generation of its branch.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RefOwnership {
-    pub repository: ProjectId,
-    pub endpoint: RefEndpoint,
-    pub reference: String,
-    pub generation: u64,
-    pub origin: RefOrigin,
 }
 
 /// One observation to record. `origin` says what the caller saw: `Created`
@@ -124,6 +102,54 @@ impl RefLedger {
         })
     }
 
+    fn generation_high_water(&self, current: Option<&RefRecord>) -> Result<u64, WorktreeError> {
+        let bytes = match read_bounded(
+            &self.directory,
+            OsStr::new(GENERATION_SEQUENCE),
+            MAX_STATE_RECORD,
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) if error.is_not_found() => {
+                let names = provenant_os::fs::entry_names(&self.directory, MAX_LEDGER_ENTRIES)?;
+                if names.iter().any(|name| {
+                    name.as_bytes().ends_with(b".json") && !name.as_bytes().starts_with(b".")
+                }) {
+                    return Err(WorktreeError::InvalidOutput);
+                }
+                return Ok(0);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let sequence: GenerationSequence =
+            serde_json::from_slice(&bytes).map_err(|_| WorktreeError::InvalidOutput)?;
+        if sequence.schema_version != 1
+            || sequence.repository != self.repository
+            || sequence.last_generation == 0
+            || current.is_some_and(|record| record.generation > sequence.last_generation)
+        {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        Ok(sequence.last_generation)
+    }
+
+    fn write_generation_high_water(&self, last_generation: u64) -> Result<(), WorktreeError> {
+        let sequence = GenerationSequence {
+            schema_version: 1,
+            repository: self.repository,
+            last_generation,
+        };
+        self.directory
+            .atomic_write(
+                OsStr::new(GENERATION_SEQUENCE),
+                ".ref-generation-",
+                &serde_json::to_vec(&sequence).map_err(|_| WorktreeError::InvalidOutput)?,
+                PublishMode::Replace,
+            )?
+            .require_durable()
+            .map_err(|_| WorktreeError::RegistrationUnconfirmed)?;
+        Ok(())
+    }
+
     pub fn repository(&self) -> ProjectId {
         self.repository
     }
@@ -154,13 +180,9 @@ impl RefLedger {
 
     /// Record a creation or adoption and return the resulting generation.
     ///
-    /// A creation is always a new generation. An adoption keeps the current
-    /// record when the ref still holds the commit that record names: nothing
-    /// observable distinguishes it from the generation already recorded.
-    /// Otherwise an adoption replaces it, so a later created proof is never
-    /// inherited by a ref someone else replaced. An attempt replaying its own
-    /// observation, such as a sealed delivery receipt read again, is the same
-    /// generation rather than a recreation.
+    /// A fresh creation or adoption starts a generation, even when the ref
+    /// still has the same tip. Only a replay carrying the same stable owner
+    /// identity and tip reuses its generation.
     pub fn record(
         &self,
         observation: RefObservation,
@@ -173,24 +195,27 @@ impl RefLedger {
         }
         let _lock = self.lock(clock, cancel)?;
         let current = self.load(&observation.endpoint, &observation.reference)?;
+        let last_generation = self.generation_high_water(current.as_ref())?;
         if let Some(current) = current.as_ref()
             && current.tip == observation.tip
-            && (observation.origin == RefOrigin::Adopted
-                || observation.attempt_id.is_some()
-                    && current.attempt_id == observation.attempt_id
-                    && current.origin == observation.origin)
+            && (observation.attempt_id.is_some() || observation.operation_id.is_some())
+            && current.attempt_id == observation.attempt_id
+            && current.operation_id == observation.operation_id
         {
             return Ok(current.clone());
         }
+        let generation = last_generation
+            .checked_add(1)
+            .ok_or(WorktreeError::InvalidRequest)?;
+        // Publish the high-water mark first. A failed record write may leave a
+        // gap, but forgetting a RefRecord can never make its token reusable.
+        self.write_generation_high_water(generation)?;
         let record = RefRecord {
             schema_version: 1,
             repository: self.repository,
             endpoint: observation.endpoint,
             reference: observation.reference.as_str().to_owned(),
-            generation: current
-                .as_ref()
-                .map_or(Some(1), |current| current.generation.checked_add(1))
-                .ok_or(WorktreeError::InvalidRequest)?,
+            generation,
             origin: observation.origin,
             tip: observation.tip,
             recorded_at: observation.recorded_at,
@@ -233,7 +258,7 @@ impl RefLedger {
     /// belongs elsewhere is skipped, so the ref it names stays unobserved and
     /// is retained. The listing is bounded; a larger ledger is an error.
     pub fn list(&self) -> Result<Vec<RefRecord>, WorktreeError> {
-        let mut names = provenant_os::fs::entry_names(&self.directory, MAX_LEDGER_RECORDS)?;
+        let mut names = provenant_os::fs::entry_names(&self.directory, MAX_LEDGER_ENTRIES)?;
         names.sort();
         let mut records = Vec::new();
         for name in names {
@@ -274,6 +299,7 @@ impl RefLedger {
         if self.load(&record.endpoint, &reference)?.as_ref() != Some(record) {
             return Ok(false);
         }
+        self.generation_high_water(Some(record))?;
         let name = record_name(&record.endpoint, &reference)?;
         self.directory.unlink(OsStr::new(&name))?;
         self.directory.sync()?;

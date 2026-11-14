@@ -82,27 +82,6 @@ pub(crate) struct UnsettledCollection {
     pub(crate) removals: Vec<provenant_records::custody::RemovalRecord>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct RemovalIntent {
-    project: provenant_core::ProjectId,
-    subject: provenant_records::custody::Subject,
-    tip: provenant_core::GitOid,
-    evidence: provenant_records::custody::LandedEvidence,
-}
-
-impl RemovalIntent {
-    fn record(self) -> provenant_records::custody::RemovalRecord {
-        provenant_records::custody::RemovalRecord {
-            project: self.project,
-            subject: self.subject,
-            tip: self.tip,
-            outcome: provenant_records::custody::RemovalOutcome::Removed {
-                evidence: self.evidence,
-            },
-        }
-    }
-}
-
 fn landed_evidence(
     reference: String,
     commit: provenant_core::GitOid,
@@ -121,20 +100,6 @@ fn retained_ref_evidence(
         predicate: provenant_records::custody::LandingPredicate::Subsumed,
         source: provenant_records::custody::LandingSource::RetainedRef { reference, commit },
     }
-}
-
-fn valid_removal_evidence(evidence: &provenant_records::custody::LandedEvidence) -> bool {
-    use provenant_records::custody::{LandingPredicate, LandingSource};
-    matches!(
-        (&evidence.predicate, &evidence.source),
-        (
-            LandingPredicate::Landed,
-            LandingSource::IntegrationTarget { .. }
-        ) | (
-            LandingPredicate::Subsumed,
-            LandingSource::RetainedRef { .. }
-        )
-    )
 }
 
 fn is_integration_evidence(evidence: &provenant_records::custody::LandedEvidence) -> bool {
@@ -193,31 +158,6 @@ fn delivered_removal_evidence(
     }
 }
 
-fn removal_intent(
-    project: provenant_core::ProjectId,
-    kind: provenant_records::custody::SubjectKind,
-    subject: impl Into<String>,
-    tip: provenant_core::GitOid,
-    evidence: &provenant_records::custody::LandedEvidence,
-) -> RemovalIntent {
-    RemovalIntent {
-        project,
-        subject: provenant_records::custody::Subject::new(kind, subject),
-        tip,
-        evidence: evidence.clone(),
-    }
-}
-
-fn removal_record(
-    project: provenant_core::ProjectId,
-    kind: provenant_records::custody::SubjectKind,
-    subject: impl Into<String>,
-    tip: provenant_core::GitOid,
-    evidence: &provenant_records::custody::LandedEvidence,
-) -> provenant_records::custody::RemovalRecord {
-    removal_intent(project, kind, subject, tip, evidence).record()
-}
-
 fn kept_unproven_worktree(
     project: provenant_core::ProjectId,
     path: &Path,
@@ -236,90 +176,100 @@ fn kept_unproven_worktree(
     }
 }
 
-fn removal_records_for_result(
-    project: provenant_core::ProjectId,
-    result: &provenant_confinement::worktrees::RemoveOutcome,
-    evidence: &provenant_records::custody::LandedEvidence,
-) -> Vec<provenant_records::custody::RemovalRecord> {
-    use provenant_records::custody::{RemovalOutcome, Subject, SubjectKind};
-    let mut records: Vec<_> = result
-        .removed
-        .iter()
-        .map(|tree| {
-            removal_record(
-                project,
-                SubjectKind::Worktree,
-                tree.path.to_string_lossy(),
-                tree.head,
-                evidence,
-            )
-        })
-        .collect();
-    if let Some(tree) = result.removed.first() {
-        for branch in &result.pruned_refs {
-            records.push(removal_record(
-                project,
-                SubjectKind::Branch,
-                format!("refs/heads/{branch}"),
-                tree.head,
-                evidence,
-            ));
-        }
-    }
-    for discarded in &result.discarded {
-        records.push(removal_record(
-            project,
-            SubjectKind::Branch,
-            format!("refs/heads/{}", discarded.branch),
-            discarded.head,
-            evidence,
-        ));
-    }
-    records
-}
-
-fn recovered_removal_records(
-    context: &provenant_confinement::worktrees::WorktreeContext<'_>,
+/// Resume from the existing operation receipt by following its durable owner.
+/// The receipt only locates the retirement; only that record projects removals.
+fn retirement_records_for_receipt(
+    port: &dyn provenant_confinement::worktrees::RetirementPort,
     project: provenant_core::ProjectId,
     path: &Path,
-    branch: Option<&str>,
-    candidates: &[RemovalIntent],
-    cancel: &CancelToken,
+    receipt: &serde_json::Value,
 ) -> Result<Vec<provenant_records::custody::RemovalRecord>, Box<dyn std::error::Error>> {
-    use provenant_records::custody::SubjectKind;
-    let path = path.to_string_lossy();
-    let worktree_intent = candidates.iter().find(|candidate| {
-        candidate.project == project
-            && candidate.subject.kind == SubjectKind::Worktree
-            && candidate.subject.id.as_str() == path.as_ref()
-            && valid_removal_evidence(&candidate.evidence)
-    });
-    let worktree_tip = worktree_intent.map(|candidate| candidate.tip);
-    let mut confirmed = Vec::new();
-    for candidate in candidates {
-        if candidate.project != project || !valid_removal_evidence(&candidate.evidence) {
-            continue;
-        }
-        match candidate.subject.kind {
-            SubjectKind::Worktree if candidate.subject.id.as_str() == path.as_ref() => {
-                confirmed.push(candidate.clone().record());
-            }
-            SubjectKind::Branch
-                if branch == Some(candidate.subject.id.as_str())
-                    && worktree_tip == Some(candidate.tip)
-                    && worktree_intent
-                        .is_some_and(|intent| intent.evidence == candidate.evidence) =>
-            {
-                let reference = provenant_confinement::repo::GitRefName::new(&candidate.subject.id)
-                    .map_err(|_| "pruning intent contains an invalid branch subject")?;
-                if worktrees::ref_tip(context, &reference, cancel)?.is_none() {
-                    confirmed.push(candidate.clone().record());
-                }
-            }
-            _ => {}
-        }
+    use provenant_records::custody::{
+        RemovalEvidence, RetirementDecision, RetirementStep, RetirementStepState, Subject,
+        SubjectKind,
+    };
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+        Ok(_) => return Err("worktree removal is not confirmed".into()),
     }
-    Ok(confirmed)
+    let id = receipt["retirement_id"]
+        .as_str()
+        .ok_or("pruning receipt has no retirement id")?;
+    let subject: Subject = serde_json::from_value(
+        receipt
+            .get("retirement_subject")
+            .cloned()
+            .ok_or("pruning receipt has no retirement subject")?,
+    )?;
+    let expected_tip: provenant_core::GitOid = serde_json::from_value(
+        receipt
+            .get("retirement_tip")
+            .cloned()
+            .ok_or("pruning receipt has no expected tip")?,
+    )?;
+    let Some(mut retirement) = port.retirement_for_subject(project, &subject)? else {
+        return Err("pruning receipt has no custody retirement owner".into());
+    };
+    let worktree = Subject::new(
+        SubjectKind::Worktree,
+        path.to_str().ok_or("worktree path is not valid UTF-8")?,
+    );
+    if subject.kind != SubjectKind::Ref
+        || retirement.id != id
+        || retirement.project != project
+        || retirement.subject != subject
+        || retirement.reference.custody_subject()? != subject
+        || retirement.expected_tip != expected_tip
+        || !retirement.related_subjects.contains(&worktree)
+        || !matches!(&retirement.decision, RetirementDecision::Discard { .. })
+    {
+        return Err("pruning receipt does not match its durable retirement".into());
+    }
+    let step = RetirementStep::Worktree {
+        subject: worktree.clone(),
+    };
+    let state = retirement
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.step == step)
+        .map(|outcome| &outcome.state)
+        .ok_or("retirement has no worktree outcome")?;
+    if !matches!(state, RetirementStepState::Completed { .. }) {
+        let RemovalEvidence::Landing { evidence } = retirement.decision.evidence() else {
+            return Err("automatic worktree retirement has no landing proof".into());
+        };
+        if matches!(state, RetirementStepState::Refused { .. }) {
+            return Err("worktree retirement was refused".into());
+        }
+        let completion = RemovalEvidence::Landing {
+            evidence: evidence.clone(),
+        };
+        if !step.accepts_completion_evidence(retirement.decision.evidence(), &completion) {
+            return Err("retirement proof does not authorize the worktree outcome".into());
+        }
+        retirement = port.advance_retirement(
+            &retirement,
+            step,
+            RetirementStepState::Completed {
+                evidence: completion,
+            },
+        )?;
+    }
+    let records = retirement.removals();
+    if !records.iter().any(|record| {
+        record.subject == worktree
+            && matches!(
+                &record.outcome,
+                provenant_records::custody::RemovalOutcome::Removed {
+                    retirement_id,
+                    ..
+                } if retirement_id == &retirement.id
+            )
+    }) {
+        return Err("durable retirement has no completed worktree projection".into());
+    }
+    Ok(records)
 }
 
 pub(crate) fn collect_owned_worktree(
@@ -463,6 +413,13 @@ fn collect_owned_worktree_with(
     use provenant_confinement::worktrees::{self, WorktreeGcPolicy, WorktreeOrigin};
     let clock = SystemClock;
     let cancel = CancelToken::new();
+    let retirement = crate::custody::RetirementWriter::open(
+        roots,
+        settled.project_id,
+        settled.actor_id,
+        &clock,
+        &cancel,
+    )?;
     let call = provenant_run::Request {
         clock: &clock,
         cancel: &cancel,
@@ -612,8 +569,6 @@ fn collect_owned_worktree_with(
     let retention_reason =
         settlement_retention_reason(&record.state, task.deliver.is_some(), delivery);
     let mut pruning_intent = replayed.clone();
-    let removal_evidence =
-        std::cell::RefCell::new(None::<provenant_records::custody::LandedEvidence>);
     let collection_error = std::cell::RefCell::new(None::<String>);
     let final_reason = std::cell::Cell::new(retention_reason);
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
@@ -633,37 +588,26 @@ fn collect_owned_worktree_with(
             facts,
             |context, cancel| {
                 if let Some(replayed_receipt) = replayed.as_mut() {
-                    if replayed_receipt["recovered_from_intent"] == true {
-                        let evidence = replayed_receipt.get("removal_intents").cloned().ok_or(
-                            "pruning receipt is missing required removal intent; recovery cannot report the removal",
-                        )?;
-                        let candidates: Vec<RemovalIntent> = serde_json::from_value(evidence)?;
+                    if replayed_receipt["state"] == "pruned"
+                        || replayed_receipt["recovered_from_intent"] == true
+                    {
                         if replayed_receipt["schema_version"] != 2 {
                             return Err(
-                                "pruning receipt has an unsupported removal-evidence schema".into(),
+                                "pruning receipt has an unsupported retirement schema".into()
                             );
                         }
-                        let confirmed = recovered_removal_records(
-                            context,
+                        let confirmed = retirement_records_for_receipt(
+                            &retirement,
                             settled.project_id,
                             &writer.worktree,
-                            replayed_receipt["branch"].as_str(),
-                            &candidates,
-                            cancel,
+                            replayed_receipt,
                         )?;
-                        if !confirmed.iter().any(|record| {
-                            record.subject.kind == provenant_records::custody::SubjectKind::Worktree
-                        }) {
-                            return Err(
-                                "pruned worktree has no matching recorded removal evidence".into(),
-                            );
-                        }
                         if let Some(records) = removal_records.as_deref_mut() {
                             records.extend(confirmed.iter().cloned());
                         }
                         replayed_receipt["removal_records"] = serde_json::to_value(&confirmed)?;
                         if let Some(object) = replayed_receipt.as_object_mut() {
-                            object.remove("removal_intents");
+                            object.remove("recovered_from_intent");
                         }
                     }
                     return Ok(None);
@@ -715,7 +659,7 @@ fn collect_owned_worktree_with(
                 };
                 // A failed pre-prune step must not replace a retained lane's
                 // real reason, so record it and carry on.
-                let pre_prune = || -> Result<(), Box<dyn std::error::Error>> {
+                let pre_prune = |evidence: &provenant_records::custody::LandedEvidence| -> Result<(), Box<dyn std::error::Error>> {
                     let lane = worktrees::list_for_gc_matching(context, cancel, |path, _| {
                         path == writer.worktree
                     })?
@@ -732,6 +676,10 @@ fn collect_owned_worktree_with(
                         context,
                         std::slice::from_ref(&lane),
                         &output_policy,
+                        worktrees::RetirementMode::Apply {
+                            port: &retirement,
+                            evidence,
+                        },
                         cancel,
                     )?;
                     if output
@@ -778,12 +726,6 @@ fn collect_owned_worktree_with(
                     }
                     Ok(())
                 };
-                if let Err(error) = pre_prune() {
-                    *collection_error.borrow_mut() = Some(error.to_string());
-                }
-                if retention_reason.is_some() {
-                    return Ok(None);
-                }
                 let delivered_ref = delivery
                     .filter(|receipt| {
                         matches!(
@@ -834,7 +776,12 @@ fn collect_owned_worktree_with(
                 } else {
                     landed_evidence(proof_reference.clone(), pinned)
                 };
-                *removal_evidence.borrow_mut() = Some(evidence.clone());
+                if let Err(error) = pre_prune(&evidence) {
+                    *collection_error.borrow_mut() = Some(error.to_string());
+                }
+                if retention_reason.is_some() {
+                    return Ok(None);
+                }
                 let target = worktrees::LandingTarget {
                     reference: Some(
                         provenant_confinement::repo::GitRefName::new(&proof_reference)
@@ -863,48 +810,73 @@ fn collect_owned_worktree_with(
                         .map(|_| pinned),
                     ..output_policy
                 };
-                let mut intent = serde_json::json!({
-                    "schema_version":2, "state":"pruning", "worktree":writer.worktree,
-                    "branch":format!("refs/heads/{}", owner.branch)
-                });
-                let mut candidates = vec![removal_intent(
-                    settled.project_id,
-                    provenant_records::custody::SubjectKind::Worktree,
-                    writer.worktree.to_string_lossy(),
-                    head,
-                    &evidence,
-                )];
                 let branch = provenant_confinement::repo::GitRefName::branch(&owner.branch)
                     .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;
-                if policy.upstream.is_some()
-                    && worktrees::created_branch(context, &branch, owner.reference.as_ref())?
-                        .is_some()
-                    && worktrees::ref_tip(context, &branch, cancel)? == Some(head)
+                let Some(reference) = owner.reference.clone() else {
+                    return Ok(None);
+                };
+                if reference.endpoint != provenant_records::custody::RefEndpoint::Local
+                    || reference.origin != provenant_records::custody::RefOrigin::Created
                 {
-                    candidates.push(removal_intent(
-                        settled.project_id,
-                        provenant_records::custody::SubjectKind::Branch,
-                        branch.as_str(),
-                        head,
-                        &evidence,
-                    ));
+                    return Ok(None);
                 }
-                intent["removal_intents"] = serde_json::to_value(&candidates)?;
+                let ledger = worktrees::RefLedger::for_context(context)?;
+                let Some(ref_record) = ledger.load(&reference.endpoint, &branch)? else {
+                    return Ok(None);
+                };
+                if ref_record.ownership() != reference {
+                    return Ok(None);
+                }
+                let worktree_subject = provenant_records::custody::Subject::new(
+                    provenant_records::custody::SubjectKind::Worktree,
+                    writer
+                        .worktree
+                        .to_str()
+                        .ok_or(worktrees::WorktreeError::InvalidRequest)?,
+                );
+                let Some(retirement_record) =
+                    retirement.begin_retirement(worktrees::RetirementIntent {
+                        project: settled.project_id,
+                        related_subjects: vec![worktree_subject],
+                        reference,
+                        expected_tip: head,
+                        evidence: evidence.clone(),
+                    })?
+                else {
+                    return Ok(None);
+                };
+                let retirement_id = retirement_record.id.clone();
+                let mut intent = serde_json::json!({
+                    "schema_version":2,
+                    "state":"pruning",
+                    "worktree":writer.worktree,
+                    "branch":branch.as_str(),
+                    "retirement_id":retirement_record.id,
+                    "retirement_subject":retirement_record.subject,
+                    "retirement_tip":retirement_record.expected_tip
+                });
                 if let Some(warning) = tracking_ref_warning.as_ref() {
                     intent["tracking_ref_warning"] = serde_json::json!(warning);
                 }
                 record_worktree_settlement(&store, record.attempt_id, &intent)
                     .map_err(|_| worktrees::WorktreeError::RegistrationUnconfirmed)?;
                 pruning_intent = Some(intent);
-                Ok(Some(worktrees::prune_owned(
+                let (outcome, updated_retirement) = worktrees::prune_owned(
                     context,
                     &writer.worktree,
                     owner_attempt,
                     head,
                     pinned,
                     &policy,
+                    &retirement,
+                    retirement_record,
+                    evidence,
                     cancel,
-                )?))
+                )?;
+                if updated_retirement.id != retirement_id {
+                    return Err(worktrees::WorktreeError::IdentityChanged);
+                }
+                Ok(Some(outcome))
             },
         )?)
     })();
@@ -932,13 +904,15 @@ fn collect_owned_worktree_with(
             }
             Ok(Some(result)) => {
                 let artefacts = worktrees::ArtefactOutcome::from_remove(&result);
-                let records = removal_evidence
-                    .borrow()
+                let intent = pruning_intent
                     .as_ref()
-                    .map(|evidence| {
-                        removal_records_for_result(settled.project_id, &result, evidence)
-                    })
-                    .ok_or("pruned worktree is missing removal evidence")?;
+                    .ok_or("pruned worktree is missing its retirement receipt")?;
+                let records = retirement_records_for_receipt(
+                    &retirement,
+                    settled.project_id,
+                    &writer.worktree,
+                    intent,
+                )?;
                 if let Some(sink) = removal_records.as_deref_mut() {
                     sink.extend(records.iter().cloned());
                 }
@@ -970,11 +944,17 @@ fn collect_owned_worktree_with(
             }
         }
     };
-    if let Some(branch) = pruning_intent
-        .as_ref()
-        .and_then(|intent| intent.get("branch"))
-    {
-        receipt["branch"] = branch.clone();
+    if let Some(intent) = pruning_intent.as_ref() {
+        for field in [
+            "branch",
+            "retirement_id",
+            "retirement_subject",
+            "retirement_tip",
+        ] {
+            if let Some(value) = intent.get(field) {
+                receipt[field] = value.clone();
+            }
+        }
     }
     if receipt["state"] == "pruned" && !receipt["removal_records"].is_array() {
         return Err("pruned GC receipt is missing required removal evidence".into());
@@ -1023,7 +1003,12 @@ fn collect_owned_worktree_with(
                 facts,
                 |context, cancel| {
                     Ok(crate::lane_cleanup::settle_integrated(
-                        context, &branch, delivered, &sweep, cancel,
+                        context,
+                        &branch,
+                        delivered,
+                        &sweep,
+                        &retirement,
+                        cancel,
                     ))
                 },
             );
@@ -1078,74 +1063,7 @@ mod removal_tests {
     use super::*;
 
     #[test]
-    fn applied_lane_prune_records_worktree_and_branch_with_exact_target_evidence() {
-        let project = provenant_core::ProjectId::from_bytes([9; 16]);
-        let tip = provenant_core::GitOid::parse(&"a1".repeat(20)).unwrap();
-        let target = provenant_core::GitOid::parse(&"b2".repeat(20)).unwrap();
-        let path = Path::new("/repo/.worktrees/topic");
-        let evidence = landed_evidence("refs/remotes/origin/main".into(), target);
-        let mut result = provenant_confinement::worktrees::RemoveOutcome::default();
-        result
-            .removed
-            .push(provenant_confinement::worktrees::WorktreeInfo {
-                warnings: Vec::new(),
-                path: path.to_path_buf(),
-                branch: Some("refs/heads/topic".into()),
-                head: tip,
-                dirty: provenant_confinement::worktrees::WorktreeCondition::Clean,
-                occupancy: provenant_confinement::worktrees::Occupancy::Available,
-                owner: Ok(None),
-                primary: false,
-            });
-        result.pruned_refs.push("topic".into());
-
-        let records = removal_records_for_result(project, &result, &evidence);
-        assert_eq!(records.len(), 2);
-        assert!(records.iter().all(|record| {
-            record.project == project
-                && record.tip == tip
-                && matches!(
-                    &record.outcome,
-                    provenant_records::custody::RemovalOutcome::Removed { evidence: actual }
-                        if actual == &evidence
-                )
-        }));
-        assert!(records.iter().any(|record| {
-            record.subject.kind == provenant_records::custody::SubjectKind::Worktree
-                && record.subject.id.as_str() == path.to_string_lossy().as_ref()
-        }));
-        assert!(records.iter().any(|record| {
-            record.subject.kind == provenant_records::custody::SubjectKind::Branch
-                && record.subject.id == "refs/heads/topic"
-        }));
-        let encoded = serde_json::to_value(&records).unwrap();
-        let decoded: Vec<provenant_records::custody::RemovalRecord> =
-            serde_json::from_value(encoded).unwrap();
-        assert_eq!(decoded, records);
-
-        let intents = vec![
-            removal_intent(
-                project,
-                provenant_records::custody::SubjectKind::Worktree,
-                path.to_string_lossy(),
-                tip,
-                &evidence,
-            ),
-            removal_intent(
-                project,
-                provenant_records::custody::SubjectKind::Branch,
-                "refs/heads/topic",
-                tip,
-                &evidence,
-            ),
-        ];
-        let encoded = serde_json::to_value(&intents).unwrap();
-        let decoded: Vec<RemovalIntent> = serde_json::from_value(encoded).unwrap();
-        assert_eq!(decoded, intents);
-    }
-
-    #[test]
-    fn delivery_removal_evidence_distinguishes_retained_refs_from_integration_targets() {
+    fn delivery_receipts_classify_subsumed_refs_and_integration_targets() {
         use provenant_records::run::{
             DeliveryMode, WriterDeliveryRequest, WriterDeliveryState, WriterIntegration,
         };
@@ -1195,7 +1113,6 @@ mod removal_tests {
                 evidence,
                 retained_ref_evidence("refs/remotes/origin/topic".into(), head)
             );
-            assert!(valid_removal_evidence(&evidence));
             assert!(!is_integration_evidence(&evidence));
         }
 
@@ -1228,7 +1145,6 @@ mod removal_tests {
             evidence,
             landed_evidence("refs/remotes/origin/main".into(), target)
         );
-        assert!(valid_removal_evidence(&evidence));
         assert!(is_integration_evidence(&evidence));
 
         let mismatched = make_request(
@@ -1248,16 +1164,6 @@ mod removal_tests {
             evidence,
             retained_ref_evidence("refs/remotes/origin/main".into(), target)
         );
-        assert!(valid_removal_evidence(&evidence));
         assert!(!is_integration_evidence(&evidence));
-
-        let invalid_pair = provenant_records::custody::LandedEvidence {
-            predicate: provenant_records::custody::LandingPredicate::Landed,
-            source: provenant_records::custody::LandingSource::RetainedRef {
-                reference: "refs/remotes/origin/topic".into(),
-                commit: head,
-            },
-        };
-        assert!(!valid_removal_evidence(&invalid_pair));
     }
 }

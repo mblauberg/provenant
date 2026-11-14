@@ -35,7 +35,7 @@ fn creating_a_branch_records_creation_with_repository_and_full_ref() -> Result<(
     assert_eq!(record.endpoint, RefEndpoint::Local);
     assert_eq!(record.reference, "refs/heads/lane/owned");
     assert_eq!(record.origin, RefOrigin::Created);
-    assert_eq!(record.generation, 1);
+    assert!(record.generation > 0);
     assert_eq!(record.tip, base);
     Ok(())
 }
@@ -56,7 +56,7 @@ fn reusing_an_existing_branch_records_adoption() -> Result<(), Box<dyn Error>> {
     )?;
     let record = ledger_record(&context, "human/topic")?.ok_or("no ledger record")?;
     assert_eq!(record.origin, RefOrigin::Adopted);
-    assert_eq!(record.generation, 1);
+    assert!(record.generation > 0);
     Ok(())
 }
 
@@ -84,16 +84,72 @@ fn recreating_a_ref_at_the_same_commit_is_a_new_generation() -> Result<(), Box<d
     )?;
     fixture.run(&["branch", "-D", "lane/again"]).ok();
     assert!(!branch_exists(&fixture, "lane/again"));
+    let ledger = RefLedger::for_context(&context)?;
+    let _ = ledger.forget(&first, &test.clock, &cancel())?;
+    assert!(ledger_record(&context, "lane/again")?.is_none());
     create(&context, request(), &cancel())?;
     let second = ledger_record(&context, "lane/again")?.ok_or("no second record")?;
     assert_eq!(first.tip, second.tip);
     assert_eq!(second.origin, RefOrigin::Created);
-    assert_eq!(second.generation, first.generation + 1);
+    assert!(second.generation > first.generation);
     Ok(())
 }
 
 #[test]
-fn adoption_keeps_a_created_generation_only_at_the_recorded_tip() -> Result<(), Box<dyn Error>> {
+fn missing_generation_sequence_does_not_restart_a_nonempty_ledger() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let ledger = RefLedger::for_context(&context)?;
+    let head = fixture.head()?;
+    let first = ledger.record(
+        RefObservation {
+            endpoint: RefEndpoint::Local,
+            reference: GitRefName::branch("lane/first")?,
+            origin: RefOrigin::Created,
+            tip: head,
+            recorded_at: test.clock.wall_now()?,
+            attempt_id: None,
+            operation_id: None,
+        },
+        &test.clock,
+        &cancel(),
+    )?;
+    let sequence = fixture
+        ._temp
+        .path()
+        .join("worktrees")
+        .join(test.binding.project_id().to_string())
+        .join("refs")
+        .join("last-generation");
+    std::fs::remove_file(sequence)?;
+    assert!(matches!(
+        ledger.forget(&first, &test.clock, &cancel()),
+        Err(WorktreeError::InvalidOutput)
+    ));
+    let next = ledger.record(
+        RefObservation {
+            endpoint: RefEndpoint::Local,
+            reference: GitRefName::branch("lane/next")?,
+            origin: RefOrigin::Created,
+            tip: head,
+            recorded_at: test.clock.wall_now()?,
+            attempt_id: None,
+            operation_id: None,
+        },
+        &test.clock,
+        &cancel(),
+    );
+    assert!(matches!(next, Err(WorktreeError::InvalidOutput)));
+    assert_eq!(
+        ledger_record(&context, "lane/first")?.as_ref(),
+        Some(&first)
+    );
+    Ok(())
+}
+
+#[test]
+fn each_unscoped_adoption_starts_a_generation_even_at_the_same_tip() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
@@ -110,13 +166,18 @@ fn adoption_keeps_a_created_generation_only_at_the_recorded_tip() -> Result<(), 
     };
     let head = fixture.head()?;
     let created = ledger.record(observe(RefOrigin::Created, head), &test.clock, &cancel())?;
-    let same = ledger.record(observe(RefOrigin::Adopted, head), &test.clock, &cancel())?;
-    assert_eq!(same, created);
+    let adopted = ledger.record(observe(RefOrigin::Adopted, head), &test.clock, &cancel())?;
+    assert_eq!(adopted.origin, RefOrigin::Adopted);
+    assert_eq!(adopted.tip, head);
+    assert!(adopted.generation > created.generation);
+    let adopted_again = ledger.record(observe(RefOrigin::Adopted, head), &test.clock, &cancel())?;
+    assert!(adopted_again.generation > adopted.generation);
     fixture.run(&["commit", "--allow-empty", "-m", "moved"])?;
     let moved = fixture.head()?;
-    let adopted = ledger.record(observe(RefOrigin::Adopted, moved), &test.clock, &cancel())?;
-    assert_eq!(adopted.origin, RefOrigin::Adopted);
-    assert_eq!(adopted.generation, created.generation + 1);
+    let moved_adoption =
+        ledger.record(observe(RefOrigin::Adopted, moved), &test.clock, &cancel())?;
+    assert_eq!(moved_adoption.origin, RefOrigin::Adopted);
+    assert!(moved_adoption.generation > adopted_again.generation);
     Ok(())
 }
 
@@ -142,16 +203,74 @@ fn cooperating_writers_share_one_ledger_per_repository() -> Result<(), Box<dyn E
         operation_id: None,
     };
     let first = other.record(observation.clone(), &test.clock, &cancel())?;
-    // The same attempt replaying its sealed receipt is not a recreation.
-    let replay = other.record(observation, &test.clock, &cancel())?;
+    // A replay by the same owner remains the same generation even if the
+    // branch is now observed as existing rather than created.
+    let mut replay_observation = observation.clone();
+    replay_observation.origin = RefOrigin::Adopted;
+    replay_observation.recorded_at = test.clock.wall_now()?;
+    let replay = other.record(replay_observation, &test.clock, &cancel())?;
     assert_eq!(replay, first);
+    // A distinct owner adopting that exact tip starts a new generation.
+    let mut new_owner = observation.clone();
+    new_owner.origin = RefOrigin::Adopted;
+    new_owner.attempt_id = Some(AttemptId::from_bytes([10; 16]));
+    let adopted = other.record(new_owner, &test.clock, &cancel())?;
+    assert!(adopted.generation > first.generation);
+    assert_eq!(adopted.origin, RefOrigin::Adopted);
+    // The ledger remains shared by both writers.
     let seen = RefLedger::for_context(&context)?
         .load(&endpoint, &reference)?
         .ok_or("record not shared")?;
+    assert_eq!(seen, adopted);
+    // A new observation under the same attempt remains idempotent.
+    let replay = other.record(new_owner.clone(), &test.clock, &cancel())?;
+    assert_eq!(replay, adopted);
     assert_eq!(seen.endpoint, endpoint);
-    assert_eq!(seen.origin, RefOrigin::Created);
     // The local ref of the same name is a different, unobserved ref.
     assert!(ledger_record(&context, "lane/pushed")?.is_none());
+    Ok(())
+}
+
+#[test]
+fn operation_replay_preserves_generation_but_a_new_operation_advances_it()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let ledger = RefLedger::for_context(&test.context())?;
+    let reference = GitRefName::branch("lane/operation")?;
+    let tip = fixture.head()?;
+    let observation = |origin, operation_id| RefObservation {
+        endpoint: RefEndpoint::Local,
+        reference: reference.clone(),
+        origin,
+        tip,
+        recorded_at: test.clock.wall_now().expect("wall clock"),
+        attempt_id: None,
+        operation_id: Some(operation_id),
+    };
+    let first_operation = provenant_core::OperationId::parse("create-lane")?;
+    let first = ledger.record(
+        observation(RefOrigin::Created, first_operation.clone()),
+        &test.clock,
+        &cancel(),
+    )?;
+    let replay = ledger.record(
+        observation(RefOrigin::Adopted, first_operation),
+        &test.clock,
+        &cancel(),
+    )?;
+    assert_eq!(replay, first);
+
+    let next = ledger.record(
+        observation(
+            RefOrigin::Adopted,
+            provenant_core::OperationId::parse("adopt-lane")?,
+        ),
+        &test.clock,
+        &cancel(),
+    )?;
+    assert!(next.generation > first.generation);
+    assert_eq!(next.origin, RefOrigin::Adopted);
     Ok(())
 }
 

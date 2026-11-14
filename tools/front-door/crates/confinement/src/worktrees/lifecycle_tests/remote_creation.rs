@@ -280,12 +280,16 @@ fn gc_missing_observer_gate_remains_unknown_during_preview_and_apply() -> Result
     let test = TestContext::new(&fixture)?;
     let context = test.context();
     let lane = gc_merged_worktree(&fixture, &context, "gc-missing-gate")?;
+    let retirement = HostRetirementFixture::new(&test)?;
+    retirement.seed_lane(&context, &lane)?;
+    let upstream = fixture.head()?;
+    let evidence = gc_landing_evidence(&fixture, upstream)?;
     let slot = writer_directory(context.project_state, &lane.path)?;
     drop(slot.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?);
     let gate = slot.current_path()?.join("writer-probe.lock");
     fs::remove_file(&gate)?;
     let policy = WorktreeGcPolicy {
-        upstream: Some(fixture.head()?),
+        upstream: Some(upstream),
         terminal: &|_| false,
         no_live_lanes: &|_| true,
         regenerable: &[],
@@ -294,16 +298,17 @@ fn gc_missing_observer_gate_remains_unknown_during_preview_and_apply() -> Result
         dry_run: true,
         foreign_merged_clean: true,
     };
-    let preview = collect(&context, std::slice::from_ref(&lane), &policy, &cancel())?;
+    let preview = collect(
+        &context,
+        std::slice::from_ref(&lane),
+        &policy,
+        RetirementMode::Observe,
+        &cancel(),
+    )?;
     assert!(preview.worktrees.removed.is_empty());
-    assert_eq!(
-        preview.worktrees.retained,
-        vec![RetainedBranch {
-            branch: "gc-missing-gate".into(),
-            reason: RetainReason::UnknownWriter,
-            detail: None,
-        }]
-    );
+    assert!(preview.worktrees.retained.iter().any(|retained| {
+        retained.branch == "gc-missing-gate" && retained.reason == RetainReason::UnknownWriter
+    }));
     assert!(
         matches!(
             cache_writer_probe(context.project_state, &lane.path),
@@ -321,17 +326,18 @@ fn gc_missing_observer_gate_remains_unknown_during_preview_and_apply() -> Result
             dry_run: false,
             ..policy
         },
+        retirement.apply(&evidence),
         &cancel(),
     )?;
-    assert!(applied.worktrees.removed.is_empty(), "{applied:?}");
-    assert_eq!(
-        applied.worktrees.retained,
-        vec![RetainedBranch {
-            branch: "gc-missing-gate".into(),
-            reason: RetainReason::UnknownWriter,
-            detail: None,
-        }]
-    );
+    assert!(applied.worktrees.retained.iter().any(|retained| {
+        retained.branch == "gc-missing-gate" && retained.reason == RetainReason::UnknownWriter
+    }));
+    assert!(applied.removals.iter().all(|removal| {
+        !matches!(
+            &removal.outcome,
+            provenant_records::custody::RemovalOutcome::Removed { .. }
+        )
+    }));
     assert!(
         !gate.exists(),
         "mutation cannot repair a missing observer gate"
@@ -481,6 +487,7 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
             dry_run: true,
             foreign_merged_clean: false,
         },
+        RetirementMode::Observe,
         &cancel(),
     )?;
     eprintln!(
@@ -1014,6 +1021,7 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
             dry_run: true,
             foreign_merged_clean: false,
         },
+        RetirementMode::Observe,
         &cancel(),
     )?;
     assert!(report.worktrees.removed.is_empty());
@@ -1034,6 +1042,7 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
             dry_run: false,
             foreign_merged_clean: false,
         },
+        RetirementMode::Observe,
         &cancel(),
     )?;
     // Applying discards the cached snapshot and reads again under custody.

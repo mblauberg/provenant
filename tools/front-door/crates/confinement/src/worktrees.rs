@@ -32,7 +32,7 @@ pub use owner::{
     WorktreeOrigin, WorktreeOwner, branch_ownership, load_owner, owned_worktree_paths, prune_owned,
     save_lane_owner_when_free, save_owner, update_owner_when_unchanged,
 };
-pub use refs::{RefEndpoint, RefLedger, RefObservation, RefOrigin, RefOwnership, RefRecord};
+pub use refs::{RefLedger, RefObservation, RefRecord};
 pub use removal::{
     Artefact, ArtefactOutcome, ArtefactState, RefDeletion, branch_checked_out, created_branch,
     delete_ref_leased, has_commit, landing_in_repo, ref_tip,
@@ -54,6 +54,7 @@ use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, PublishMode, can
 #[cfg(test)]
 use provenant_os::pid::ProcessUids;
 use provenant_os::pid::{CensusIgnoreEntry, CwdObservation, CwdObserver, SystemCwdObserver};
+use provenant_records::custody::{RefEndpoint, RefOrigin, RefOwnership};
 use provenant_records::{PathWireError, StructuredPathWire};
 use provenant_supervisor::census::{
     Ancestry, ProcessFact, ProcessLookup, ProcessObservation, ProcessObserver,
@@ -271,6 +272,8 @@ pub enum WorktreeError {
     PrimaryMoved,
     #[error("worktree result path cannot be represented safely")]
     PathEncoding,
+    #[error("durable retirement authority could not be read or advanced")]
+    Retirement(#[source] Box<dyn std::error::Error>),
     #[error("worktree creation failed: {cause}; {}", if *.rolled_back {
         "the partial checkout and new branch were removed, so it is safe to retry"
     } else {
@@ -530,6 +533,50 @@ pub struct WorktreeContext<'a> {
     /// legitimately take minutes on a large repository, so it is far longer.
     pub mutation_budget: UtilityBudget,
     pub lock_budget: WaitBudget,
+}
+
+/// A removal intent after the caller has verified its authority against the
+/// exact live reference generation and tip.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetirementIntent {
+    pub project: provenant_core::ProjectId,
+    pub related_subjects: Vec<provenant_records::custody::Subject>,
+    pub reference: provenant_records::custody::RefOwnership,
+    pub expected_tip: GitOid,
+    pub evidence: provenant_records::custody::RemovalEvidence,
+}
+
+/// Port to the single durable retirement owner. Confinement verifies live Git
+/// state and performs deletion; the host application stores lifecycle intent.
+pub trait RetirementPort {
+    fn begin_retirement(
+        &self,
+        intent: RetirementIntent,
+    ) -> Result<Option<provenant_records::custody::RetirementRecord>, WorktreeError>;
+
+    fn retirement_for_subject(
+        &self,
+        project: provenant_core::ProjectId,
+        subject: &provenant_records::custody::Subject,
+    ) -> Result<Option<provenant_records::custody::RetirementRecord>, WorktreeError>;
+
+    fn advance_retirement(
+        &self,
+        record: &provenant_records::custody::RetirementRecord,
+        step: provenant_records::custody::RetirementStep,
+        state: provenant_records::custody::RetirementStepState,
+    ) -> Result<provenant_records::custody::RetirementRecord, WorktreeError>;
+}
+
+/// Whether this collection may retire worktrees. Observation mode can prune
+/// regenerable output but never removes a worktree or reference.
+#[derive(Clone, Copy)]
+pub enum RetirementMode<'a> {
+    Observe,
+    Apply {
+        port: &'a dyn RetirementPort,
+        evidence: &'a provenant_records::custody::LandedEvidence,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

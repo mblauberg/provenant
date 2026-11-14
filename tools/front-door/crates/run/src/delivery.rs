@@ -2574,9 +2574,8 @@ impl crate::RunStore {
         receipt: &WriterDeliveryReceipt,
         call: &crate::Request<'_>,
     ) {
-        use provenant_confinement::worktrees::{
-            RefEndpoint, RefLedger, RefObservation, RefOrigin, WorktreeError,
-        };
+        use provenant_confinement::worktrees::{RefLedger, RefObservation, WorktreeError};
+        use provenant_records::custody::{RefEndpoint, RefOrigin};
         if matches!(request.mode, crate::DeliveryMode::Integrate(_))
             || !matches!(receipt.state, WriterDeliveryState::Delivered { .. })
         {
@@ -2587,6 +2586,18 @@ impl crate::RunStore {
         };
         let Some(push_url) = integration.push_url.as_ref() else {
             return;
+        };
+        let operation_id = match self.attempt_operation(record.attempt_id, call) {
+            Ok(operation) => Some(operation.operation_id),
+            Err(error) => {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: could not record ownership of delivered ref {}: {error}; it is retained as unobserved",
+                    integration.target
+                );
+                return;
+            }
         };
         let result = (|| -> std::result::Result<(), WorktreeError> {
             let reference =
@@ -2610,10 +2621,7 @@ impl crate::RunStore {
                     tip: integration.integrated,
                     recorded_at,
                     attempt_id: Some(record.attempt_id),
-                    operation_id: self
-                        .attempt_operation(record.attempt_id, call)
-                        .ok()
-                        .map(|operation| operation.operation_id),
+                    operation_id,
                 },
                 call.clock,
                 call.cancel,

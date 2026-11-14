@@ -54,12 +54,19 @@ stored receipt; the same ID with a different digest conflicts.
 
 Fabric claims and graph chair identity use one host-owned custody ledger.
 Subject kinds are declared once in `records::custody::SubjectKind`: graph,
-attempt, branch, worktree, pr, issue, path and cloud key. Records retain holder
-(chair or attempt nested under a chair), project, origin, active/landed/retired/
-released state, last activity, related artefacts and dispatch provenance.
-`LandedEvidence` names its predicate (subsumed or landed) and proof source;
-`RetirementRecord` retains that evidence. These records are defined in records
-for landing and retention to share; state alone never authorises deletion.
+attempt, branch, ref, worktree, pr, issue, path and cloud key. Records retain
+the holder (chair or attempt nested under a chair), project, origin,
+active/landed/retired/released state, last activity, related artefacts and
+dispatch provenance.
+`LandedEvidence` names its predicate (subsumed or landed) and proof source.
+The custody-owned `RetirementRecord` pins the endpoint-qualified reference
+generation, expected commit, authority and initial proof in the host store.
+Remote endpoint identity keeps only a digest of its bound push URL.
+Each completed subject step stores the proof it used: under a landing-based
+intent, a worktree may complete when its tip is subsumed or landed, while
+reference deletion requires a landed proof. Explicit discard remains a distinct
+authority choice and never claims landing. `Removed` projections carry the
+step proof and durable retirement ID. State alone never authorises deletion.
 
 Claims do not expire, lock or refuse overlapping advisory ownership. Acquiring
 another holder's item warns, records the previous holder in the same transaction
@@ -71,7 +78,7 @@ Git isolation. Cursors advance monotonically; an unreachable peer is Unknown.
 - Test: `crates/fabric-store/src/tests/f2.rs::custody_is_durable_advisory_and_queryable_by_declared_kinds`;
   `crates/fabric-store/src/tests/f2.rs::custody_event_failure_rolls_back_the_record`;
   `crates/fabric-store/src/tests/f2.rs::custody_queries_page_and_include_nested_lanes_without_crossing_chairs`
-- Owner: `crates/records/src/custody.rs`, `crates/fabric-store/src/claims.rs`
+- Owner: `crates/records/src/custody.rs`, `crates/fabric-store/src/claims.rs`, `crates/config/src/gc.rs`
 
 ### Chair bindings follow graph names
 

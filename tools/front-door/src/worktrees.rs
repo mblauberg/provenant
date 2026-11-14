@@ -271,8 +271,13 @@ fn execute(
                         SubjectKind::Worktree,
                         info.path.to_string_lossy(),
                     )];
-                    if let Some(branch) = &info.branch {
-                        subjects.push(Subject::new(SubjectKind::Branch, branch));
+                    if let Some(branch) = info.branch.as_deref().and_then(|reference| {
+                        provenant_confinement::repo::GitRefName::new(reference).ok()
+                    }) && let Some(owner) =
+                        worktrees::branch_ownership(context, branch.short_name(), info.head)?
+                        && let Some(subject) = owner.logical_branch_subject()
+                    {
+                        subjects.push(subject);
                     }
                     if let Err(error) = crate::custody::acquire(&resolved, &subjects) {
                         provenant_fabric_runtime::custody::warning(format_args!(
@@ -815,56 +820,17 @@ fn append_gc_subpass_removals(
     }
 }
 
-fn append_gc_removal_records(
-    report: &mut worktrees::WorktreeGcReport,
-    project: provenant_core::ProjectId,
-    upstream: Option<&(String, GitOid)>,
-) {
+fn append_gc_removal_records(report: &mut worktrees::WorktreeGcReport) {
     if !report.dry_run {
-        if let Some((reference, commit)) = upstream {
-            let evidence = LandedEvidence {
-                predicate: LandingPredicate::Landed,
-                source: LandingSource::IntegrationTarget {
-                    reference: reference.clone(),
-                    commit: *commit,
-                },
-            };
-            for lane in &report.worktrees.removed {
-                report.removals.push(RemovalRecord {
-                    project,
-                    subject: Subject::new(SubjectKind::Worktree, lane.path.to_string_lossy()),
-                    tip: lane.head,
-                    outcome: provenant_records::custody::RemovalOutcome::Removed {
-                        evidence: evidence.clone(),
-                    },
-                });
-                if let Some(branch) = lane.branch.as_deref()
-                    && branch.strip_prefix("refs/heads/").is_some_and(|short| {
-                        report
-                            .worktrees
-                            .pruned_refs
-                            .iter()
-                            .any(|name| name == short)
-                    })
-                {
-                    report.removals.push(RemovalRecord {
-                        project,
-                        subject: Subject::new(SubjectKind::Branch, branch),
-                        tip: lane.head,
-                        outcome: provenant_records::custody::RemovalOutcome::Removed {
-                            evidence: evidence.clone(),
-                        },
-                    });
-                }
-            }
-        }
+        // The collection owners attach only projections of their durable
+        // retirement records. A raw removed row does not authorise a receipt.
+        report.removals.extend(
+            report
+                .refs
+                .iter()
+                .filter_map(|outcome| outcome.removal.clone()),
+        );
     }
-    report.removals.extend(
-        report
-            .refs
-            .iter()
-            .filter_map(|outcome| outcome.removal.clone()),
-    );
 }
 
 fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
@@ -1114,6 +1080,7 @@ pub(crate) fn land_cleanup(
                     foreign_merged_clean: false,
                     dry_run: false,
                 },
+                worktrees::RetirementMode::Observe,
                 cancel,
             )?;
             landed.output = collected
@@ -1122,24 +1089,63 @@ pub(crate) fn land_cleanup(
                 .filter(|entry| entry.removed)
                 .map(|entry| entry.path)
                 .collect();
-            match worktrees::remove_with_output(
+            let integration_ref =
+                provenant_confinement::repo::GitRefName::remote_tracking(integration)
+                    .map_err(|_| Error::InvalidScope)?;
+            let integration_tip =
+                context
+                    .facts
+                    .resolve_commit(context, integration_ref.clone(), cancel)?;
+            let evidence = LandedEvidence {
+                predicate: LandingPredicate::Landed,
+                source: LandingSource::IntegrationTarget {
+                    reference: integration_ref.as_str().to_owned(),
+                    commit: integration_tip,
+                },
+            };
+            let identity = provenant_cli::fabric::Context::open(roots.clone(), &home, &project)
+                .map_err(|_| Error::GcObservation("cannot establish retirement authority"))?;
+            if identity.identity.project != project_id {
+                return Err(Error::InvalidScope);
+            }
+            let retirement = crate::custody::RetirementWriter::open(
+                &roots,
+                project_id,
+                identity.identity.inbox.actor,
+                context.clock,
+                cancel,
+            )?;
+            match worktrees::collect(
                 context,
-                WorktreeRemove::Name {
-                    name: branch.to_owned(),
-                    discard: false,
-                    integration: Some(integration.to_owned()),
-                    expected_head: Some(tip),
+                std::slice::from_ref(&lane),
+                &worktrees::WorktreeGcPolicy {
+                    upstream: Some(integration_tip),
+                    terminal: &terminal,
+                    no_live_lanes: &no_live_lanes,
+                    regenerable: &regenerable,
+                    keep: &settings.keep,
+                    written_before_ns: now_ns,
+                    foreign_merged_clean: false,
+                    dry_run: false,
+                },
+                worktrees::RetirementMode::Apply {
+                    port: &retirement,
+                    evidence: &evidence,
                 },
                 cancel,
-                &provenant_config::ProjectGcSettings {
-                    regenerable,
-                    ..settings
-                },
             ) {
                 Ok(outcome) => {
-                    landed.removed = !outcome.removed.is_empty();
-                    landed.branch_deleted = outcome.pruned_refs.iter().any(|name| name == branch);
-                    landed.kept = outcome.retained.first().map(|kept| {
+                    landed.removed = outcome
+                        .worktrees
+                        .removed
+                        .iter()
+                        .any(|removed| removed.path == lane.path);
+                    landed.branch_deleted = outcome
+                        .worktrees
+                        .pruned_refs
+                        .iter()
+                        .any(|name| name == branch);
+                    landed.kept = outcome.worktrees.retained.first().map(|kept| {
                         let detail = kept
                             .detail
                             .as_deref()
@@ -1385,6 +1391,61 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     .wall_now()
                     .map(|now| i128::from(now.as_micros()) * 1_000)
                     .map_err(|_| Error::Budget)?;
+                let retirement_evidence =
+                    upstream.as_ref().map(|(reference, commit)| LandedEvidence {
+                        predicate: LandingPredicate::Landed,
+                        source: LandingSource::IntegrationTarget {
+                            reference: reference.clone(),
+                            commit: *commit,
+                        },
+                    });
+                let retirement_identity = if command.apply
+                    && !command.dry_run
+                    && retirement_evidence.is_some()
+                {
+                    Some(
+                        provenant_cli::fabric::Context::open(roots.clone(), &home, &project.path)
+                            .map_err(|_| {
+                            Error::GcObservation("cannot establish retirement authority")
+                        })?,
+                    )
+                } else {
+                    None
+                };
+                if retirement_identity.as_ref().is_some_and(|identity| {
+                    identity.identity.project != context.binding.project_id()
+                }) {
+                    return Err(Error::InvalidScope);
+                }
+                let retirement_writer = if let (Some(identity), Some(_)) =
+                    (retirement_identity.as_ref(), retirement_evidence.as_ref())
+                {
+                    Some(crate::custody::RetirementWriter::open(
+                        &roots,
+                        context.binding.project_id(),
+                        identity.identity.inbox.actor,
+                        context.clock,
+                        cancel,
+                    )?)
+                } else {
+                    None
+                };
+                let retirement = retirement_writer
+                    .as_ref()
+                    .zip(retirement_evidence.as_ref())
+                    .map(|(writer, evidence)| worktrees::RetirementMode::Apply {
+                        port: writer as &dyn provenant_confinement::worktrees::RetirementPort,
+                        evidence,
+                    })
+                    .unwrap_or(worktrees::RetirementMode::Observe);
+                let preview_retirement = crate::custody::PreviewRetirementPort;
+                let retirement_port: &dyn provenant_confinement::worktrees::RetirementPort =
+                    retirement_writer
+                        .as_ref()
+                        .map(|writer| {
+                            writer as &dyn provenant_confinement::worktrees::RetirementPort
+                        })
+                        .unwrap_or(&preview_retirement);
                 let mut report = worktrees::collect_lazy(
                     context,
                     &lanes,
@@ -1401,6 +1462,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                                 == provenant_config::ForeignWorktrees::MergedClean,
                         dry_run: command.dry_run || !command.apply,
                     },
+                    retirement,
                     cancel,
                 )?;
                 report.upstream_error = upstream_error;
@@ -1414,14 +1476,11 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                             .as_ref()
                             .and_then(crate::lane_cleanup::fetched_target),
                         &sweep,
+                        retirement_port,
                         cancel,
                     );
                 }
-                append_gc_removal_records(
-                    &mut report,
-                    context.binding.project_id(),
-                    upstream.as_ref(),
-                );
+                append_gc_removal_records(&mut report);
                 Ok(report)
             },
         );
@@ -1475,6 +1534,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         provenant_run::build_dir_gc::Report,
         Box<dyn std::error::Error>,
     > = Ok(Default::default());
+    let mut unhandled_retention_owners = Vec::new();
     let seed_policy = &config.domains.fabric.lanes.cargo_seed;
     let build_settings = config.domains.fabric.lanes.build_settings();
     let trigger = if command.pressure {
@@ -1573,25 +1633,16 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     )
                 };
             }
-            // Custody-only and append-triggered classes never enter GC.
-            RetentionKind::GitWorktrees
-            | RetentionKind::ObservationLedgers
-            | RetentionKind::QuotaHistory
-            | RetentionKind::Usage
-            // Payload and scratch collection is owned by the ProviderState pass.
-            | RetentionKind::PayloadCap
-            | RetentionKind::AttemptScratch
-            // These owners run at their existing checkpoint/install boundaries,
-            // or have no behaviour declared yet.
-            | RetentionKind::GraphCheckpoints
-            | RetentionKind::ManagedReleases
-            | RetentionKind::DiscardArchives => {}
+            _ => unhandled_retention_owners.push(class.owner),
         }
     }
     // Observe after every collection class, including a partially failed sweep.
     let mut alerts =
         crate::gc_support::disk_alert(&roots, &project_ids, alert_floor, command.dry_run)
             .unwrap_or_else(|error| vec![format!("disk alert failed: {error}")]);
+    alerts.extend(unhandled_retention_owners.into_iter().map(|owner| {
+        format!("retention owner {owner} has no GC handler; scheduled class was skipped")
+    }));
     let target_seeds = match seed_collection {
         Ok(report) => report,
         Err(error) => {
@@ -2080,14 +2131,13 @@ mod gc_preview_tests {
     }
 
     #[test]
-    fn gc_records_project_bound_actual_removals_and_no_previews() {
-        use provenant_records::custody::{RemovalOutcome, SubjectKind};
+    fn gc_reports_keep_retirement_projections_and_never_infer_them_from_removed_rows() {
+        use provenant_records::custody::{
+            LandingPredicate, LandingSource, RefEndpoint, RefOrigin, RefOwnership, RemovalOutcome,
+            SubjectKind,
+        };
         let project = provenant_core::ProjectId::from_bytes([9; 16]);
         let tip = GitOid::parse(&"a1".repeat(20)).unwrap();
-        let target = (
-            "refs/remotes/origin/main".to_owned(),
-            GitOid::parse(&"b2".repeat(20)).unwrap(),
-        );
         let lane = worktrees::WorktreeInfo {
             warnings: Vec::new(),
             path: PathBuf::from("/repo/.worktrees/topic"),
@@ -2101,38 +2151,36 @@ mod gc_preview_tests {
         let mut report = worktrees::WorktreeGcReport::default();
         report.worktrees.removed.push(lane.clone());
         report.worktrees.pruned_refs.push("topic".into());
-        append_gc_removal_records(&mut report, project, Some(&target));
-        assert_eq!(report.removals.len(), 2);
-        assert!(
-            report
-                .removals
-                .iter()
-                .all(|record| record.project == project)
-        );
-        let worktree = report
-            .removals
-            .iter()
-            .find(|record| record.subject.kind == SubjectKind::Worktree)
-            .unwrap();
-        assert_eq!(worktree.subject.id, "/repo/.worktrees/topic");
-        assert_eq!(worktree.tip, tip);
-        let branch = report
-            .removals
-            .iter()
-            .find(|record| record.subject.kind == SubjectKind::Branch)
-            .unwrap();
-        assert_eq!(branch.subject.id, "refs/heads/topic");
-        let expected_source = provenant_records::custody::LandingSource::IntegrationTarget {
-            reference: target.0.clone(),
-            commit: target.1,
+        append_gc_removal_records(&mut report);
+        assert!(report.removals.is_empty());
+
+        let projection = RemovalRecord {
+            project,
+            subject: Subject::new(SubjectKind::Worktree, "/repo/.worktrees/topic"),
+            tip,
+            outcome: RemovalOutcome::Removed {
+                evidence: provenant_records::custody::RemovalEvidence::Landing {
+                    evidence: LandedEvidence {
+                        predicate: LandingPredicate::Landed,
+                        source: LandingSource::IntegrationTarget {
+                            reference: "refs/remotes/origin/main".into(),
+                            commit: GitOid::parse(&"b2".repeat(20)).unwrap(),
+                        },
+                    },
+                },
+                retirement_id: "retirement-1".into(),
+            },
         };
-        assert!(report.removals.iter().all(|record| match &record.outcome {
-            RemovalOutcome::Removed { evidence } => {
-                evidence.predicate == provenant_records::custody::LandingPredicate::Landed
-                    && evidence.source == expected_source
-            }
-            RemovalOutcome::Kept { .. } => false,
-        }));
+        report.refs.push(
+            provenant_confinement::worktrees::ArtefactOutcome::new(
+                provenant_confinement::worktrees::Artefact::LocalBranch,
+                "refs/heads/topic",
+                provenant_confinement::worktrees::ArtefactState::Removed,
+            )
+            .with_removal(projection.clone()),
+        );
+        append_gc_removal_records(&mut report);
+        assert_eq!(report.removals, vec![projection]);
 
         let mut preview = worktrees::WorktreeGcReport {
             dry_run: true,
@@ -2140,17 +2188,19 @@ mod gc_preview_tests {
         };
         preview.worktrees.removed.push(lane);
         preview.worktrees.pruned_refs.push("topic".into());
-        append_gc_removal_records(&mut preview, project, Some(&target));
+        append_gc_removal_records(&mut preview);
         assert!(preview.removals.is_empty());
 
         let mut output = GcData::default();
         output.worktree_cleanup.push(report);
-        assert_eq!(
-            serde_json::to_value(gc_result_data(&output, false)).unwrap()["removal_records"]
+        let expected = serde_json::to_value(&projection).unwrap();
+        let records = serde_json::to_value(gc_result_data(&output, false)).unwrap();
+        assert!(
+            records["removal_records"]
                 .as_array()
                 .unwrap()
-                .len(),
-            2
+                .iter()
+                .any(|record| record == &expected),
         );
     }
 
@@ -2310,6 +2360,7 @@ mod gc_preview_tests {
 #[cfg(test)]
 mod gc_subpass_removal_tests {
     use super::*;
+    use provenant_records::custody::{RefEndpoint, RefOrigin, RefOwnership};
 
     #[test]
     fn actual_gc_lifts_unsettled_branch_removal_and_preview_keeps_none() {
@@ -2322,11 +2373,21 @@ mod gc_subpass_removal_tests {
                 commit: GitOid::parse(&"b2".repeat(20)).unwrap(),
             },
         };
+        let reference = RefOwnership {
+            repository: project,
+            endpoint: RefEndpoint::Local,
+            reference: "refs/heads/topic".into(),
+            generation: 1,
+            origin: RefOrigin::Created,
+        };
         let record = RemovalRecord {
             project,
-            subject: Subject::new(SubjectKind::Branch, "refs/heads/topic"),
+            subject: reference.custody_subject().unwrap(),
             tip,
-            outcome: provenant_records::custody::RemovalOutcome::Removed { evidence },
+            outcome: provenant_records::custody::RemovalOutcome::Removed {
+                evidence: provenant_records::custody::RemovalEvidence::Landing { evidence },
+                retirement_id: "retirement-1".into(),
+            },
         };
 
         let mut applied = worktrees::WorktreeGcReport::default();

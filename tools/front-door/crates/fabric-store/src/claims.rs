@@ -92,6 +92,15 @@ fn read(
     {
         return Err(Error::Invalid("custody schema version"));
     }
+    if let Some(record) = &record
+        && let CustodyState::Retired { retirement_id } = &record.state
+    {
+        let retirement = read_retirement(db, project, retirement_id)?
+            .ok_or(Error::Invalid("orphan retirement state"))?;
+        if !retirement.owns_subject(&record.subject) {
+            return Err(Error::Invalid("retirement subject mismatch"));
+        }
+    }
     Ok(record)
 }
 fn save(db: &rusqlite::Connection, record: &CustodyRecord) -> Result<()> {
@@ -100,6 +109,127 @@ fn save(db: &rusqlite::Connection, record: &CustodyRecord) -> Result<()> {
     db.execute("INSERT INTO custody(project,kind,subject,state,holder,chair,record) VALUES(?1,?2,?3,?4,?5,?6,?7)
         ON CONFLICT(project,kind,subject) DO UPDATE SET state=excluded.state,holder=excluded.holder,chair=excluded.chair,record=excluded.record",
         params![record.project.to_string(), record.subject.kind.as_str(), record.subject.id, record.state.kind().as_str(), holder_key(&record.holder)?, chair, bytes])?;
+    Ok(())
+}
+fn read_retirement(
+    db: &rusqlite::Connection,
+    project: ProjectId,
+    id: &str,
+) -> Result<Option<RetirementRecord>> {
+    let raw: Option<Vec<u8>> = db
+        .query_row(
+            "SELECT substr(record,1,?3) FROM retirements WHERE project=?1 AND id=?2",
+            params![project.to_string(), id, MAX_RECORD_READ_BYTES],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let record = raw.as_deref().map(decode::<RetirementRecord>).transpose()?;
+    if let Some(record) = &record {
+        if record.project != project || record.id != id {
+            return Err(Error::Invalid("retirement record identity"));
+        }
+        validate_retirement_identity(record)?;
+    }
+    Ok(record)
+}
+fn validate_retirement_identity(record: &RetirementRecord) -> Result<()> {
+    text(&record.id, "retirement id")?;
+    let identity = RetirementRecord::identity(
+        record.project,
+        &record.related_subjects,
+        &record.reference,
+        record.expected_tip,
+        &record.decision,
+    )
+    .map_err(Error::Encode)?;
+    let expected_subject = record.reference.custody_subject().map_err(Error::Encode)?;
+    let expected_steps = RetirementStep::for_subjects(&record.related_subjects);
+    if record.id != identity
+        || record.schema_version != 2
+        || record.revision == 0
+        || record.related_subjects.windows(2).any(|subjects| {
+            (subjects[0].kind.as_str(), &subjects[0].id)
+                >= (subjects[1].kind.as_str(), &subjects[1].id)
+        })
+        || record.reference.identity.repository != record.project
+        || record.reference.generation == 0
+        || record.subject != expected_subject
+        || record.related_subjects.iter().any(|subject| {
+            let path = std::path::Path::new(&subject.id);
+            subject.kind != SubjectKind::Worktree
+                || subject.id.is_empty()
+                || subject.id.len() > 4096
+                || subject.id.chars().any(char::is_control)
+                || !path.is_absolute()
+                || path
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+                || subject == &record.subject
+        })
+        || record.outcomes.len() != expected_steps.len()
+        || record
+            .outcomes
+            .iter()
+            .zip(&expected_steps)
+            .any(|(outcome, expected)| &outcome.step != expected)
+        || record.outcomes.iter().any(|outcome| {
+            !matches!(&outcome.state, RetirementStepState::Pending)
+                && !outcome.step.prerequisites_complete(&record.outcomes)
+        })
+        || record.outcomes.iter().any(|outcome| {
+            matches!(
+                &outcome.state,
+                RetirementStepState::Completed { evidence }
+                    if !outcome
+                        .step
+                        .accepts_completion_evidence(record.decision.evidence(), evidence)
+            )
+        })
+    {
+        return Err(Error::Invalid("retirement record"));
+    }
+    Ok(())
+}
+fn validate_retirement(record: &RetirementRecord) -> Result<()> {
+    validate_retirement_identity(record)?;
+    if record.revision != 1
+        || record
+            .outcomes
+            .iter()
+            .any(|outcome| !matches!(&outcome.state, RetirementStepState::Pending))
+    {
+        return Err(Error::Invalid("retirement record"));
+    }
+    Ok(())
+}
+fn retirement_authority(decision: &RetirementDecision) -> ActorId {
+    match decision {
+        RetirementDecision::Discard { authority, .. } => *authority,
+    }
+}
+fn same_retirement_intent(existing: &RetirementRecord, requested: &RetirementRecord) -> bool {
+    existing.schema_version == requested.schema_version
+        && existing.id == requested.id
+        && existing.project == requested.project
+        && existing.subject == requested.subject
+        && existing.related_subjects == requested.related_subjects
+        && existing.reference == requested.reference
+        && existing.expected_tip == requested.expected_tip
+        && existing.decision == requested.decision
+}
+fn save_retirement(db: &rusqlite::Connection, record: &RetirementRecord) -> Result<()> {
+    validate_retirement(record)?;
+    db.execute(
+        "INSERT INTO retirements(project,id,revision,kind,subject,record) VALUES(?1,?2,?3,?4,?5,?6)",
+        params![
+            record.project.to_string(),
+            record.id,
+            i64::try_from(record.revision).map_err(|_| Error::Invalid("retirement revision"))?,
+            record.subject.kind.as_str(),
+            record.subject.id,
+            encode(record)?,
+        ],
+    )?;
     Ok(())
 }
 fn changed(
@@ -129,6 +259,161 @@ fn changed(
     Ok(())
 }
 impl HostStore {
+    /// Read the single custody-owned retirement authority record for recovery.
+    pub fn retirement(
+        &self,
+        project: ProjectId,
+        id: &str,
+        request: &Request<'_>,
+    ) -> Result<Option<RetirementRecord>> {
+        request.check()?;
+        read_retirement(&self.0.db, project, id)
+    }
+
+    /// Start a durable, resumable retirement and point custody at its owner in
+    /// the same transaction. The host adapter resolves authority from trusted
+    /// host identity before calling; a repeated identical request is idempotent.
+    pub fn start_retirement(
+        &self,
+        record: &RetirementRecord,
+        request: &Request<'_>,
+    ) -> Result<RetirementRecord> {
+        validate_retirement(record)?;
+        let mut subjects = Vec::with_capacity(record.related_subjects.len() + 1);
+        subjects.push(canonical(&record.subject)?);
+        subjects.extend(
+            record
+                .related_subjects
+                .iter()
+                .map(canonical)
+                .collect::<Result<Vec<_>>>()?,
+        );
+        if subjects[0] != record.subject || subjects[1..] != record.related_subjects {
+            return Err(Error::Invalid("canonical retirement subjects"));
+        }
+        if subjects
+            .iter()
+            .enumerate()
+            .any(|(index, subject)| subjects[..index].contains(subject))
+        {
+            return Err(Error::Invalid("duplicate retirement subject"));
+        }
+        if let Some(existing) = self.retirement(record.project, &record.id, request)? {
+            return if same_retirement_intent(&existing, record) {
+                Ok(existing)
+            } else {
+                Err(Error::Conflict)
+            };
+        }
+        self.0.write(request, |tx| {
+            if let Some(existing) = read_retirement(tx, record.project, &record.id)? {
+                return if same_retirement_intent(&existing, record) {
+                    Ok(existing)
+                } else {
+                    Err(Error::Conflict)
+                };
+            }
+            let mut custody = Vec::with_capacity(subjects.len());
+            for subject in &subjects {
+                let item = read(tx, record.project, subject)?.ok_or(Error::NotFound)?;
+                match &item.state {
+                    CustodyState::Active | CustodyState::Landed { .. } => {}
+                    _ => return Err(Error::Conflict),
+                }
+                custody.push(item);
+            }
+            save_retirement(tx, record)?;
+            for mut item in custody {
+                item.state = CustodyState::Retired {
+                    retirement_id: record.id.clone(),
+                };
+                item.last_activity = request.clock.wall_now()?;
+                changed(
+                    tx,
+                    &CustodyChange {
+                        record: item,
+                        previous_holder: None,
+                    },
+                    Some(retirement_authority(&record.decision)),
+                )?;
+            }
+            Ok(record.clone())
+        })
+    }
+
+    /// Advance or reopen one step with an optimistic revision check. Completed
+    /// steps are immutable; refused and uncertain work can explicitly resume.
+    pub fn set_retirement_step(
+        &self,
+        project: ProjectId,
+        id: &str,
+        expected_revision: u64,
+        next: RetirementStepOutcome,
+        request: &Request<'_>,
+    ) -> Result<RetirementRecord> {
+        request.check()?;
+        self.0.write(request, |tx| {
+            let mut record = read_retirement(tx, project, id)?.ok_or(Error::NotFound)?;
+            if record.revision != expected_revision {
+                return Err(Error::StaleFence);
+            }
+            let current_index = record
+                .outcomes
+                .iter()
+                .position(|outcome| outcome.step == next.step)
+                .ok_or(Error::Invalid("retirement step"))?;
+            if matches!(
+                &next.state,
+                RetirementStepState::Completed { evidence }
+                    if !next
+                        .step
+                        .accepts_completion_evidence(record.decision.evidence(), evidence)
+            ) {
+                return Err(Error::Invalid("retirement completion evidence"));
+            }
+            if !matches!(&next.state, RetirementStepState::Pending)
+                && !next.step.prerequisites_complete(&record.outcomes)
+            {
+                return Err(Error::Conflict);
+            }
+            let current = &mut record.outcomes[current_index];
+            if current == &next {
+                return Ok(record);
+            }
+            let can_resume = matches!(
+                (&current.state, &next.state),
+                (RetirementStepState::Refused { .. } | RetirementStepState::Unknown { .. }, RetirementStepState::Pending)
+            );
+            let can_finish = matches!(
+                (&current.state, &next.state),
+                (RetirementStepState::Pending | RetirementStepState::Unknown { .. }, RetirementStepState::Completed { .. } | RetirementStepState::Refused { .. } | RetirementStepState::Unknown { .. })
+            );
+            if !can_resume && !can_finish {
+                return Err(Error::Conflict);
+            }
+            *current = next;
+            record.revision = record
+                .revision
+                .checked_add(1)
+                .ok_or(Error::Invalid("retirement revision"))?;
+            validate_retirement_identity(&record)?;
+            let changed = tx.execute(
+                "UPDATE retirements SET revision=?3,record=?4 WHERE project=?1 AND id=?2 AND revision=?5",
+                params![
+                    project.to_string(),
+                    id,
+                    i64::try_from(record.revision).map_err(|_| Error::Invalid("retirement revision"))?,
+                    encode(&record)?,
+                    i64::try_from(expected_revision).map_err(|_| Error::Invalid("retirement revision"))?,
+                ],
+            )?;
+            if changed != 1 {
+                return Err(Error::StaleFence);
+            }
+            Ok(record)
+        })
+    }
+
     pub fn custody_item(
         &self,
         project: ProjectId,
@@ -140,6 +425,51 @@ impl HostStore {
         let subject = canonical(subject)?;
         read(&self.0.db, project, &subject)
     }
+
+    /// Ensure a subject has a custody row, inheriting advisory ownership and
+    /// provenance from an observed related subject only when the target is
+    /// absent. Existing target state is returned unchanged.
+    pub fn ensure_custody_from_existing(
+        &self,
+        project: ProjectId,
+        subject: &Subject,
+        source_subject: &Subject,
+        request: &Request<'_>,
+    ) -> Result<CustodyRecord> {
+        let subject = canonical(subject)?;
+        self.0.write(request, |tx| {
+            if let Some(existing) = read(tx, project, &subject)? {
+                return Ok(existing);
+            }
+            let source_subject = canonical(source_subject)?;
+            if subject == source_subject {
+                return Err(Error::Invalid("custody source subject"));
+            }
+            let source = read(tx, project, &source_subject)?.ok_or(Error::NotFound)?;
+            let record = CustodyRecord {
+                schema_version: 2,
+                subject: subject.clone(),
+                holder: source.holder,
+                project,
+                origin: source.origin,
+                state: CustodyState::Active,
+                last_activity: request.clock.wall_now()?,
+                links: Vec::new(),
+                provenance: source.provenance,
+                extra: Default::default(),
+            };
+            changed(
+                tx,
+                &CustodyChange {
+                    record: record.clone(),
+                    previous_holder: None,
+                },
+                record.holder.actor(),
+            )?;
+            Ok(record)
+        })
+    }
+
     /// Acquire or adopt; another holder is evidence to report, never a lock.
     pub fn acquire_custody(
         &self,
@@ -152,6 +482,12 @@ impl HostStore {
         let subject = canonical(subject)?;
         self.0.write(request, |tx| {
             let previous = read(tx, project, &subject)?;
+            if previous
+                .as_ref()
+                .is_some_and(|old| matches!(&old.state, CustodyState::Retired { .. }))
+            {
+                return Err(Error::Conflict);
+            }
             let previous_holder = previous
                 .as_ref()
                 .filter(|old| old.state.kind() == StateKind::Active && old.holder != *holder)
@@ -244,6 +580,22 @@ impl HostStore {
         let subject = canonical(subject)?;
         self.0.write(request, |tx| {
             let mut record = read(tx, project, &subject)?.ok_or(Error::NotFound)?;
+            if let CustodyState::Retired { retirement_id } = &state {
+                let retirement =
+                    read_retirement(tx, project, retirement_id)?.ok_or(Error::Conflict)?;
+                let can_link = matches!(
+                    &record.state,
+                    CustodyState::Active | CustodyState::Landed { .. }
+                ) || matches!(
+                    &record.state,
+                    CustodyState::Retired { retirement_id: current } if current == retirement_id
+                );
+                if !retirement.owns_subject(&subject) || !can_link {
+                    return Err(Error::Conflict);
+                }
+            } else if matches!(&record.state, CustodyState::Retired { .. }) {
+                return Err(Error::Conflict);
+            }
             if record.state == state {
                 return Ok(record);
             }

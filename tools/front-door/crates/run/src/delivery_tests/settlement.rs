@@ -148,7 +148,7 @@ fn review_delivery_requires_acceptance_and_exact_head()
     let integration = receipt.integration.as_ref().ok_or("integration")?;
     assert_eq!(integration.previous, None);
     assert_eq!(integration.integrated, head);
-    let endpoint = provenant_confinement::worktrees::RefEndpoint::Remote {
+    let endpoint = provenant_records::custody::RefEndpoint::Remote {
         remote: integration.remote.clone(),
         push_url: integration.push_url.clone().ok_or("push URL")?,
     };
@@ -160,10 +160,7 @@ fn review_delivery_requires_acceptance_and_exact_head()
     let owned = ledger
         .load(&endpoint, &reference)?
         .ok_or("pushed ref not recorded")?;
-    assert_eq!(
-        owned.origin,
-        provenant_confinement::worktrees::RefOrigin::Created
-    );
+    assert_eq!(owned.origin, provenant_records::custody::RefOrigin::Created);
     assert_eq!(owned.attempt_id, Some(id));
     assert_eq!(owned.tip, head);
     assert_eq!(

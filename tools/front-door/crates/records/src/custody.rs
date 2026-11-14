@@ -46,7 +46,7 @@ macro_rules! subject_kinds {
     }
 }
 subject_kinds! {
-    Graph => ("graph", false), Attempt => ("attempt", false), Branch => ("branch", false), Worktree => ("worktree", true),
+    Graph => ("graph", false), Attempt => ("attempt", false), Branch => ("branch", false), Ref => ("ref", false), Worktree => ("worktree", true),
     Pr => ("pr", false), Issue => ("issue", false), Path => ("path", true), CloudKey => ("cloud_key", false),
 }
 impl std::fmt::Display for SubjectKind {
@@ -152,6 +152,360 @@ pub struct LandedEvidence {
     pub source: LandingSource,
 }
 
+/// Evidence accepted for a destructive removal. Explicit discard is an
+/// authority choice, not a claim that the subject landed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RemovalEvidence {
+    Landing { evidence: LandedEvidence },
+    ExplicitDiscard,
+}
+
+/// Where a reference lives. Remote delivery is pinned to the push URL bound by
+/// the host; callers never infer it from the remote name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RefEndpoint {
+    Local,
+    Remote { remote: String, push_url: String },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefOrigin {
+    Created,
+    Adopted,
+}
+
+/// Endpoint-qualified identity for one logical reference in a project.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RefEndpointIdentity {
+    Local,
+    Remote {
+        remote: String,
+        push_url_digest: provenant_core::Digest,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RefIdentity {
+    pub repository: ProjectId,
+    pub endpoint: RefEndpointIdentity,
+    pub reference: String,
+}
+
+impl RefIdentity {
+    fn custody_subject(&self, generation: u64) -> Result<Subject, crate::CanonicalError> {
+        let id =
+            crate::CanonicalV1::record_digest("custody-ref-generation", 2, &(self, generation))?
+                .to_string();
+        Ok(Subject::new(SubjectKind::Ref, id))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RefOwnership {
+    pub repository: ProjectId,
+    pub endpoint: RefEndpoint,
+    pub reference: String,
+    pub generation: u64,
+    pub origin: RefOrigin,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RefGeneration {
+    pub identity: RefIdentity,
+    pub generation: u64,
+    pub origin: RefOrigin,
+}
+
+impl RefGeneration {
+    pub fn custody_subject(&self) -> Result<Subject, crate::CanonicalError> {
+        self.identity.custody_subject(self.generation)
+    }
+
+    pub fn matches_ownership(
+        &self,
+        ownership: &RefOwnership,
+    ) -> Result<bool, crate::CanonicalError> {
+        let observed = ownership.generation_identity()?;
+        Ok(self == &observed)
+    }
+}
+
+impl RefOwnership {
+    /// Logical branch custody is an advisory owner source only; endpoint and
+    /// generation identity for retirement comes from `custody_subject`.
+    pub fn logical_branch_subject(&self) -> Option<Subject> {
+        let id = self.reference.strip_prefix("refs/heads/")?;
+        if id.is_empty() || id.len() > 4096 || id.chars().any(char::is_control) {
+            return None;
+        }
+        Some(Subject::new(SubjectKind::Branch, id))
+    }
+
+    pub fn identity(&self) -> Result<RefIdentity, crate::CanonicalError> {
+        let endpoint = match &self.endpoint {
+            RefEndpoint::Local => RefEndpointIdentity::Local,
+            RefEndpoint::Remote { remote, push_url } => RefEndpointIdentity::Remote {
+                remote: remote.clone(),
+                push_url_digest: crate::CanonicalV1::record_digest(
+                    "custody-ref-push-url",
+                    2,
+                    &(self.repository, remote, push_url),
+                )?,
+            },
+        };
+        Ok(RefIdentity {
+            repository: self.repository,
+            endpoint,
+            reference: self.reference.clone(),
+        })
+    }
+
+    pub fn generation_identity(&self) -> Result<RefGeneration, crate::CanonicalError> {
+        Ok(RefGeneration {
+            identity: self.identity()?,
+            generation: self.generation,
+            origin: self.origin,
+        })
+    }
+
+    /// Stable custody identity for one observed generation. Remote URL text
+    /// stays in the live ref ledger and never enters the custody record or key.
+    pub fn custody_subject(&self) -> Result<Subject, crate::CanonicalError> {
+        self.generation_identity()?.custody_subject()
+    }
+}
+
+/// The actor's durable decision. Explicit discard is distinct from a landing
+/// claim and remains fenced by the pinned reference generation and tip.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RetirementDecision {
+    Discard {
+        authority: ActorId,
+        evidence: RemovalEvidence,
+    },
+}
+impl RetirementDecision {
+    pub fn evidence(&self) -> &RemovalEvidence {
+        match self {
+            Self::Discard { evidence, .. } => evidence,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "step", rename_all = "snake_case")]
+pub enum RetirementStep {
+    Worktree { subject: Subject },
+    Reference,
+}
+impl RetirementStep {
+    pub fn for_subjects(subjects: &[Subject]) -> Vec<Self> {
+        subjects
+            .iter()
+            .cloned()
+            .map(|subject| Self::Worktree { subject })
+            .chain(std::iter::once(Self::Reference))
+            .collect()
+    }
+
+    pub fn prerequisites_complete(&self, outcomes: &[RetirementStepOutcome]) -> bool {
+        match self {
+            Self::Worktree { .. } => true,
+            Self::Reference => outcomes
+                .iter()
+                .filter(|outcome| matches!(&outcome.step, Self::Worktree { .. }))
+                .all(|outcome| matches!(&outcome.state, RetirementStepState::Completed { .. })),
+        }
+    }
+
+    /// Worktrees can be discarded once their exact tip is subsumed; deleting
+    /// the reference itself requires a current landed proof.
+    pub fn accepts_completion_evidence(
+        &self,
+        intent: &RemovalEvidence,
+        evidence: &RemovalEvidence,
+    ) -> bool {
+        match evidence {
+            RemovalEvidence::ExplicitDiscard => {
+                matches!(intent, RemovalEvidence::ExplicitDiscard)
+            }
+            RemovalEvidence::Landing { evidence } => match self {
+                Self::Worktree { .. } => matches!(
+                    evidence.predicate,
+                    LandingPredicate::Subsumed | LandingPredicate::Landed
+                ),
+                Self::Reference => evidence.predicate == LandingPredicate::Landed,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RetirementStepState {
+    Pending,
+    Completed { evidence: RemovalEvidence },
+    Refused { reason: String },
+    Unknown { reason: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetirementStepOutcome {
+    pub step: RetirementStep,
+    pub state: RetirementStepState,
+}
+
+/// Custody-owned intent and resumable outcomes for one reference generation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetirementRecord {
+    pub schema_version: u32,
+    pub id: String,
+    pub project: ProjectId,
+    /// The endpoint-qualified reference generation being retired.
+    pub subject: Subject,
+    /// Additional custody subjects retired by this same worktree operation.
+    pub related_subjects: Vec<Subject>,
+    pub reference: RefGeneration,
+    pub expected_tip: provenant_core::GitOid,
+    pub decision: RetirementDecision,
+    pub revision: u64,
+    pub outcomes: Vec<RetirementStepOutcome>,
+}
+
+impl RetirementRecord {
+    fn normalize_subjects(subjects: &[Subject]) -> Vec<Subject> {
+        let mut subjects = subjects.to_vec();
+        subjects.sort_by(|left, right| {
+            (left.kind.as_str(), &left.id).cmp(&(right.kind.as_str(), &right.id))
+        });
+        subjects.dedup();
+        subjects
+    }
+
+    pub fn identity(
+        project: ProjectId,
+        related_subjects: &[Subject],
+        reference: &RefGeneration,
+        expected_tip: provenant_core::GitOid,
+        decision: &RetirementDecision,
+    ) -> Result<String, crate::CanonicalError> {
+        let subject = reference.custody_subject()?;
+        let related_subjects = Self::normalize_subjects(related_subjects);
+        Ok(crate::CanonicalV1::record_digest(
+            "custody-retirement",
+            2,
+            &(
+                project,
+                subject,
+                related_subjects,
+                reference,
+                expected_tip,
+                decision,
+            ),
+        )?
+        .to_string())
+    }
+
+    pub fn plan(
+        project: ProjectId,
+        related_subjects: Vec<Subject>,
+        reference: RefOwnership,
+        expected_tip: provenant_core::GitOid,
+        decision: RetirementDecision,
+    ) -> Result<Self, crate::CanonicalError> {
+        let reference = reference.generation_identity()?;
+        let subject = reference.custody_subject()?;
+        let related_subjects = Self::normalize_subjects(&related_subjects);
+        let id = Self::identity(
+            project,
+            &related_subjects,
+            &reference,
+            expected_tip,
+            &decision,
+        )?;
+        let outcomes = RetirementStep::for_subjects(&related_subjects)
+            .into_iter()
+            .map(|step| RetirementStepOutcome {
+                step,
+                state: RetirementStepState::Pending,
+            })
+            .collect();
+        Ok(Self {
+            schema_version: 2,
+            id,
+            project,
+            subject,
+            related_subjects,
+            reference,
+            expected_tip,
+            decision,
+            revision: 1,
+            outcomes,
+        })
+    }
+
+    fn projection(&self, subject: &Subject) -> RemovalRecord {
+        let projected_step = if subject == &self.subject {
+            RetirementStep::Reference
+        } else {
+            RetirementStep::Worktree {
+                subject: subject.clone(),
+            }
+        };
+        let state = self
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.step == projected_step)
+            .map(|outcome| &outcome.state);
+        let outcome = match (&self.decision, state) {
+            (
+                RetirementDecision::Discard { .. },
+                Some(RetirementStepState::Completed { evidence }),
+            ) => RemovalOutcome::Removed {
+                evidence: evidence.clone(),
+                retirement_id: self.id.clone(),
+            },
+            (RetirementDecision::Discard { .. }, _) => RemovalOutcome::Kept {
+                cause: RemovalUncertainty::RetirementIncomplete,
+            },
+        };
+        RemovalRecord {
+            project: self.project,
+            subject: subject.clone(),
+            tip: self.expected_tip,
+            outcome,
+        }
+    }
+
+    /// Project each affected custody subject into the existing GC report.
+    pub fn removals(&self) -> Vec<RemovalRecord> {
+        std::iter::once(self.projection(&self.subject))
+            .chain(
+                self.related_subjects
+                    .iter()
+                    .map(|subject| self.projection(subject)),
+            )
+            .collect()
+    }
+
+    pub fn removal(&self) -> RemovalRecord {
+        self.projection(&self.subject)
+    }
+
+    pub fn owns_subject(&self, subject: &Subject) -> bool {
+        &self.subject == subject || self.related_subjects.contains(subject)
+    }
+}
+
 macro_rules! removal_uncertainties {
     ($($variant:ident => $wire:literal),+ $(,)?) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,14 +524,20 @@ removal_uncertainties! {
     RewrittenDefaultBranch => "rewritten_default_branch",
     UnprovenLanding => "unproven_landing",
     MissingCommit => "missing_commit",
+    RetirementIncomplete => "retirement_incomplete",
 }
 
 /// The outcome of considering one subject and tip for removal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum RemovalOutcome {
-    Removed { evidence: LandedEvidence },
-    Kept { cause: RemovalUncertainty },
+    Removed {
+        evidence: RemovalEvidence,
+        retirement_id: String,
+    },
+    Kept {
+        cause: RemovalUncertainty,
+    },
 }
 
 /// Evidence emitted by collection for a removed or uncertainty-retained subject.
@@ -195,7 +555,7 @@ pub enum CustodyState {
     Landed {
         evidence: LandedEvidence,
     },
-    /// Points at `landing::RetirementRecord::id`, which owns the decision and step outcomes.
+    /// Points at this module's durable custody-owned retirement record.
     Retired {
         retirement_id: String,
     },
@@ -304,6 +664,58 @@ pub struct CustodyStatus {
 mod tests {
     use super::*;
     #[test]
+    fn ref_custody_subject_binds_endpoint_reference_and_generation_without_exposing_url() {
+        let project = ProjectId::from_bytes([9; 16]);
+        let local = RefOwnership {
+            repository: project,
+            endpoint: RefEndpoint::Local,
+            reference: "refs/heads/topic".into(),
+            generation: 1,
+            origin: RefOrigin::Created,
+        };
+        let remote = RefOwnership {
+            endpoint: RefEndpoint::Remote {
+                remote: "origin".into(),
+                push_url: "ssh://example.invalid/team/repo.git".into(),
+            },
+            ..local.clone()
+        };
+        let another_generation = RefOwnership {
+            generation: 2,
+            ..remote.clone()
+        };
+        let another_remote = RefOwnership {
+            endpoint: RefEndpoint::Remote {
+                remote: "backup".into(),
+                push_url: "ssh://backup.invalid/team/repo.git".into(),
+            },
+            ..remote.clone()
+        };
+        let local_subject = local.custody_subject().unwrap();
+        let remote_subject = remote.custody_subject().unwrap();
+        assert_eq!(local_subject.kind, SubjectKind::Ref);
+        assert_eq!(
+            local.logical_branch_subject(),
+            remote.logical_branch_subject()
+        );
+        assert_ne!(local_subject, remote_subject);
+        assert_ne!(
+            remote_subject,
+            another_generation.custody_subject().unwrap()
+        );
+        assert_ne!(remote_subject, another_remote.custody_subject().unwrap());
+        let RefEndpoint::Remote { push_url, .. } = &remote.endpoint else {
+            unreachable!()
+        };
+        assert!(!remote_subject.id.contains(&push_url));
+        assert!(
+            !serde_json::to_string(&remote.generation_identity().unwrap())
+                .unwrap()
+                .contains(&push_url)
+        );
+    }
+
+    #[test]
     fn removal_records_round_trip_every_predicate_source_and_uncertainty() {
         let oid = provenant_core::GitOid::parse(&"a".repeat(40)).unwrap();
         let target = provenant_core::GitOid::parse(&"b".repeat(40)).unwrap();
@@ -335,17 +747,40 @@ mod tests {
                     subject: Subject::new(SubjectKind::Worktree, "feature"),
                     tip: oid,
                     outcome: RemovalOutcome::Removed {
-                        evidence: LandedEvidence {
-                            predicate,
-                            source: source.clone(),
+                        evidence: RemovalEvidence::Landing {
+                            evidence: LandedEvidence {
+                                predicate,
+                                source: source.clone(),
+                            },
                         },
+                        retirement_id: "retirement-test".into(),
                     },
                 };
                 let encoded = serde_json::to_vec(&record).unwrap();
                 let decoded: RemovalRecord = serde_json::from_slice(&encoded).unwrap();
                 assert_eq!(decoded, record);
+                let mut without_owner = serde_json::to_value(&record).unwrap();
+                without_owner["outcome"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("retirement_id");
+                assert!(serde_json::from_value::<RemovalRecord>(without_owner).is_err());
             }
         }
+        let explicit = RemovalRecord {
+            project,
+            subject: Subject::new(SubjectKind::Worktree, "feature"),
+            tip: oid,
+            outcome: RemovalOutcome::Removed {
+                evidence: RemovalEvidence::ExplicitDiscard,
+                retirement_id: "retirement-explicit".into(),
+            },
+        };
+        let encoded = serde_json::to_vec(&explicit).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<RemovalRecord>(&encoded).unwrap(),
+            explicit
+        );
         for &cause in RemovalUncertainty::ALL {
             let record = RemovalRecord {
                 project,

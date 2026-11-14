@@ -817,74 +817,6 @@ pub struct LandingRecord {
     pub passes: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum RetirementEndpoint {
-    Local,
-    Remote { remote: String, push_url: String },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RetirementOrigin {
-    Created,
-    Adopted,
-}
-
-/// Value-shape mirror of confinement::worktrees::RefOwnership; deliberately independent.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RetirementRef {
-    pub repository: String,
-    pub endpoint: RetirementEndpoint,
-    pub reference: String,
-    pub generation: u64,
-    pub origin: RetirementOrigin,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RetirementAction {
-    #[default]
-    Preserve,
-    Discard,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RetirementDecision {
-    pub authority: String,
-    pub reason: String,
-    pub action: RetirementAction,
-    pub decided_at: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum RetirementStepState {
-    Pending,
-    Completed { detail: Option<String> },
-    Refused { reason: String },
-    Unknown { reason: String },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RetirementStepOutcome {
-    pub step: String,
-    pub state: RetirementStepState,
-}
-
-/// Durable intent and per-step outcome retained independently of the ref ledger.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RetirementRecord {
-    pub schema_version: u32,
-    pub id: String,
-    pub reference: RetirementRef,
-    pub expected_tip: String,
-    pub decision: RetirementDecision,
-    pub recovery_reference: Option<String>,
-    pub revision: u64,
-    pub outcomes: Vec<RetirementStepOutcome>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1006,36 +938,7 @@ mod tests {
     }
 
     #[test]
-    fn retirement_and_pending_observation_roundtrip() -> Result<(), serde_json::Error> {
-        let record = RetirementRecord {
-            schema_version: 2,
-            id: "retirement".into(),
-            reference: RetirementRef {
-                repository: "repo".into(),
-                endpoint: RetirementEndpoint::Remote {
-                    remote: "origin".into(),
-                    push_url: "https://example.invalid/repo".into(),
-                },
-                reference: "refs/heads/work".into(),
-                generation: 7,
-                origin: RetirementOrigin::Created,
-            },
-            expected_tip: "tip".into(),
-            decision: RetirementDecision {
-                authority: "owner-decision".into(),
-                reason: "finished".into(),
-                action: RetirementAction::default(),
-                decided_at: "2026-11-14T00:00:00Z".into(),
-            },
-            recovery_reference: None,
-            revision: 1,
-            outcomes: vec![RetirementStepOutcome {
-                step: "worktree".into(),
-                state: RetirementStepState::Pending,
-            }],
-        };
-        let decoded: RetirementRecord = serde_json::from_slice(&serde_json::to_vec(&record)?)?;
-        assert_eq!(decoded, record);
+    fn pending_observation_roundtrip() -> Result<(), serde_json::Error> {
         let observation = ForgeObservation::Pending {
             pending: PendingState::AwaitingChecks,
         };

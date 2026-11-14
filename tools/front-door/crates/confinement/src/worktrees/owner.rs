@@ -2,6 +2,7 @@
 //! GC consumers must still prove clean/merged state and acquire custody.
 use super::*;
 use provenant_core::{AttemptId, HostId, OperationId, WallTime};
+use provenant_records::custody::{RetirementStep, RetirementStepState};
 
 const OWNER: &str = "provenant-owner.json";
 
@@ -319,8 +320,11 @@ pub fn prune_owned(
     head: GitOid,
     upstream: GitOid,
     policy: &WorktreeGcPolicy<'_>,
+    retirement: &dyn RetirementPort,
+    mut record: provenant_records::custody::RetirementRecord,
+    evidence: &provenant_records::custody::LandedEvidence,
     cancel: &CancelToken,
-) -> Result<RemoveOutcome, WorktreeError> {
+) -> Result<(RemoveOutcome, provenant_records::custody::RetirementRecord), WorktreeError> {
     let verified = verify_worktree(context.repo, path)?;
     let owner = load_owner(&verified)?.ok_or(WorktreeError::UnknownWriter)?;
     let relative = path
@@ -330,13 +334,6 @@ pub fn prune_owned(
     if owner.origin != WorktreeOrigin::Lane || owner.attempt_id != Some(attempt) || !managed {
         return Err(WorktreeError::UnknownWriter);
     }
-    let delivered = LandingTarget {
-        reference: None,
-        tip: upstream,
-    };
-    if !landed::landed_on(context, head, &delivered, cancel)? {
-        return Err(WorktreeError::InvalidRequest);
-    }
     let lanes = list_for_gc_matching(context, cancel, |candidate, _| candidate == path)?
         .into_iter()
         .filter(|lane| lane.path == path && lane.head == head)
@@ -344,55 +341,102 @@ pub fn prune_owned(
     if lanes.len() != 1 {
         return Err(WorktreeError::IdentityChanged);
     }
+    let canonical = canonicalize(path)?;
+    let Some(worktree_path) = canonical.to_str() else {
+        return Err(WorktreeError::InvalidRequest);
+    };
+    let worktree_subject =
+        provenant_records::custody::Subject::new(SubjectKind::Worktree, worktree_path);
+    let reference = owner
+        .reference
+        .as_ref()
+        .ok_or(WorktreeError::UnknownWriter)?;
+    let branch =
+        GitRefName::new(&reference.reference).map_err(|_| WorktreeError::InvalidRequest)?;
+    if reference.repository != context.binding.project_id()
+        || reference.endpoint != RefEndpoint::Local
+        || reference.origin != RefOrigin::Created
+        || branch.short_name() != owner.branch
+        || record.project != context.binding.project_id()
+        || record.subject
+            != reference
+                .custody_subject()
+                .map_err(|_| WorktreeError::InvalidRequest)?
+        || record.related_subjects.len() != 1
+        || record.related_subjects.first() != Some(&worktree_subject)
+        || !record
+            .reference
+            .matches_ownership(reference)
+            .map_err(|_| WorktreeError::InvalidRequest)?
+        || record.expected_tip != head
+        || !matches!(
+            record.decision.evidence(),
+            provenant_records::custody::RemovalEvidence::Landing { .. }
+        )
+    {
+        return Err(WorktreeError::IdentityChanged);
+    }
+    let completion = provenant_records::custody::RemovalEvidence::Landing {
+        evidence: evidence.clone(),
+    };
+    let worktree_step = RetirementStep::Worktree {
+        subject: worktree_subject.clone(),
+    };
+    if record.outcomes.iter().any(|outcome| {
+        outcome.step == worktree_step
+            && matches!(&outcome.state, RetirementStepState::Completed { .. })
+    }) {
+        return Err(WorktreeError::RegistrationUnconfirmed);
+    }
+    if !worktree_step.accepts_completion_evidence(record.decision.evidence(), &completion)
+        || !super::gc::verify_retirement_landing_evidence(
+            context, head, upstream, evidence, cancel,
+        )?
+    {
+        return Err(WorktreeError::InvalidRequest);
+    }
     // This pass only cleans declared output; final removal is separately
     // fenced below, after rechecking ownership, ancestry and exact HEAD.
     let output_policy = WorktreeGcPolicy {
         upstream: None,
         ..*policy
     };
-    collect_lazy(context, &lanes, &output_policy, cancel)?;
+    collect_lazy(
+        context,
+        &lanes,
+        &output_policy,
+        RetirementMode::Observe,
+        cancel,
+    )?;
     let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
     let entries = context.facts.read_inventory(context, cancel)?;
     let entry = entries
         .iter()
         .find(|entry| canonicalize(&entry.path).ok().as_deref() == Some(path))
         .ok_or(WorktreeError::NotFound)?;
-    let branch = entry.branch.as_ref().ok_or(WorktreeError::InvalidRequest)?;
-    if branch.as_str() != format!("refs/heads/{}", owner.branch)
+    let entry_branch = entry.branch.as_ref().ok_or(WorktreeError::InvalidRequest)?;
+    if entry_branch != &branch
         || entry.head != head
-        || !landed::landed_on(context, head, &delivered, cancel)?
+        || created_branch(context, &branch, Some(reference))
+            .is_none_or(|current| current.ownership() != *reference)
     {
         return Err(WorktreeError::IdentityChanged);
     }
-    // A pushed lane ref or an open PR is not an integration target. Its
-    // worktree can be pruned while the local ref remains for landing and GC.
-    let disposition = match policy.upstream {
-        Some(integration)
-            if landed::landed_on(
-                context,
-                head,
-                &LandingTarget {
-                    reference: None,
-                    tip: integration,
-                },
-                cancel,
-            )? =>
-        {
-            Disposition::Merged
-        }
+    let disposition = match (policy.upstream, &evidence.predicate, &evidence.source) {
+        (
+            Some(integration),
+            provenant_records::custody::LandingPredicate::Landed,
+            provenant_records::custody::LandingSource::IntegrationTarget { commit, .. },
+        ) if integration == *commit && integration == upstream => Disposition::Merged,
         _ => Disposition::Keep(RetainReason::NotMerged),
     };
-    // Only a branch the ledger records as created, at the generation this
-    // owner links, may be deleted; an adopted or unobserved one is kept.
-    let disposition = match disposition {
-        Disposition::Merged
-            if created_branch(context, branch, owner.reference.as_ref()).is_none() =>
-        {
-            Disposition::Keep(RetainReason::NotCreated)
-        }
-        other => other,
+    let settings = provenant_config::ProjectGcSettings {
+        regenerable: policy.regenerable.to_vec(),
+        keep: policy.keep.to_vec(),
+        ..Default::default()
     };
-    let removed = remove_tree_when(
+    let mut predelete_ready = false;
+    let removed_result = remove_tree_when_before_delete(
         context,
         entry,
         head,
@@ -408,22 +452,101 @@ pub fn prune_owned(
             .then_some(())
             .ok_or(WorktreeError::UnknownWriter)
         },
-        Some(&provenant_config::ProjectGcSettings {
-            regenerable: policy.regenerable.to_vec(),
-            keep: policy.keep.to_vec(),
-            ..Default::default()
-        }),
+        Some(&settings),
         Repository::Held,
-    )?;
+        |verified, canonical| {
+            if canonical != path || load_owner(verified)?.as_ref() != Some(&owner) {
+                return Err(WorktreeError::IdentityChanged);
+            }
+            let current = created_branch(context, &branch, Some(reference))
+                .ok_or(WorktreeError::RegistrationUnconfirmed)?;
+            if current.ownership() != *reference
+                || read_branch_tips(context, cancel)?.get(&branch) != Some(&head)
+                || !super::gc::verify_retirement_landing_evidence(
+                    context, head, upstream, evidence, cancel,
+                )?
+            {
+                return Err(WorktreeError::IdentityChanged);
+            }
+            record =
+                super::gc::prepare_retirement_step(retirement, &record, worktree_step.clone())?;
+            predelete_ready = true;
+            Ok(())
+        },
+    );
+    let removed = match removed_result {
+        Ok(removed) => removed,
+        Err(error) => {
+            if predelete_ready {
+                super::gc::update_retirement_step(
+                    retirement,
+                    &record,
+                    worktree_step,
+                    RetirementStepState::Unknown {
+                        reason: error.to_string(),
+                    },
+                )?;
+            } else {
+                super::gc::update_retirement_step(
+                    retirement,
+                    &record,
+                    worktree_step,
+                    RetirementStepState::Refused {
+                        reason: error.to_string(),
+                    },
+                )?;
+            }
+            return Err(error);
+        }
+    };
     let mut result = RemoveOutcome::default();
     result.removed.push(removed.info.clone());
-    if let Err(error) = settle_branch(context, branch, head, disposition, cancel, &mut result) {
-        retain(&mut result, branch, retain_reason(&error));
+    record = super::gc::update_retirement_step(
+        retirement,
+        &record,
+        worktree_step,
+        RetirementStepState::Completed {
+            evidence: completion.clone(),
+        },
+    )?;
+    if matches!(&disposition, Disposition::Merged) {
+        record =
+            super::gc::prepare_retirement_step(retirement, &record, RetirementStep::Reference)?;
+    }
+    if let Err(error) = settle_branch(context, &branch, head, disposition, cancel, &mut result) {
+        retain(&mut result, &branch, retain_reason(&error));
+    }
+    let reference_removed = result
+        .pruned_refs
+        .iter()
+        .any(|name| name == branch.short_name());
+    if reference_removed {
+        record = super::gc::update_retirement_step(
+            retirement,
+            &record,
+            RetirementStep::Reference,
+            RetirementStepState::Completed {
+                evidence: completion,
+            },
+        )?;
+    } else if matches!(disposition, Disposition::Merged) {
+        let reason = result
+            .retained
+            .iter()
+            .find(|retained| retained.branch == branch)
+            .map(|retained| format!("reference removal incomplete: {:?}", retained.reason))
+            .unwrap_or_else(|| "reference removal outcome was not recorded".into());
+        record = super::gc::update_retirement_step(
+            retirement,
+            &record,
+            RetirementStep::Reference,
+            RetirementStepState::Unknown { reason },
+        )?;
     }
     if let Some(cache) = removed.lane_cache.as_deref()
         && let Err(error) = crate::cache::prune_worktree_cargo_cache(context.home, cache)
     {
         warn_cache_removal(&error);
     }
-    Ok(result)
+    Ok((result, record))
 }

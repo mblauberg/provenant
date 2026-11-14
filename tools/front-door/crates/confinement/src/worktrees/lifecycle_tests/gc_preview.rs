@@ -28,6 +28,7 @@ fn gc_lazy_inventory_still_refuses_a_dirty_candidate() -> Result<(), Box<dyn Err
             dry_run: true,
             foreign_merged_clean: false,
         },
+        RetirementMode::Observe,
         &cancel(),
     )?;
     assert!(
@@ -99,6 +100,7 @@ fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dy
             dry_run: false,
             foreign_merged_clean: false,
         },
+        RetirementMode::Observe,
         &cancel(),
     )?;
     assert!(git.rejected.load(Ordering::SeqCst) > 0);
@@ -145,6 +147,7 @@ fn gc_lazy_candidate_never_runs_nested_git_filters() -> Result<(), Box<dyn Error
             dry_run: true,
             foreign_merged_clean: false,
         },
+        RetirementMode::Observe,
         &cancel(),
     )?;
     assert!(!marker.exists());
@@ -256,6 +259,7 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
                 dry_run: matches!(scenario, "preview" | "no-output" | "unconfigured"),
                 foreign_merged_clean: false,
             },
+            RetirementMode::Observe,
             &cancel(),
         )?;
         assert!(path.is_dir(), "{scenario}");
@@ -340,7 +344,13 @@ fn gc_native_output_preview_creates_no_writer_state() -> Result<(), Box<dyn Erro
             dry_run: true,
             foreign_merged_clean: false,
         };
-        let preview = collect(&context, &lanes, &policy, &cancel())?;
+        let preview = collect(
+            &context,
+            &lanes,
+            &policy,
+            RetirementMode::Observe,
+            &cancel(),
+        )?;
         assert_eq!(preview.idle_output.len(), 1);
         assert_eq!(preview.idle_output[0].reason, "would_remove");
         assert!(path.join("target/artifact").is_file());
@@ -353,6 +363,7 @@ fn gc_native_output_preview_creates_no_writer_state() -> Result<(), Box<dyn Erro
                 dry_run: false,
                 ..policy
             },
+            RetirementMode::Observe,
             &cancel(),
         )?;
         assert_eq!(applied.idle_output.len(), 1);
@@ -571,7 +582,13 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
         dry_run: false,
         foreign_merged_clean: false,
     };
-    collect(&context, &lanes, &policy, &cancel())?;
+    collect(
+        &context,
+        &lanes,
+        &policy,
+        RetirementMode::Observe,
+        &cancel(),
+    )?;
     assert!(path.join("target/artifact").is_file());
     assert_eq!(
         fs::read_to_string(path.join("uncommitted"))?,
@@ -753,6 +770,7 @@ fn writer_lock_busy_is_distinct_from_observed_live_process() -> Result<(), Box<d
             dry_run: true,
             foreign_merged_clean: false,
         },
+        RetirementMode::Observe,
         &cancel(),
     )?;
     assert!(
@@ -777,13 +795,17 @@ fn writer_lock_busy_is_distinct_from_observed_live_process() -> Result<(), Box<d
 }
 
 #[test]
-fn foreign_gc_removes_recent_declared_output() -> Result<(), Box<dyn Error>> {
+fn foreign_gc_retains_unowned_worktree_with_typed_retirement_outcome() -> Result<(), Box<dyn Error>>
+{
     let fixture = Fixture::new()?;
     fs::write(fixture.root.join(".gitignore"), "target/\n")?;
     fixture.run(&["add", ".gitignore"])?;
     fixture.run(&["commit", "-m", "ignore output"])?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
+    let retirement = HostRetirementFixture::new(&test)?;
+    let upstream = fixture.head()?;
+    let evidence = gc_landing_evidence(&fixture, upstream)?;
     let path = fixture._temp.path().join("foreign");
     fixture.run(&[
         "worktree",
@@ -799,7 +821,7 @@ fn foreign_gc_removes_recent_declared_output() -> Result<(), Box<dyn Error>> {
         &context,
         &lanes,
         &WorktreeGcPolicy {
-            upstream: Some(fixture.head()?),
+            upstream: Some(upstream),
             terminal: &|_| false,
             no_live_lanes: &|_| true,
             regenerable: &["target".into()],
@@ -808,11 +830,25 @@ fn foreign_gc_removes_recent_declared_output() -> Result<(), Box<dyn Error>> {
             dry_run: false,
             foreign_merged_clean: true,
         },
+        retirement.apply(&evidence),
         &cancel(),
     )?;
-    assert_eq!(report.worktrees.removed.len(), 1);
-    assert!(!path.exists());
-    assert!(!branch_exists(&fixture, "foreign"));
+    let subject = provenant_records::custody::Subject::new(
+        provenant_records::custody::SubjectKind::Worktree,
+        std::fs::canonicalize(&path)?.to_string_lossy().into_owned(),
+    );
+    assert!(report.removals.iter().any(|removal| {
+        removal.subject == subject
+            && matches!(
+                &removal.outcome,
+                provenant_records::custody::RemovalOutcome::Kept {
+                    cause: provenant_records::custody::RemovalUncertainty::RetirementIncomplete
+                }
+            )
+    }));
+    assert!(path.is_dir());
+    assert!(path.join("target/artifact").is_file());
+    assert!(branch_exists(&fixture, "foreign"));
     Ok(())
 }
 

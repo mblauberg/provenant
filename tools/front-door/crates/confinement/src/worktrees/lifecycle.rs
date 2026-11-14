@@ -1045,6 +1045,30 @@ pub(super) fn remove_tree_when(
     output: Option<&provenant_config::ProjectGcSettings>,
     repository: Repository<'_>,
 ) -> Result<RemovedTree, WorktreeError> {
+    remove_tree_when_before_delete(
+        context,
+        entry,
+        expected_head,
+        cancel,
+        eligible,
+        output,
+        repository,
+        |_, _| Ok(()),
+    )
+}
+
+/// The same fenced removal core with one durable-authority callback after the
+/// final worktree and repository checks and immediately before Git mutation.
+pub(super) fn remove_tree_when_before_delete(
+    context: &WorktreeContext<'_>,
+    entry: &GitWorktree,
+    expected_head: GitOid,
+    cancel: &CancelToken,
+    eligible: &dyn Fn() -> Result<(), WorktreeError>,
+    output: Option<&provenant_config::ProjectGcSettings>,
+    repository: Repository<'_>,
+    before_delete: impl FnOnce(&VerifiedWorktree, &Path) -> Result<(), WorktreeError>,
+) -> Result<RemovedTree, WorktreeError> {
     if entry.locked || entry.prunable {
         return Err(WorktreeError::GitEntryHeld {
             locked: entry.locked,
@@ -1114,6 +1138,7 @@ pub(super) fn remove_tree_when(
         }
         WorktreeCleanliness::Unknown => return Err(WorktreeError::UnknownWriter),
     }
+    before_delete(&locked.verified, &canonical)?;
     // A cache that cannot be derived must not block removal; warn and skip it.
     let cargo_cache = crate::permissions::worktree_cargo_cache(context.home, &locked.verified)
         .map_err(|error| warn_cache_removal(&error))

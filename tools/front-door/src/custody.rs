@@ -1,7 +1,7 @@
 //! Command projection and host lifecycle effects for the single custody ledger.
 use crate::{emit, fail, roots};
 use provenant_cli::{Globals, Status};
-use provenant_core::{CancelToken, Roots};
+use provenant_core::{ActorId, CancelToken, Clock, ProjectId, Roots};
 use provenant_fabric_store::{HostStore, Request};
 use provenant_os::clock::SystemClock;
 use provenant_records::{CommandResult, Outcome, custody::*};
@@ -11,6 +11,261 @@ use std::{
     time::{Duration, Instant},
 };
 type Error = Box<dyn std::error::Error>;
+
+/// Host-backed adapter for confinement's retirement port. It opens the one
+/// custody store per operation so every receipt and state transition uses the
+/// current host database revision.
+pub struct RetirementWriter<'a> {
+    store: HostStore,
+    project: ProjectId,
+    actor: ActorId,
+    clock: &'a dyn Clock,
+    cancel: &'a CancelToken,
+}
+
+impl<'a> RetirementWriter<'a> {
+    pub fn open(
+        roots: &'a Roots,
+        project: ProjectId,
+        actor: ActorId,
+        clock: &'a dyn Clock,
+        cancel: &'a CancelToken,
+    ) -> Result<Self, provenant_confinement::worktrees::WorktreeError> {
+        let request = Request { clock, cancel };
+        let store = HostStore::open(&roots.state, &request).map_err(Self::error)?;
+        Ok(Self {
+            store,
+            project,
+            actor,
+            clock,
+            cancel,
+        })
+    }
+
+    fn request(&self) -> Request<'_> {
+        Request {
+            clock: self.clock,
+            cancel: self.cancel,
+        }
+    }
+
+    fn error(
+        error: impl std::error::Error + 'static,
+    ) -> provenant_confinement::worktrees::WorktreeError {
+        provenant_confinement::worktrees::WorktreeError::Retirement(Box::new(error))
+    }
+
+    fn require_project(
+        &self,
+        project: ProjectId,
+    ) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
+        if project == self.project {
+            Ok(())
+        } else {
+            Err(provenant_confinement::worktrees::WorktreeError::InvalidRequest)
+        }
+    }
+
+    fn ensure_ref_subject(
+        store: &HostStore,
+        project: ProjectId,
+        reference: &RefOwnership,
+        related_subjects: &[Subject],
+        request: &Request<'_>,
+    ) -> Result<bool, provenant_confinement::worktrees::WorktreeError> {
+        let subject = reference.custody_subject().map_err(Self::error)?;
+        if store
+            .custody_item(project, &subject, request)
+            .map_err(Self::error)?
+            .is_some()
+        {
+            return Ok(true);
+        }
+
+        let source_subjects = related_subjects
+            .iter()
+            .cloned()
+            .chain(reference.logical_branch_subject())
+            .collect::<Vec<_>>();
+        for source_subject in source_subjects {
+            let Some(source) = store
+                .custody_item(project, &source_subject, request)
+                .map_err(Self::error)?
+            else {
+                continue;
+            };
+            if !matches!(
+                source.state,
+                CustodyState::Active | CustodyState::Landed { .. }
+            ) {
+                continue;
+            }
+            store
+                .ensure_custody_from_existing(project, &subject, &source_subject, request)
+                .map_err(Self::error)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+}
+
+impl provenant_confinement::worktrees::RetirementPort for RetirementWriter<'_> {
+    fn begin_retirement(
+        &self,
+        intent: provenant_confinement::worktrees::RetirementIntent,
+    ) -> Result<Option<RetirementRecord>, provenant_confinement::worktrees::WorktreeError> {
+        self.require_project(intent.project)?;
+        if intent.reference.repository != intent.project {
+            return Err(provenant_confinement::worktrees::WorktreeError::InvalidRequest);
+        }
+        let request = self.request();
+        let subject = intent.reference.custody_subject().map_err(Self::error)?;
+        if let Some(item) = self
+            .store
+            .custody_item(intent.project, &subject, &request)
+            .map_err(Self::error)?
+            && let CustodyState::Retired { retirement_id } = item.state
+        {
+            let record = self
+                .store
+                .retirement(intent.project, &retirement_id, &request)
+                .map_err(Self::error)?
+                .ok_or_else(|| Self::error(provenant_fabric_store::Error::NotFound))?;
+            let mut requested_related = intent.related_subjects.clone();
+            requested_related.sort_by(|left, right| {
+                (left.kind.as_str(), &left.id).cmp(&(right.kind.as_str(), &right.id))
+            });
+            requested_related.dedup();
+            let escalates_landing = matches!(
+                (record.decision.evidence(), &intent.evidence),
+                (
+                    RemovalEvidence::Landing { .. },
+                    RemovalEvidence::ExplicitDiscard
+                )
+            );
+            if record.project != intent.project
+                || record.subject != subject
+                || !requested_related
+                    .iter()
+                    .all(|subject| record.related_subjects.contains(subject))
+                || !record
+                    .reference
+                    .matches_ownership(&intent.reference)
+                    .map_err(Self::error)?
+                || record.expected_tip != intent.expected_tip
+                || escalates_landing
+            {
+                return Err(
+                    provenant_confinement::worktrees::WorktreeError::RegistrationUnconfirmed,
+                );
+            }
+            return Ok(Some(record));
+        }
+
+        if !Self::ensure_ref_subject(
+            &self.store,
+            intent.project,
+            &intent.reference,
+            &intent.related_subjects,
+            &request,
+        )? {
+            return Ok(None);
+        }
+
+        let planned = RetirementRecord::plan(
+            intent.project,
+            intent.related_subjects,
+            intent.reference,
+            intent.expected_tip,
+            RetirementDecision::Discard {
+                authority: self.actor,
+                evidence: intent.evidence,
+            },
+        )
+        .map_err(Self::error)?;
+        self.store
+            .start_retirement(&planned, &request)
+            .map(Some)
+            .map_err(Self::error)
+    }
+
+    fn retirement_for_subject(
+        &self,
+        project: ProjectId,
+        subject: &Subject,
+    ) -> Result<Option<RetirementRecord>, provenant_confinement::worktrees::WorktreeError> {
+        self.require_project(project)?;
+        let request = self.request();
+        let Some(item) = self
+            .store
+            .custody_item(project, subject, &request)
+            .map_err(Self::error)?
+        else {
+            return Ok(None);
+        };
+        let CustodyState::Retired { retirement_id } = item.state else {
+            return Ok(None);
+        };
+        let record = self
+            .store
+            .retirement(project, &retirement_id, &request)
+            .map_err(Self::error)?
+            .ok_or_else(|| Self::error(provenant_fabric_store::Error::NotFound))?;
+        if !record.owns_subject(subject) {
+            return Err(provenant_confinement::worktrees::WorktreeError::RegistrationUnconfirmed);
+        }
+        Ok(Some(record))
+    }
+
+    fn advance_retirement(
+        &self,
+        record: &RetirementRecord,
+        step: RetirementStep,
+        state: RetirementStepState,
+    ) -> Result<RetirementRecord, provenant_confinement::worktrees::WorktreeError> {
+        self.require_project(record.project)?;
+        let request = self.request();
+        self.store
+            .set_retirement_step(
+                record.project,
+                &record.id,
+                record.revision,
+                RetirementStepOutcome { step, state },
+                &request,
+            )
+            .map_err(Self::error)
+    }
+}
+
+/// No-effect port for previews and callers that have no verified evidence.
+/// The confinement boundary treats a missing durable owner as Kept.
+pub(crate) struct PreviewRetirementPort;
+
+impl provenant_confinement::worktrees::RetirementPort for PreviewRetirementPort {
+    fn begin_retirement(
+        &self,
+        _intent: provenant_confinement::worktrees::RetirementIntent,
+    ) -> Result<Option<RetirementRecord>, provenant_confinement::worktrees::WorktreeError> {
+        Ok(None)
+    }
+
+    fn retirement_for_subject(
+        &self,
+        _project: ProjectId,
+        _subject: &Subject,
+    ) -> Result<Option<RetirementRecord>, provenant_confinement::worktrees::WorktreeError> {
+        Ok(None)
+    }
+
+    fn advance_retirement(
+        &self,
+        _record: &RetirementRecord,
+        _step: RetirementStep,
+        _state: RetirementStepState,
+    ) -> Result<RetirementRecord, provenant_confinement::worktrees::WorktreeError> {
+        Err(provenant_confinement::worktrees::WorktreeError::InvalidRequest)
+    }
+}
 
 fn presence(
     record: &CustodyRecord,

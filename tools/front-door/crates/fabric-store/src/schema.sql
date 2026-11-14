@@ -36,6 +36,13 @@ CREATE INDEX custody_state ON custody(state,seq);
 CREATE INDEX custody_holder ON custody(holder,state,seq);
 CREATE INDEX custody_chair ON custody(chair,state,seq);
 CREATE INDEX custody_project ON custody(project,state,seq);
+CREATE TABLE retirements (
+ project TEXT NOT NULL, id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0),
+ kind TEXT NOT NULL, subject TEXT NOT NULL, record BLOB NOT NULL,
+ PRIMARY KEY(project,id),
+ FOREIGN KEY(project,kind,subject) REFERENCES custody(project,kind,subject)
+) STRICT;
+CREATE INDEX retirement_subject ON retirements(project,kind,subject,revision);
 CREATE TABLE coordination_operations (
  project TEXT NOT NULL, id TEXT NOT NULL, actor TEXT NOT NULL,
  request BLOB NOT NULL, result BLOB NOT NULL,
@@ -100,4 +107,4 @@ CREATE INDEX human_hook_pending ON human_answer_outbox(project,
  json_extract(CAST(record AS TEXT),'$.target_actor'), answer
 ) WHERE json_extract(CAST(record AS TEXT),'$.state') IN ('queued','offered')
  AND coalesce(json_extract(CAST(record AS TEXT),'$.error'),'') != 'hook_envelope_too_large';
-PRAGMA user_version=17;
+PRAGMA user_version=18;

@@ -113,6 +113,20 @@ retention_classes! {
         settings: [],
         triggers: NEVER
     },
+    RetirementRecords => {
+        owner: "fabric-store/custody",
+        eligibility: Declared,
+        detail: "durable retirement intent and step outcomes for audit and recovery",
+        settings: [],
+        triggers: NEVER
+    },
+    RefGenerationSequences => {
+        owner: "confinement/worktrees/ref-ledger",
+        eligibility: Declared,
+        detail: "permanent repository ref generation high-water marks",
+        settings: [],
+        triggers: NEVER
+    },
     Staging => {
         owner: "staging_gc",
         eligibility: Declared,

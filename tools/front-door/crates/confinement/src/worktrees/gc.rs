@@ -2,7 +2,8 @@
 use super::*;
 use provenant_os::fs::{FileKind, PayloadTree, entry_names, temporary_name};
 use provenant_records::custody::{
-    RemovalOutcome, RemovalRecord, RemovalUncertainty, Subject, SubjectKind,
+    LandedEvidence, LandingPredicate, LandingSource, RemovalOutcome, RemovalRecord,
+    RemovalUncertainty, RetirementStep, RetirementStepState, Subject, SubjectKind,
 };
 use std::collections::HashSet;
 
@@ -126,9 +127,10 @@ pub fn collect(
     context: &WorktreeContext<'_>,
     lanes: &[WorktreeInfo],
     policy: &WorktreeGcPolicy<'_>,
+    retirement: RetirementMode<'_>,
     cancel: &CancelToken,
 ) -> Result<WorktreeGcReport, WorktreeError> {
-    collect_impl(context, lanes, policy, cancel, false)
+    collect_impl(context, lanes, policy, cancel, false, retirement)
 }
 
 /// Collect against [`list_for_gc`], checking candidate cleanliness under
@@ -137,9 +139,253 @@ pub fn collect_lazy(
     context: &WorktreeContext<'_>,
     lanes: &[WorktreeInfo],
     policy: &WorktreeGcPolicy<'_>,
+    retirement: RetirementMode<'_>,
     cancel: &CancelToken,
 ) -> Result<WorktreeGcReport, WorktreeError> {
-    collect_impl(context, lanes, policy, cancel, true)
+    collect_impl(context, lanes, policy, cancel, true, retirement)
+}
+
+fn begin_worktree_retirement(
+    context: &WorktreeContext<'_>,
+    port: &dyn RetirementPort,
+    lane: &WorktreeInfo,
+    owner: &WorktreeOwner,
+    canonical_worktree: &Path,
+    expected_target: GitOid,
+    evidence: &LandedEvidence,
+    cancel: &CancelToken,
+) -> Result<Option<provenant_records::custody::RetirementRecord>, WorktreeError> {
+    if !matches!(
+        (&evidence.predicate, &evidence.source),
+        (
+            LandingPredicate::Landed,
+            LandingSource::IntegrationTarget { commit, .. }
+        ) | (LandingPredicate::Landed, LandingSource::ForgeMerged { .. })
+            | (
+                LandingPredicate::Subsumed,
+                LandingSource::RetainedRef { commit, .. }
+            )
+            | (
+                LandingPredicate::Subsumed,
+                LandingSource::TreeEquivalent { .. }
+            )
+    ) || match &evidence.source {
+        LandingSource::IntegrationTarget { commit, .. }
+        | LandingSource::RetainedRef { commit, .. } => *commit != expected_target,
+        LandingSource::TreeEquivalent { target, .. } => *target != expected_target,
+        LandingSource::ForgeMerged { .. } => false,
+    } {
+        return Err(WorktreeError::InvalidRequest);
+    }
+    if owner.origin != WorktreeOrigin::Lane {
+        return Ok(None);
+    }
+    let Some(reference) = owner.reference.clone() else {
+        return Ok(None);
+    };
+    if reference.repository != context.binding.project_id()
+        || reference.endpoint != RefEndpoint::Local
+        || reference.origin != RefOrigin::Created
+        || owner.branch != lane.branch.as_deref().unwrap_or_default()
+    {
+        return Ok(None);
+    }
+    let branch =
+        GitRefName::new(&reference.reference).map_err(|_| WorktreeError::InvalidRequest)?;
+    if branch.short_name() != owner.branch {
+        return Ok(None);
+    }
+    if canonicalize(canonical_worktree)? != canonical_worktree {
+        return Err(WorktreeError::IdentityChanged);
+    }
+    let ledger = match RefLedger::for_context(context) {
+        Ok(ledger) => ledger,
+        Err(_) => return Ok(None),
+    };
+    let current = match ledger.load(&reference.endpoint, &branch) {
+        Ok(Some(record)) => record,
+        Ok(None) | Err(_) => return Ok(None),
+    };
+    if current.ownership() != reference {
+        return Ok(None);
+    }
+    if read_branch_tips(context, cancel)?.get(&branch) != Some(&lane.head) {
+        return Ok(None);
+    }
+    let Some(worktree) = canonical_worktree.to_str() else {
+        return Ok(None);
+    };
+    let intent = RetirementIntent {
+        project: context.binding.project_id(),
+        related_subjects: vec![Subject::new(SubjectKind::Worktree, worktree)],
+        reference,
+        expected_tip: lane.head,
+        evidence: provenant_records::custody::RemovalEvidence::Landing {
+            evidence: evidence.clone(),
+        },
+    };
+    port.begin_retirement(intent)
+}
+
+/// Revalidate a caller-supplied landing proof against the exact live worktree
+/// head and pinned target immediately before retirement begins.
+pub(super) fn verify_retirement_landing_evidence(
+    context: &WorktreeContext<'_>,
+    head: GitOid,
+    expected_target: GitOid,
+    evidence: &LandedEvidence,
+    cancel: &CancelToken,
+) -> Result<bool, WorktreeError> {
+    use LandingSource::{ForgeMerged, IntegrationTarget, RetainedRef, TreeEquivalent};
+
+    let target = LandingTarget {
+        reference: None,
+        tip: expected_target,
+    };
+    match &evidence.source {
+        IntegrationTarget { reference, commit } | RetainedRef { reference, commit } => {
+            if *commit != expected_target {
+                return Ok(false);
+            }
+            let Some(name) = evidence_ref_name(reference) else {
+                return Ok(false);
+            };
+            if context
+                .facts
+                .resolve_commit(context, name.clone(), cancel)?
+                != *commit
+            {
+                return Ok(false);
+            }
+            Ok(matches!(
+                landed::landing_on(
+                    context,
+                    head,
+                    &LandingTarget {
+                        reference: Some(name),
+                        tip: *commit,
+                    },
+                    cancel,
+                )?,
+                Landing::Landed(_)
+            ))
+        }
+        TreeEquivalent {
+            head: proof_head,
+            target: proof_target,
+            tree,
+        } => {
+            if *proof_head != head || *proof_target != expected_target {
+                return Ok(false);
+            }
+            let head_tree = resolve_commit_tree(context, head, cancel)?;
+            let target_tree = resolve_commit_tree(context, expected_target, cancel)?;
+            Ok(head_tree == *tree && target_tree == *tree)
+        }
+        ForgeMerged {
+            head: proof_head,
+            merge_commit,
+            ..
+        } => {
+            if *proof_head != head {
+                return Ok(false);
+            }
+            if let Some(merge_commit) = merge_commit {
+                let merge = LandingTarget {
+                    reference: None,
+                    tip: *merge_commit,
+                };
+                if !matches!(
+                    landed::landing_on(context, head, &merge, cancel)?,
+                    Landing::Landed(_)
+                ) || !matches!(
+                    landed::landing_on(context, *merge_commit, &target, cancel)?,
+                    Landing::Landed(_)
+                ) {
+                    return Ok(false);
+                }
+                Ok(true)
+            } else {
+                Ok(matches!(
+                    landed::landing_on(context, head, &target, cancel)?,
+                    Landing::Landed(_)
+                ))
+            }
+        }
+    }
+}
+
+fn evidence_ref_name(reference: &str) -> Option<GitRefName> {
+    if let Some(branch) = reference.strip_prefix("refs/heads/") {
+        return GitRefName::branch(branch).ok();
+    }
+    reference
+        .strip_prefix("refs/remotes/")
+        .and_then(|remote_tracking| GitRefName::remote_tracking(remote_tracking).ok())
+}
+
+fn resolve_commit_tree(
+    context: &WorktreeContext<'_>,
+    commit: GitOid,
+    cancel: &CancelToken,
+) -> Result<GitOid, WorktreeError> {
+    let outcome = run_git(
+        context,
+        context.repo,
+        GitRead::ResolveCommitTree { oid: commit },
+        cancel,
+    )?;
+    if exit_code(&outcome)? != 0 {
+        return Err(WorktreeError::NotFound);
+    }
+    parse_oid(trim_ascii(&outcome.stdout.bytes))
+}
+
+pub(super) fn update_retirement_step(
+    port: &dyn RetirementPort,
+    record: &provenant_records::custody::RetirementRecord,
+    step: RetirementStep,
+    state: RetirementStepState,
+) -> Result<provenant_records::custody::RetirementRecord, WorktreeError> {
+    let current = record
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.step == step)
+        .ok_or(WorktreeError::RegistrationUnconfirmed)?;
+    if current.state == state || matches!(&current.state, RetirementStepState::Completed { .. }) {
+        return Ok(record.clone());
+    }
+    let mut current_record = record.clone();
+    if matches!(
+        &current.state,
+        RetirementStepState::Refused { .. } | RetirementStepState::Unknown { .. }
+    ) && !matches!(&state, RetirementStepState::Pending)
+    {
+        current_record =
+            port.advance_retirement(&current_record, step.clone(), RetirementStepState::Pending)?;
+    }
+    port.advance_retirement(&current_record, step, state)
+}
+
+/// Reopen an uncertain step before retrying its destructive action. The
+/// returned revision must be used for the subsequent completion outcome.
+pub(super) fn prepare_retirement_step(
+    port: &dyn RetirementPort,
+    record: &provenant_records::custody::RetirementRecord,
+    step: RetirementStep,
+) -> Result<provenant_records::custody::RetirementRecord, WorktreeError> {
+    let current = record
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.step == step)
+        .ok_or(WorktreeError::RegistrationUnconfirmed)?;
+    match &current.state {
+        RetirementStepState::Pending => Ok(record.clone()),
+        RetirementStepState::Refused { .. } | RetirementStepState::Unknown { .. } => {
+            port.advance_retirement(record, step, RetirementStepState::Pending)
+        }
+        RetirementStepState::Completed { .. } => Err(WorktreeError::RegistrationUnconfirmed),
+    }
 }
 
 fn collect_impl(
@@ -148,6 +394,7 @@ fn collect_impl(
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
     lazy_cleanliness: bool,
+    retirement: RetirementMode<'_>,
 ) -> Result<WorktreeGcReport, WorktreeError> {
     validate_binding(context)?;
     // A preview describes one inventory snapshot. Applied cleanup refreshes
@@ -306,6 +553,7 @@ fn collect_impl(
                 &mut report.removals,
                 &layout_roots,
                 &preview_walk,
+                retirement,
             ) {
                 Ok(Some(info)) if policy.dry_run => {
                     report.worktrees.removed.push(info);
@@ -512,7 +760,16 @@ fn collect_impl(
             }
             continue;
         }
-        if let Err(error) = remove_and_finalise(
+        let RetirementMode::Apply { port, evidence } = retirement else {
+            retain(&mut report.worktrees, &branch, RetainReason::NotCreated);
+            report.removals.push(kept_landing_record(
+                context.binding.project_id(),
+                lane,
+                RemovalUncertainty::RetirementIncomplete,
+            ));
+            continue;
+        };
+        let removal_result = remove_and_finalise(
             context,
             &Removal {
                 entry,
@@ -529,7 +786,10 @@ fn collect_impl(
             },
             cancel,
             &mut report.worktrees,
-        ) {
+            (port, evidence, upstream),
+            &mut report.removals,
+        );
+        if let Err(error) = removal_result {
             retain_error(&mut report.worktrees, &branch, error);
         }
     }
@@ -744,8 +1004,13 @@ fn remove_and_finalise(
     removal: &Removal<'_>,
     cancel: &CancelToken,
     outcome: &mut RemoveOutcome,
+    retirement: (&dyn RetirementPort, &LandedEvidence, GitOid),
+    removals: &mut Vec<RemovalRecord>,
 ) -> Result<(), WorktreeError> {
-    let mut removed = remove_tree_when(
+    let (port, evidence, expected_target) = retirement;
+    let mut retirement_record = None;
+    let mut worktree_already_completed = false;
+    let removed_result = remove_tree_when_before_delete(
         context,
         removal.entry,
         removal.lane.head,
@@ -755,18 +1020,186 @@ fn remove_and_finalise(
         Repository::Acquire {
             lanes: removal.lanes,
         },
-    )?;
-    outcome.removed.push(removed.info.clone());
-    if let Err(error) = settle_branch(
-        context,
-        removal.branch,
-        removal.lane.head,
-        Disposition::Merged,
-        cancel,
-        outcome,
-    ) {
-        retain(outcome, removal.branch, retain_reason(&error));
+        |verified, canonical| {
+            let owner = load_owner(verified)?.ok_or(WorktreeError::RegistrationUnconfirmed)?;
+            if !matches!(
+                removal.lane.owner.as_ref(),
+                Ok(Some(observed)) if observed == &owner
+            ) || owner.origin != WorktreeOrigin::Lane
+            {
+                return Err(WorktreeError::IdentityChanged);
+            }
+            let branch_tips = read_branch_tips(context, cancel)?;
+            if branch_tips.get(removal.branch) != Some(&removal.lane.head) {
+                return Err(WorktreeError::IdentityChanged);
+            }
+            if !verify_retirement_landing_evidence(
+                context,
+                removal.lane.head,
+                expected_target,
+                evidence,
+                cancel,
+            )? {
+                return Err(WorktreeError::RegistrationUnconfirmed);
+            }
+            let canonical_lane = WorktreeInfo {
+                path: canonical.to_path_buf(),
+                owner: Ok(Some(owner.clone())),
+                ..removal.lane.clone()
+            };
+            retirement_record = begin_worktree_retirement(
+                context,
+                port,
+                &canonical_lane,
+                &owner,
+                canonical,
+                expected_target,
+                evidence,
+                cancel,
+            )?;
+            if retirement_record.is_none() {
+                return Err(WorktreeError::RegistrationUnconfirmed);
+            }
+            let worktree_subject = Subject::new(
+                SubjectKind::Worktree,
+                canonical.to_string_lossy().into_owned(),
+            );
+            if retirement_record.as_ref().is_some_and(|record| {
+                record.outcomes.iter().any(|outcome| {
+                    outcome.step
+                        == (RetirementStep::Worktree {
+                            subject: worktree_subject.clone(),
+                        })
+                        && matches!(&outcome.state, RetirementStepState::Completed { .. })
+                })
+            }) {
+                worktree_already_completed = true;
+                return Err(WorktreeError::RegistrationUnconfirmed);
+            }
+            let record = retirement_record
+                .as_ref()
+                .ok_or(WorktreeError::RegistrationUnconfirmed)?;
+            retirement_record = Some(prepare_retirement_step(
+                port,
+                record,
+                RetirementStep::Worktree {
+                    subject: worktree_subject,
+                },
+            )?);
+            Ok(())
+        },
+    );
+    let mut record = retirement_record;
+    let removed = match removed_result {
+        Ok(removed) => removed,
+        Err(error) => {
+            if worktree_already_completed {
+                removals.push(kept_landing_record(
+                    context.binding.project_id(),
+                    removal.lane,
+                    RemovalUncertainty::RetirementIncomplete,
+                ));
+                return Err(error);
+            }
+            if let Some(record) = record.as_mut() {
+                if let Some(step) = record.outcomes.iter().find_map(|outcome| {
+                    matches!(
+                        &outcome.step,
+                        RetirementStep::Worktree { subject }
+                            if subject.kind == SubjectKind::Worktree
+                                && subject.id == removal.lane.path.to_string_lossy()
+                    )
+                    .then(|| outcome.step.clone())
+                }) {
+                    *record = update_retirement_step(
+                        port,
+                        record,
+                        step,
+                        RetirementStepState::Unknown {
+                            reason: error.to_string(),
+                        },
+                    )?;
+                }
+                removals.extend(record.removals());
+            } else {
+                removals.push(kept_landing_record(
+                    context.binding.project_id(),
+                    removal.lane,
+                    RemovalUncertainty::RetirementIncomplete,
+                ));
+            }
+            return Err(error);
+        }
+    };
+    let mut record = record
+        .take()
+        .ok_or(WorktreeError::RegistrationUnconfirmed)?;
+    if let Some(step) = record.outcomes.iter().find_map(|outcome| {
+        matches!(
+            &outcome.step,
+            RetirementStep::Worktree { subject }
+                if subject.kind == SubjectKind::Worktree
+                    && subject.id == removed.info.path.to_string_lossy()
+        )
+        .then(|| outcome.step.clone())
+    }) {
+        record = update_retirement_step(
+            port,
+            &record,
+            step,
+            RetirementStepState::Completed {
+                evidence: provenant_records::custody::RemovalEvidence::Landing {
+                    evidence: evidence.clone(),
+                },
+            },
+        )?;
+    } else {
+        return Err(WorktreeError::RegistrationUnconfirmed);
     }
+    outcome.removed.push(removed.info.clone());
+    let mut settlement_error = None;
+    if evidence.predicate == LandingPredicate::Landed {
+        record = prepare_retirement_step(port, &record, RetirementStep::Reference)?;
+        if let Err(error) = settle_branch(
+            context,
+            removal.branch,
+            removal.lane.head,
+            Disposition::Merged,
+            cancel,
+            outcome,
+        ) {
+            settlement_error = Some(error.to_string());
+            retain(outcome, removal.branch, retain_reason(&error));
+        }
+    } else {
+        retain(outcome, removal.branch, RetainReason::NotMerged);
+    }
+    let reference_removed = outcome
+        .pruned_refs
+        .iter()
+        .any(|name| name == removal.branch.short_name());
+    if reference_removed && evidence.predicate == LandingPredicate::Landed {
+        record = update_retirement_step(
+            port,
+            &record,
+            RetirementStep::Reference,
+            RetirementStepState::Completed {
+                evidence: provenant_records::custody::RemovalEvidence::Landing {
+                    evidence: evidence.clone(),
+                },
+            },
+        )?;
+    } else if evidence.predicate == LandingPredicate::Landed {
+        let reason =
+            settlement_error.unwrap_or_else(|| "reference removal was not confirmed".into());
+        record = update_retirement_step(
+            port,
+            &record,
+            RetirementStep::Reference,
+            RetirementStepState::Unknown { reason },
+        )?;
+    }
+    removals.extend(record.removals());
     // Writer exclusion stays held through cache pruning.
     removed.repository = None;
     if let Some(cache) = removed.lane_cache.as_deref()
@@ -1329,10 +1762,8 @@ fn protect_nonignored(
     Ok(())
 }
 
-/// Foreign worktrees need a complete free process census in place of a
-/// Provenant custody proof. Applied removal creates writer exclusion even for
-/// trees with no state yet, deletes the local ref only when a merged
-/// disposition settles it, and never creates ownership records.
+/// A non-terminal managed lane still needs the same custody-owned retirement
+/// and exact reference fences as an ordinary candidate before deletion.
 #[allow(clippy::too_many_arguments)]
 fn collect_foreign(
     context: &WorktreeContext<'_>,
@@ -1347,6 +1778,7 @@ fn collect_foreign(
     removals: &mut Vec<RemovalRecord>,
     layout_roots: &[PathBuf],
     preview_walk: &PreviewWalk,
+    retirement: RetirementMode<'_>,
 ) -> Result<Option<WorktreeInfo>, WorktreeError> {
     if !(policy.no_live_lanes)(&lane.path) {
         return Err(WorktreeError::UnknownWriter);
@@ -1394,8 +1826,15 @@ fn collect_foreign(
             info.dirty = observed;
         }
     } else {
-        // remove_tree_when verifies once, under writer custody.
-        remove_and_finalise(
+        let RetirementMode::Apply { port, evidence } = retirement else {
+            removals.push(kept_landing_record(
+                context.binding.project_id(),
+                lane,
+                RemovalUncertainty::RetirementIncomplete,
+            ));
+            return Ok(None);
+        };
+        let removal_result = remove_and_finalise(
             context,
             &Removal {
                 entry,
@@ -1412,7 +1851,10 @@ fn collect_foreign(
             },
             cancel,
             outcome,
-        )?;
+            (port, evidence, upstream),
+            removals,
+        );
+        removal_result?;
     }
     Ok(Some(info))
 }

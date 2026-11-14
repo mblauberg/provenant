@@ -576,6 +576,7 @@ version = "1.11.2"
 dependencies = [
  "provenant-config",
  "provenant-core",
+ "provenant-fabric-store",
  "provenant-os",
  "provenant-records",
  "provenant-supervisor",

@@ -254,6 +254,7 @@ fn occupancy_keeps_scoped_census_evidence_and_held_lease_priority() -> Result<()
         &context,
         std::slice::from_ref(&observation),
         &policy,
+        RetirementMode::Observe,
         &cancel(),
     )?;
     assert!(info.path.exists());
