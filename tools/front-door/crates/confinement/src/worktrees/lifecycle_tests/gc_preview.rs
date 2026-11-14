@@ -323,6 +323,7 @@ fn gc_native_output_preview_creates_no_writer_state() -> Result<(), Box<dyn Erro
                 .is_none()
         );
         let lanes = list(&context, &cancel())?;
+        let retirement = HostRetirementFixture::new(&test)?;
         let regenerable = ["target".into()];
         let policy = WorktreeGcPolicy {
             upstream: None,
@@ -332,9 +333,9 @@ fn gc_native_output_preview_creates_no_writer_state() -> Result<(), Box<dyn Erro
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: true,
-            include_foreign: false,
-            retirement_port: None,
-            retirement_feeds: None,
+            include_foreign: true,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
             mode: CollectionMode::Worktrees,
             proof: None,
             upstream_reference: None,
@@ -347,6 +348,8 @@ fn gc_native_output_preview_creates_no_writer_state() -> Result<(), Box<dyn Erro
         assert!(path.join("target/artifact").is_file());
         assert_eq!(slot.exists(), existing_slot);
         assert!(!slot.join(WRITER_LOCK).exists());
+        // The first foreign pass only previews.
+        acknowledge_foreign_preview(&context)?;
         let applied = collect(
             &context,
             &lanes,
@@ -720,14 +723,7 @@ fn writer_lock_busy_is_distinct_from_observed_live_process() -> Result<(), Box<d
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
-    let info = create(
-        &context,
-        WorktreeCreate {
-            branch: "busy".into(),
-            base: None,
-        },
-        &cancel(),
-    )?;
+    let info = gc_owned_lane(&test, &context, "busy")?;
     let state = writer_directory(context.project_state, &info.path)?;
     let before = state.metadata_at(OsStr::new(WRITER_LOCK), false)?;
     let held = state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?;
@@ -793,7 +789,7 @@ fn writer_lock_busy_is_distinct_from_observed_live_process() -> Result<(), Box<d
 }
 
 #[test]
-fn foreign_gc_retains_unowned_worktree_with_typed_retirement_outcome() -> Result<(), Box<dyn Error>>
+fn foreign_gc_retires_a_landed_unowned_worktree_with_a_typed_outcome() -> Result<(), Box<dyn Error>>
 {
     let fixture = Fixture::new()?;
     fs::write(fixture.root.join(".gitignore"), "target/\n")?;
@@ -814,6 +810,7 @@ fn foreign_gc_retains_unowned_worktree_with_typed_retirement_outcome() -> Result
     ])?;
     fs::create_dir(path.join("target"))?;
     fs::write(path.join("target/artifact"), "recent output")?;
+    let canonical = std::fs::canonicalize(&path)?;
     let lanes = list(&context, &cancel())?;
     let report = collect(
         &context,
@@ -839,20 +836,19 @@ fn foreign_gc_retains_unowned_worktree_with_typed_retirement_outcome() -> Result
     )?;
     let subject = provenant_records::custody::Subject::new(
         provenant_records::custody::SubjectKind::Worktree,
-        std::fs::canonicalize(&path)?.to_string_lossy().into_owned(),
+        canonical.to_string_lossy().into_owned(),
     );
+    // A landed foreign lane is retired with its declared output, with the
+    // integration-target evidence recorded against the worktree subject.
     assert!(report.removals.iter().any(|removal| {
         removal.subject == subject
             && matches!(
                 &removal.outcome,
-                provenant_records::custody::RemovalOutcome::Kept {
-                    cause: provenant_records::custody::RemovalUncertainty::RetirementIncomplete
-                }
+                provenant_records::custody::RemovalOutcome::Removed { .. }
             )
     }));
-    assert!(path.is_dir());
-    assert!(path.join("target/artifact").is_file());
-    assert!(branch_exists(&fixture, "foreign"));
+    assert!(!path.exists());
+    assert!(!branch_exists(&fixture, "foreign"));
     Ok(())
 }
 
