@@ -42,37 +42,7 @@ pub struct Candidate {
     pub tree: String,
     pub ref_name: String,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GateDefinition {
-    pub kind: provenant_cli::domains::GateKind,
-    pub digest: String,
-    pub checks: Vec<String>,
-    pub commands: Vec<String>,
-    pub issuer: Option<String>,
-    pub executor: Option<String>,
-    pub coverage: Vec<String>,
-    pub timeout_seconds: u64,
-    #[serde(default)]
-    pub pool: Option<String>,
-    #[serde(default)]
-    pub env_passthrough: Vec<String>,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GateResult {
-    Passed,
-    Failed,
-    Pending,
-    Missing,
-    Skipped,
-    Neutral,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckEvidence {
-    pub name: String,
-    pub issuer: Option<String>,
-    pub result: GateResult,
-}
+pub use provenant_records::landing::{CheckEvidence, GateDefinition, GateResult};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GateEvidence {
     pub commit: String,
@@ -143,7 +113,7 @@ pub struct PendingAttempt {
     pub cost: CostEstimate,
     #[serde(default)]
     pub settled: Option<SettledAttempt>,
-    /// Members for which dispatch was prepared; absent on older markers.
+    /// Members for which dispatch was prepared, recorded before submission.
     #[serde(default)]
     pub dispatched: Option<Vec<u64>>,
     #[serde(default)]
@@ -160,7 +130,6 @@ pub struct SettledAttempt {
     pub receipt_pending: bool,
     pub tree_pending: bool,
     pub follow_pending: bool,
-    #[serde(default)]
     pub local_follow_pending: bool,
     pub cleanup_pending: bool,
 }
@@ -185,7 +154,6 @@ pub struct LandingReceipt {
     pub gate_evidence: GateEvidence,
     pub publish: PublishDecision,
     pub outcomes: BTreeMap<u64, Outcome>,
-    #[serde(default)]
     pub split: Vec<Vec<u64>>,
     pub approved_to_landed: BTreeMap<String, String>,
     pub cost: CostEstimate,

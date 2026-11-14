@@ -1,4 +1,6 @@
 //! Lane cache collection settings shared by the CLI and scheduled agent.
+// Retirement is an audit record, independent of the ref ledger and retention age.
+pub use provenant_records::landing::RetirementRecord;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
