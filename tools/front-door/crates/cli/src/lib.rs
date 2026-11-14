@@ -2092,6 +2092,7 @@ mod tests {
         let model = expanded_model();
         let fixture = include_str!("removed-cli-1.11.1.txt");
         let mut rows = 0;
+        let mut missing = Vec::new();
         for line in fixture
             .lines()
             .map(str::trim)
@@ -2111,10 +2112,9 @@ mod tests {
                 command_at(&model, &path)
             };
             if !path.is_empty() && current.is_none() {
-                assert!(
-                    retired_command(&path),
-                    "unrefused historical command: {line}"
-                );
+                if !retired_command(&path) {
+                    missing.push(format!("command {}", path.join(" ")));
+                }
                 continue;
             }
             let current = current.expect("root command exists");
@@ -2124,12 +2124,9 @@ mod tests {
                 if !current.get_subcommands().any(|command| {
                     command.get_name() == child
                         || command.get_all_aliases().any(|alias| alias == child)
-                }) {
-                    assert!(
-                        retired_command(&child_path),
-                        "unrefused historical command: {}",
-                        child_path.join(" ")
-                    );
+                }) && !retired_command(&child_path)
+                {
+                    missing.push(format!("command {}", child_path.join(" ")));
                 }
             }
             for option in columns[2].split_whitespace() {
@@ -2142,20 +2139,16 @@ mod tests {
                         && removed.flag == Some(name)
                         && removed.words == path
                 });
-                if !has_option(current, &model, name) {
-                    assert!(
-                        exact || retired_command(&path),
-                        "unrefused historical option {option} at {}",
-                        if path.is_empty() {
-                            "provenant".into()
-                        } else {
-                            path.join(" ")
-                        }
-                    );
+                if !has_option(current, &model, name) && !exact && !retired_command(&path) {
+                    missing.push(format!("option {option} at {}", path.join(" ")));
                 }
             }
         }
         assert!(rows > 0, "the 1.11.1 clap fixture must not be empty");
+        assert!(
+            missing.is_empty(),
+            "unrefused historical members: {missing:?}"
+        );
     }
 
     /// Every public command, from the model the help catalogue renders, with

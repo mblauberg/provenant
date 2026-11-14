@@ -1761,6 +1761,10 @@ mod provisioning_tests {
         let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
         inputs.state_dir = Some(root.path().join("state"));
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(project.join(".git"))?,
+        )?;
         let context = Context::open(roots, &home, &project)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(provenant_os::clock::SystemClock.mono_now(), 55)?;
@@ -2052,6 +2056,10 @@ mod provisioning_tests {
         let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
         inputs.state_dir = Some(root.path().join("state"));
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(project.join(".git"))?,
+        )?;
         let mut context = Context::open(roots, &home, &project)?;
         context.config.graph.writer_provision_seconds = 60;
         let cancel = CancelToken::new();

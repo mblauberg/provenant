@@ -523,7 +523,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
             "attempt_number": 1, "revision": 1, "generation": 0,
             "requested_route": {"kind": "model", "provider": adapter, "model": "fixture-model"},
             "applied_route": {"provider": adapter, "model": format!("{adapter}/fixture-model"), "account_key": "local"},
-            "authority_digest": Digest::from_bytes([0; 32]), "read_only_writable": [],
+            "authority_digest": Digest::from_bytes([0; 32]), "read_only_writable": [], "protected_paths": [], "trace": {},
             "session": "fixture-session", "queued_at": "2026-10-25T00:00:00.000000Z",
             "state": {"state": "queued"}, "usage": {},
             "prompt": {"path": {"encoding": "utf8", "path": "prompt.txt"}, "digest": FileDigest::from_bytes([0; 32]), "bytes": 0, "complete": true, "redacted": false}

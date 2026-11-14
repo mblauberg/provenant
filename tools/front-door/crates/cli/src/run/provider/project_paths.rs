@@ -683,6 +683,14 @@ mod tests {
             exec_roots: vec![".local-tools".into()],
             ..Default::default()
         };
+        let state = root.join("state");
+        let mut mandatory =
+            provenant_confinement::permissions::MandatoryRoots::new(&home, &state, &primary)?;
+        // The host keeps the primary checkout immutable; the configured
+        // executable root must not widen that authority in either mode.
+        mandatory.add_protected(grant(primary.clone()))?;
+        let host_policy = provenant_confinement::run_config::RunConfig::default()
+            .policy_for_launch(&state, mandatory);
         for writer in [false, true] {
             let mode = if writer {
                 AccessMode::WorktreeWrite(Box::new(
@@ -700,7 +708,7 @@ mod tests {
                 extensions: ExtensionPolicy::Deny,
                 agy_state: None,
                 permissions: PlanPermissions {
-                    policy: None,
+                    policy: Some(host_policy.clone()),
                     mode,
                     read_only: None,
                     scratch: grant(scratch.clone()),
