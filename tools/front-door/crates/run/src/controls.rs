@@ -629,6 +629,41 @@ mod reboot_tests {
     }
 
     #[test]
+    fn a_live_launcher_fences_unlaunched_reconciliation_until_owner_exits()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (_temp, store, _run, id) = starting_store()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let original = store.record(id, &call)?;
+        let attempt = store.attempt_dir(id, false)?;
+        let launcher = attempt.try_lock(
+            std::ffi::OsStr::new("launcher.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+
+        assert_eq!(
+            store.settle_unlaunched(id, &original, &call)?,
+            Reconciled::Held
+        );
+        assert_eq!(store.record(id, &call)?, original);
+
+        drop(launcher);
+        assert_eq!(
+            store.settle_unlaunched(id, &original, &call)?,
+            Reconciled::Withdrawn
+        );
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Rejected,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn cancelling_an_attempt_that_never_launched_settles_it_before_returning()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let (_temp, store, _run, id) = starting_store()?;
@@ -3078,21 +3113,40 @@ impl RunStore {
         self.set_temporary_retained(record.attempt_id, false, call)?;
         Ok(Some(Reconciled::Finished))
     }
-    /// Settle an attempt that has no launch summary. Only a reservation or
-    /// handoff that provably never spawned is withdrawn; a held custody lock
-    /// or a live provider leaves it untouched and uncertain.
+    /// Settle an attempt that has no launch summary only after acquiring the
+    /// launcher's liveness lock. A live owner may still be preparing a provider;
+    /// keep that owner ahead of reconciliation, then re-read under the lock.
     fn settle_unlaunched(
         &self,
         id: AttemptId,
         record: &AttemptRecord,
         call: &Request<'_>,
     ) -> Result<Reconciled> {
-        let scope = Self::scope(record);
-        let dir = || self.attempt_dir(id, false);
-        let cancelled = crate::store::cancel_requested(&dir()?, scope);
         if !matches!(record.state, AttemptState::Starting { .. }) {
             return Ok(Reconciled::uncertain(UncertainReason::NoLaunchSummary));
         }
+        let attempt = self.attempt_dir(id, false)?;
+        let _launcher = match attempt.try_lock(
+            std::ffi::OsStr::new("launcher.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        ) {
+            Ok(guard) => guard,
+            Err(provenant_os::fs::FsError::LockTimeout { .. }) => {
+                return Ok(Reconciled::Held);
+            }
+            Err(error) => return Ok(Reconciled::custody_unavailable(&error)),
+        };
+        let current = self.record(id, call)?;
+        if !matches!(current.state, AttemptState::Starting { .. })
+            || current.generation != record.generation
+            || current.key != record.key
+        {
+            return Ok(Reconciled::Held);
+        }
+        let record = &current;
+        let scope = Self::scope(record);
+        let cancelled = crate::store::cancel_requested(&attempt, scope);
+        let dir = || self.attempt_dir(id, false);
         if let Some(fence) = self
             .writer_fences()?
             .into_iter()
