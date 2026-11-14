@@ -27,7 +27,7 @@ verify = load_script("verify_tier", "verify-tier")
 def write_ports(root, verify_values):
     ports = copy.deepcopy(verify.BUILTIN_PORTS)
     ports["verify"].update(verify_values)
-    (root / ".provenant/ports.json").write_text(json.dumps(ports))
+    (root / "config/ports.json").write_text(json.dumps(ports))
 
 
 class Selection(unittest.TestCase):
@@ -54,8 +54,9 @@ class Selection(unittest.TestCase):
     def test_free_form_tiers_do_not_inject_builtin_tier_names(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / ".provenant").mkdir()
+            (root / "config").mkdir()
             write_ports(root, {"default_tier": "assurance/linux", "tiers": {"assurance/linux": {"commands": ["custom test"], "selection": "all", "warn_for_host_load": False}}})
+            self.assertFalse((root / ".provenant").exists())
             cfg = verify.config(root)
             self.assertEqual(cfg["tiers"]["assurance/linux"]["commands"], ["custom test"])
             self.assertNotIn("0", cfg["tiers"])
@@ -65,7 +66,7 @@ class Selection(unittest.TestCase):
     def test_entry_point_runs_repository_override(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / ".provenant").mkdir()
+            (root / "config").mkdir()
             write_ports(root, {"default_tier": "assurance/full", "tiers": {"assurance/full": {"commands": ["custom-check --full"], "selection": "all", "warn_for_host_load": False}}})
             with mock.patch.object(verify, "ROOT", root), \
                  mock.patch.object(verify.subprocess, "check_output", return_value="abc\n"), \

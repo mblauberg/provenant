@@ -9,3 +9,7 @@
 ### CLI and install
 
 - Reference generation includes the declared outward interfaces and their JSON schema owners. Internal state-file readers remain unsupported. (#3078)
+
+### Verification
+
+- Repository tier checks read the single declaration in `config/ports.json`; `.provenant/ports.json` is an optional link to it. CI no longer depends on the agent-integration directory. (#3078)

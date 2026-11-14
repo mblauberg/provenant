@@ -17,7 +17,9 @@ DEFAULTS = BUILTIN_PORTS["verify"]
 
 
 def config(root):
-    path = root / ".provenant" / "ports.json"
+    # Repository CI owns this declaration; the optional .provenant entry is a
+    # link for the agent integration, never a build dependency.
+    path = root / "config" / "ports.json"
     if not path.exists():
         return copy.deepcopy(DEFAULTS)
     with path.open() as stream:
