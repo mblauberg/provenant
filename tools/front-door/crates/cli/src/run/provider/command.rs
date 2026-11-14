@@ -425,83 +425,97 @@ pub(super) fn configure_build_slots(
     state: &Path,
     knobs: &std::collections::BTreeMap<String, serde_json::Value>,
 ) -> Vec<PathGrant> {
-    if spec.env.iter().any(|(name, value)| {
+    let sandbox_off = spec.env.iter().any(|(name, value)| {
         name == provenant_confinement::run_config::SANDBOX_ENV && value == "off"
-    }) {
-        return Vec::new();
-    }
+    });
     // Builds, not lanes, share the host's build slots: a `cargo` shim takes
     // one around each compiling command. The host (this process, outside
     // the sandbox) creates the slot files; the lane may only read and lock
     // them. Memory is unreadable only on a host that cannot run lanes.
     let cargo = home.join(".cargo/bin/cargo");
     if spec.env.iter().any(|(name, _)| name == "CARGO_TARGET_DIR") && cargo.is_file() {
-        let total = provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
-        let slots = settings.build_limit(total);
-        match provenant_os::build_slots::BuildSlots::provision(state, slots) {
-            Ok(()) => {
-                let disk_floors = (|| {
-                    let gc = provenant_config::GcSettings::read(state)?;
-                    let target = spec
-                        .env
-                        .iter()
-                        .find(|(name, _)| name == "CARGO_TARGET_DIR")
-                        .map(|(_, value)| PathBuf::from(value))
-                        .ok_or_else(|| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::NotFound,
-                                "CARGO_TARGET_DIR is unavailable",
-                            )
-                        })?;
-                    let target = existing_ancestor(&target)?;
-                    let (_, total) = provenant_os::fs::filesystem_bytes_at(&target)?;
-                    gc.disk_floors_for_total(total)
-                })();
-                let disk_floors = match disk_floors {
-                    Ok(floors) => Some(floors),
-                    Err(error) => {
-                        eprintln!(
-                            "provenant: build disk floors unavailable; critical floor could not be resolved, so the build may proceed without the disk gate: {error}"
-                        );
-                        None
-                    }
-                };
-                match spec.configure_build_slots(
-                    scratch,
-                    &provenant_providers::BuildSlotGate {
-                        provenant: runtime,
-                        state,
-                        slots,
-                        disk_floors,
-                        cargo: &cargo,
-                        local_cargo: local_cargo(knobs),
-                    },
-                ) {
-                    Ok(provenant_providers::BuildSlotSetupOutcome::Configured) => {
-                        let directory = state.join(provenant_os::build_slots::DIRECTORY.join("/"));
-                        // BuildSlots opens the directory and each existing slot
-                        // read-only, then takes an advisory lock. The lane cannot
-                        // create, replace or unlink these host coordination files.
-                        return std::iter::once(PathGrant {
-                            path: directory.clone(),
-                            scope: PathScope::Exact,
-                        })
-                        .chain((0..slots).map(|index| PathGrant {
-                            path: directory.join(format!("slot-{index}.lock")),
-                            scope: PathScope::Exact,
-                        }))
-                        .collect();
-                    }
-                    Ok(provenant_providers::BuildSlotSetupOutcome::Skipped) => {}
-                    Err(error) => eprintln!(
-                        "provenant: build slot shim unavailable for this lane, building without it: {error}"
-                    ),
+        let coordination = if sandbox_off {
+            None
+        } else {
+            let total =
+                provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
+            let slots = settings.build_limit(total);
+            match provenant_os::build_slots::BuildSlots::provision(state, slots) {
+                Ok(()) => Some(provenant_providers::BuildSlotCoordination {
+                    state,
+                    slots,
+                    local_cargo: local_cargo(knobs),
+                }),
+                // Build slots are fair sharing, not a boundary. Disk safety
+                // still uses the same cargo wrapper when coordination is unavailable.
+                Err(error) => {
+                    eprintln!(
+                        "provenant: build slots unavailable for this lane, building without coordination: {error}"
+                    );
+                    None
                 }
             }
-            // Build slots are fair sharing, not a boundary: without them
-            // the lane still runs, ungated.
+        };
+        let disk_floors = (|| {
+            let gc = provenant_config::GcSettings::read(state)?;
+            let target = spec
+                .env
+                .iter()
+                .find(|(name, _)| name == "CARGO_TARGET_DIR")
+                .map(|(_, value)| PathBuf::from(value))
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "CARGO_TARGET_DIR is unavailable",
+                    )
+                })?;
+            let target = existing_ancestor(&target)?;
+            let (_, total) = provenant_os::fs::filesystem_bytes_at(&target)?;
+            gc.disk_floors_for_total(total)
+        })();
+        let disk_floors = match disk_floors {
+            Ok(floors) => Some(floors),
+            Err(error) => {
+                eprintln!(
+                    "provenant: build disk floors unavailable; critical floor could not be resolved, so the build may proceed without the disk gate: {error}"
+                );
+                None
+            }
+        };
+        if coordination.is_none() && disk_floors.is_none() {
+            return Vec::new();
+        }
+        match spec.configure_build_slots(
+            scratch,
+            &provenant_providers::BuildSlotGate {
+                provenant: runtime,
+                coordination,
+                disk_floors,
+                cargo: &cargo,
+            },
+        ) {
+            Ok(provenant_providers::BuildSlotSetupOutcome::Configured) => {
+                if let Some(coordination) = coordination {
+                    let directory = coordination
+                        .state
+                        .join(provenant_os::build_slots::DIRECTORY.join("/"));
+                    // BuildSlots opens the directory and each existing slot
+                    // read-only, then takes an advisory lock. The lane cannot
+                    // create, replace or unlink these host coordination files.
+                    return std::iter::once(PathGrant {
+                        path: directory.clone(),
+                        scope: PathScope::Exact,
+                    })
+                    .chain((0..coordination.slots).map(|index| PathGrant {
+                        path: directory.join(format!("slot-{index}.lock")),
+                        scope: PathScope::Exact,
+                    }))
+                    .collect();
+                }
+            }
+            Ok(provenant_providers::BuildSlotSetupOutcome::Skipped) => {}
             Err(error) => eprintln!(
-                "provenant: build slots unavailable for this lane, building without them: {error}"
+                "provenant: build slot shim unavailable for this lane, building without it: {error}"
             ),
         }
     }

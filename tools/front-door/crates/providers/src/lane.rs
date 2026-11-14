@@ -89,7 +89,7 @@ impl crate::LaunchSpec {
         scratch: &Path,
         gate: &BuildSlotGate<'_>,
     ) -> Result<BuildSlotSetupOutcome, ProviderError> {
-        if self.native_environment() {
+        if gate.coordination.is_none() && gate.disk_floors.is_none() {
             return Ok(BuildSlotSetupOutcome::Skipped);
         }
         match self.configure_build_slots_inner(scratch, gate) {
@@ -118,10 +118,6 @@ impl crate::LaunchSpec {
             }
             Ok(shell_quote(value))
         };
-        if !(1..=64).contains(&gate.slots) || !["all", "check", "none"].contains(&gate.local_cargo)
-        {
-            return Err(ProviderError::Malformed);
-        }
         let bin = scratch.join("bin");
         let disk = gate.disk_floors.as_ref().map_or_else(String::new, |floors| {
             format!(
@@ -132,11 +128,23 @@ impl crate::LaunchSpec {
                 shell_quote(floors.critical.source.description()),
             )
         });
+        let coordination = if let Some(coordination) = &gate.coordination {
+            if !(1..=64).contains(&coordination.slots)
+                || !["all", "check", "none"].contains(&coordination.local_cargo)
+            {
+                return Err(ProviderError::Malformed);
+            }
+            format!(
+                "PROVENANT_BUILD_SLOT_STATE={} PROVENANT_BUILD_SLOTS={} PROVENANT_LOCAL_CARGO={}\nexport PROVENANT_BUILD_SLOT_STATE PROVENANT_BUILD_SLOTS PROVENANT_LOCAL_CARGO\n",
+                text(coordination.state)?,
+                coordination.slots,
+                coordination.local_cargo,
+            )
+        } else {
+            String::new()
+        };
         let script = format!(
-            "#!/bin/sh\n{disk}PROVENANT_BUILD_SLOT_STATE={} PROVENANT_BUILD_SLOTS={} PROVENANT_LOCAL_CARGO={}\nexport PROVENANT_BUILD_SLOT_STATE PROVENANT_BUILD_SLOTS PROVENANT_LOCAL_CARGO\nexec {} internal build-slot -- {} \"$@\"\n",
-            text(gate.state)?,
-            gate.slots,
-            gate.local_cargo,
+            "#!/bin/sh\n{disk}{coordination}exec {} internal build-slot -- {} \"$@\"\n",
             text(gate.provenant)?,
             text(gate.cargo)?,
         );
@@ -154,9 +162,6 @@ impl crate::LaunchSpec {
             std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(path)))
                 .map_err(|_| ProviderError::InvalidPath)?
         };
-        let slots = gate
-            .state
-            .join(provenant_os::build_slots::DIRECTORY.join("/"));
         let create = SetupStep::CreateDir(bin.clone());
         if !self.setup.contains(&create) {
             self.setup.push(create);
@@ -167,8 +172,13 @@ impl crate::LaunchSpec {
         });
         self.env[path_index].1 = next_path;
         let profile = &mut self.profile.spec;
-        // Read only: no write grant covers the slot directory.
-        profile.runtime_reads.push(subtree(slots));
+        if let Some(coordination) = &gate.coordination {
+            let slots = coordination
+                .state
+                .join(provenant_os::build_slots::DIRECTORY.join("/"));
+            // Read only: no write grant covers the slot directory.
+            profile.runtime_reads.push(subtree(slots));
+        }
         profile
             .process_executables
             .extend([exact("/bin/sh"), exact(gate.provenant)]);
@@ -747,28 +757,34 @@ pub(crate) fn shell_quote(value: &str) -> String {
 }
 
 /// What the `cargo` shim needs to take a host build slot.
-pub struct BuildSlotGate<'a> {
-    /// The `provenant` executable that runs `internal build-slot`.
-    pub provenant: &'a Path,
-    /// Host state directory, shared by every project, holding the slot files.
+#[derive(Clone, Copy, Debug)]
+pub struct BuildSlotCoordination<'a> {
+    /// Host state directory holding the shared slot files.
     pub state: &'a Path,
     /// How many builds the host runs at once.
     pub slots: u64,
+    /// Cargo subcommands the lane may run locally.
+    pub local_cargo: &'a str,
+}
+
+/// Host-controlled build behavior installed in a provider's cargo wrapper.
+pub struct BuildSlotGate<'a> {
+    /// The `provenant` executable that runs `internal build-slot`.
+    pub provenant: &'a Path,
+    /// Optional fair-sharing coordination. Omitting it never adds a slot wait or read grant.
+    pub coordination: Option<BuildSlotCoordination<'a>>,
     /// Host-resolved warning and critical floors, including their sources.
     pub disk_floors: Option<provenant_config::DiskFloors>,
     /// The real `cargo` the shim runs once it holds a slot.
     pub cargo: &'a Path,
-    /// Cargo commands the lane may run: `all`, `check` or `none`. The shim
-    /// refuses the rest; see the `lanes.local_cargo` knob.
-    pub local_cargo: &'a str,
 }
 
-/// Whether launch preparation installed the optional build-slot shim.
+/// Whether launch preparation installed the host-controlled cargo wrapper.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuildSlotSetupOutcome {
-    /// The shim and its matching read grants were installed.
+    /// The wrapper with requested disk and optional coordination controls was installed.
     Configured,
-    /// The lane does not use the shim, or its optional setup was omitted.
+    /// No disk or coordination control required a wrapper, or optional setup was omitted.
     Skipped,
 }
 
@@ -2388,11 +2404,13 @@ mod tests {
                     source: SettingSource::ShippedDefault,
                 },
             }),
+            coordination: Some(BuildSlotCoordination {
+                state: &state,
+                slots: 3,
+                local_cargo: "all",
+            }),
             provenant: &provenant,
-            state: &state,
-            slots: 3,
             cargo: Path::new("/home/.cargo/bin/cargo"),
-            local_cargo: "all",
         };
         assert!(matches!(
             spec.configure_build_slots(&scratch, &gate),
@@ -2446,11 +2464,14 @@ mod tests {
             .output()
             .unwrap();
         assert!(output.status.success());
+        let floors = gate.disk_floors.as_ref().unwrap();
         assert_eq!(
             String::from_utf8(output.stdout).unwrap(),
             format!(
-                "<internal><build-slot><--></home/.cargo/bin/cargo><test><--><two words>[{}|3|50|host configuration|10|shipped default]",
-                state.display()
+                "<internal><build-slot><--></home/.cargo/bin/cargo><test><--><two words>[{}|3|50|{}|10|{}]",
+                state.display(),
+                floors.free.source.description(),
+                floors.critical.source.description(),
             ),
             "the shim forwards its sealed slots and disk floors"
         );
@@ -2482,11 +2503,13 @@ mod tests {
         let mut spec = Codex.prepare(input).unwrap();
         let gate = BuildSlotGate {
             disk_floors: None,
+            coordination: Some(BuildSlotCoordination {
+                state: &state,
+                slots: 2,
+                local_cargo: "all",
+            }),
             provenant: Path::new("/fixture/bin/provenant"),
-            state: &state,
-            slots: 2,
             cargo: Path::new("/home/.cargo/bin/cargo"),
-            local_cargo: "all",
         };
         assert!(matches!(
             spec.configure_build_slots(&base.join("scratch"), &gate),
@@ -2517,11 +2540,13 @@ mod tests {
             let mut spec = bare_spec("/usr/bin");
             let gate = BuildSlotGate {
                 disk_floors: None,
+                coordination: Some(BuildSlotCoordination {
+                    state: Path::new(state),
+                    slots,
+                    local_cargo: "all",
+                }),
                 provenant: Path::new("/p"),
-                state: Path::new(state),
-                slots,
                 cargo: Path::new("/c"),
-                local_cargo: "all",
             };
             assert!(
                 spec.configure_build_slots(Path::new("/scratch"), &gate)
@@ -2534,11 +2559,13 @@ mod tests {
             let mut spec = bare_spec("/usr/bin");
             let gate = BuildSlotGate {
                 disk_floors: None,
+                coordination: Some(BuildSlotCoordination {
+                    state: Path::new(state),
+                    slots: 1,
+                    local_cargo: "all",
+                }),
                 provenant: Path::new("/p"),
-                state: Path::new(state),
-                slots: 1,
                 cargo: Path::new("/c"),
-                local_cargo: "all",
             };
             assert!(matches!(
                 spec.configure_build_slots(Path::new("/scratch"), &gate),
@@ -2552,11 +2579,13 @@ mod tests {
     fn unrepresentable_build_slot_shim_is_skipped_without_mutating_launch() {
         let gate = BuildSlotGate {
             disk_floors: None,
+            coordination: Some(BuildSlotCoordination {
+                state: Path::new("/state"),
+                slots: 1,
+                local_cargo: "all",
+            }),
             provenant: Path::new("/runtime"),
-            state: Path::new("/state"),
-            slots: 1,
             cargo: Path::new("/cargo"),
-            local_cargo: "all",
         };
         for missing_path in [true, false] {
             let mut spec = bare_spec("/usr/bin");
