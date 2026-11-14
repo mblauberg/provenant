@@ -64,8 +64,8 @@ The [deliver skill](skills/deliver/SKILL.md) owns the engineering stance.
 - Use explicit typed failures and catch mistakes before runtime. Checks allow or
   warn by default; hard holds protect credentials, Git isolation, data integrity
   and authority. When busy, skip and retry.
-- Move callers to the new shape and remove compatibility code. Tests pin
-  invariants derived from declarations; see [test-design](skills/test-design/SKILL.md).
+- Move callers to the new shape and remove compatibility code. For tests, see
+  [test-design](skills/test-design/SKILL.md).
 
 ## Documentation and skills
 

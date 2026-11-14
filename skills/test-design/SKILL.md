@@ -5,17 +5,11 @@ description: "Use for TDD and choosing, writing, merging or deleting tests."
 
 # Test design
 
-Follow the `deliver` skill's engineering stance. Derive invariants from
-declarations and test them at public boundaries with parameterised or property
-tests and modular, deterministic fixtures. Do not pin exact messages, counts,
-order, snapshots, pixels or geometry unless they are the invariant.
-
-On any test failure, first decide whether the test caught a defect or pins
-implementation detail: fix the code for a defect; rewrite the test as a boundary
-invariant or delete it if it pins implementation. Never bend product code around
-rigid tests or bump expected values to pass. Pruning is normal, welcome work:
-delete redundant, duplicate, rigid, or implementation-pinned tests on touch, and
-report every removed test with a one-line reason.
+Tests pin invariants derived from declarations at public boundaries, using deterministic, modular fixtures.
+Classify failures as defects (fix code), stale or rigid tests (redesign or delete), or rigid code (redesign).
+When a test and the design disagree, the test moves; delete redundant tests and tests of removed mechanisms.
+Merge near-duplicates into table-driven invariants; avoid exact messages, counts, order or snapshots unless they are the invariant.
+Report each touched failing test as kept, redesigned, merged or deleted, with a one-line reason.
 
 ## Choose and prune
 

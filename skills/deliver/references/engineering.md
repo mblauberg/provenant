@@ -30,6 +30,7 @@ checklists: name the alternatives and say which one you chose and why.
 
 ## Reliability and strictness
 
+- Lanes are as free as native subagents; holds protect only credentials, Git isolation, data integrity and authority.
 - Failures are explicit typed states, never silent fallbacks. Catch mistakes
   before runtime with types, lints and generators.
 - Checks default to allow or warn and have one deciding point. Add no new
@@ -46,7 +47,4 @@ shape of the codebase.
 
 ## Tests
 
-Tests pin invariants derived from declarations (parameterised or property
-tests), with modular, deterministic fixtures. Do not assert exact messages,
-counts, order or snapshots unless that is the invariant. Question a failing
-test first: redesign or delete it if it is stale or rigid. See `test-design`.
+See [test-design](../../test-design/SKILL.md) for test invariants and failure triage.
