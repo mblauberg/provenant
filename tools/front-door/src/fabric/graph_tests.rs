@@ -112,7 +112,7 @@ mod graph_writer_admission_tests {
                         result_path: None,
                         branch: None,
                         commit: None,
-                        handoff: None,
+                        stop: None,
                     },
                 )
             }
@@ -2122,7 +2122,7 @@ mod result_tests {
         let mut run = graph_status_fixture();
         let first = "1".repeat(40);
         let second = "2".repeat(40);
-        run.checkpoint.bases = GraphBaseBinding::new(
+        run.checkpoint.bases = provenant_fabric_runtime::graph::GraphBaseBinding::new(
             Some(provenant_core::GitOid::parse(&first).unwrap()),
             Some(provenant_core::GitOid::parse(&second).unwrap()),
         );
@@ -2764,7 +2764,7 @@ mod result_tests {
                     result_path: None,
                     branch: None,
                     commit: None,
-                    handoff: None,
+                    stop: None,
                 })
             }
         }
@@ -3380,7 +3380,7 @@ mod retry_allowance_tests {
                 result_path: None,
                 branch: None,
                 commit: None,
-                handoff: None,
+                stop: None,
             })
         }
     }

@@ -4197,9 +4197,10 @@ pub(super) fn prepare_candidates(
             "discovery_warnings".into(),
             serde_json::json!(discovery_warnings(&spec.omitted_discovery, &home, false)),
         );
-        let cargo_home = spec.cargo_home().cloned().ok_or_else(|| {
-            PrepareError::Other("host Cargo binding was not finalised".into())
-        })?;
+        let cargo_home = spec
+            .cargo_home()
+            .cloned()
+            .ok_or_else(|| PrepareError::Other("host Cargo binding was not finalised".into()))?;
         let stdin = match spec.stdin {
             Stdin::Bytes(bytes) => bytes,
             Stdin::Null => Vec::new(),

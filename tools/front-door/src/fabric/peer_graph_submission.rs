@@ -548,7 +548,7 @@ fn graph_submission_pins_the_integration_base_across_replay()
         &cancel,
     )?;
     assert_eq!(replay.checkpoint, run.checkpoint);
-    let journal = FileJournal::open(
+    let mut journal = FileJournal::open(
         &fixture.roots.state,
         fixture.settled.project_id,
         "pinned-base",
@@ -557,7 +557,10 @@ fn graph_submission_pins_the_integration_base_across_replay()
         &factory.clock,
     )?;
     assert_eq!(journal.integration_base(), Some(base));
-    assert_eq!(journal.load("pinned-base")?, Some(run.checkpoint.clone()));
+    assert_eq!(
+        provenant_fabric_runtime::graph::GraphJournal::load(&mut journal, "pinned-base")?,
+        Some(run.checkpoint.clone())
+    );
     let execution = FileJournal::execution(
         &fixture.roots.state,
         fixture.settled.project_id,

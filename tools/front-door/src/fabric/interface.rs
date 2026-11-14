@@ -263,6 +263,7 @@ pub(super) fn next_remote_deadline(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
     mut run: provenant_fabric_runtime::graph::GraphRun,
     wait: WaitBudget,
@@ -391,6 +392,7 @@ fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
 }
 
 /// Observe a submitted graph within the caller's original wait budget.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn wait_submission<C: provenant_core::Clock + ?Sized>(
     run: provenant_fabric_runtime::graph::GraphRun,
     wait: WaitBudget,
@@ -2370,9 +2372,7 @@ impl Factory {
             row["kind"] == "attempt"
                 && row["attempt_id"].as_str().is_some_and(|reference| {
                     reference.split_once('/').is_some_and(|(owner, _)| {
-                        owner
-                            .parse::<provenant_core::HostId>()
-                            .map_or(true, |host| host != local_host)
+                        owner.parse::<provenant_core::HostId>() != Ok(local_host)
                     })
                 })
         });

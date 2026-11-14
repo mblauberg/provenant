@@ -325,9 +325,9 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 );
                 let ports = PortTable::read_for(Some(&project), roots.state.as_path())?;
                 match ports.release.backend {
-                    PortBackend::Builtin => {
-                        provenant_cli::check::release_page(git, range, selector, &page)
-                    }
+                    PortBackend::Builtin => Ok(provenant_cli::check::release_page(
+                        git, range, selector, &page,
+                    )?),
                     PortBackend::Command { command } => command_release_page(
                         &project,
                         roots.state.as_path(),
@@ -457,7 +457,7 @@ fn private_home<T>(operation: impl FnOnce(&Path) -> Result<T, Error>) -> Result<
 fn git_page(
     project: &Path,
     host_state: &Path,
-    operation: impl FnOnce(&GitContext<'_>) -> Result<CheckPage, CheckError>,
+    operation: impl FnOnce(&GitContext<'_>) -> Result<CheckPage, Error>,
 ) -> Result<CheckPage, Error> {
     private_home(|home| {
         let git = provenant_os::git::git_executable()
@@ -472,12 +472,12 @@ fn git_page(
             provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
             &cancel,
         )?;
-        Ok(operation(&GitContext {
+        operation(&GitContext {
             host_state,
             repo: &repo,
             runtime: &runtime,
             executor: &executor,
             cancel: &cancel,
-        })?)
+        })
     })
 }

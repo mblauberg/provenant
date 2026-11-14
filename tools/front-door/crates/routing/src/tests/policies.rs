@@ -802,7 +802,8 @@ fn opencode_effort_normalisation_is_visible_in_exact_pool_and_launch_routes()
                         .as_str()
                         .is_some_and(|source| !source.is_empty())
                 );
-                let record = provenant_records::run::RouteRecord::from_resolved(&route, None, "fixture");
+                let record =
+                    provenant_records::run::RouteRecord::from_resolved(&route, None, "fixture");
                 assert_eq!(record.extra["effort_warning"], *warning);
                 if let Some(receipt) = route.pool_selection {
                     assert!(

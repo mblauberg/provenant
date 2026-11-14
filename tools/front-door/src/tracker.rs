@@ -318,7 +318,8 @@ pub fn run(command: Tracker, globals: &Globals) -> u8 {
             );
         }
     };
-    let mut port = TrackerPort::from_port(ports.tracker, resolved.roots.state.clone());
+    let mut port =
+        TrackerPort::from_port(ports.tracker, resolved.roots.state.as_path().to_path_buf());
     let report = collect(&root, &numbers, file.as_deref(), &kind, &mut |n| {
         port.issue(&root, n, Duration::from_secs(15))
     });

@@ -8,6 +8,7 @@ use provenant_os::{
 };
 use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 mod steward;
 
@@ -914,6 +915,7 @@ mod tests {
             || {
                 seed_pass(
                     &directory,
+                    &root,
                     &seed_clock(),
                     false,
                     || panic!("a disabled seed must not enumerate projects"),

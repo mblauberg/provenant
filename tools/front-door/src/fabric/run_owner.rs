@@ -1467,7 +1467,8 @@ impl BinaryRunOwner<'_> {
                     return Err(FacadeError::ConfinementRefused { resource: None });
                 }
                 let wait_config =
-                    provenant_cli::config_reads::read_for(&self.factory.context.roots, "wait")?;
+                    provenant_cli::config_reads::read_for(&self.factory.context.roots, "wait")
+                        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
                 let interval =
                     std::time::Duration::from_millis(wait_config.domains.wait.local_interval_ms);
                 let local_session = if local_indices.is_empty() {
@@ -1520,7 +1521,7 @@ impl BinaryRunOwner<'_> {
                     .clock
                     .mono_now()
                     .checked_add(provenant_core::DurationMicros::from_micros(interval_micros))
-                    .map_err(FacadeError::Time)?;
+                    .map_err(|_| FacadeError::io("wait pacing clock"))?;
                 loop {
                     if cancel.is_cancelled() {
                         return Err(FacadeError::Cancelled);
@@ -1534,7 +1535,7 @@ impl BinaryRunOwner<'_> {
                                 attempts,
                                 true,
                                 observation_extra(&observation),
-                                &refresh_local,
+                                refresh_local,
                             );
                         }
                         return Err(FacadeError::Timeout);
@@ -1582,7 +1583,7 @@ impl BinaryRunOwner<'_> {
                                                 attempts,
                                                 true,
                                                 observation_extra(&observation),
-                                                &refresh_local,
+                                                refresh_local,
                                             )
                                         }
                                         None if expired => Err(FacadeError::Timeout),
@@ -1611,7 +1612,7 @@ impl BinaryRunOwner<'_> {
                             .checked_add(provenant_core::DurationMicros::from_micros(
                                 interval_micros,
                             ))
-                            .map_err(FacadeError::Time)?;
+                            .map_err(|_| FacadeError::io("wait pacing clock"))?;
                     }
                     let attempts = observed_attempts
                         .iter()
@@ -1630,7 +1631,7 @@ impl BinaryRunOwner<'_> {
                             attempts,
                             timed_out,
                             observation_extra(&observation),
-                            &refresh_local,
+                            refresh_local,
                         );
                     }
                     last_attempts = Some(attempts);
@@ -1650,7 +1651,7 @@ impl BinaryRunOwner<'_> {
                     let maximum = remaining.min(until_remote);
                     let wake = observation
                         .wait(maximum, cancel, &self.factory.clock)
-                        .map_err(FacadeError::Time)?;
+                        .map_err(|_| FacadeError::io("wait pacing clock"))?;
                     match wake {
                         crate::status_wait::ObservationWake::Changed
                         | crate::status_wait::ObservationWake::Woken => {

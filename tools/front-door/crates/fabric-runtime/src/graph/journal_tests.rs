@@ -119,7 +119,11 @@ fn watching_the_checkpoint_observes_publication_after_the_precommit_event_log() 
 
     journal.save(&fixture.checkpoint).unwrap();
 
-    assert!(directory.join(super::journal::events::name("g-test")).is_file());
+    assert!(
+        directory
+            .join(super::journal::events::name("g-test"))
+            .is_file()
+    );
     assert_eq!(
         watcher.wait(Duration::from_secs(2)).unwrap(),
         WaitOutcome::Changed

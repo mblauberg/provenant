@@ -81,7 +81,7 @@ impl Line {
             "pending"
         } else if self.draft {
             "draft"
-        } else if self.review.as_deref() == Some("unknown") {
+        } else if self.review == "unknown" {
             "review_unknown"
         } else {
             "ready"

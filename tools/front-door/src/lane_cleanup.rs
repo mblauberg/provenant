@@ -151,6 +151,20 @@ impl<T: RetirementPort + ?Sized> RetirementLookup for T {
     }
 }
 
+/// A writer port read through the lookup half, for sweeps that hold a
+/// writer and no separate reader.
+struct PortLookup<'a>(&'a dyn RetirementPort);
+
+impl RetirementLookup for PortLookup<'_> {
+    fn retirement_for_subject(
+        &self,
+        project: provenant_core::ProjectId,
+        subject: &provenant_records::custody::Subject,
+    ) -> Result<Option<RetirementRecord>, worktrees::WorktreeError> {
+        self.0.retirement_for_subject(project, subject)
+    }
+}
+
 impl RetirementLookup for crate::custody::RetirementReader<'_> {
     fn retirement_for_subject(
         &self,
@@ -297,6 +311,7 @@ fn removal_is_complete(record: &RetirementRecord) -> Option<RemovalRecord> {
     matches!(&removal.outcome, RemovalOutcome::Removed { .. }).then_some(removal)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn recovered_ref_outcome(
     writer: Option<&dyn RetirementPort>,
     state: RefRetirementState,
@@ -325,7 +340,7 @@ fn recovered_ref_outcome(
     let retirement = match state.record {
         Some(retirement) => retirement,
         None => {
-            if let Some(writer) = writer
+            if writer.is_some()
                 && let Some(record) = record
                 && let Err(error) = ledger.forget(record, context.clock, cancel)
             {
@@ -362,6 +377,8 @@ fn recovered_ref_outcome(
 
 /// Remove one created local branch when its live tip matches the durable
 /// retirement, or the ledger's creation observation when no intent exists.
+#[cfg(test)]
+#[allow(dead_code)] // Also compiled by the harness=false worktree driver.
 pub(crate) fn sweep_local(
     context: &WorktreeContext<'_>,
     ledger: &RefLedger,
@@ -377,7 +394,7 @@ pub(crate) fn sweep_local(
         record,
         targets,
         sweep,
-        retirement,
+        &PortLookup(retirement),
         Some(retirement),
         cancel,
     );
@@ -385,6 +402,7 @@ pub(crate) fn sweep_local(
     outcome
 }
 
+#[allow(clippy::too_many_arguments)]
 fn local_outcome(
     context: &WorktreeContext<'_>,
     ledger: &RefLedger,
@@ -419,6 +437,7 @@ fn local_outcome(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn local_candidate_outcome(
     context: &WorktreeContext<'_>,
     ledger: &RefLedger,
@@ -446,6 +465,7 @@ fn local_candidate_outcome(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn local_outcome_for_ref(
     context: &WorktreeContext<'_>,
     ledger: &RefLedger,
@@ -761,6 +781,8 @@ fn local_outcome_for_ref(
 
 /// Remove one remote branch Provenant created, and its tracking ref, when it
 /// has landed on `target` (through ancestry or `chain`).
+#[cfg(test)]
+#[allow(dead_code, clippy::too_many_arguments)] // Also compiled by the harness=false worktree driver.
 pub(crate) fn sweep_remote(
     context: &WorktreeContext<'_>,
     ledger: &RefLedger,
@@ -778,7 +800,7 @@ pub(crate) fn sweep_remote(
         target,
         chain,
         sweep,
-        retirement,
+        &PortLookup(retirement),
         Some(retirement),
         cancel,
     );
@@ -786,6 +808,7 @@ pub(crate) fn sweep_remote(
     outcomes
 }
 
+#[allow(clippy::too_many_arguments)]
 fn remote_outcomes(
     context: &WorktreeContext<'_>,
     ledger: &RefLedger,
@@ -848,11 +871,11 @@ fn remote_outcomes(
             context,
             cancel,
         );
-        if let Some(tracking) = &tracking {
-            if let Some(outcome) = stale_tracking(context, remote, tracking, cancel) {
-                let _ = &mut recovered;
-                return vec![recovered, outcome];
-            }
+        if let Some(tracking) = &tracking
+            && let Some(outcome) = stale_tracking(context, remote, tracking, cancel)
+        {
+            let _ = &mut recovered;
+            return vec![recovered, outcome];
         }
         return vec![recovered];
     };
@@ -1138,10 +1161,10 @@ fn remote_outcomes(
             ),
         },
     }
-    if let Some(tracking) = &tracking {
-        if let Some(outcome) = stale_tracking(context, remote, tracking, cancel) {
-            outcomes.push(outcome);
-        }
+    if let Some(tracking) = &tracking
+        && let Some(outcome) = stale_tracking(context, remote, tracking, cancel)
+    {
+        outcomes.push(outcome);
     }
     outcomes
 }
@@ -1528,7 +1551,7 @@ pub(crate) fn settle_integrated(
         Some(&root),
         &chain,
         sweep,
-        retirement,
+        &PortLookup(retirement),
         Some(retirement),
         cancel,
     );

@@ -152,6 +152,7 @@ fn resumed_lane_settlement_ignores_terminal_graph()
         bases: None,
         directory: fixture.rig.project.clone(),
         document,
+        extra: Default::default(),
     })?;
     journal.save(&checkpoint)?;
     drop(journal);

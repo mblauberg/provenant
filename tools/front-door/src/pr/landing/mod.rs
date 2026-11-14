@@ -312,7 +312,6 @@ fn branch_name(value: &str) -> Result<String, Box<dyn std::error::Error>> {
 /// The landing policy one adapter call resolved for a checkout.
 pub(crate) struct Prepared {
     resolved: crate::roots::Resolved,
-    project: Option<String>,
     review_scope: provenant_records::landing::ReviewScope,
     policy: policy::LandPolicy,
     effective: provenant_cli::domains::LandSettings,
@@ -423,7 +422,6 @@ fn prepare_resolved(
         });
     Ok(Prepared {
         resolved,
-        project,
         review_scope,
         policy,
         effective,
@@ -453,7 +451,6 @@ pub(crate) fn submit(
 
     let Prepared {
         resolved,
-        project,
         review_scope,
         policy,
         effective,

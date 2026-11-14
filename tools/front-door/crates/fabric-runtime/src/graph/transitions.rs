@@ -1877,8 +1877,7 @@ mod tests {
         })).unwrap();
         let limits = crate::config::GraphLimits::default();
         let (plan, positions) = validate_flat_plan(&document, &limits).unwrap();
-        let checkpoint =
-            initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
+        let checkpoint = initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
         (plan, positions, checkpoint, limits)
     }
 

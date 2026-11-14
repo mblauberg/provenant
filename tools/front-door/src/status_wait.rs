@@ -128,7 +128,8 @@ fn read(
     if cancel.is_cancelled() || left.is_zero() {
         return Reading::unavailable(&label, "wait deadline or cancellation reached");
     }
-    let reading = match source {
+
+    match source {
         Source::UnreadableGraph(_, error) => classify_rows(
             &label,
             &[json!({
@@ -139,9 +140,7 @@ fn read(
             match provenant_sqlite::with_busy_timeout(Duration::ZERO, || {
                 crate::fabric::read_status_rows(target, edge, session, deadline, cancel)
             }) {
-                Ok(rows) => {
-                    return classify_rows(&label, &rows);
-                }
+                Ok(rows) => classify_rows(&label, &rows),
                 Err(error) => Reading::unavailable(&label, &error.to_string()),
             }
         }
@@ -167,8 +166,7 @@ fn read(
             },
             Err(error) => Reading::unavailable(&label, error),
         },
-    };
-    reading
+    }
 }
 
 /// Cancellation wakes source pauses and interrupts in-flight GitHub reads.
@@ -190,10 +188,10 @@ impl Stop {
     }
     fn stop(&self) {
         self.cancel.cancel();
-        if let Ok(slot) = self.event_wake.lock() {
-            if let Some(wake) = slot.as_ref() {
-                let _ = wake.wake();
-            }
+        if let Ok(slot) = self.event_wake.lock()
+            && let Some(wake) = slot.as_ref()
+        {
+            let _ = wake.wake();
         }
         if let Ok(mut stopped) = self.stopped.lock() {
             *stopped = true;
@@ -751,7 +749,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         .map(|context| (context.identity.project, context.identity.host))
         .map_err(|error| format!("cannot resolve project event logs: {error}"))
     };
-    let local_host = project.as_ref().ok().map(|(_, host)| host.clone());
+    let local_host = project.as_ref().ok().map(|(_, host)| *host);
     let project_error = project.as_ref().err().cloned();
     let mut pending_index_error = None;
     let mut observation_path_error = None;
@@ -891,7 +889,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     if !prs.is_empty() {
         let repository = crate::pr::status::wait_repository(
             edge.roots.state.as_path(),
-            &edge.cwd,
+            edge.cwd,
             pr_read_timeout,
         )
         .map_err(|error| error.to_string());
@@ -986,7 +984,6 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 .iter()
                 .map(|index| (*index, sources[*index].clone()))
                 .collect::<Vec<_>>();
-            let local_host = local_host.clone();
             let mut watcher = event_watcher.take();
             let mut fallback_reason = fallback_reason.clone();
             let mut remote_indices = pending
@@ -1308,6 +1305,8 @@ fn write_line(line: &str) -> std::io::Result<()> {
 #[allow(dead_code)] // Also included by the worktree driver without libtest.
 mod tests {
     use super::*;
+    #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
+    use provenant_core::Clock as _;
 
     #[test]
     fn a_selection_with_peer_or_relayed_attempts_is_not_locally_represented() {
@@ -1323,11 +1322,11 @@ mod tests {
 
     #[test]
     fn completed_peer_source_remains_in_final_observation() {
-        let host = "aa".to_owned();
+        let host = provenant_core::HostId::parse(&"a".repeat(32)).expect("fixture host");
         let completed_peer = Reading {
             settle: Settle::Succeeded,
             line: "peer settled".into(),
-            data: json!({"rows":[{"kind":"attempt","attempt_id":"bb/2"}]}),
+            data: json!({"rows":[{"kind":"attempt","attempt_id":format!("{}/2", "b".repeat(32))}]}),
         };
         let mut history = ObservationHistory::default();
         history.record(&completed_peer, Some(&host));
@@ -1388,7 +1387,8 @@ mod tests {
     fn registration_does_not_create_an_event_log_and_empty_timeout_is_not_a_read() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let log = directory.path().join("graph.events.jsonl");
-        let mut observation = LocalObservation::subscribe(&[log.clone()], Duration::from_secs(1));
+        let mut observation =
+            LocalObservation::subscribe(std::slice::from_ref(&log), Duration::from_secs(1));
         assert!(!log.exists());
         let clock = provenant_core::TestClock::new(
             provenant_core::WallTime::from_micros(0).expect("valid fixture time"),

@@ -5,7 +5,7 @@ use provenant_confinement::worktrees::{
 use provenant_core::{CancelToken, GitOid, Roots};
 use provenant_fabric_store::{HostStore, Request};
 use provenant_os::{clock::SystemClock, exec::Termination};
-use provenant_records::{custody::*, landing::*};
+use provenant_records::custody::*;
 use serde::Deserialize;
 use std::{
     cell::RefCell,
@@ -164,7 +164,6 @@ impl<'a> Owner<'a> {
             .trim()
             .parse()
             .map_err(|e| format!("tip age: {e}"))?;
-        use provenant_core::Clock;
         let now = context
             .clock
             .wall_now()
@@ -202,6 +201,7 @@ impl worktrees::RetirementFeeds for Owner<'_> {
         Ok(self.context()?.identity.inbox.actor)
     }
 
+    #[allow(clippy::disallowed_methods)] // Native read-only store open deadline.
     fn custody(&self, lane: &WorktreeInfo) -> Result<(), String> {
         let context = self.context()?;
         let clock = SystemClock::new();

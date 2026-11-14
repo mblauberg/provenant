@@ -928,6 +928,7 @@ fn config_hint(context: &Context) -> Option<String> {
 }
 // Identity is resolved through the provider adapter on every session start.
 // The config directory selects auth state and never supplies account identity.
+#[allow(clippy::print_stderr)] // Attribution warns the operator; it never blocks the hook.
 fn session_identity(context: &Context) -> provenant_telemetry::usage::AccountIdentity {
     use provenant_telemetry::usage::AccountIdentity;
 
@@ -959,13 +960,16 @@ fn session_identity(context: &Context) -> provenant_telemetry::usage::AccountIde
 // Attribution is best effort and must not prevent consuming a handoff.
 fn record_start(context: &Context, input: &Input) {
     let project = if crate::usage::attribution_enabled(&context.roots) {
-        crate::hooks::with_git(|runtime, executor, budget, cancel| {
-            let location = runtime
-                .project_location(executor, &context.cwd, budget, cancel)?
-                .location;
-            Ok(provenant_config::lookup_project(&context.roots, &location)?
-                .map(|binding| binding.project_id()))
-        })
+        crate::hooks::with_git(
+            context.roots.state.as_path(),
+            |runtime, executor, budget, cancel| {
+                let location = runtime
+                    .project_location(executor, &context.cwd, budget, cancel)?
+                    .location;
+                Ok(provenant_config::lookup_project(&context.roots, &location)?
+                    .map(|binding| binding.project_id()))
+            },
+        )
         .ok()
         .flatten()
     } else {

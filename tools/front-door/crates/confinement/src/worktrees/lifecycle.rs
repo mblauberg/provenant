@@ -1571,8 +1571,7 @@ pub(super) fn remove_merged_candidate(
                         return Err(WorktreeError::IdentityChanged);
                     }
                     revalidate_landing_evidence(context, tip, &evidence, cancel)?;
-                    if let (Some((port, _)), Some(decision)) = (retirement, decision.clone())
-                    {
+                    if let (Some((port, _)), Some(decision)) = (retirement, decision.clone()) {
                         let owner = load_owner(verified)?;
                         let lane = WorktreeInfo {
                             warnings: Vec::new(),

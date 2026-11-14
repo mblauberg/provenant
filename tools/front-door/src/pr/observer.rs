@@ -246,8 +246,8 @@ fn durations_from_cache(cached: &Cached) -> Vec<RunDuration> {
         .flat_map(|runs| runs.iter())
         .filter(|run| run.get("status").and_then(Value::as_str) == Some("completed"))
         .filter_map(|run| {
-            let started = time(run.get("started_at"))?.flatten()?.as_millisecond();
-            let completed = time(run.get("completed_at"))?.flatten()?.as_millisecond();
+            let started = time(run.get("started_at"))??.as_millisecond();
+            let completed = time(run.get("completed_at"))??.as_millisecond();
             let duration_ms = completed
                 .checked_sub(started)
                 .filter(|duration| *duration > 0)?;
@@ -331,7 +331,7 @@ fn settings_roots(state: &Path, project: &Path) -> Result<provenant_core::Roots,
         })
 }
 
-fn request_etag<'a>(cadence: Cadence, previous: Option<&'a Page>) -> Option<&'a str> {
+fn request_etag(cadence: Cadence, previous: Option<&Page>) -> Option<&str> {
     if cadence.conditional_requests {
         previous.and_then(|page| page.etag.as_deref())
     } else {
@@ -382,6 +382,7 @@ impl Observer<port::SelectedTransport, WallClock> {
 }
 
 impl<F: Forge, C: Clock> Observer<F, C> {
+    #[cfg(test)]
     pub(crate) fn with(
         state: &Path,
         repository: &str,
@@ -1172,10 +1173,12 @@ mod tests {
         tempfile::tempdir().expect("state")
     }
 
+    /// One resource read: its path and the conditional tag it sent.
+    type ResourceRequest = (String, Option<String>);
     #[derive(Clone, Default)]
-    struct ResourceForge(Arc<Mutex<Vec<(String, Option<String>)>>>);
+    struct ResourceForge(Arc<Mutex<Vec<ResourceRequest>>>);
     impl ResourceForge {
-        fn requests(&self) -> Vec<(String, Option<String>)> {
+        fn requests(&self) -> Vec<ResourceRequest> {
             self.0.lock().expect("requests").clone()
         }
     }

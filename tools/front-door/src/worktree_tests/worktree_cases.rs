@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn naming_and_post_create_ports_are_advisory_and_evidenced() -> Result {
     let rig = repository()?;
-    let (roots, execution) = writer_context(&rig)?;
+    let (roots, _execution) = writer_context(&rig)?;
     let marker_path = rig.state.join("post-create-runs");
     let marker = marker_path.to_str().ok_or("marker path")?.to_owned();
     let mut ports = provenant_config::PortTable::builtin();

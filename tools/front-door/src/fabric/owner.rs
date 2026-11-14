@@ -2089,10 +2089,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     ) -> Result<Option<provenant_core::review_cover::Coverage>, Self::Error> {
         // A proof that cannot be read, including before the branch has a
         // pull request, refuses the land as an unproved one does.
-        Ok(
-            crate::pr::landing::approval::graph_coverage(&self.factory.cwd, branch, reviewed, head)
-                .ok(),
+        Ok(crate::pr::landing::approval::graph_coverage(
+            &self.factory.cwd,
+            self.factory.context.roots.state.as_path(),
+            branch,
+            reviewed,
+            head,
         )
+        .ok())
     }
     fn land(
         &mut self,

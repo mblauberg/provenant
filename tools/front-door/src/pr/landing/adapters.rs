@@ -192,6 +192,7 @@ impl GhForge {
     fn poll_interval(&self) -> Option<Duration> {
         self.poll_interval_override.or(self.observation_interval)
     }
+    #[allow(clippy::disallowed_methods)] // The reader deadline is a native Instant.
     fn repository_name(&mut self) -> Result<String, LandingError> {
         if let Some(repository) = &self.repository {
             return Ok(repository.clone());

@@ -390,11 +390,10 @@ pub fn prune_owned(
     let Some(worktree_path) = canonical.to_str() else {
         return Err(WorktreeError::InvalidRequest);
     };
-    let worktree_subject =
-        provenant_records::custody::Subject::new(
-            provenant_records::custody::SubjectKind::Worktree,
-            worktree_path,
-        );
+    let worktree_subject = provenant_records::custody::Subject::new(
+        provenant_records::custody::SubjectKind::Worktree,
+        worktree_path,
+    );
     let branch = GitRefName::branch(&owner.branch).map_err(|_| WorktreeError::InvalidRequest)?;
     let evidence = match decision.evidence() {
         provenant_records::custody::RemovalEvidence::Landing { evidence } => Some(evidence),

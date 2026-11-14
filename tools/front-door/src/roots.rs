@@ -252,6 +252,7 @@ pub fn state_candidate(context: &Roots, candidate: PathBuf) -> Result<Roots, Roo
     Ok(roots)
 }
 
+#[allow(clippy::print_stderr)] // Root warnings go to the operator before any output.
 fn report_warnings(roots: &Roots) {
     for warning in roots.state.warnings() {
         eprintln!("warning: {}", warning.message());

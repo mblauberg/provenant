@@ -175,6 +175,20 @@ struct RestUser {
 fn pull_endpoint(number: &str) -> String {
     format!("repos/{{owner}}/{{repo}}/pulls/{number}")
 }
+fn rest_pull(read: &impl Fn(&[&str]) -> Result<ExecOutcome>, number: &str) -> Result<RestPull> {
+    let endpoint = pull_endpoint(number);
+    let bytes = successful(read(&[
+        "gh",
+        "api",
+        &endpoint,
+        "-H",
+        "X-GitHub-Api-Version:2026-03-10",
+    ])?)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+fn head(project: &Path, number: &str) -> Result<GitOid> {
+    Ok(rest_pull(&|argv| execute(project, argv), number)?.head.sha)
+}
 /// The pull request a graph lands: found by head branch, never by `gh pr
 /// view BRANCH`, which reads a numeric branch as a pull request number.
 #[derive(Debug, PartialEq, Eq)]

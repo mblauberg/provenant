@@ -14,6 +14,7 @@ use provenant_routing::{Catalogue, ModelId};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 const PROMPT: &str = "Reply with exactly one word: OK. Do not use tools, read files, change files, run commands or perform any other work.";
 
@@ -375,7 +376,7 @@ fn live(
     let entropy = provenant_os::fs::entropy_128()?;
     let name = format!("provider-check-{:032x}", u128::from_le_bytes(entropy));
     row.graph = Some(name.clone());
-    let interval = Duration::from_micros(u64::try_from(interval.as_micros()).unwrap_or_default());
+    let interval = Duration::from_micros(interval.as_micros());
     let budget =
         provenant_core::WaitBudget::cli(factory.clock.mono_now(), settings.timeout_seconds.value)?;
     let on_stop = provenant_records::OnStop::new(

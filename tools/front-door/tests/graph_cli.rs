@@ -1617,7 +1617,12 @@ fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
         let mut document: GraphDocument = serde_json::from_value(
             json!({"schema_version":1,"graph_id":id,"nodes":[{"id":"one","prompt":"fixture","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]}),
         )?;
-        graph::patch::submission(&mut document, &format!("submit:{id}"), &Default::default())?;
+        graph::patch::submission(
+            &mut document,
+            &format!("submit:{id}"),
+            &Default::default(),
+            provenant_config::PortTable::builtin().worktree_layout,
+        )?;
         let mut journal = FileJournal::open(
             &state,
             project,

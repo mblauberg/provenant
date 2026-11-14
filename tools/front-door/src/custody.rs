@@ -50,7 +50,7 @@ impl<'a> RetirementWriter<'a> {
     }
 
     fn error(
-        error: impl std::error::Error + 'static,
+        error: impl std::error::Error + Send + Sync + 'static,
     ) -> provenant_confinement::worktrees::WorktreeError {
         provenant_confinement::worktrees::WorktreeError::Retirement(Box::new(error))
     }
@@ -275,6 +275,7 @@ pub(crate) struct RetirementReader<'a> {
 }
 
 impl<'a> RetirementReader<'a> {
+    #[allow(clippy::disallowed_methods)] // Native read-only store open deadline.
     pub(crate) fn open(
         roots: &'a Roots,
         project: ProjectId,

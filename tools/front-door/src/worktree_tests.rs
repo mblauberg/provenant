@@ -179,8 +179,10 @@ pub fn main() -> std::process::ExitCode {
                 let merged = args.get(1).and_then(|arg| arg.to_str()).ok_or("head")?;
                 let between: Vec<&str> =
                     args.iter().skip(2).filter_map(|arg| arg.to_str()).collect();
+                let state = std::env::var_os("PROVENANT_STATE_DIR").ok_or("state dir")?;
                 let (status, detail) = crate::pr::land::delete_after_check(
                     &std::env::current_dir()?,
+                    std::path::Path::new(&state),
                     merged.parse()?,
                     &between,
                 )

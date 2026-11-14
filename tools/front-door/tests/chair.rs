@@ -216,7 +216,7 @@ fn hook(rig: &TestRig, start: bool, session: &str) -> Result<provenant_os::exec:
 }
 #[test]
 fn chair_start_records_verified_identity_without_a_pending_handoff() -> Result {
-    let mut rig = configured()?;
+    let rig = configured()?;
     let identity_key =
         write_fake_claude_identity(&rig.root.join("claude"), "primary@example.test")?;
     assert_eq!(code(&rig.command(&["fabric", "identity", "--json"])?), 0);

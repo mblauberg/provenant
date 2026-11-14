@@ -342,7 +342,11 @@ impl RefLedger {
             current
                 .as_ref()
                 .map_or((origin, attempt_id, operation_id), |current| {
-                    (current.origin, current.attempt_id, current.operation_id.clone())
+                    (
+                        current.origin,
+                        current.attempt_id,
+                        current.operation_id.clone(),
+                    )
                 })
         } else {
             (origin, attempt_id, operation_id)

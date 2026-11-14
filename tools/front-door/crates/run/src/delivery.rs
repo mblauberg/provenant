@@ -230,7 +230,9 @@ impl HostDeliveryContext {
         self.host_state
             .clone()
             .or_else(|| captured(provenant_core::STATE_DIRECTORY_ENV))
-            .or_else(|| captured("HOME").map(|home| home.join(provenant_core::DEFAULT_STATE_SUFFIX)))
+            .or_else(|| {
+                captured("HOME").map(|home| home.join(provenant_core::DEFAULT_STATE_SUFFIX))
+            })
     }
     /// Share the command-scoped repository fact limits with host delivery.
     pub fn with_repo_facts(mut self, facts: &provenant_confinement::worktrees::RepoFacts) -> Self {

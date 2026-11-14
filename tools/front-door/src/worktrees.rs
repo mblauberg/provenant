@@ -73,6 +73,8 @@ pub(crate) enum Error {
     InvalidScope,
     #[error("target seed build: {0}")]
     SeedBuild(String),
+    #[error("{0}")]
+    Settlement(String),
 }
 
 #[allow(clippy::print_stderr)]
@@ -338,7 +340,7 @@ fn execute(
                         .cloned()
                         .unwrap_or_default();
                     let authority =
-                        provenant_cli::fabric::Context::open(roots.clone(), &home, &project)
+                        provenant_cli::fabric::Context::open(roots.clone(), home, project)
                             .map_err(|_| {
                                 Error::GcObservation("cannot establish removal authority")
                             })?;
@@ -1542,6 +1544,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     use provenant_config::{RetentionKind, RetentionTrigger, retention_schedule};
     let mut report = Ok(Default::default());
     let mut discard_archives = worktrees::ArchiveReport::default();
+    let mut unhandled_retention_owners = Vec::new();
     let mut staging_busy = Vec::new();
     let mut provider_state = Default::default();
     let mut chair_logs = Default::default();
@@ -1810,81 +1813,6 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                         Err(_) => unobserved_projects.push(project.path.clone()),
                     }
                 }
-            }
-            _ => {}
-        }
-    }
-    let lanes: Vec<_> = projects.iter().flat_map(|project| &project.lanes).collect();
-    let now_ns = SystemClock
-        .wall_now()
-        .map(|now| i128::from(now.as_micros()) * 1_000)
-        .map_err(|_| Error::Budget)?;
-    let policy = CacheGcPolicy {
-        idle_before_ns: Some(now_ns - i128::from(command.idle_days) * 86_400 * 1_000_000_000),
-        free_floor_bytes: Some(free_floor),
-        max_total_bytes: Some(
-            config
-                .gc
-                .lane_cargo_cache_max_bytes()
-                .map_err(Error::DiskSpace)?,
-        ),
-        dry_run: command.dry_run,
-        protected_owners: lanes
-            .iter()
-            .filter(|info| !info.occupancy.is_available())
-            .map(|info| (info.path.clone(), info.occupancy.clone()))
-            .collect(),
-        project_owners: lanes.iter().map(|info| info.path.clone()).collect(),
-        selected_only: command.pressure && !command.scheduled,
-    };
-    let alert_floor = config
-        .gc
-        .alert_below
-        .as_deref()
-        .map(provenant_config::parse_cache_size)
-        .transpose()
-        .map_err(|_| Error::GcObservation("invalid alert threshold"))?
-        .unwrap_or(0)
-        .max(free_floor);
-    use provenant_config::{RetentionKind, RetentionTrigger, retention_schedule};
-    let mut report = Ok(Default::default());
-    let mut staging_busy = Vec::new();
-    let mut provider_state = Default::default();
-    let mut chair_logs = Default::default();
-    let mut seed_collection: Result<
-        provenant_run::target_seed_gc::Report,
-        Box<dyn std::error::Error>,
-    > = Ok(Default::default());
-    let mut build_collection: Result<
-        provenant_run::build_dir_gc::Report,
-        Box<dyn std::error::Error>,
-    > = Ok(Default::default());
-    let mut unhandled_retention_owners = Vec::new();
-    let seed_policy = &config.domains.fabric.lanes.cargo_seed;
-    let build_settings = config.domains.fabric.lanes.build_settings();
-    let trigger = if command.pressure {
-        RetentionTrigger::Gc
-    } else {
-        RetentionTrigger::FullGc
-    };
-    for class in retention_schedule(trigger) {
-        match class.class {
-            RetentionKind::LaneCargoCaches => {
-                report = gc_worktree_cargo_caches_with_writer_guard(&home, &policy, |path| {
-                    for project in &projects {
-                        if project.lanes.iter().any(|lane| lane.path == path) {
-                            return if policy.dry_run {
-                                worktrees::cache_writer_probe(&project.state, path)
-                            } else {
-                                worktrees::cache_writer_guard(&project.state, path).map(Some)
-                            };
-                        }
-                    }
-                    Err(worktrees::Occupancy::custody_unknown(
-                        path.to_path_buf(),
-                        "writer registration was not observed",
-                    ))
-                });
             }
             RetentionKind::DiscardArchives => {
                 for project in &projects {
@@ -2555,7 +2483,7 @@ mod gc_preview_tests {
             .with_removal(projection.clone()),
         );
         append_gc_removal_records(&mut report);
-        assert_eq!(report.removals, vec![projection]);
+        assert_eq!(report.removals, vec![projection.clone()]);
 
         let mut preview = worktrees::WorktreeGcReport {
             dry_run: true,
@@ -2734,7 +2662,9 @@ mod gc_preview_tests {
 
 #[cfg(test)]
 mod gc_subpass_removal_tests {
+    #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
     use super::*;
+    #[allow(unused_imports)]
     use provenant_records::custody::{RefEndpoint, RefOrigin, RefOwnership};
 
     #[test]

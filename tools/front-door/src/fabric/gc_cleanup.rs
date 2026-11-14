@@ -176,6 +176,18 @@ fn kept_unproven_worktree(
     }
 }
 
+/// Settlement steps mix custody, Git and receipt errors. Keep the worktree
+/// classification the receipt reads; carry anything else as its message.
+fn settlement_error(error: Box<dyn std::error::Error>) -> crate::worktrees::Error {
+    match error.downcast::<crate::worktrees::Error>() {
+        Ok(error) => *error,
+        Err(error) => match error.downcast::<provenant_confinement::worktrees::WorktreeError>() {
+            Ok(error) => crate::worktrees::Error::Worktree(*error),
+            Err(error) => crate::worktrees::Error::Settlement(error.to_string()),
+        },
+    }
+}
+
 /// Resume from the existing operation receipt by following its durable owner.
 /// The receipt only locates the retirement; only that record projects removals.
 fn retirement_records_for_receipt(
@@ -661,6 +673,7 @@ fn collect_owned_worktree_with(
             workers,
             facts,
             |context, cancel| {
+                (|| -> Result<_, Box<dyn std::error::Error>> {
                 if let Some(replayed_receipt) = replayed.as_mut() {
                     if replayed_receipt["state"] == "pruned"
                         || replayed_receipt["recovered_from_intent"] == true
@@ -742,7 +755,7 @@ fn collect_owned_worktree_with(
                 };
                 // A failed pre-prune step must not replace a retained lane's
                 // real reason, so record it and carry on.
-                let pre_prune = |evidence: &provenant_records::custody::LandedEvidence| -> Result<(), Box<dyn std::error::Error>> {
+                let pre_prune = |_evidence: &provenant_records::custody::LandedEvidence| -> Result<(), Box<dyn std::error::Error>> {
                     let lane = worktrees::list_for_gc_matching(context, cancel, |path, _| {
                         path == writer.worktree
                     })?
@@ -900,9 +913,22 @@ fn collect_owned_worktree_with(
                     .and_then(|intent| intent["retirement_id"].as_str())
                     .ok_or(worktrees::WorktreeError::RegistrationUnconfirmed)?;
                 if updated_retirement.id != receipt_id {
-                    return Err(worktrees::WorktreeError::IdentityChanged);
+                    return Err(worktrees::WorktreeError::IdentityChanged.into());
                 }
-                Ok(Some(outcome))
+                let intent = pruning_intent
+                    .as_ref()
+                    .ok_or("pruned worktree is missing its retirement receipt")?;
+                let records = retirement_records_for_receipt(
+                    context,
+                    &retirement,
+                    settled.project_id,
+                    &writer.worktree,
+                    intent,
+                    cancel,
+                )?;
+                Ok(Some((outcome, records)))
+                })()
+                .map_err(settlement_error)
             },
         )?)
     })();
@@ -928,7 +954,7 @@ fn collect_owned_worktree_with(
                 let warning = collection_error.take();
                 serde_json::json!({"schema_version":1, "state":"retained", "worktree":writer.worktree, "reason":reason, "cleanup_complete":true, "cleanup_warning":warning})
             }
-            Ok(Some(result)) => {
+            Ok(Some((result, records))) => {
                 let artefacts = worktrees::ArtefactOutcome::from_remove(&result);
                 let intent = pruning_intent
                     .as_ref()
@@ -936,14 +962,6 @@ fn collect_owned_worktree_with(
                 let retirement_id = intent["retirement_id"]
                     .as_str()
                     .ok_or("pruned worktree has no canonical retirement id")?;
-                let records = retirement_records_for_receipt(
-                    context,
-                    &retirement,
-                    settled.project_id,
-                    &writer.worktree,
-                    intent,
-                    cancel,
-                )?;
                 if let Some(sink) = removal_records.as_deref_mut() {
                     sink.extend(records.iter().cloned());
                 }
@@ -1074,13 +1092,17 @@ fn collect_owned_worktree_with(
                         .iter()
                         .filter_map(|outcome| outcome.removal.clone())
                         .collect();
-                    if let Some(sink) = removal_records.as_deref_mut() {
+                    if let Some(sink) = removal_records {
                         sink.extend(removals.iter().cloned());
                     }
+                    let encoded = removals
+                        .iter()
+                        .map(serde_json::to_value)
+                        .collect::<Result<Vec<_>, _>>()?;
                     receipt["removal_records"]
                         .as_array_mut()
                         .ok_or("missing removal_records")?
-                        .extend(serde_json::to_value(removals)?);
+                        .extend(encoded);
                 }
                 (Ok(_), false) => {}
                 (Err(error), _) => {
@@ -1098,6 +1120,7 @@ fn collect_owned_worktree_with(
 
 #[cfg(test)]
 mod removal_tests {
+    #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
     use super::*;
 
     #[test]
