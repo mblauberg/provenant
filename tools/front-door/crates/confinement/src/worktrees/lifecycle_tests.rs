@@ -982,7 +982,12 @@ fn merge_proof_scenario() -> Result<(), Box<dyn Error>> {
         integration_patterns: &[],
         excluded_paths: &[],
     };
-    let lanes = [via_batch.clone(), squashed.clone(), unmerged, advanced.clone()];
+    let lanes = [
+        via_batch.clone(),
+        squashed.clone(),
+        unmerged,
+        advanced.clone(),
+    ];
     // One lane keeps the preview inside its traversal budget.
     let preview = collect(
         &context,
@@ -1003,12 +1008,19 @@ fn merge_proof_scenario() -> Result<(), Box<dyn Error>> {
     // lane; unlanded work and a tip that moved after listing stay.
     assert!(!via_batch.path.exists() && !squashed.path.exists());
     // Subsumption retires the tree, not the branch: only landing deletes a ref.
-    for name in ["proof-via-batch", "proof-squashed", "proof-unmerged", "proof-advanced"] {
+    for name in [
+        "proof-via-batch",
+        "proof-squashed",
+        "proof-unmerged",
+        "proof-advanced",
+    ] {
         assert!(branch_exists(&fixture, name), "{name}");
     }
     assert!(
-        applied.candidates.iter().any(|row| row.action == "kept"
-            && row.path.ends_with("proof-unmerged")),
+        applied
+            .candidates
+            .iter()
+            .any(|row| row.action == "kept" && row.path.ends_with("proof-unmerged")),
         "{applied:?}"
     );
     assert!(applied.worktrees.retained.iter().any(|retained| {

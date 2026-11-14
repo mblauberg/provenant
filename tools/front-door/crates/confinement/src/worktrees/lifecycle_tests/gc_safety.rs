@@ -122,7 +122,7 @@ fn gc_idle_output_requires_ignored_idle_and_free_writer() -> Result<(), Box<dyn 
         let test_context = TestContext::new(&fixture)?;
         let context = test_context.context();
         let created = gc_owned_lane(&test_context, &context, "idle-output")?;
-            fs::create_dir_all(created.path.join("target"))?;
+        fs::create_dir_all(created.path.join("target"))?;
         fs::write(created.path.join("target/cache"), "output")?;
         let lanes = list(&context, &cancel())?;
         if scenario == "untracked" {

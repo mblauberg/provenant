@@ -568,7 +568,8 @@ fn gc_preview_and_apply_both_retain_a_managed_tree_with_an_unknown_census()
 }
 
 #[test]
-fn gc_dry_run_keeps_a_merged_foreign_worktree_when_foreign_cleanup_is_off() -> Result<(), Box<dyn Error>> {
+fn gc_dry_run_keeps_a_merged_foreign_worktree_when_foreign_cleanup_is_off()
+-> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test_context = TestContext::new(&fixture)?;
     let context = test_context.context();

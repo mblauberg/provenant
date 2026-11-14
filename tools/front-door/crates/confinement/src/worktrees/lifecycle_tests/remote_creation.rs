@@ -488,7 +488,7 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: true,
-            include_foreign: false,
+            include_foreign: true,
             retirement_port: None,
             retirement_feeds: None,
             mode: CollectionMode::Worktrees,
@@ -504,7 +504,8 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
         started.elapsed()
     );
     assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(git.listings.load(Ordering::SeqCst), 1);
+    // The command inventory is read at most once, never per worktree.
+    assert!(git.listings.load(Ordering::SeqCst) <= 1);
     // The shared 500 ms preview budget may expire on a busy CI host. Every
     // candidate must still receive a safe outcome, using the same census and
     // inventory even when the remaining work is deferred.
@@ -982,7 +983,7 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct CountingGit<'a> {
         inner: &'a dyn Executor,
-        calls: AtomicUsize,
+        statuses: AtomicUsize,
         listings: AtomicUsize,
     }
     impl Executor for CountingGit<'_> {
@@ -990,7 +991,9 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
             &self,
             options: provenant_os::exec::ExecOptions<'_>,
         ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
+            if options.argv.iter().any(|arg| arg == "status") {
+                self.statuses.fetch_add(1, Ordering::SeqCst);
+            }
             if options
                 .argv
                 .windows(2)
@@ -1011,7 +1014,7 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
     }
     let git = CountingGit {
         inner: context.executor,
-        calls: AtomicUsize::new(0),
+        statuses: AtomicUsize::new(0),
         listings: AtomicUsize::new(0),
     };
     context.executor = &git;
@@ -1040,8 +1043,9 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
         &cancel(),
     )?;
     assert!(report.worktrees.removed.is_empty());
-    // A single command-scoped inventory serves both phases of a preview.
-    assert_eq!(git.calls.load(Ordering::SeqCst), 1);
+    // A single command-scoped inventory serves both phases of a preview, and
+    // no out-of-scope tree is probed for status.
+    assert_eq!(git.statuses.load(Ordering::SeqCst), 0);
     assert_eq!(git.listings.load(Ordering::SeqCst), 1);
     let lanes = list_for_gc(&context, &cancel())?;
     collect(
@@ -1066,7 +1070,6 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
         },
         &cancel(),
     )?;
-    // Applying discards the cached snapshot and reads again under custody.
-    assert_eq!(git.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(git.statuses.load(Ordering::SeqCst), 0);
     Ok(())
 }

@@ -1102,7 +1102,16 @@ fn collect_impl(
     cancel: &CancelToken,
 ) -> Result<WorktreeGcReport, WorktreeError> {
     validate_binding(context)?;
-    let entries = context.facts.fresh_inventory(context, cancel)?;
+    // A preview describes the command's inventory snapshot; applied cleanup
+    // reads afresh and re-reads again under custody before each mutation.
+    let entries = match policy
+        .dry_run
+        .then(|| context.facts.take_inventory(context))
+        .flatten()
+    {
+        Some(entries) => entries,
+        None => context.facts.fresh_inventory(context, cancel)?,
+    };
     let primary = canonicalize(context.repo.root_path())?;
     let ports = provenant_config::PortTable::read_for(Some(&primary), &context.host_state()?)
         .map_err(WorktreeError::PortConfiguration)?;
@@ -1133,6 +1142,11 @@ fn collect_impl(
         && policy.include_foreign
         && first_foreign_pass(context)?;
     let dry = policy.dry_run || first_foreign;
+    if dry {
+        // Preview every candidate against one census snapshot.
+        let roots: Vec<_> = lanes.iter().map(|lane| lane.path.clone()).collect();
+        context.workers.observe_roots(&roots);
+    }
     let mut report = WorktreeGcReport {
         dry_run: dry,
         first_foreign_preview: first_foreign,
@@ -1243,7 +1257,8 @@ fn collect_impl(
                     })?;
             }
             let locked = lock_worktree(context, entry, cancel, dry)?;
-            census_free(context, &lane.path)?;
+            // A preview shares one census across candidates; applying re-reads.
+            census_free(context, &lane.path, !dry)?;
             let tree_bytes = match allocated_tree(locked.verified.repo().root_dir(), 0) {
                 Ok(bytes) => Some(bytes),
                 Err(error) => {
@@ -1488,7 +1503,7 @@ fn collect_impl(
                 }
                 // A census is slow: never under the repository lock.
                 if census {
-                    census_free(context, &lane.path)
+                    census_free(context, &lane.path, !dry)
                 } else {
                     Ok(())
                 }
@@ -1700,8 +1715,14 @@ fn collect_impl(
 
 /// Removal needs a fresh positive census. Custody accepts an unobservable
 /// process for ordinary removal; deleting a tree automatically does not.
-fn census_free(context: &WorktreeContext<'_>, path: &Path) -> Result<(), WorktreeError> {
-    context.workers.invalidate();
+fn census_free(
+    context: &WorktreeContext<'_>,
+    path: &Path,
+    refresh: bool,
+) -> Result<(), WorktreeError> {
+    if refresh {
+        context.workers.invalidate();
+    }
     match census_refusal_detail(context, path) {
         Some(detail) => Err(WorktreeError::IncompleteCensus { detail }),
         None => Ok(()),

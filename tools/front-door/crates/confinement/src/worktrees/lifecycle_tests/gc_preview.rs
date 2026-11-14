@@ -242,10 +242,9 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
                 keep: &[],
                 written_before_ns: match scenario {
                     "recent" => 0,
-                    "aged" => (std::time::SystemTime::now()
-                        - std::time::Duration::from_secs(3600))
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_nanos() as i128,
+                    "aged" => (std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+                        .duration_since(std::time::UNIX_EPOCH)?
+                        .as_nanos() as i128,
                     _ => i128::MAX,
                 },
                 dry_run: matches!(scenario, "preview" | "no-output" | "unconfigured"),
