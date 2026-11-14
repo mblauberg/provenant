@@ -13,7 +13,7 @@ recovers any partial or crashed install.
 toolchain (`--yes` accepts a missing-toolchain install). Releases are
 `aarch64-apple-darwin` only; other hosts must use `--source`. The script
 verifies the package SHA-256 before running anything from it. State defaults to
-`~/.local/share/provenant/v1` and the binary to `~/.local/bin`; override with
+`~/.local/share/provenant/v2` and the binary to `~/.local/bin`; override with
 `--state-dir`, `PROVENANT_STATE_DIR` and `--bin-dir` (absolute paths).
 
 Exit codes: 2 invalid arguments or interrupted prompt, 3 toolchain needs
@@ -43,85 +43,53 @@ Drain first: no lane should run across a binary swap. Check
 `provenant status`, collect `provenant output TARGET`, and only then `retry`
 unfinished work.
 
-A state-format break stops the install with `STATE_FORMAT_BREAK` (exit 6),
-listing dropped and kept classes and worktrees holding unlanded commits.
-`--yes` does not acknowledge it. Pass `--reset-state` or type `reset` at the
-interactive `install.sh` prompt. Other refusals do not offer that prompt.
-`install --dry-run` prints the reset plan without deleting anything.
+If installation fails after stopping agents, the output names the stopped
+agents and those that may still be running, prints the quoted state directory
+and asks you to rerun your original install command with its original options
+(`--source`, `--state-dir`, `--bin-dir`). Agents restart after a successful
+install.
 
-To cut over from 1.x to 2.0.0, on **each host, peers included**:
+`provenant upgrade` preflights every configured host before installing any
+host and never prompts while capturing installer output. Keep the fleet
+quiescent for the whole operation; preflight cannot make a multi-host install
+atomic.
 
-1. Land or park work in every lane worktree. Commits survive; run records do not.
-2. Finish or stop every lane and close every other chair/harness session on that
-   host. No old session or hook may run during cut-over. A custody lock,
-   including a detached child's lock, blocks reset even with acknowledgement.
-3. Copy the state directory if you want a complete archive.
-4. Use the **2.0 installer**: `install.sh --upgrade --reset-state`. A 1.x
-   `provenant upgrade` does not understand `--reset-state`; it cannot perform
-   this cut-over. Its captured installer output must refuse immediately, without
-   opening a terminal. The reset prompt requires both stdin and stderr to be
-   terminals; otherwise run `install.sh --upgrade --reset-state` explicitly.
-   `PROVENANT_INSTALL_TTY=1` simulates a terminal for installer tests, including
-   the reset prompt; captured invocations must leave it unset.
-   Read the dropped and kept lists before proceeding.
-5. Run `provenant check install` using the new binary.
+### From 1.x to 2.0
 
-The installer validates all account previews and release smoke checks before
-resetting. It stops and re-queries each eligible old peer/tick service, including
-retired labels, before any deletion or archive move. A loaded job is Running,
-including an idle scheduled job; only an explicit missing-service response is
-Absent. Query timeouts, launchctl errors and parse failures are Indeterminate.
-The initial shutdown check precedes install writes. Running or Indeterminate
-refuses reset and prints one line naming the service and the exact command to
-stop it by hand. Run that command and retry the same installer. Absence is
-checked again immediately before removal. A failed final check leaves reset
-sources unmoved; preparatory install writes may already have completed. On
-Linux, the installer stops and confirms inactivity of both the tick timer and
-any tick service it already dispatched. Agents restart after successful
-installation. If installation fails after shutdown, the output names
-stopped agents and agents whose shutdown failed as "may still be running",
-prints the quoted state directory and asks you to rerun your original install
-command, preserving `--source`, `--state-dir`, `--bin-dir` and other options.
-Add `--reset-state` only when the failed install had a reset plan. This Upgrade
-section is the recovery procedure; use the same installer path or invocation
-that you used originally. Rerun before opening sessions. Provider archives move
-out of the dropped tree to `provider-history/format-1/`, retaining their relative
-attempt paths. The format-1 usage ledger moves to `usage-history/format-1/`;
-schema-1 `ingest/` and `ingest-cursors.json` move to
-`usage-history/format-1-ingest/` and
-`usage-history/format-1-ingest-cursors.json`. These telemetry archives are made
-only with receipt none or 1 and positively identified old state; receipt 2
-leaves live telemetry untouched even when old agents recreate stores. Format 2
-has no format-1 telemetry reader. Only positively identified format-1
-admission leases are dropped. Read-only tmp directories and partial removal can
-be retried safely. Dropped symlinks,
-including lock-named links, are unlinked with an identity check; their targets
-are never followed. A symlink or non-directory at a provider-history source or
-archive ancestor, or an existing destination with its source still present,
-refuses during preflight, before shutdown or moves. An already moved archive
-with no remaining source stays intact on retry. The usage ledger source and
-archive ancestors must also be directories, and its archive destination must be absent.
+2.0 keeps its state in a fresh root, `~/.local/share/provenant/v2`. It never
+writes, moves or deletes the 1.x root, `~/.local/share/provenant/v1`, and
+refuses any state root inside it. The first install at the default root, while
+that root is absent or empty and a 1.x root exists, stops the 1.x launch agents
+and then copies the owner configuration and nothing else:
 
-Classify every store separately. Without a receipt, only shipped 1.x headers
-(or the retired work index) identify old state; other non-fresh headers refuse.
-With receipt 1, SQLite versions below that store's current format-2 version
-identify old state, including intermediate migrations. Current/newer versions
-and garbage refuse: they may be live data from a partial reset. With receipt 2,
-only shipped 1.x versions are reset; known format-2 stores and their payloads
-stay untouched, while unknown headers refuse. One old store never authorises
-removal of its siblings or live telemetry. A store symlink is left alone.
-An empty main file or a complete version-zero header with page count 0 or 1
-supplies no evidence. A short non-empty main file refuses even with
-WAL/shared-memory companions: its incomplete header cannot identify the format.
-Other unknown non-empty or unreadable headers refuse and require repair or
-restoration before retrying. See the
-[state format contract](../specs/state.md#a-format-break-needs-acknowledgement)
-for the shipped-version table and receipt rules.
+- `config.toml`: accounts, routing, presets, Fabric peers, lanes and the shared
+  settings source.
+- `host-id`: this host's Fabric identity, which its peers name.
+- `install/receipt.json`: the recorded targets, binary directory and hooks, so
+  the install replaces the 1.x links instead of refusing them as foreign.
 
-From a format-2 binary, `provenant upgrade` preflights every configured host
-before installing any host and never prompts while capturing installer output.
-Each host rechecks its reset plan before deletion. Keep the fleet quiescent for
-the entire operation; preflight cannot make a multi-host install atomic.
+Run records, stores, ledgers, quota and usage history, worktree records and
+caches stay in the 1.x root; credentials stay with each provider. The JSON
+result names the copy under `state_copy` (`from`, `to`, `files`, `copied`) and
+the human output says it in one line. A dry run or `--upgrade-preflight` reports
+the copy it would make, checks the release and changes nothing. A failed agent
+stop copies nothing. A non-empty 2.0 root is never seeded again, and an explicit
+`--state-dir` or `PROVENANT_STATE_DIR` other than the default is never seeded.
+
+The 1.x and 2.0 agents share the labels `dev.provenant.peer` and
+`dev.provenant.tick` and their plist paths, so the install stops them by label
+(with the retired `dev.provenant.disk-guard` and `dev.provenant.gc`) before the
+copy and starts the 2.0 agents after it. `install.sh` maps a `--state-dir`
+naming the 1.x root, which a 1.x `provenant upgrade` passes, to the 2.0
+default.
+
+On each host, peers included: land or park lane work and finish every lane
+(1.x run records do not carry over), close other sessions, run `provenant
+upgrade` (1.x) or `install.sh --upgrade` (2.0), then `provenant check install`.
+
+Rollback: run `provenant uninstall` with the 2.0 binary, then the 1.x installer
+(`install.sh --tag v1.11.2`, or the last 1.x tag), which finds its 1.x root
+intact. Delete the 2.0 root by hand if you no longer want it.
 
 ### Test a candidate binary
 
@@ -160,7 +128,7 @@ source, never an account.
 
 ```sh
 PROVENANT="$RELEASE/bin/provenant"
-STATE="$HOME/.local/share/provenant/v1"
+STATE="$HOME/.local/share/provenant/v2"
 "$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude --dry-run
 "$PROVENANT" --state-dir "$STATE" install --source "$RELEASE" --harness claude
 "$PROVENANT" --state-dir "$STATE" check install --source "$RELEASE"

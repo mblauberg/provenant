@@ -38,6 +38,11 @@ mod release_smoke;
 mod roots;
 mod settlement;
 mod staging_gc;
+mod state_handoff;
+#[allow(
+    dead_code,
+    reason = "2.0.0 install runs from a fresh root and never resets; a later release gates removing the 1.x root on the owner"
+)]
 mod state_reset;
 mod status_wait;
 mod target_seed_build;

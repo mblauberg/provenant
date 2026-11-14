@@ -463,7 +463,7 @@ pub enum RunError {
     #[error("invalid Git base {0:?}: expected a resolvable commit reference")]
     InvalidBase(String),
     #[error(
-        "STATE_RESET_REQUIRED: schema version {0} is not supported; run `install --reset-state` to discard the store"
+        "STATE_RESET_REQUIRED: schema version {0} is not supported; move the store aside to start it fresh"
     )]
     Version(i64),
     #[error("run-store path {} is not private or contained: {check}", path.display())]

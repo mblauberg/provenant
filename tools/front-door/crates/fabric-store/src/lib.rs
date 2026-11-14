@@ -71,7 +71,7 @@ pub enum Error {
     #[error("request cancelled")]
     Cancelled,
     #[error(
-        "STATE_RESET_REQUIRED: database schema version {0} is not supported; run `install --reset-state` to discard it"
+        "STATE_RESET_REQUIRED: database schema version {0} is not supported; move the store aside to start it fresh"
     )]
     SchemaVersion(i64),
     #[error("SQLite refused WAL journal mode (returned {0})")]

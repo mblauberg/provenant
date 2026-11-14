@@ -919,7 +919,7 @@ fn mandatory_for_plan(
     if let Some(policy) = &plan.policy {
         return Ok(policy.mandatory().clone());
     }
-    let state = home.join(".local/share/provenant/v1");
+    let state = home.join(provenant_core::DEFAULT_STATE_SUFFIX);
     let missing_source = home.join(".provenant-unbound-source");
     let source = worktree
         .map(|grants| grants.worktree.path.as_path())

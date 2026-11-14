@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 
-Changed: 2026-10-30, #2284; 2026-11-04 (shims and provider guards); 2026-11-12 (unsandboxed trusted routes, #3246).
+Changed: 2026-10-30, #2284; 2026-11-04 (shims and provider guards); 2026-11-12 (unsandboxed trusted routes, #3246); 2026-11-14 (2.0.0 runs from a fresh state root, #3078).
 
 ## Context
 
@@ -35,8 +35,15 @@ versioned and tolerate extra fields.
 Interfaces change without compatibility shims, before and after 1.0: no legacy
 readers, aliases, fallback paths or dual formats. A breaking change ships with
 a release note and a clear operator step, such as draining active work or
-resetting incompatible persisted state before upgrade
-([install](../runbooks/install.md#bootstrap-and-upgrade)).
+moving to a fresh state root
+([install](../runbooks/install.md#from-1x-to-20)).
+
+The format-1 reset moved off the 2.0.0 install path. Deleting 1.x state in
+place was a one-way step on owner data, with a recovery story that depended on
+every store being classified correctly. 2.0.0 instead runs from a fresh state
+root, copies only the owner configuration out of the 1.x root and never writes
+that root, so no 2.0 code reads 1.x-shaped state and rollback is reinstalling
+1.x. The reset code stays for a later, owner-gated removal of the 1.x root.
 
 Provider and launch guards outside the four boundaries warn and continue, or
 are configurable defaults with a visible source. They do not refuse a lane.

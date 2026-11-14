@@ -633,7 +633,7 @@ commit; a lane-rewritable record never decides whether a held handle stops.
 Every SQLite store (`run`, `admission`, `work-index`, `pr-contributions`,
 the workflow log, and Fabric's `fabric` and `host`) is created from one schema
 file at one version. A store at any other version, older or newer, is refused
-with `STATE_RESET_REQUIRED`, which names `install --reset-state`, and its bytes
+with `STATE_RESET_REQUIRED`, which says to move the store aside, and its bytes
 are left unchanged. There is no migration, snapshot or older-shape reader.
 
 `stop` durably records the request and signals the supervisor without waiting
@@ -1292,7 +1292,7 @@ directory of its first attempt, until graph records replace the run level.
 Each admitted record persists its work key; reads reject a missing key or one
 that disagrees with the indexed project, graph, node or attempt number.
 The store opens from one schema file at one version and refuses any other
-version (`STATE_RESET_REQUIRED`, naming `install --reset-state`) without modifying it; it also
+version (`STATE_RESET_REQUIRED`, which says to move the store aside) without modifying it; it also
 refuses unsafe companion files beside the database, and caps (1 MiB record or prompt, 64 MiB stream,
 4 MiB result) make an oversized result a typed failure, never a truncation.
 

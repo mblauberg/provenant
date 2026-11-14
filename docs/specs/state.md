@@ -122,31 +122,29 @@ Host identity uses the same no-replace publication and reads the winning ID.
   `crates/run/src/target_seed_gc.rs::tests::active_clone_lock_prevents_collection`
 - Owner: `crates/run/src/retention.rs`
 
-### A format break needs acknowledgement
+### 2.0 runs from a fresh state root
 
-An install never opens an older-format store with SQLite. A format-1 receipt
-or positively identified format-1 stores trigger `STATE_FORMAT_BREAK`
-(exit 6). Without `--reset-state` the install changes nothing, even with `--yes`.
-A dry run describes the reset. Header classification happens separately for each
-store, including nested stores; one old database never authorises deletion of
-another store. Receipt errors and newer formats refuse rather than guessing.
+The default state root is `~/.local/share/provenant/v2`
+(`provenant_core::DEFAULT_STATE_SUFFIX`); the 1.x root
+`~/.local/share/provenant/v1` (`LEGACY_V1_STATE_SUFFIX`) is the only other
+spelling. 2.0 never writes, moves or deletes the 1.x root and refuses any state
+root inside it, so no 2.0 code opens a 1.x store. The first install at the
+default root, while that root is absent or empty and a 1.x root exists, stops
+every 1.x launch agent by label, then copies `config.toml`, `host-id` and
+`install/receipt.json` (regular files only, modes kept) into a staged directory
+renamed into place. A failed stop copies nothing; a non-empty root and any
+other explicit root are never seeded. The copied receipt's links stay owned, so
+the install replaces them. A dry run reports the copy and writes nothing.
+- Why: rollback is reinstalling 1.x, which needs its root intact, and two
+  versions must never run agents at once.
+- Test: `src/state_handoff.rs::copies_only_owner_configuration_and_never_writes_the_old_root`;
+  `tests/install.rs::first_install_at_a_fresh_root_copies_only_1x_configuration`
+- Owner: `src/state_handoff.rs`, `src/install.rs`, `install.sh`
 
-- No receipt: only a header in that store's shipped 1.x table identifies format
-  1. Empty/fresh stores supply no evidence; every other header refuses.
-- Receipt 1: SQLite versions below that store's current format-2 version identify
-  format 1, including interrupted 1.x migrations. A version at or above current,
-  garbage or a non-SQLite file refuses, since partial reset may have created
-  live format-2 state. Empty/fresh stores supply no evidence.
-- Receipt 2: only shipped 1.x versions identify stores recreated by an old agent.
-  Known format-2 versions (above the shipped 1.x maximum) are untouched;
-  unknown headers refuse.
-
-Without a receipt, positive evidence also requires an `install/` directory;
-otherwise repair the receipt before resetting. Retired work-index files and
-companions identify only that retired class: no format-2 writer creates them.
-
-`src/state_reset.rs::FORMAT_ONE_VERSIONS` is the single table of versions
-shipped by 1.x releases, audited across `v1.0.0` through `v1.11.1`:
+The format-1 reset in `src/state_reset.rs` is not on the 2.0.0 install path. A
+later release turns it into an owner-gated removal of the 1.x root. Its table
+of versions shipped by 1.x releases, audited across `v1.0.0` through `v1.11.1`,
+is `FORMAT_ONE_VERSIONS`:
 
 | Store | Released 1.x current versions |
 | --- | --- |
@@ -155,84 +153,6 @@ shipped by 1.x releases, audited across `v1.0.0` through `v1.11.1`:
 | `fabric/host.sqlite3` (introduced in v1.3.0) | 13, 15 |
 | `admission.sqlite3` | 1, 2, 5, 6 |
 | `pr-contributions.sqlite3` (introduced in v1.3.0) | 4 |
-
-These are release-current versions, not intermediate migration steps or a
-compatibility reader. Inspect bytes 0–15 for SQLite magic and 60–63 for the
-big-endian `user_version`; without receipt 1, only membership in that store's
-table is format-1 header evidence. Format-2 writers use versions above these sets, including
-admission 7 and PR contributions 5, avoiding the old admission 6 collision and
-the PR version regression. Current versions come from the owning crates'
-schema constants; every current version must exceed its store's last shipped
-1.x version. Under receipt 2, later bumps and earlier format-2 versions are never
-reset evidence. An empty main file or a complete SQLite header with version zero
-and page count 0 or 1 identifies neither format. A short non-empty main file
-refuses, including with a `-wal` or `-shm` companion: an incomplete header cannot identify the format. Other unknown
-non-empty or unreadable headers refuse with repair/restore instructions. Store
-symlinks supply no evidence and are left alone. Links inside positively identified
-payloads or their companions are unlinked without following their targets.
-
-Reset follows source verification, every account preview and release smoke
-checks. Intermediate install batches publish a format-1 receipt until removal
-succeeds and the final batch publishes format 2; there is no separate reset
-marker. The plan is rechecked before removal. Old peer and tick agents are
-stopped and re-queried before any deletion or archive move; each eligible
-service must be confirmed absent (including retired peer/tick service labels).
-A loaded service, even an idle scheduled job, is Running; only an explicit
-missing-service response is Absent. Query timeout, launchctl error or parse
-failure is Indeterminate. The initial shutdown check precedes install writes;
-Running or Indeterminate refuses reset, naming the service and its exact manual
-stop command on one line. Shutdown is checked again at removal: a failed final
-check leaves reset sources unmoved, though preparatory install writes may have
-completed. On Linux, both the tick timer and any already dispatched tick service
-must be stopped and confirmed inactive. Agents restart after a successful
-install. Failures
-name stopped agents and agents whose shutdown failed as "may still be running",
-print the quoted state directory and direct the user to rerun their original
-install command, preserving source and destination options (runbook: Upgrade).
-Only failures with a reset plan request `--reset-state`. This also covers
-receipt publication and final-inspection failures after deletion. No other chair/harness
-session may be active during cut-over. Held custody locks in base, run-keyed and
-nested child stores block reset. Fleet upgrade preflights every host before
-installing any host; hosts remain quiescent until the operation completes.
-
-Reset removes only identified databases and their SQLite companions. An old
-run store selects its own attempt payloads, including run-keyed payloads;
-nested child stores are classified independently. An old Fabric database selects
-its graph journals; host Fabric, PR contributions and admission are independent
-stores. Containers of mixed stores are traversed rather than deleted wholesale.
-If an old payload tree contains a protected store, reset refuses before writes.
-Owned macOS `pv-*` links to those attempts' tmp directories
-are unlinked. All removals use a held state-root directory capability, restore
-owner access to read-only directories and treat absent entries as removed.
-Symlinked `fabric` refuses. Every dropped symlink, lock-named ones included, is
-unlinked without following it: the unlink is identity-checked against the entry
-observed before removal, refuses a replaced entry and never touches the link's
-target.
-
-Before removing any dropped tree, provider archives from its actual
-`attempts/<id>/provider-history` layout (including run-keyed and child stores)
-are moved to `provider-history/format-1/<relative-attempt-path>/provider-history`
-with identity checks and no replacement. A symlink or non-directory at a source
-history or archive ancestor, or an existing destination whose source is still
-present, refuses at preflight before shutdown or moves. An already moved valid
-archive with no remaining source stays intact on retry. Only with receipt none
-or 1 and positively identified format-1 state, telemetry is archived without
-replacement: `usage-ledger/` to `usage-history/format-1/`,
-schema-1 `ingest/` to `usage-history/format-1-ingest/`, and `ingest-cursors.json`
-to `usage-history/format-1-ingest-cursors.json`. Format 2 has no reader for any of
-these format-1 records. Unsafe source types or archive ancestors and existing
-destinations refuse during preflight. Under receipt 2 all telemetry stays
-untouched, even when an old agent has recreated another store: it is live
-format-2 data then. Provider history is moved only out of selected attempt
-payloads. Interrupted resets are rerunnable: absent sources stay absent and
-archives stay intact; no unidentified payload is deleted on a retry.
-Quota history, these archives, session checkpoints, chair logs, worktrees
-and branches stay.
-- Why: deleting state is irreversible and a lane may be running.
-- Test: `tests/install.rs::format_one_state_is_reset_only_on_acknowledgement`;
-  `tests/install.rs::reset_unlinks_lock_named_symlinks_without_touching_their_targets`;
-  `crates/os/src/fs/tests.rs::symlink_unlink_checks_identity_and_preserves_targets_even_for_lock_names`
-- Owner: `src/state_reset.rs`, `src/install.rs`, `install.sh`
 
 ## Release identity
 
