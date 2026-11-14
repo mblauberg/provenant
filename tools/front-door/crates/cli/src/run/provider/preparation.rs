@@ -2612,6 +2612,7 @@ pub(super) fn prepare_candidates(
                 Some((context.risk_tier.as_deref()?, context.task_kind.as_deref()?))
             }),
             required_family,
+            Some(&launch_policy),
         )
         .map(|mut resolved| {
             // The router cannot observe host fences. Preserve the known
@@ -2805,6 +2806,7 @@ pub(super) fn prepare_candidates(
                             Some((context.risk_tier.as_deref()?, context.task_kind.as_deref()?))
                         }),
                         required_family,
+                        Some(&launch_policy),
                     )
                     .ok()
                 };

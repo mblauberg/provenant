@@ -247,6 +247,7 @@ pub(super) fn with_context<T>(
     host: &str,
     requested_models: &[ModelId],
     revalidated_auth: bool,
+    launch_policy: Option<&provenant_records::policy::Policy>,
     action: impl FnOnce(
         &RoutingContext<'_>,
         &[provenant_quota::AccountRecord],
@@ -272,10 +273,11 @@ pub(super) fn with_context<T>(
         .and_then(|cwd| crate::run::preview_project_id(roots, &cwd))
         .map(|project| project.to_string())
         .unwrap_or_default();
-    config.launch_policy =
+    config.launch_policy = launch_policy.cloned().unwrap_or_else(|| {
         domains
             .policy
-            .resolve_with_knobs(&project, &resolved_config.knobs, &Default::default());
+            .resolve_with_knobs(&project, &resolved_config.knobs, &Default::default())
+    });
     config.allow_unknown_partial_headroom = allow_unknown;
     config.partial_headroom_source = Some(partial_headroom_source);
     resolve_pacing_accounts(&mut config, &domains.accounts)?;
@@ -475,6 +477,7 @@ pub(crate) fn resolve_dispatch_rejecting(
         rejected,
         choice_context,
         None,
+        None,
     )
 }
 
@@ -493,6 +496,7 @@ pub(crate) fn resolve_dispatch_rejecting_family(
     rejected: &[ModelId],
     choice_context: Option<(&str, &str)>,
     required_family: Option<&str>,
+    launch_policy: Option<&provenant_records::policy::Policy>,
 ) -> Result<provenant_records::ResolvedRoute, DispatchError> {
     let catalogue = Catalogue::bundled()?;
     let (excluded_families, required, preferred) = match excluded_families {
@@ -534,6 +538,7 @@ pub(crate) fn resolve_dispatch_rejecting_family(
         rules,
         choice_context,
         required_family,
+        launch_policy,
     );
     // Relax when the unused families have no eligible member, including fresh
     // snapshot exhaustion, or the selected account is blocked by persisted
@@ -564,6 +569,7 @@ pub(crate) fn resolve_dispatch_rejecting_family(
             rules,
             choice_context,
             required_family,
+            launch_policy,
         );
         match (relaxed, selected) {
             // Keep the preferred-stage route when relaxing would only trade one
@@ -603,6 +609,7 @@ pub(crate) fn resolve_dispatch_rejecting_family(
             rules,
             choice_context,
             required_family,
+            launch_policy,
         );
         match (relaxed, selected) {
             // Relaxing must not trade a spent route for another one.
@@ -676,6 +683,7 @@ pub(super) fn resolve_dispatch_excluding(
         rules,
         choice_context,
         None,
+        None,
     )
 }
 
@@ -693,6 +701,7 @@ pub(super) fn resolve_dispatch_excluding_family(
     rules: &[provenant_routing::ExclusionRule],
     choice_context: Option<(&str, &str)>,
     required_family: Option<&str>,
+    launch_policy: Option<&provenant_records::policy::Policy>,
 ) -> Result<provenant_records::ResolvedRoute, EdgeError> {
     let mut requested_models = Vec::new();
     if let RouteChoice::Model(model) = &request.choice {
@@ -709,6 +718,7 @@ pub(super) fn resolve_dispatch_excluding_family(
         host,
         &requested_models,
         true,
+        launch_policy,
         |context, records, policies, _| {
             let scoped = RoutingContext {
                 choice_context,
@@ -1051,6 +1061,7 @@ pub fn resolve_review_family(
                 "local-preview",
                 &[],
                 false,
+                None,
                 |context, records, policies, settings| {
                     let rules = effective_exclusion_rules(exclude, roots)?;
                     // Preview has no availability probes. Account exclusions
@@ -1272,6 +1283,7 @@ pub fn depletion_facts(
         &host,
         std::slice::from_ref(&model),
         true,
+        None,
         |context, _, _, _| {
             Ok((
                 provenant_routing::depletion_facts(context, intent, std::slice::from_ref(&model))?,
