@@ -887,16 +887,26 @@ fn concurrent_owner_lock_creation_of_one_new_name_succeeds_for_every_caller() {
 }
 
 #[test]
-fn creating_owner_lock_stops_after_five_persistent_not_found_errors() {
+fn create_open_retries_transient_and_bounds_persistent_not_found() {
     let mut attempts = 0;
-    let error = open_lock_creating_with(|| {
+    let recovered = crate::sys::fs::retry_create_open(|| {
         attempts += 1;
-        assert!(attempts <= 5, "lock open retried beyond its limit");
+        if attempts == 1 {
+            return Err(io::Error::from_raw_os_error(errno::ENOENT));
+        }
+        Ok(attempts)
+    })
+    .unwrap();
+    assert_eq!(recovered, 2);
+
+    let mut attempts = 0;
+    let error = crate::sys::fs::retry_create_open::<()>(|| {
+        attempts += 1;
         Err(io::Error::from_raw_os_error(errno::ENOENT))
     })
     .unwrap_err();
 
-    assert_eq!(attempts, 5);
+    assert_eq!(attempts, crate::sys::fs::CREATE_OPEN_ATTEMPTS);
     assert_eq!(error.raw_os_error(), Some(errno::ENOENT));
 }
 

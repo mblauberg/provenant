@@ -309,29 +309,6 @@ impl From<FsError> for io::Error {
         }
     }
 }
-/// Open (creating if absent) an owner lock relative to a held directory.
-///
-/// On macOS/APFS, `openat(O_CREAT)` of one new name by concurrent callers can
-/// fail the loser with ENOENT even though the directory is live and the entry
-/// now exists (measured: about half of two-thread races; one immediate retry
-/// always succeeded). A genuinely removed directory keeps returning ENOENT, so
-/// a small bounded retry absorbs the race without hiding that case. The caller
-/// still verifies the opened inode against the directory entry.
-fn open_lock_creating(dir: &File, name: &OsStr) -> io::Result<File> {
-    open_lock_creating_with(|| os::open_lock(dir, name))
-}
-fn open_lock_creating_with(mut open: impl FnMut() -> io::Result<File>) -> io::Result<File> {
-    const ATTEMPTS: usize = 5;
-    let mut attempt = 1;
-    loop {
-        match open() {
-            Err(source) if source.kind() == io::ErrorKind::NotFound && attempt < ATTEMPTS => {
-                attempt += 1;
-            }
-            result => return result,
-        }
-    }
-}
 fn error<'a>(operation: &'static str, path: &'a Path) -> impl FnOnce(io::Error) -> FsError + 'a {
     move |source| {
         if source.raw_os_error() == Some(errno::ELOOP) {
@@ -900,7 +877,7 @@ impl Directory {
             Err(error) if error.is_not_found() => None,
             Err(error) => return Err(error),
         };
-        let file = open_lock_creating(&self.file, name).map_err(error("open owner lock", &path))?;
+        let file = os::open_lock(&self.file, name).map_err(error("open owner lock", &path))?;
         let opened = file
             .metadata()
             .map(Metadata::from_std)
