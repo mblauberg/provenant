@@ -575,7 +575,17 @@ fn submit_with_launcher(
                     let profile = config.dispatch_profile(&submission.knobs);
                     let dispatch = profile.as_ref().map(provenant_config::policy::dispatch).unwrap_or_default();
                     let policy = config.domains.policy.resolve_with_knobs(&session.context.project_id.to_string(), &config.knobs, &dispatch);
-                    let effect = policy.check("LAUNCH_DISK", provenant_records::policy::Facts::violation("writer disk observation below configured floor"));
+                    let (code, detail) = match &check {
+                        DiskCheck::Low { .. } => (
+                            "LAUNCH_DISK",
+                            "writer disk observation is below its configured floor",
+                        ),
+                        DiskCheck::Unobserved(_) => (
+                            "SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE",
+                            "writer disk space could not be observed",
+                        ),
+                    };
+                    let effect = policy.check(code, provenant_records::policy::Facts::violation(detail));
                     if effect.blocks() { Err(check) } else {
                         if let Some(message) = effect.message() { let _ = writeln!(std::io::stderr().lock(), "warning: {message}"); }
                         Ok(())

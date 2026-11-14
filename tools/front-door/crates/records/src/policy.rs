@@ -161,6 +161,26 @@ impl Policy {
             }
         }
     }
+    /// Keep an existing domain error while routing its immutable safety
+    /// decision through the compiled policy table. Boundary rules have no
+    /// knobs and must always refuse a violated predicate; a table regression
+    /// here is a programming error, not a reason to weaken the boundary.
+    #[allow(clippy::panic)]
+    pub fn boundary_error<E>(&self, code: &str, facts: Facts, typed_error: E) -> E {
+        let effective = self.rule(code);
+        assert!(
+            effective.rule.boundary != Boundary::None
+                && effective.rule.knob.is_none()
+                && effective.rule.strength == Strength::Refuse,
+            "boundary policy must be immutable and refusing"
+        );
+        match self.check(code, facts) {
+            Effect::Refuse(_) => typed_error,
+            Effect::Proceed | Effect::Warn(_) | Effect::Queue(_) => {
+                panic!("violated boundary policy did not refuse")
+            }
+        }
+    }
     /// Presentation and lane guidance use exactly the resolved enforcement rows.
     pub fn render(&self) -> String {
         self.rules

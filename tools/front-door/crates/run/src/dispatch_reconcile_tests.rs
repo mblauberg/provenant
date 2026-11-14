@@ -133,6 +133,7 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
         ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
             Err(crate::PrepareRefusal {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                policy_code: None,
                 resource: None,
                 terminal_cause: provenant_records::run::TerminalCause::HandoffRefused,
                 terminal_note: None,
@@ -226,6 +227,7 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
         ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
             Err(crate::PrepareRefusal {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                policy_code: None,
                 resource: None,
                 terminal_cause: provenant_records::run::TerminalCause::HandoffRefused,
                 terminal_note: None,

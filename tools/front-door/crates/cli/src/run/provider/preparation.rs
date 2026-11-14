@@ -547,7 +547,9 @@ pub(super) enum PrepareError {
     #[error("{0}")]
     GraphInputsAuthority(String),
     #[error("{0}")]
-    SourceAuthority(String),
+    SourceProfileIsolated(String),
+    #[error("{0}")]
+    SourceViewReadOnly(String),
     #[error(transparent)]
     SourceRoots(#[from] super::source_tree::SourceRootOverlap),
     #[error("{0}")]
@@ -575,6 +577,19 @@ pub(super) enum PrepareError {
     #[error("{0}")]
     Other(String),
 }
+
+fn policy_code_for_boundary(
+    class: provenant_records::diagnostic::BoundaryClass,
+) -> Option<&'static str> {
+    use provenant_records::diagnostic::BoundaryClass as B;
+    match class {
+        B::Credentials => Some("PREPARATION_PREPARE_WITH_CREDENTIALS"),
+        B::LaneGit => Some("VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"),
+        B::Integrity => Some("PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY"),
+        B::Authority => Some("PREPARATION_PREPARE_CANDIDATES_AUTHORITY"),
+        B::None => None,
+    }
+}
 impl PrepareError {
     pub(super) fn into_refusal(self) -> run::PrepareRefusal {
         match self {
@@ -591,6 +606,7 @@ impl PrepareError {
                 note,
             } => run::PrepareRefusal {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                policy_code: None,
                 resource: None,
                 terminal_cause: cause,
                 terminal_note: note,
@@ -633,6 +649,7 @@ impl PrepareError {
                 };
                 let mut refusal = run::PrepareRefusal {
                     boundary_class,
+                    policy_code: policy_code_for_boundary(boundary_class).map(str::to_owned),
                     resource: candidate_resource,
                     terminal_cause: provenant_records::run::TerminalCause::RouteResolutionRefused,
                     terminal_note: None,
@@ -652,6 +669,7 @@ impl PrepareError {
                     error.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.policy_code = Some("SOURCE_TREE_ENSURE_SOURCE_ROOTS_AUTHORITY".into());
                 refusal.terminal_note = Some(error.to_string());
                 refusal
             }
@@ -661,6 +679,13 @@ impl PrepareError {
                     error.to_string(),
                 );
                 refusal.boundary_class = error.boundary_class();
+                refusal.policy_code = if refusal.boundary_class
+                    == provenant_records::diagnostic::BoundaryClass::Authority
+                {
+                    Some("CONFINEMENT_SOURCE_CWD_AUTHORITY".into())
+                } else {
+                    policy_code_for_boundary(refusal.boundary_class).map(str::to_owned)
+                };
                 refusal
             }
             Self::Permission(error) => PlanCheckError::Permission(error).into_refusal(),
@@ -670,6 +695,7 @@ impl PrepareError {
                     error.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.policy_code = Some("PREPARATION_PREPARE_CANDIDATES_AUTHORITY".into());
                 refusal
             }
             Self::ContinuationRequest(error) => {
@@ -678,6 +704,7 @@ impl PrepareError {
                     error.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.policy_code = Some("CONTRACT_CONTINUATION_VALIDATE_AUTHORITY".into());
                 refusal
             }
             Self::SourceHead(error) => {
@@ -686,6 +713,7 @@ impl PrepareError {
                     error.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.policy_code = Some("CONFINEMENT_REQUIRE_SOURCE_HEAD_AUTHORITY".into());
                 refusal
             }
             Self::ReadOnly(error) => PlanCheckError::ReadOnly(error).into_refusal(),
@@ -700,6 +728,7 @@ impl PrepareError {
                     error.to_string(),
                 );
                 refusal.boundary_class = boundary_class;
+                refusal.policy_code = policy_code_for_boundary(boundary_class).map(str::to_owned);
                 refusal
             }
             Self::Prompt(error) => {
@@ -716,6 +745,8 @@ impl PrepareError {
                     }
                     _ => provenant_records::diagnostic::BoundaryClass::None,
                 };
+                refusal.policy_code =
+                    policy_code_for_boundary(refusal.boundary_class).map(str::to_owned);
                 refusal.resource = error.resource_fact();
                 refusal
             }
@@ -725,16 +756,47 @@ impl PrepareError {
                     error.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Integrity;
+                refusal.policy_code = Some(
+                    match &error {
+                        Self::HostIndexOverlap => {
+                            "CONFINEMENT_HOST_INDEXES_PROTECTED_DATA_INTEGRITY"
+                        }
+                        Self::TargetSeedOverlap => {
+                            "CONFINEMENT_TARGET_SEEDS_PROTECTED_DATA_INTEGRITY"
+                        }
+                        _ => return refusal,
+                    }
+                    .into(),
+                );
                 refusal
             }
             error @ (Self::GraphInputsAuthority(_)
-            | Self::SourceAuthority(_)
+            | Self::SourceProfileIsolated(_)
+            | Self::SourceViewReadOnly(_)
             | Self::WriterContinuation(_)) => {
                 let mut refusal = run::PrepareRefusal::new(
                     provenant_records::run::TerminalCause::AccessPolicyRefused,
                     error.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.policy_code = Some(
+                    match &error {
+                        Self::GraphInputsAuthority(_) => {
+                            "PREPARATION_CHECK_GRAPH_INPUTS_ROOT_AUTHORITY"
+                        }
+                        Self::SourceProfileIsolated(_) => {
+                            "SOURCE_TREE_ENSURE_PROFILE_ISOLATED_AUTHORITY"
+                        }
+                        Self::SourceViewReadOnly(_) => {
+                            "SOURCE_TREE_ENSURE_VIEW_READ_ONLY_AUTHORITY"
+                        }
+                        Self::WriterContinuation(_) => {
+                            "CONFINEMENT_WRITER_SOURCE_CONTEXT_AUTHORITY"
+                        }
+                        _ => return refusal,
+                    }
+                    .into(),
+                );
                 refusal
             }
             other => run::PrepareRefusal::new(
@@ -822,7 +884,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     assert_eq!(other.boundary_class, BoundaryClass::None);
     for error in [
         PrepareError::GraphInputsAuthority("invalid graph inputs root".into()),
-        PrepareError::SourceAuthority("source grant overlaps".into()),
+        PrepareError::SourceProfileIsolated("source grant overlaps".into()),
         PrepareError::WriterContinuation("uncommitted predecessor edits".into()),
     ] {
         assert_eq!(
@@ -999,6 +1061,61 @@ impl PlanCheckError {
         }
     }
 
+    fn policy_code(&self) -> Option<&'static str> {
+        use provenant_confinement::{PlanError, permissions::PermissionError};
+        let permission = match self {
+            Self::Permission(error) | Self::Plan(PlanError::Permission(error)) => Some(error),
+            _ => None,
+        };
+        if let Some(permission) = permission {
+            fn root(error: &PermissionError) -> &PermissionError {
+                match error {
+                    PermissionError::ConfigOrigin { source, .. } => root(source),
+                    other => other,
+                }
+            }
+            return Some(match root(permission) {
+                PermissionError::CredentialRoot
+                | PermissionError::CredentialRootAt { .. }
+                | PermissionError::CredentialGrant { .. } => {
+                    "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_CREDENTIALS"
+                }
+                PermissionError::AnchorMismatch | PermissionError::AnchorMismatchAt { .. } => {
+                    "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_CREDENTIALS_2"
+                }
+                PermissionError::InvalidPath(_) | PermissionError::InvalidReadOnlyPolicy => {
+                    "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_AUTHORITY_2"
+                }
+                _ => match permission.boundary_class() {
+                    provenant_records::diagnostic::BoundaryClass::Credentials => {
+                        "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_CREDENTIALS"
+                    }
+                    provenant_records::diagnostic::BoundaryClass::LaneGit => {
+                        "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"
+                    }
+                    provenant_records::diagnostic::BoundaryClass::Integrity => {
+                        "PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY"
+                    }
+                    provenant_records::diagnostic::BoundaryClass::Authority => {
+                        "PREPARATION_PREPARE_CANDIDATES_AUTHORITY"
+                    }
+                    provenant_records::diagnostic::BoundaryClass::None => {
+                        return None;
+                    }
+                },
+            });
+        }
+        Some(match self {
+            Self::ReadOnly(_) => "CONFINEMENT_READ_ONLY_PLAN_AUTHORITY",
+            Self::SourceHead(_) => "CONFINEMENT_REQUIRE_SOURCE_HEAD_AUTHORITY",
+            Self::Plan(
+                PlanError::InvalidRoots | PlanError::UnconfinedExtensions | PlanError::Home(_),
+            ) => "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_AUTHORITY_2",
+            Self::Plan(_) => "PREPARATION_PREPARE_CANDIDATES_AUTHORITY",
+            Self::Permission(_) => return None,
+        })
+    }
+
     fn skipped(&self, route: &str) -> SkippedRoute {
         use provenant_confinement::{PlanError, permissions::PermissionError};
         use provenant_records::diagnostic::PlanFailure;
@@ -1059,6 +1176,7 @@ impl PlanCheckError {
             skipped.detail.clone(),
         );
         refusal.boundary_class = self.boundary_class();
+        refusal.policy_code = self.policy_code().map(str::to_owned);
         refusal.terminal_note = Some(skipped.detail.clone());
         refusal.resource = skipped
             .extra
@@ -1982,7 +2100,7 @@ pub(super) fn prepare_candidates(
     // Continue the applied decision rather than redrawing the named pool
     // using the new operation seed.
     let mut request = match resume {
-        Some(prior) => continuation_request(prior)?,
+        Some(prior) => continuation_request(prior, &launch_policy)?,
         None => route_request(task)?,
     };
     let task_request = route_request(task)?;
@@ -3315,7 +3433,7 @@ pub(super) fn prepare_candidates(
             &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
         ) {
             let effect = launch_policy.check(
-                "PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY",
+                "CONFINEMENT_HOST_INDEXES_PROTECTED_DATA_INTEGRITY",
                 provenant_records::policy::Facts::violation("write grants overlap host indexes"),
             );
             if effect.blocks() {
@@ -3327,7 +3445,7 @@ pub(super) fn prepare_candidates(
             &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
         ) {
             let effect = launch_policy.check(
-                "PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY",
+                "CONFINEMENT_TARGET_SEEDS_PROTECTED_DATA_INTEGRITY",
                 provenant_records::policy::Facts::violation("write grants overlap target seeds"),
             );
             if effect.blocks() {
@@ -3409,12 +3527,12 @@ pub(super) fn prepare_candidates(
         spec.complete_tool_requirements(&plan, &home, &cwd);
         if isolated {
             super::source_tree::ensure_profile_isolated(&source, &spec.profile.spec)
-                .map_err(PrepareError::SourceAuthority)?;
+                .map_err(PrepareError::SourceProfileIsolated)?;
             super::source_tree::ensure_view_read_only(
                 &cwd,
                 &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
             )
-            .map_err(PrepareError::SourceAuthority)?;
+            .map_err(PrepareError::SourceViewReadOnly)?;
         }
         let transcript_account = account
             .as_ref()

@@ -214,6 +214,7 @@ fn output_retains_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Erro
         ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
             Err(run::PrepareRefusal {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                policy_code: None,
                 resource: None,
                 terminal_cause: provenant_records::run::TerminalCause::AccessPolicyRefused,
                 terminal_note: Some(self.note.clone()),

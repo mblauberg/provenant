@@ -250,6 +250,31 @@ pub(crate) struct LaneCaps {
     project_source: provenant_records::diagnostic::SettingSource,
 }
 impl LaneCaps {
+    pub(crate) fn under_strength(
+        mut self,
+        policy: &provenant_records::policy::Policy,
+        strength: provenant_records::policy::Strength,
+    ) -> Self {
+        use provenant_records::policy::{Effect, Facts, Strength};
+        for (code, value) in [
+            ("ADMISSION_WRITERS", &mut self.host_writers),
+            ("ADMISSION_PROJECT_WRITERS", &mut self.project_writers),
+            ("ADMISSION_LANES", &mut self.host_total),
+            ("ADMISSION_PROJECT_LANES", &mut self.project_total),
+        ] {
+            let effect = policy.check(code, Facts::violation("configured lane cap"));
+            let applies = match strength {
+                Strength::Refuse => matches!(effect, Effect::Refuse(_)),
+                Strength::Queue => matches!(effect, Effect::Queue(_)),
+                Strength::Warn => matches!(effect, Effect::Warn(_)),
+                Strength::Off => false,
+            };
+            if !applies {
+                *value = u64::MAX;
+            }
+        }
+        self
+    }
     pub(crate) fn under_policy(mut self, policy: &provenant_records::policy::Policy) -> Self {
         use provenant_records::policy::Facts;
         for (code, value) in [

@@ -267,10 +267,15 @@ pub(super) fn with_context<T>(
     let domains = resolved_config.domains;
     let policies = provenant_providers::scheduling_policies(&domains.quota, registry);
     let mut config = domains.routing;
+    let project = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| crate::run::preview_project_id(roots, &cwd))
+        .map(|project| project.to_string())
+        .unwrap_or_default();
     config.launch_policy =
         domains
             .policy
-            .resolve_with_knobs("", &resolved_config.knobs, &Default::default());
+            .resolve_with_knobs(&project, &resolved_config.knobs, &Default::default());
     config.allow_unknown_partial_headroom = allow_unknown;
     config.partial_headroom_source = Some(partial_headroom_source);
     resolve_pacing_accounts(&mut config, &domains.accounts)?;

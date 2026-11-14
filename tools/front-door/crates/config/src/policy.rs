@@ -7,7 +7,6 @@ use std::{collections::BTreeMap, path::Path};
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
-    pub rules: BTreeMap<String, Strength>,
     pub projects: BTreeMap<String, Project>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -16,14 +15,11 @@ pub struct Project {
     pub rules: BTreeMap<String, Strength>,
 }
 impl DomainConfig for Settings {}
-pub const SECTION: DomainSection =
-    DomainSection::new::<Settings>("policy", |_| "[rules]\n[projects]\n").with_fields(&[
-        FieldMetadata::enumeration("rules.{code}", &["refuse", "queue", "warn", "off"]),
-        FieldMetadata::enumeration(
-            "projects.{project}.rules.{code}",
-            &["refuse", "queue", "warn", "off"],
-        ),
-    ]);
+pub const SECTION: DomainSection = DomainSection::new::<Settings>("policy", |_| "[projects]\n")
+    .with_fields(&[FieldMetadata::enumeration(
+        "projects.{project}.rules.{code}",
+        &["refuse", "queue", "warn", "off"],
+    )]);
 impl Settings {
     pub fn resolve_with_knobs(
         &self,
@@ -33,7 +29,6 @@ impl Settings {
     ) -> Policy {
         let mut policy = Policy::default();
         overlay_knobs(&mut policy, knobs);
-        policy.overlay(&self.rules, Source::Host);
         if let Some(project) = self.projects.get(project) {
             policy.overlay(&project.rules, Source::Project);
         }
@@ -42,7 +37,6 @@ impl Settings {
     }
     pub fn resolve(&self, project: &str, dispatch: &BTreeMap<String, Strength>) -> Policy {
         let mut policy = Policy::default();
-        policy.overlay(&self.rules, Source::Host);
         if let Some(project) = self.projects.get(project) {
             policy.overlay(&project.rules, Source::Project);
         }
@@ -79,7 +73,6 @@ pub fn read(state: &Path, project: &str, dispatch: &BTreeMap<String, Strength>) 
         }
         policy.overlay(&values, Source::Host);
     }
-    policy.overlay(&settings.rules, Source::Host);
     if let Some(project) = settings.projects.get(project) {
         policy.overlay(&project.rules, Source::Project);
     }

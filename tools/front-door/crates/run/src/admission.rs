@@ -210,6 +210,13 @@ impl RunStore {
         resources: &dyn Resources,
     ) -> Result<bool> {
         let ledger = crate::ledger::open(&self.writer_registry, call)?;
+        let request = self.request(id, call)?;
+        let policy = crate::launch_policy(
+            &self.writer_registry,
+            &self.context.project_id.to_string(),
+            &request.task,
+        );
+        let caps = self.lane_caps().under_policy(&policy);
         let owner = if waiting {
             None
         } else {
@@ -217,7 +224,7 @@ impl RunStore {
                 &ledger,
                 self.context.state_root.as_path(),
                 &self.ticket(&self.db, id)?,
-                self.lane_caps(),
+                caps,
                 call.clock,
                 resources,
             )?)
@@ -245,7 +252,7 @@ impl RunStore {
                     &ledger,
                     self.context.state_root.as_path(),
                     &ticket,
-                    self.lane_caps(),
+                    caps,
                     call.clock,
                     call,
                     owner.as_ref().ok_or(RunError::Conflict)?,
@@ -1132,15 +1139,17 @@ impl RunStore {
             &self.context.project_id.to_string(),
             &request.task,
         );
+        use provenant_records::diagnostic::LaneLimit;
+        use provenant_records::policy::{Effect, Facts, Strength};
         let configured = self.lane_caps();
-        if let Some(hit) = crate::ledger::cap_hit(
-            &ledger,
-            self.context.project_id,
-            self.ticket(&self.db, id)?.lane_class,
-            configured,
-        )? {
-            use provenant_records::diagnostic::LaneLimit;
-            use provenant_records::policy::{Effect, Facts};
+        let ticket = self.ticket(&self.db, id)?;
+        for strength in [Strength::Refuse, Strength::Queue, Strength::Warn] {
+            let caps = configured.under_strength(&policy, strength);
+            let Some(hit) =
+                crate::ledger::cap_hit(&ledger, self.context.project_id, ticket.lane_class, caps)?
+            else {
+                continue;
+            };
             let code = match hit.kind {
                 LaneLimit::HostWriters => "ADMISSION_WRITERS",
                 LaneLimit::ProjectWriters => "ADMISSION_PROJECT_WRITERS",

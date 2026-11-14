@@ -349,6 +349,7 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
     .ok_or("writer accepted insufficient disk")?;
     let refusal = disk_policy_refusal(check);
     assert_eq!(refusal.terminal_cause, TerminalCause::DiskFloor);
+    assert_eq!(refusal.policy_code.as_deref(), Some("LAUNCH_DISK"));
     assert_eq!(
         refusal.resource,
         Some(provenant_records::diagnostic::ResourceFact::Disk {
@@ -364,6 +365,10 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
     );
     assert!(!TerminalCause::DiskFloor.detail().contains("access grants"));
     let unobserved = disk_policy_refusal(DiskCheck::Unobserved("HOST_ERROR_SENTINEL".into()));
+    assert_eq!(
+        unobserved.policy_code.as_deref(),
+        Some("SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE")
+    );
     assert_eq!(
         unobserved.terminal_cause,
         TerminalCause::DiskObservationUnavailable

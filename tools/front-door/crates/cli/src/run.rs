@@ -350,7 +350,12 @@ fn disk_policy_refusal(error: DiskCheck) -> run::PrepareRefusal {
             provenant_records::run::TerminalCause::DiskObservationUnavailable
         }
     };
+    let policy_code = match &error {
+        DiskCheck::Low { .. } => "LAUNCH_DISK",
+        DiskCheck::Unobserved(_) => "SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE",
+    };
     let mut refusal = run::PrepareRefusal::new(cause, String::from(error));
+    refusal.policy_code = Some(policy_code.into());
     refusal.resource = resource;
     refusal
 }

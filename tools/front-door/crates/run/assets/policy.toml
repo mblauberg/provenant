@@ -81,7 +81,7 @@ justification = "Nested argv prompts above the threshold cannot spill to a paren
 
 [[rule]]
 code = "CONTRACT_CONTINUATION_VALIDATE_AUTHORITY"
-site = "providers/src/contract.rs#Continuation::validate"
+site = "providers/src/contract.rs#Continuation::{from_outcome,retained,bind_stream,validate}"
 boundary = "authority"
 strength = "refuse"
 justification = "A continuation must match its recorded route and grant identity."
@@ -95,7 +95,7 @@ justification = "A continuation must resolve the provider and model actually app
 
 [[rule]]
 code = "CONTINUATION_CONTINUATION_FOR_AUTHORITY"
-site = "cli/src/run/provider/continuation.rs#continuation_for"
+site = "cli/src/run/provider/continuation.rs#continuation_for_policy"
 boundary = "authority"
 strength = "refuse"
 justification = "A continuation requires its recorded session, applied route and account identity and must match the selected route."

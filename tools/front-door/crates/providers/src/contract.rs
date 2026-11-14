@@ -233,6 +233,13 @@ pub struct Continuation {
     grant_digest: String,
 }
 impl Continuation {
+    fn authority_error(message: &str, error: ProviderError) -> ProviderError {
+        provenant_records::policy::Policy::default().boundary_error(
+            "CONTRACT_CONTINUATION_VALIDATE_AUTHORITY",
+            provenant_records::policy::Facts::violation(message),
+            error,
+        )
+    }
     pub(crate) fn from_outcome(
         adapter: &str,
         outcome: &ProviderOutcome,
@@ -241,16 +248,29 @@ impl Continuation {
         model_on_wire: bool,
     ) -> Result<Self, ProviderError> {
         if outcome.adapter() != adapter || route.adapter != adapter {
-            return Err(ProviderError::IdentityMismatch);
+            return Err(Self::authority_error(
+                "provider outcome does not match the applied route adapter",
+                ProviderError::IdentityMismatch,
+            ));
         }
-        let session = outcome.session().ok_or(ProviderError::UnknownIdentity)?;
+        let session = outcome.session().ok_or_else(|| {
+            Self::authority_error(
+                "provider outcome did not identify its session",
+                ProviderError::UnknownIdentity,
+            )
+        })?;
         // Requested models cannot substitute for answering-model evidence.
         // Codex's exec stream has no model position; its resume argv pins the
         // same `-m`, and any model it does report must still match.
         match outcome.model() {
             Some(model) if model == route.model => {}
             None if !model_on_wire => {}
-            _ => return Err(ProviderError::UnknownIdentity),
+            _ => {
+                return Err(Self::authority_error(
+                    "provider outcome did not identify its applied model",
+                    ProviderError::UnknownIdentity,
+                ));
+            }
         }
         Self::retained(adapter, session, route, grant_digest)
     }
@@ -264,12 +284,17 @@ impl Continuation {
         grant_digest: &str,
     ) -> Result<Self, ProviderError> {
         if route.adapter != adapter || session.is_empty() {
-            return Err(ProviderError::IdentityMismatch);
+            return Err(Self::authority_error(
+                "retained session does not match its applied route",
+                ProviderError::IdentityMismatch,
+            ));
         }
-        let account_key = route
-            .account_key
-            .clone()
-            .ok_or(ProviderError::UnknownIdentity)?;
+        let account_key = route.account_key.clone().ok_or_else(|| {
+            Self::authority_error(
+                "applied route has no account identity",
+                ProviderError::UnknownIdentity,
+            )
+        })?;
         Ok(Self {
             adapter: adapter.into(),
             session: session.into(),
@@ -286,7 +311,10 @@ impl Continuation {
         state: &mut StreamState,
     ) -> Result<(), ProviderError> {
         if self.adapter != adapter {
-            return Err(ProviderError::IdentityMismatch);
+            return Err(Self::authority_error(
+                "provider stream does not match the continuation adapter",
+                ProviderError::IdentityMismatch,
+            ));
         }
         state.bind_identity(&self.session, &self.model);
         Ok(())
@@ -302,7 +330,10 @@ impl Continuation {
             || self.effort != route.effort
             || self.grant_digest != grant_digest
         {
-            return Err(ProviderError::IdentityMismatch);
+            return Err(Self::authority_error(
+                "continuation identity differs from the resolved route or write grant",
+                ProviderError::IdentityMismatch,
+            ));
         }
         Ok(())
     }

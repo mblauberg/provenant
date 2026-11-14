@@ -1902,20 +1902,8 @@ impl RunStore {
                     })
                 })
             };
-            if let Some(raw) = read_sealed(attempt, "policy-write-scope.json", RECORD_LIMIT)?
-                && let Some(handoff) = handoff.as_mut()
-            {
-                let report: serde_json::Value = crate::db::decode(&raw)?;
-                handoff.extra.insert("write_scope".into(), report);
-                let safe = crate::sanitise_handoff(handoff)?;
-                crate::artifacts::seal(
-                    attempt,
-                    provenant_records::AttemptFile::Handoff.name(),
-                    &crate::db::bytes(&safe)?,
-                    provenant_records::handoff::HANDOFF_BYTES as u64,
-                )?;
-                *handoff = safe;
-            }
+            handoff =
+                handoff.map(|handoff| crate::completion::attach_scope_report(attempt, &handoff));
             if let Some(bytes) = read_sealed(attempt, "budget-commit.json", RECORD_LIMIT)? {
                 let result: serde_json::Value = crate::db::decode(&bytes)?;
                 let note = result["note"]
@@ -4097,6 +4085,11 @@ mod writer_recovery_tests {
         let store = RunStore::open(&execution, &call)?;
         let mut run = input();
         run.request.task.writer = Some(fixture.writer.clone());
+        run.request
+            .task
+            .profile
+            .extra
+            .insert("write_scope".into(), serde_json::json!(["src"]));
         store.create(&run, &call)?;
         let id = run.attempt_id;
         store.mark_starting(
@@ -4201,6 +4194,13 @@ mod writer_recovery_tests {
         assert_eq!(handoff.note, "Parser done; renderer next");
         assert_eq!(handoff.remaining, vec!["Finish renderer".to_owned()]);
         assert!(handoff.unfinished());
+        assert_eq!(handoff.extra["write_scope"]["code"], "WRITE_SCOPE");
+        assert_eq!(handoff.extra["write_scope"]["strength"], "warn");
+        assert!(
+            handoff.extra["write_scope"]["out_of_scope_paths"]
+                .as_array()
+                .is_some_and(|paths| paths.contains(&serde_json::json!("context-work.txt")))
+        );
         // Nothing was committed for the lane; its edit stays for the restart.
         assert!(read_sealed(&attempt, "budget-commit.json", RECORD_LIMIT)?.is_none());
         assert_eq!(
@@ -4208,6 +4208,12 @@ mod writer_recovery_tests {
             "uncommitted work before the context handoff\n"
         );
         Ok(())
+    }
+
+    #[test]
+    fn strict_write_scope_keeps_budget_commit_private_until_scope_is_resolved()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        budget_stop_case(BudgetStopCase::StrictScope)
     }
 
     /// A Claude writer whose launch-time token copy was lost mid-run (the
@@ -4401,6 +4407,7 @@ mod writer_recovery_tests {
         CommitFailure,
         CustodyPresent,
         HostileFilter,
+        StrictScope,
         SymlinkObjects,
     }
 
@@ -4415,6 +4422,30 @@ mod writer_recovery_tests {
         let store = RunStore::open(&execution, &call)?;
         let mut run = input();
         run.request.task.writer = Some(fixture.writer.clone());
+        if matches!(case, BudgetStopCase::HostileFilter) {
+            run.request
+                .task
+                .profile
+                .extra
+                .insert("write_scope".into(), serde_json::json!(["."]));
+        }
+        if matches!(case, BudgetStopCase::StrictScope) {
+            run.request
+                .task
+                .profile
+                .extra
+                .insert("write_scope".into(), serde_json::json!(["src"]));
+            run.request
+                .task
+                .profile
+                .knobs
+                .insert("policy.WRITE_SCOPE".into(), serde_json::json!("refuse"));
+            run.request
+                .task
+                .profile
+                .overrides
+                .push("policy.WRITE_SCOPE=refuse".into());
+        }
         store.create(&run, &call)?;
         let id = run.attempt_id;
         let limits = if matches!(
@@ -4635,6 +4666,53 @@ mod writer_recovery_tests {
                 fixture.writer.worktree.join(".gitattributes"),
                 "budget-work.txt filter=poison\n",
             )?;
+        }
+        if matches!(case, BudgetStopCase::StrictScope) {
+            let recovery =
+                custody::acquire_recovery(directory, scope, call.lock_budget(), &cancel, &clock)?;
+            assert_eq!(recovery.observe(), custody::RecoveryState::Absent);
+            let mut settlement = crate::settlement::Guard::claim(&attempt, scope, &clock)?
+                .ok_or("settlement claim")?;
+            let result = launch.terminal(
+                execution.state_root.as_path(),
+                &attempt,
+                &recovery,
+                &mut settlement,
+                true,
+            );
+            assert!(matches!(
+                result,
+                Err(RunError::Validation("WRITE_SCOPE: strict scope policy"))
+            ));
+            let report: serde_json::Value = serde_json::from_slice(
+                &read_sealed(&attempt, "policy-write-scope.json", RECORD_LIMIT)?
+                    .ok_or("write scope report")?,
+            )?;
+            assert_eq!(report["code"], "WRITE_SCOPE");
+            assert_eq!(report["strength"], "refuse");
+            assert!(
+                !report["out_of_scope_paths"]
+                    .as_array()
+                    .ok_or("paths")?
+                    .is_empty()
+            );
+            assert_eq!(
+                crate::objects::resolve_ref(&git, launch.worktree.repo(), launch.branch.as_str())?,
+                launch.base
+            );
+            let source = crate::objects::bound_source(&attempt)?.ok_or("private source")?;
+            let private_tip = crate::objects::private_tip(&source, launch.branch.as_str())?;
+            assert_ne!(private_tip, launch.base);
+            let disposition: serde_json::Value = serde_json::from_slice(
+                &read_sealed(&attempt, "budget-commit.json", RECORD_LIMIT)?
+                    .ok_or("budget commit disposition")?,
+            )?;
+            assert_eq!(disposition["commit"], private_tip.to_string());
+            assert_eq!(
+                std::fs::read_to_string(fixture.writer.worktree.join("budget-work.txt"))?,
+                "uncommitted work before budget stop\n"
+            );
+            return Ok(());
         }
         if matches!(case, BudgetStopCase::SymlinkObjects) {
             let outside = fixture

@@ -24,21 +24,39 @@ pub(super) enum ContinuationRequestError {
 /// Resolving an exact model bypasses named-pool selection and quota redraws.
 pub(super) fn continuation_request(
     prior: &run::AttemptRecord,
+    enforcement: &provenant_records::policy::Policy,
 ) -> Result<provenant_routing::RouteRequest, ContinuationRequestError> {
     use provenant_routing::{Fallback, ModelId, RouteChoice};
 
-    let applied = prior
-        .applied_route
-        .as_ref()
-        .ok_or(ContinuationRequestError::MissingRoute)?;
-    let model = applied
-        .model
-        .as_deref()
-        .ok_or(ContinuationRequestError::MissingModel)?;
-    let model = ModelId::parse(model)
-        .map_err(|error| ContinuationRequestError::InvalidModel(error.to_string()))?;
+    let applied = prior.applied_route.as_ref().ok_or_else(|| {
+        enforcement.boundary_error(
+            "CONTINUATION_CONTINUATION_REQUEST_AUTHORITY",
+            provenant_records::policy::Facts::violation("prior attempt has no applied route"),
+            ContinuationRequestError::MissingRoute,
+        )
+    })?;
+    let model = applied.model.as_deref().ok_or_else(|| {
+        enforcement.boundary_error(
+            "CONTINUATION_CONTINUATION_REQUEST_AUTHORITY",
+            provenant_records::policy::Facts::violation("prior attempt has no applied model"),
+            ContinuationRequestError::MissingModel,
+        )
+    })?;
+    let model = ModelId::parse(model).map_err(|error| {
+        enforcement.boundary_error(
+            "CONTINUATION_CONTINUATION_REQUEST_AUTHORITY",
+            provenant_records::policy::Facts::violation("prior attempt's applied model is invalid"),
+            ContinuationRequestError::InvalidModel(error.to_string()),
+        )
+    })?;
     if applied.provider.as_deref() != Some(model.adapter()) {
-        return Err(ContinuationRequestError::ProviderMismatch);
+        return Err(enforcement.boundary_error(
+            "CONTINUATION_CONTINUATION_REQUEST_AUTHORITY",
+            provenant_records::policy::Facts::violation(
+                "prior attempt provider does not match its applied model",
+            ),
+            ContinuationRequestError::ProviderMismatch,
+        ));
     }
     Ok(provenant_routing::RouteRequest {
         intent: Default::default(),
@@ -157,19 +175,31 @@ pub(super) fn continuation_for_policy(
     private_state: &Path,
     enforcement: &provenant_records::policy::Policy,
 ) -> Result<provenant_providers::Continuation, ContinuationError> {
-    let session = prior
-        .session
-        .as_deref()
-        .ok_or(ContinuationError::MissingSession)?;
-    let applied = prior
-        .applied_route
-        .as_ref()
-        .ok_or(ContinuationError::MissingRoute)?;
+    let session = prior.session.as_deref().ok_or_else(|| {
+        enforcement.boundary_error(
+            "CONTINUATION_CONTINUATION_FOR_AUTHORITY",
+            provenant_records::policy::Facts::violation("prior attempt has no provider session"),
+            ContinuationError::MissingSession,
+        )
+    })?;
+    let applied = prior.applied_route.as_ref().ok_or_else(|| {
+        enforcement.boundary_error(
+            "CONTINUATION_CONTINUATION_FOR_AUTHORITY",
+            provenant_records::policy::Facts::violation("prior attempt has no applied route"),
+            ContinuationError::MissingRoute,
+        )
+    })?;
     if applied.provider.as_deref() != Some(route.adapter.as_str())
         || applied.model.as_deref() != Some(format!("{}/{}", route.adapter, route.model).as_str())
         || applied.account_key != route.account_key
     {
-        return Err(ContinuationError::RouteMismatch);
+        return Err(enforcement.boundary_error(
+            "CONTINUATION_CONTINUATION_FOR_AUTHORITY",
+            provenant_records::policy::Facts::violation(
+                "selected continuation route differs from the prior provider, model or account",
+            ),
+            ContinuationError::RouteMismatch,
+        ));
     }
     let continuation =
         provenant_providers::Continuation::retained(&route.adapter, session, route, grant_digest)?;
@@ -532,6 +562,35 @@ fn copy_state_classified(
         let Err(error) = &result else {
             return result;
         };
+        if error.class != provenant_records::diagnostic::BoundaryClass::None {
+            let code = match error.class {
+                provenant_records::diagnostic::BoundaryClass::Integrity => {
+                    Some("CONTINUATION_COPY_STATE_CLASSIFIED_DATA_INTEGRITY")
+                }
+                provenant_records::diagnostic::BoundaryClass::Authority
+                    if error.message.contains("anchored directory") =>
+                {
+                    Some("CONTINUATION_COPY_STATE_CLASSIFIED_AUTHORITY_2")
+                }
+                provenant_records::diagnostic::BoundaryClass::Authority => {
+                    Some("CONTINUATION_COPY_STATE_CLASSIFIED_AUTHORITY")
+                }
+                _ => None,
+            };
+            if let Some(code) = code {
+                let enforcement = policy.enforcement.as_ref().cloned().unwrap_or_default();
+                let typed_error = StateCopyError {
+                    message: error.message.clone(),
+                    class: error.class,
+                    resource: error.resource.clone(),
+                };
+                return Err(enforcement.boundary_error(
+                    code,
+                    provenant_records::policy::Facts::violation(&error.message),
+                    typed_error,
+                ));
+            }
+        }
         let Some(provenant_records::diagnostic::ResourceFact::ContinuationCopy {
             setting,
             available_bytes,

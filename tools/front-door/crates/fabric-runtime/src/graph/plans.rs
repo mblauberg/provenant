@@ -69,9 +69,10 @@ pub struct PlanSpec {
     /// authority they declare. Any other node is held to the planner's own.
     #[serde(default, rename = "patterns", skip_serializing_if = "Vec::is_empty")]
     pub templates: Vec<Template>,
-    /// Fragment units that no dependency orders form one wave, and the writers
-    /// of one wave must hold disjoint scopes. Without it, overlapping writers
-    /// share a checkout and run in turn.
+    /// Fragment units that no dependency orders form one wave. With this set,
+    /// writers in the same worktree must be ordered; relative scopes are only
+    /// advisory settlement metadata. Without it, shared worktrees are admitted
+    /// and serialized by the writer lease.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disjoint_waves: bool,
     /// Consumers of the plan node also read what the fragment's template
@@ -244,7 +245,7 @@ pub fn prompt(node: &GraphNode) -> String {
             .and_then(serde_json::Value::as_u64)
             .and_then(|n| usize::try_from(n).ok())
             .unwrap_or(spec.max_nodes);
-        prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes, holding a patch: {{\"schema_version\":1,\"nodes\":[...],\"templates\":{{...}}}}. Emit 1..{planner_limit} nodes. A node is either `use` of a template with `with` parameters and overrides (`brief`, `tier`, `after`, `inputs`, `over`, `min_ok`, `repeat`), or compiled-node fields with a `kind` of task, composite, loop, gate, decide, synthesise or land (use `plan` for a planning brief); composites, loops and further plan nodes are allowed. `over` copies a node once per named item with `${{item}}`; `repeat = {{\"until\":\"gate\",\"max_rounds\":N}}` loops a composite until its gate passes. Bundled templates: task, plan, explore, research, design, implement, implement.fix, review, review.security, verify, synthesise, repair; `templates` may define more inline. Each agent node requires id, a `brief` (or `goal`), `acceptance_checks` and local `after` or depends_on. `access` defaults to read_only; writers set worktree_write and also require `write_scope` (relative literal files/directories) ; omit `worktree` for a host-provisioned checkout or name an existing registered worktree; read-only agents may omit `write_scope`. The tier defaults to senior. Synthesise nodes require `inputs` selecting dependency outputs, either as `{{\"node\":\"id\",\"outputs\":[\"result\"]}}` or the shorthand `\"id\"` (which selects `result`). Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 200 bytes."));
+        prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes, holding a patch: {{\"schema_version\":1,\"nodes\":[...],\"templates\":{{...}}}}. Emit 1..{planner_limit} nodes. A node is either `use` of a template with `with` parameters and overrides (`brief`, `tier`, `after`, `inputs`, `over`, `min_ok`, `repeat`), or compiled-node fields with a `kind` of task, composite, loop, gate, decide, synthesise or land (use `plan` for a planning brief); composites, loops and further plan nodes are allowed. `over` copies a node once per named item with `${{item}}`; `repeat = {{\"until\":\"gate\",\"max_rounds\":N}}` loops a composite until its gate passes. Bundled templates: task, plan, explore, research, design, implement, implement.fix, review, review.security, verify, synthesise, repair; `templates` may define more inline. Each agent node requires id, a `brief` (or `goal`), `acceptance_checks` and local `after` or depends_on. `access` defaults to read_only; writers set worktree_write and may include optional write_scope metadata, which the WRITE_SCOPE policy checks when the writer settles; omit `worktree` for a host-provisioned checkout or name an existing registered worktree. The tier defaults to senior. Synthesise nodes require `inputs` selecting dependency outputs, either as `{{\"node\":\"id\",\"outputs\":[\"result\"]}}` or the shorthand `\"id\"` (which selects `result`). Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 200 bytes."));
         if !spec.templates.is_empty() {
             prompt.push_str(&format!(
                 " Host templates with their declared authority: {}.",
@@ -886,34 +887,10 @@ fn wire_exports(node: &mut GraphNode, source: &str, exported: &[GraphInput]) {
     }
 }
 
-fn valid_scope(scope: &str) -> bool {
-    scope == "."
-        || (!scope.is_empty()
-            && !scope
-                .split('/')
-                .any(|part| part.is_empty() || part == "." || part == "..")
-            && !scope.contains(['\\', '*', '?', '[', ']']))
-}
-
-fn overlaps(left: &[String], right: &[String]) -> bool {
-    left.is_empty()
-        || right.is_empty()
-        || left.iter().chain(right).any(|scope| !valid_scope(scope))
-        || left.iter().any(|a| {
-            right.iter().any(|b| {
-                a == "."
-                    || b == "."
-                    || a == b
-                    || a.starts_with(&format!("{b}/"))
-                    || b.starts_with(&format!("{a}/"))
-            })
-        })
-}
-
 pub(super) fn writers_conflict(left: &PlannedNode, right: &PlannedNode) -> bool {
     left.access == AccessMode::WorktreeWrite
         && right.access == AccessMode::WorktreeWrite
-        && (left.worktree == right.worktree || overlaps(&left.write_scope, &right.write_scope))
+        && left.worktree == right.worktree
 }
 
 pub(super) fn prepare(
@@ -1049,7 +1026,7 @@ fn prepare_nested(
         return Ok(());
     }
     // Gate evidence lives in its condition and a decision in its question.
-    // Writer nodes carry explicit scope; all agents carry acceptance prose.
+    // Write scope is optional review metadata; all agents carry acceptance prose.
     if !matches!(
         child.kind,
         Some(NodeKind::Gate | NodeKind::Decide | NodeKind::Composite | NodeKind::Loop)
@@ -1057,10 +1034,8 @@ fn prepare_nested(
         if child.prompt.trim().is_empty()
             || child.acceptance_checks.is_empty()
             || child.acceptance_checks.iter().any(|s| s.trim().is_empty())
-            || child.access == AccessMode::WorktreeWrite && child.write_scope.is_empty()
-            || child.write_scope.iter().any(|s| !valid_scope(s))
         {
-            return Err("fragment agent requires goal or brief and acceptance_checks; writers also require relative literal write_scope".into());
+            return Err("fragment agent requires goal or brief and acceptance_checks".into());
         }
         child.prompt.push_str("\n\n");
         if !child.write_scope.is_empty() {
@@ -1483,15 +1458,14 @@ pub(super) fn flatten_fragment(
     if spec.is_some_and(|spec| spec.disjoint_waves) {
         check_waves(&units, &nodes)?;
     }
-    // Union overlapping writer scopes, including transitive overlaps. Every
-    // component uses one checkout; admission fences serialise its writers.
+    // Writers sharing a worktree use one checkout; admission fences serialise
+    // them. Relative path metadata does not connect otherwise isolated trees.
     let mut components: Vec<usize> = (0..nodes.len()).collect();
     for i in 0..nodes.len() {
         for j in 0..i {
             if nodes[i].access == AccessMode::WorktreeWrite
                 && nodes[j].access == AccessMode::WorktreeWrite
-                && (nodes[i].worktree == nodes[j].worktree
-                    || overlaps(&nodes[i].write_scope, &nodes[j].write_scope))
+                && nodes[i].worktree == nodes[j].worktree
             {
                 let old = components[i].max(components[j]);
                 let new = components[i].min(components[j]);
@@ -1507,7 +1481,7 @@ pub(super) fn flatten_fragment(
         if components[i] != i {
             let first = nodes[components[i]].clone();
             if document.integration_branch.is_none() {
-                return Err("overlapping writers require an integration_branch".into());
+                return Err("writers sharing a worktree require an integration_branch".into());
             }
             nodes[i].worktree = first.worktree;
         }
@@ -1597,7 +1571,7 @@ pub(super) fn flatten_fragment(
     Ok(nodes)
 }
 
-/// Refuse a wave whose units write overlapping scopes. A unit is a fragment
+/// Refuse a wave whose units write to the same worktree. A unit is a fragment
 /// node or pattern instance; two units are in one wave when neither depends,
 /// directly or through other units, on the other.
 fn check_waves(units: &BTreeMap<String, Vec<String>>, nodes: &[GraphNode]) -> Result<(), String> {
@@ -1632,11 +1606,9 @@ fn check_waves(units: &BTreeMap<String, Vec<String>>, nodes: &[GraphNode]) -> Re
             {
                 continue;
             }
-            if a.iter()
-                .any(|x| b.iter().any(|y| overlaps(&x.write_scope, &y.write_scope)))
-            {
+            if a.iter().any(|x| b.iter().any(|y| x.worktree == y.worktree)) {
                 return Err(format!(
-                    "{left} and {right} write overlapping scopes in one wave; order one after the other with depends_on or split their write scopes"
+                    "{left} and {right} write to the same worktree in one wave; order one after the other with depends_on"
                 ));
             }
         }
@@ -1668,9 +1640,7 @@ fn coordinate(
                         progress.id == n.id
                             && matches!(progress.state, NodeState::Skipped | NodeState::Blocked)
                     })
-                    && members.iter().any(|child| {
-                        n.worktree == child.worktree || overlaps(&n.write_scope, &child.write_scope)
-                    })
+                    && members.iter().any(|child| n.worktree == child.worktree)
             })
             .collect();
         let checkouts: std::collections::BTreeSet<_> = existing
@@ -1693,7 +1663,7 @@ fn coordinate(
                 })
             });
             if document.integration_branch.is_none() && !continues_settled_branch {
-                return Err("overlapping writers require an integration_branch".into());
+                return Err("writers sharing a worktree require an integration_branch".into());
             }
             for child in nodes
                 .iter_mut()

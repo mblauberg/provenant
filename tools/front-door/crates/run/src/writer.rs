@@ -535,6 +535,12 @@ impl WriterLaunch {
 
 /// The paths in `git status --porcelain -z` output.
 fn status_paths(output: &[u8]) -> Result<Vec<String>> {
+    Ok(status_paths_raw(output, false)?
+        .into_iter()
+        .map(|path| String::from_utf8_lossy(&path).into_owned())
+        .collect())
+}
+fn status_paths_raw(output: &[u8], include_sources: bool) -> Result<Vec<Vec<u8>>> {
     let mut records = output.split(|byte| *byte == 0);
     let mut paths = Vec::new();
     while let Some(record) = records.next() {
@@ -544,14 +550,18 @@ fn status_paths(output: &[u8]) -> Result<Vec<String>> {
         if record.len() < 4 || record[2] != b' ' {
             return Err(RunError::Validation("invalid Git status record"));
         }
-        paths.push(String::from_utf8_lossy(&record[3..]).into_owned());
-        // Porcelain -z puts the destination first and follows it with the source.
+        paths.push(record[3..].to_vec());
         if record[..2]
             .iter()
             .any(|status| matches!(status, b'R' | b'C'))
-            && records.next().is_none_or(|source| source.is_empty())
         {
-            return Err(RunError::Validation("invalid Git status rename"));
+            let source = records
+                .next()
+                .filter(|source| !source.is_empty())
+                .ok_or(RunError::Validation("invalid Git status rename"))?;
+            if include_sources {
+                paths.push(source.to_vec());
+            }
         }
     }
     Ok(paths)
@@ -2620,6 +2630,7 @@ impl WriterLaunch {
         attempt: &Directory,
         base: GitOid,
         head: GitOid,
+        source: Option<&crate::objects::ObjectSource>,
     ) -> Result<()> {
         let Some(raw) =
             crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)?
@@ -2644,34 +2655,6 @@ impl WriterLaunch {
         if scope.is_empty() {
             return Ok(());
         }
-        let repo = self.worktree.repo();
-        let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
-        let changed = crate::objects::command(
-            &git,
-            repo.private_git_dir(),
-            repo.root_path(),
-            &[
-                "diff".into(),
-                "--no-ext-diff".into(),
-                "--no-textconv".into(),
-                "--no-renames".into(),
-                "--name-only".into(),
-                "-z".into(),
-                base.to_string().into(),
-                head.to_string().into(),
-                "--".into(),
-            ],
-            None,
-        )?;
-        let mut paths: Vec<String> = changed
-            .split(|byte| *byte == 0)
-            .filter(|path| !path.is_empty())
-            .map(|path| String::from_utf8_lossy(path).into_owned())
-            .collect();
-        paths.extend(self.uncommitted_paths(&git)?);
-        paths.retain(|path| !scope.iter().any(|root| Path::new(path).starts_with(root)));
-        paths.sort();
-        paths.dedup();
         let policy = crate::launch_policy(
             state,
             request
@@ -2683,21 +2666,166 @@ impl WriterLaunch {
                 .unwrap_or(""),
             &request.task,
         );
+        let saved = crate::artifacts::read_sealed(
+            attempt,
+            "policy-write-scope.json",
+            provenant_records::run::TERMINAL_RECORD_LIMIT,
+        )
+        .map_err(|_| invalid_write_scope_snapshot(&policy))?;
+        if let Some(raw) = saved {
+            let report: WriteScopeSnapshot =
+                serde_json::from_slice(&raw).map_err(|_| invalid_write_scope_snapshot(&policy))?;
+            if report.schema_version != 1
+                || report.code != "WRITE_SCOPE"
+                || report.base != base.to_string()
+                || report.head != head.to_string()
+            {
+                return Err(invalid_write_scope_snapshot(&policy));
+            }
+            let effect = policy.check(
+                "WRITE_SCOPE",
+                provenant_records::policy::Facts {
+                    violated: !report.out_of_scope_paths.is_empty(),
+                    detail: format!(
+                        "{} paths outside declared write scope; see policy-write-scope.json",
+                        report.out_of_scope_paths.len()
+                    ),
+                },
+            );
+            if let Some(message) = effect.message() {
+                let _ = writeln!(std::io::stderr().lock(), "policy: {message}");
+            }
+            if effect.blocks() {
+                return Err(RunError::Validation("WRITE_SCOPE: strict scope policy"));
+            }
+            return Ok(());
+        }
+        let repo = self.worktree.repo();
+        let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+        let source_refs = source
+            .map(|source| source.refs.current_path())
+            .transpose()?;
+        let source_objects = source
+            .map(|source| source.objects.current_path())
+            .transpose()?;
+        let refs = source_refs.as_deref().unwrap_or(repo.private_git_dir());
+        let ref_index = refs.join("index");
+        if let Some(source) = source {
+            source
+                .refs
+                .read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
+        } else {
+            repo.private_dir()
+                .read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
+        }
+        let mut indexes = vec![ref_index];
+        // The native index may contain staged deletions after the lane HEAD
+        // advances, so inspect it alongside private Git on the first snapshot.
+        repo.private_dir()
+            .read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
+        let native_index = repo.private_dir().current_path()?.join("index");
+        if !indexes.contains(&native_index) {
+            indexes.push(native_index);
+        }
+        let source_objects = source_objects.as_deref();
+        let alternate = repo.common_git_dir().join("objects");
+        let (changed, status) =
+            crate::objects::with_clean_view(&git, repo, head, None, |_, path| {
+                let run = |arguments: &[&str], index: &Path| {
+                    crate::objects::execute_bounded(
+                        &git,
+                        path,
+                        repo.root_path(),
+                        &arguments.iter().map(OsString::from).collect::<Vec<_>>(),
+                        None,
+                        crate::objects::Execution {
+                            object_directory: source_objects,
+                            index_file: Some(index),
+                            alternate_directory: Some(&alternate),
+                            ..Default::default()
+                        },
+                    )
+                };
+                run(&["update-ref", "HEAD", &head.to_string()], &indexes[0])?;
+                let changed = run(
+                    &[
+                        "diff",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "--no-renames",
+                        "--name-only",
+                        "-z",
+                        &base.to_string(),
+                        &head.to_string(),
+                        "--",
+                    ],
+                    &indexes[0],
+                )?;
+                let mut status = Vec::new();
+                for index in &indexes {
+                    status.extend(run(
+                        &[
+                            "--no-optional-locks",
+                            "--work-tree",
+                            repo.root_path()
+                                .to_str()
+                                .ok_or(RunError::Validation("worktree path"))?,
+                            "status",
+                            "--porcelain",
+                            "-z",
+                            "--untracked-files=all",
+                            "--ignore-submodules=all",
+                        ],
+                        index,
+                    )?);
+                }
+                Ok((changed, status))
+            })?;
+        let mut paths: Vec<Vec<u8>> = changed
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(<[u8]>::to_vec)
+            .collect();
+        paths.extend(status_paths_raw(&status, true)?);
+        use std::os::unix::ffi::OsStringExt;
+        paths.retain(|path| {
+            let path = PathBuf::from(OsString::from_vec(path.clone()));
+            !scope
+                .iter()
+                .any(|root| *root == Path::new(".") || path.starts_with(root))
+        });
+        paths.sort();
+        paths.dedup();
+        let paths: Vec<_> = paths
+            .into_iter()
+            .map(|path| {
+                let path = PathBuf::from(OsString::from_vec(path));
+                let relative = provenant_core::RelativePath::parse(&path)
+                    .map_err(|_| RunError::Validation("invalid scope path"))?;
+                provenant_records::PathWire::from_relative(&relative)
+                    .map_err(|_| RunError::Validation("scope path encoding"))
+            })
+            .collect::<Result<_>>()?;
         let effect = policy.check(
             "WRITE_SCOPE",
             provenant_records::policy::Facts {
                 violated: !paths.is_empty(),
-                detail: format!("paths outside declared write scope: {}", paths.join(", ")),
+                detail: format!(
+                    "{} paths outside declared write scope; see policy-write-scope.json",
+                    paths.len()
+                ),
             },
         );
         crate::artifacts::seal(
             attempt,
             "policy-write-scope.json",
             &crate::db::bytes(&serde_json::json!({
-                "code": "WRITE_SCOPE", "strength": policy.rule("WRITE_SCOPE").rule.strength,
+                "schema_version": 1, "code": "WRITE_SCOPE",
+                "base": base.to_string(), "head": head.to_string(),
+                "strength": policy.rule("WRITE_SCOPE").rule.strength,
                 "source": policy.rule("WRITE_SCOPE").source, "out_of_scope_paths": paths,
             }))?,
-            crate::RECORD_LIMIT,
+            provenant_records::run::TERMINAL_RECORD_LIMIT,
         )?;
         if let Some(message) = effect.message() {
             let _ = writeln!(std::io::stderr().lock(), "policy: {message}");
@@ -2783,6 +2911,40 @@ impl WriterLaunch {
             None => self.effective_head(attempt, base)?.0,
         };
         settlement.set_head(verified_tip)?;
+        if let Err(error) =
+            self.report_write_scope(state, attempt, base, verified_tip, source.as_ref())
+        {
+            if error.boundary_class() != provenant_records::diagnostic::BoundaryClass::None {
+                return Err(error);
+            }
+            let request: crate::CanonicalRequest = crate::db::decode(
+                &crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)?
+                    .ok_or(RunError::NotFound)?,
+            )?;
+            let policy = crate::launch_policy(
+                state,
+                request
+                    .task
+                    .profile
+                    .extra
+                    .get("policy_project")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+                &request.task,
+            );
+            let effect = policy.check(
+                "WRITE_SCOPE",
+                provenant_records::policy::Facts::violation(format!(
+                    "scope report unavailable: {error}"
+                )),
+            );
+            if effect.blocks() {
+                return Err(error);
+            }
+            if let Some(message) = effect.message() {
+                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            }
+        }
         let import_cancel = settlement.cancellation();
         let merge_objects = source
             .as_ref()
@@ -2906,7 +3068,7 @@ impl WriterLaunch {
         {
             return Err(RunError::WriterHeadNotLaneBranch);
         }
-        self.report_write_scope(state, attempt, base, tip)?;
+
         if !merge_objects.is_empty() {
             let source = source
                 .as_ref()
@@ -3007,6 +3169,26 @@ impl WriterLaunch {
 }
 /// How many dirty paths a reason names before it counts the rest.
 const UNCOMMITTED_LISTED: usize = 12;
+#[derive(serde::Deserialize)]
+struct WriteScopeSnapshot {
+    schema_version: u64,
+    code: String,
+    base: String,
+    head: String,
+    out_of_scope_paths: Vec<provenant_records::PathWire>,
+}
+
+fn invalid_write_scope_snapshot(policy: &provenant_records::policy::Policy) -> RunError {
+    use provenant_records::diagnostic::BoundaryClass;
+    policy.boundary_error(
+        "ARTIFACTS_RUNSTORE_ARTIFACT_BYTES_DATA_INTEGRITY",
+        provenant_records::policy::Facts::violation(
+            "sealed write-scope report does not match this writer settlement",
+        ),
+        RunError::HandoffBoundary(BoundaryClass::Integrity),
+    )
+}
+
 impl WriterLaunch {
     /// A diagnostic naming the edits a writer left uncommitted, or `None` when
     /// it committed or its tree is clean. Call it after `terminal` succeeds.

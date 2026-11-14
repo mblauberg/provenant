@@ -205,6 +205,8 @@ impl Decoded {
 pub struct PrepareRefusal {
     /// Boundary established by the original typed preparation failure, if any.
     pub boundary_class: provenant_records::diagnostic::BoundaryClass,
+    /// Stable table row for the predicate that refused preparation.
+    pub policy_code: Option<String>,
     /// A configurable resource threshold that refused this launch, if known.
     pub resource: Option<provenant_records::diagnostic::ResourceFact>,
     /// The specific cause. There is no generic refusal.
@@ -225,6 +227,7 @@ impl PrepareRefusal {
     pub fn new(cause: TerminalCause, message: impl Into<String>) -> Self {
         Self {
             boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+            policy_code: None,
             resource: None,
             terminal_cause: cause,
             terminal_note: None,
@@ -377,21 +380,38 @@ fn check_launch_policy(
     let Err(refusal) = providers.check_policy(task) else {
         return Ok(());
     };
-    let code = match refusal.boundary_class {
-        provenant_records::diagnostic::BoundaryClass::Credentials => {
-            "PREPARATION_PREPARE_WITH_CREDENTIALS"
+    let code = if let Some(code) = refusal.policy_code.as_deref() {
+        code
+    } else {
+        match refusal.boundary_class {
+            provenant_records::diagnostic::BoundaryClass::Credentials => {
+                "PREPARATION_PREPARE_WITH_CREDENTIALS"
+            }
+            provenant_records::diagnostic::BoundaryClass::LaneGit => {
+                "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"
+            }
+            provenant_records::diagnostic::BoundaryClass::Integrity => {
+                "PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY"
+            }
+            provenant_records::diagnostic::BoundaryClass::Authority => {
+                "LAUNCH_RUNSTORE_START_INNER_AUTHORITY"
+            }
+            provenant_records::diagnostic::BoundaryClass::None
+                if matches!(
+                    refusal.terminal_cause,
+                    TerminalCause::DiskFloor | TerminalCause::DiskObservationUnavailable
+                ) =>
+            {
+                "LAUNCH_DISK"
+            }
+            // A generic refusal with no boundary is not evidence of disk pressure.
+            // Keep its typed outcome instead of letting a disk knob authorize it.
+            provenant_records::diagnostic::BoundaryClass::None => return Err(refusal),
         }
-        provenant_records::diagnostic::BoundaryClass::LaneGit => {
-            "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"
-        }
-        provenant_records::diagnostic::BoundaryClass::Integrity => {
-            "PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY"
-        }
-        provenant_records::diagnostic::BoundaryClass::Authority => {
-            "LAUNCH_RUNSTORE_START_INNER_AUTHORITY"
-        }
-        provenant_records::diagnostic::BoundaryClass::None => "LAUNCH_DISK",
     };
+    if refusal.boundary_class != provenant_records::diagnostic::BoundaryClass::None {
+        return Err(policy.boundary_error(code, Facts::violation(&refusal.message), refusal));
+    }
     match policy.check(code, Facts::violation(&refusal.message)) {
         Effect::Proceed => Ok(()),
         Effect::Warn(message) => {
@@ -401,6 +421,32 @@ fn check_launch_policy(
         }
         Effect::Queue(_) | Effect::Refuse(_) => Err(refusal),
     }
+}
+
+fn check_preparation_refusal(
+    policy: &provenant_records::policy::Policy,
+    refusal: PrepareRefusal,
+) -> PrepareRefusal {
+    use provenant_records::diagnostic::BoundaryClass;
+    let class = refusal.boundary_class;
+    if class == BoundaryClass::None {
+        return refusal;
+    }
+    let fallback = match class {
+        BoundaryClass::Credentials => Some("PREPARATION_PREPARE_WITH_CREDENTIALS"),
+        BoundaryClass::LaneGit => Some("VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"),
+        BoundaryClass::Integrity => Some("PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY"),
+        BoundaryClass::Authority => Some("PREPARATION_PREPARE_CANDIDATES_AUTHORITY"),
+        BoundaryClass::None => None,
+    };
+    let Some(code) = refusal.policy_code.as_deref().or(fallback) else {
+        return refusal;
+    };
+    policy.boundary_error(
+        code,
+        provenant_records::policy::Facts::violation(&refusal.message),
+        refusal,
+    )
 }
 
 impl RunStore {
@@ -1139,7 +1185,10 @@ impl RunStore {
                     providers
                         .prepare(task, &prompt, &paths, resume.as_ref())
                         .map(|plan| (plan, priority))
-                        .map_err(|reason| (reason.kind(), Box::new(reason)))
+                        .map_err(|reason| {
+                            let refusal = check_preparation_refusal(&policy, reason);
+                            (refusal.kind(), Box::new(refusal))
+                        })
                 });
             let (mut plan, priority) = match prepared {
                 Ok(prepared) => prepared,

@@ -26,6 +26,36 @@ fn dispatch_preserves_launch_fields_on_request_reopen() -> TestResult {
         assert_eq!(task.account.as_deref(), Some("account-a"));
         assert!(task.build_heavy);
         assert_eq!(task.access.write_roots, roots);
+        let project_id = store.context.project_id.to_string();
+        assert_eq!(
+            task.profile
+                .extra
+                .get("policy_project")
+                .and_then(serde_json::Value::as_str),
+            Some(project_id.as_str())
+        );
+        let policy: provenant_records::policy::Policy = serde_json::from_value(
+            task.profile
+                .extra
+                .get("launch_policy")
+                .cloned()
+                .ok_or("launch policy snapshot")?,
+        )?;
+        assert_eq!(
+            policy.rule("WRITE_SCOPE").source,
+            provenant_records::policy::Source::CompiledDefault
+        );
+        assert_eq!(
+            policy.rule("WRITE_SCOPE").rule.strength,
+            provenant_records::policy::Strength::Warn
+        );
+        assert_eq!(
+            policy
+                .rule("HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY")
+                .rule
+                .strength,
+            provenant_records::policy::Strength::Refuse
+        );
     }
     Ok(())
 }

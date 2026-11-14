@@ -551,13 +551,18 @@ pub(super) fn check_launch_prompt(
             .check_argv()
             .is_err()
     {
-        return Err(LaunchPromptError::NestedArgvTooLarge {
+        let error = LaunchPromptError::NestedArgvTooLarge {
             limit: argv_limit,
             origin: match argv_origin {
                 provenant_records::diagnostic::SettingSource::Configuration => "host configuration",
                 provenant_records::diagnostic::SettingSource::ShippedDefault => "compiled default",
             },
-        });
+        };
+        return Err(provenant_records::policy::Policy::default().boundary_error(
+            "OBSERVATION_CHECK_LAUNCH_PROMPT_AUTHORITY",
+            provenant_records::policy::Facts::violation(error.to_string()),
+            error,
+        ));
     }
     Ok(())
 }
