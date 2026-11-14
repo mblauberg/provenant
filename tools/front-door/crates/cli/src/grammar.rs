@@ -479,6 +479,8 @@ fn host_alias(value: &str) -> Result<String, &'static str> {
 }
 #[derive(Debug, Subcommand)]
 pub enum Config {
+    /// Show the effective repository integration ports and their sources.
+    Ports,
     /// List configuration warnings with their source file and key.
     Check(Page),
     /// Print effective configuration and knobs, plus the resolved launch

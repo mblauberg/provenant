@@ -597,6 +597,7 @@ fn sync_registered_account(
 /// What a config command does: show, describe the schema, edit, or list history.
 enum ConfigAction<'a> {
     Show,
+    Ports,
     Schema {
         all: bool,
     },
@@ -632,6 +633,31 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
         let sections = &provenant_cli::domains::SECTIONS;
         let options = config::EditOptions::new("cli");
         Ok(match action {
+            ConfigAction::Ports => {
+                let table = config::PortTable::read_project(&context.project)?;
+                let ports: Vec<_> = table.entries().map(|(name, source, backend, valid)| {
+                    let backend = match backend {
+                        config::PortBackendKind::Builtin => "builtin",
+                        config::PortBackendKind::Command => "command",
+                        config::PortBackendKind::None => "none",
+                    };
+                    let unavailable_reason = if !valid {
+                        Some("the port declaration is invalid")
+                    } else if backend == "none" {
+                        Some("the effective declaration disables this port")
+                    } else {
+                        None
+                    };
+                    serde_json::json!({
+                        "name": name,
+                        "backend": backend,
+                        "source": source,
+                        "available": unavailable_reason.is_none(),
+                        "unavailable_reason": unavailable_reason,
+                    })
+                }).collect();
+                serde_json::json!({ "schema_version": table.schema_version, "ports": ports })
+            }
             ConfigAction::Show => {
                 let (resolved, revision) = config::show(&roots, sections)?;
                 let mut value = serde_json::to_value(&resolved)?;
@@ -1146,6 +1172,9 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             "help must be resolved by the parser",
             globals,
         ),
+        Command::Config(provenant_cli::Config::Ports) => {
+            config_command("config ports", ConfigAction::Ports, globals)
+        }
         Command::Config(provenant_cli::Config::Check(page)) => checks::config(page, globals),
         Command::Config(provenant_cli::Config::Show) => {
             config_command("config show", ConfigAction::Show, globals)

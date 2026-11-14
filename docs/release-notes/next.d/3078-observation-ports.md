@@ -1,6 +1,6 @@
 # Observation and repository ports
 
-## Fixed
+## Fixes
 
 ### Lanes and settlement
 
