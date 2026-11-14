@@ -87,7 +87,7 @@ const MAX_WORKTREES: usize = 10_000;
 const MAX_BRANCHES: usize = 10_000;
 const MAX_STATE_RECORD: u64 = 64 * 1024;
 /// The single common-directory protocol for repository mutations and the Git
-/// snapshots they depend on. Acquisition tries once plus one immediate retry;
+/// snapshots they depend on. Acquisition tries once;
 /// a repository holder may only try a writer lock without waiting. Release
 /// this owner before network discovery, slow census, or provider execution.
 pub const REPOSITORY_LOCK: &str = "provenant-repository.lock";
