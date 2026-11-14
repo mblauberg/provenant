@@ -294,16 +294,29 @@ impl<'a> HostProbeExecutor<'a> {
     pub fn root(&self) -> &Path {
         &self.path
     }
+
+    /// Check that a private probe directory can be prepared before resolving
+    /// account identity. Registration must surface host-state failures even
+    /// for adapters whose identity comes from local files rather than a probe.
+    pub fn preflight(&self) -> Result<(), ExecError> {
+        HostProbeDir::create_in(&self.root, &self.path)
+            .map(drop)
+            .map_err(probe_directory_error)
+    }
+}
+
+fn probe_directory_error(error: fs::FsError) -> ExecError {
+    ExecError::Io {
+        operation: PROBE_DIR_OPERATION,
+        source: std::io::Error::other(error),
+    }
 }
 
 impl Executor for HostProbeExecutor<'_> {
     fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
         // mkdir is exclusive: an existing entry is an error, never a cwd.
-        let scratch = HostProbeDir::create_in(&self.root, &self.path);
-        let scratch = scratch.map_err(|error| ExecError::Io {
-            operation: PROBE_DIR_OPERATION,
-            source: std::io::Error::other(error),
-        })?;
+        let scratch =
+            HostProbeDir::create_in(&self.root, &self.path).map_err(probe_directory_error)?;
         // Reborrow filters with the shorter cwd lifetime. Struct update syntax
         // would retain ExecOptions' original, invariant filter lifetime.
         self.executor.execute(ExecOptions {

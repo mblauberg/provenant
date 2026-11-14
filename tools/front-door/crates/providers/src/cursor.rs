@@ -25,6 +25,8 @@ impl CursorIdentity {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CursorIdentityError {
+    #[error("Cursor credentials were not found")]
+    CredentialNotFound,
     #[error("Cursor identity is unavailable")]
     Unavailable,
     #[error("Cursor identity is malformed")]
@@ -47,7 +49,13 @@ pub fn read_identity(directory: &Path) -> Result<CursorIdentity, CursorIdentityE
 
     let mut bytes = Vec::new();
     std::fs::File::open(directory.join("cli-config.json"))
-        .map_err(|_| CursorIdentityError::Unavailable)?
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                CursorIdentityError::CredentialNotFound
+            } else {
+                CursorIdentityError::Unavailable
+            }
+        })?
         .take(IDENTITY_LIMIT as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| CursorIdentityError::Unavailable)?;
@@ -80,6 +88,16 @@ fn read_access_token(directory: &Path) -> Result<Option<String>, CursorIdentityE
     connection
         .busy_timeout(Duration::from_millis(250))
         .map_err(|_| CursorIdentityError::Unavailable)?;
+    let has_item_table: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ItemTable')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| CursorIdentityError::Unavailable)?;
+    if !has_item_table {
+        return Ok(None);
+    }
     connection
         .query_row(
             "SELECT substr(value,1,1048577) FROM ItemTable WHERE key='cursorAuth/accessToken' LIMIT 1",

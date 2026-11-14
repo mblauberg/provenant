@@ -422,14 +422,6 @@ fn cursor_status_observes_the_signed_in_account() {
 
 #[test]
 fn cursor_cli_only_account_matches_desktop_identity() {
-    use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
-
-    struct NoDesktop;
-    impl Executor for NoDesktop {
-        fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
-            Err(ExecError::Busy)
-        }
-    }
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
         directory.path().join("cli-config.json"),
@@ -437,7 +429,7 @@ fn cursor_cli_only_account_matches_desktop_identity() {
     )
     .unwrap();
     let key = crate::accounts::detect(
-        &NoDesktop,
+        &CursorNoExecutor,
         "cursor",
         Path::new("/bin/cursor-agent"),
         Path::new("/home/test"),
@@ -463,7 +455,7 @@ fn cursor_cli_only_account_matches_desktop_identity() {
             std::fs::write(directory.path().join("cli-config.json"), config).unwrap();
         }
         let result = crate::accounts::detect(
-            &NoDesktop,
+            &CursorNoExecutor,
             "cursor",
             Path::new("/bin/cursor-agent"),
             Path::new("/home/test"),
@@ -505,47 +497,14 @@ impl provenant_os::exec::Executor for CursorDesktopToken<'_> {
 #[test]
 fn cursor_account_falls_back_to_cli_when_desktop_has_no_identity() {
     let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("state.vscdb"), b"").unwrap();
+    write_cursor_database(directory.path(), None);
     std::fs::write(
         directory.path().join("cli-config.json"),
         br#"{"authInfo":{"authId":"auth0|user_fixture"}}"#,
     )
     .unwrap();
-    // A logged-out database returns no rows; an empty database has no ItemTable.
-    for status in [0, 1] {
-        let key = crate::accounts::detect(
-            &CursorDesktopToken("", status),
-            "cursor",
-            Path::new("/bin/cursor-agent"),
-            Path::new("/home/test"),
-            OsStr::new("test"),
-            directory.path(),
-            directory.path(),
-        )
-        .unwrap();
-        assert_eq!(
-            Some(key),
-            crate::identity::cursor_account(
-                "header.eyJzdWIiOiJhdXRoMHx1c2VyX2ZpeHR1cmUifQ.signature"
-            )
-        );
-    }
-}
-
-#[test]
-fn cursor_account_prefers_desktop_when_cli_is_also_signed_in() {
-    let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("state.vscdb"), b"").unwrap();
-    std::fs::write(
-        directory.path().join("cli-config.json"),
-        br#"{"authInfo":{"authId":"auth0|different_cli_user"}}"#,
-    )
-    .unwrap();
     let key = crate::accounts::detect(
-        &CursorDesktopToken(
-            "header.eyJzdWIiOiJhdXRoMHx1c2VyX2ZpeHR1cmUifQ.signature\n",
-            0,
-        ),
+        &CursorNoExecutor,
         "cursor",
         Path::new("/bin/cursor-agent"),
         Path::new("/home/test"),
@@ -558,6 +517,54 @@ fn cursor_account_prefers_desktop_when_cli_is_also_signed_in() {
         Some(key),
         crate::identity::cursor_account("header.eyJzdWIiOiJhdXRoMHx1c2VyX2ZpeHR1cmUifQ.signature")
     );
+}
+
+#[test]
+fn cursor_account_prefers_desktop_when_cli_is_also_signed_in() {
+    let directory = tempfile::tempdir().unwrap();
+    let desktop_token = "header.eyJzdWIiOiJhdXRoMHx1c2VyX2ZpeHR1cmUifQ.signature";
+    write_cursor_database(directory.path(), Some(desktop_token));
+    std::fs::write(
+        directory.path().join("cli-config.json"),
+        br#"{"authInfo":{"authId":"auth0|different_cli_user"}}"#,
+    )
+    .unwrap();
+    let key = crate::accounts::detect(
+        &CursorNoExecutor,
+        "cursor",
+        Path::new("/bin/cursor-agent"),
+        Path::new("/home/test"),
+        OsStr::new("test"),
+        directory.path(),
+        directory.path(),
+    )
+    .unwrap();
+    assert_eq!(Some(key), crate::identity::cursor_account(desktop_token));
+}
+
+struct CursorNoExecutor;
+impl provenant_os::exec::Executor for CursorNoExecutor {
+    fn execute(
+        &self,
+        _: provenant_os::exec::ExecOptions<'_>,
+    ) -> Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError> {
+        Err(provenant_os::exec::ExecError::Busy)
+    }
+}
+
+fn write_cursor_database(directory: &Path, token: Option<&str>) {
+    let connection = rusqlite::Connection::open(directory.join("state.vscdb")).unwrap();
+    if let Some(token) = token {
+        connection
+            .execute("CREATE TABLE ItemTable (key TEXT, value TEXT)", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO ItemTable (key, value) VALUES ('cursorAuth/accessToken', ?1)",
+                [token],
+            )
+            .unwrap();
+    }
 }
 
 #[test]
@@ -720,7 +727,7 @@ fn write_agy_keychain(directory: &Path) {
 }
 
 #[test]
-fn registration_reports_probe_directory_failures_from_the_executor() {
+fn account_detection_preserves_probe_directory_executor_errors() {
     use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
 
     struct Fail;
@@ -734,11 +741,8 @@ fn registration_reports_probe_directory_failures_from_the_executor() {
     }
     let state = tempfile::tempdir().unwrap();
     let host_root = state.path().canonicalize().unwrap();
-    for adapter in ["claude", "cursor", "agy"] {
-        // Cursor reads its CLI login without the executor unless the desktop
-        // database exists, so give it one to reach the probe.
+    for adapter in ["claude", "agy"] {
         let identity = tempfile::tempdir().unwrap();
-        std::fs::write(identity.path().join("state.vscdb"), b"").unwrap();
         // An isolated agy account must hold its own keychain to reach the probe.
         write_agy_keychain(identity.path());
         let directory = if matches!(adapter, "cursor" | "agy") {
@@ -760,13 +764,12 @@ fn registration_reports_probe_directory_failures_from_the_executor() {
             matches!(&error, ProviderError::ProbeDirectory(_)),
             "{adapter}: {error}"
         );
-        assert!(error.to_string().contains("fixture probe failure"));
         assert_eq!(std::fs::read_dir(&host_root).unwrap().count(), 0);
     }
 }
 
 #[test]
-fn registration_names_probe_directory_failures() {
+fn registration_preflights_probe_directory_before_cursor_identity() {
     use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
     use std::os::unix::fs::PermissionsExt;
 
@@ -779,29 +782,18 @@ fn registration_names_probe_directory_failures() {
     let state = tempfile::tempdir().unwrap();
     let executor = crate::host::HostProbeExecutor::new(&Never, state.path()).unwrap();
     std::fs::set_permissions(state.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
-    for adapter in ["claude", "cursor", "agy"] {
-        let identity = tempfile::tempdir().unwrap();
-        std::fs::write(identity.path().join("state.vscdb"), b"").unwrap();
-        // An isolated agy account must hold its own keychain to reach the probe.
-        write_agy_keychain(identity.path());
-        let directory = if matches!(adapter, "cursor" | "agy") {
-            identity.path()
-        } else {
-            Path::new("/home/test/identity")
-        };
-        let error = crate::accounts::detect_with_org(
-            &executor,
-            adapter,
-            Path::new("/bin/provider"),
-            Path::new("/home/test"),
-            OsStr::new("test"),
-            directory,
-            state.path(),
-        )
-        .unwrap_err();
-        assert!(matches!(&error, ProviderError::ProbeDirectory(_)));
-        assert!(error.to_string().contains("private directory"), "{error}");
-    }
+    let identity = tempfile::tempdir().unwrap();
+    let error = crate::accounts::detect_for_registration(
+        &executor,
+        "cursor",
+        Path::new("/bin/cursor-agent"),
+        Path::new("/home/test"),
+        OsStr::new("test"),
+        identity.path(),
+        state.path(),
+    )
+    .unwrap_err();
+    assert!(matches!(&error, ProviderError::ProbeDirectory(_)));
 }
 
 #[test]

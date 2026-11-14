@@ -452,7 +452,7 @@ pub fn detect_with_org(
 
 /// Registration must observe the current identity, even when a recent probe is cached.
 pub fn detect_for_registration(
-    executor: &dyn Executor,
+    executor: &crate::host::HostProbeExecutor<'_>,
     adapter: &str,
     executable: &Path,
     home: &Path,
@@ -460,6 +460,7 @@ pub fn detect_for_registration(
     directory: &Path,
     probe_root: &Path,
 ) -> Result<(String, Option<String>), ProviderError> {
+    executor.preflight().map_err(exec_error)?;
     detect_with_org_inner(
         executor, adapter, executable, home, user, directory, probe_root, false,
     )
@@ -512,8 +513,13 @@ fn detect_with_org_inner(
             .ok_or(ProviderError::UnknownIdentity);
     }
     if adapter == "cursor" {
-        let identity =
-            crate::cursor::read_identity(directory).map_err(|_| ProviderError::UnknownIdentity)?;
+        let identity = crate::cursor::read_identity(directory).map_err(|error| match error {
+            crate::cursor::CursorIdentityError::CredentialNotFound => {
+                ProviderError::CredentialNotFound
+            }
+            crate::cursor::CursorIdentityError::Unavailable
+            | crate::cursor::CursorIdentityError::Malformed => ProviderError::UnknownIdentity,
+        })?;
         return Ok((identity.account_key, None));
     }
     if adapter != "claude" || directory == home.join(".claude") {
