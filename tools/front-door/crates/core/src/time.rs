@@ -10,7 +10,7 @@ pub enum TimeError {
     WallRange,
     #[error("wall time must use canonical RFC3339 UTC with six fractional digits")]
     WallSpelling,
-    #[error("wait budget must be between 1 and {maximum_seconds} seconds")]
+    #[error("wait budget must be at most {maximum_seconds} seconds")]
     WaitLimit { maximum_seconds: u64 },
     #[error("the host monotonic clock or boot identity cannot be read")]
     HostClock,
@@ -229,7 +229,10 @@ impl WaitBudget {
         transport: WaitTransport,
     ) -> Result<Self, TimeError> {
         let maximum_seconds = transport.maximum_seconds();
-        if duration.0 < 1_000_000 || duration.0 > maximum_seconds * 1_000_000 {
+        if duration.0 == 0 {
+            return Ok(Self::nonblocking(now));
+        }
+        if duration.0 > maximum_seconds * 1_000_000 {
             return Err(TimeError::WaitLimit { maximum_seconds });
         }
         Ok(Self {
@@ -238,8 +241,8 @@ impl WaitBudget {
         })
     }
     /// A wait of up to `duration`, shortened to the CLI maximum. Unlike
-    /// [`Self::new`] it accepts sub-second waits, for internal lock bounds
-    /// rather than requested waits.
+    /// [`Self::new`] it caps an oversized bound instead of rejecting it and
+    /// preserves zero as an expired ordinary deadline.
     pub fn up_to(now: MonoTime, duration: DurationMicros) -> Self {
         let maximum = DurationMicros(MAX_LANE_RUNTIME_SECONDS * 1_000_000);
         Self {
@@ -483,15 +486,18 @@ mod tests {
         );
         assert!(WaitBudget::cli(MonoTime::from_micros(u64::MAX), 1).is_err());
         assert!(DurationMicros::from_seconds(u64::MAX).is_err());
-        assert!(WaitBudget::cli(now, 0).is_err());
-        assert!(
-            WaitBudget::new(
-                now,
-                DurationMicros::from_micros(999_999),
-                WaitTransport::Relay
-            )
-            .is_err()
-        );
+        let zero_wait = WaitBudget::cli(now, 0).unwrap();
+        assert!(zero_wait.is_nonblocking());
+        assert_eq!(zero_wait.deadline().as_mono_time(), now);
+        assert_eq!(zero_wait.remaining(now), DurationMicros::ZERO);
+        let subsecond_wait = WaitBudget::new(
+            now,
+            DurationMicros::from_micros(999_999),
+            WaitTransport::Relay,
+        )
+        .unwrap();
+        assert!(!subsecond_wait.is_nonblocking());
+        assert_eq!(subsecond_wait.remaining(now).as_micros(), 999_999);
         let wait = WaitBudget::relay(now, 1).unwrap();
         assert!(wait.deadline().is_expired(MonoTime::from_micros(1_000_010)));
         assert_eq!(

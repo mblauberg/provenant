@@ -137,7 +137,9 @@ carries and verifies the accepted launch scope. Unsupported controls refuse with
 read/wait work; `domains.fabric.graph.writer_provision_seconds` gives each writer
 provisioning its independent allowance. Both default to 55 seconds, validate in
 1..=14400, and report their effective configuration source. Changing a reader's
-wait does not change a writer's provisioning allowance. The retired
+wait does not change a writer's provisioning allowance. An explicit request wait
+of zero observes once without waiting; positive subsecond transport budgets
+retain their requested duration. The retired
 `graph.writer_launch_seconds` is refused by config validation with both new keys
 named in its diagnostic; it is never an alias.
 

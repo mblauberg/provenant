@@ -2568,6 +2568,7 @@ mod tests {
             "requested_route":{"kind":"named","name":"senior"},
             "authority_digest":digest,"queued_at":"2026-10-29T00:00:00.000000Z",
             "state":{"state":"starting"},"usage":{},"read_only_writable":[],
+            "protected_paths":[],"trace":{},
             "prompt":{"path":{"encoding":"utf8","path":"prompt.md"},
                 "digest":digest,"bytes":0,"complete":true,"redacted":false}
         }))?;

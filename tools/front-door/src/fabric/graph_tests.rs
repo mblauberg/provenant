@@ -2519,6 +2519,7 @@ mod result_tests {
                 "authority_digest": Digest::from_bytes([5; 32]), "queued_at": now,
                 "state": {"state":"terminal", "outcome":"lost", "exit_code":null, "finished_at":now, "reason":null},
                 "provider_ms": provider_ms, "usage": usage, "read_only_writable": [],
+                "protected_paths": [], "trace": {},
                 "prompt": {"path":{"encoding":"utf8", "path":"prompt.txt"},
                     "digest": provenant_records::CanonicalV1::file_digest(b""), "bytes":0, "complete":true, "redacted":false}
             })).unwrap()
