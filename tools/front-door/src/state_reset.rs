@@ -10,27 +10,35 @@ use std::{
 pub(crate) const BLOCKED: &str = "STATE_FORMAT_BREAK";
 /// Dedicated acknowledgement status, distinct from invalid arguments (2).
 pub(crate) const ACK_REQUIRED: u8 = 6;
-const DROPPED: &[&str] = &[
-    "run.sqlite3",
-    "attempts",
-    "runs",
-    "children",
-    "fabric/fabric.sqlite3",
-    "fabric/host.sqlite3",
-    "fabric/graphs",
-    "work-index.sqlite3",
-    "pr-contributions.sqlite3",
-    "admission.sqlite3",
-];
 const COMPANIONS: &[&str] = &["-wal", "-shm", "-journal", ".lock"];
-const USAGE_ARCHIVE: &str = "usage-history/format-1";
-const KEPT: &str = "usage ledger (archived to usage-history/format-1), quota history, provider history (relocated to provider-history/format-1), session checkpoints, chair log";
+// Separate destinations preserve the ledger's existing archive layout without
+// merging unrelated telemetry into it or replacing an interrupted archive.
+const TELEMETRY: &[(&str, &str, FileKind)] = &[
+    (
+        "usage-ledger",
+        "usage-history/format-1",
+        FileKind::Directory,
+    ),
+    (
+        "ingest",
+        "usage-history/format-1-ingest",
+        FileKind::Directory,
+    ),
+    (
+        "ingest-cursors.json",
+        "usage-history/format-1-ingest-cursors.json",
+        FileKind::Regular,
+    ),
+];
+const KEPT: &str = "format-1 telemetry (archived under usage-history only with receipt none/1), quota history, provider history (relocated to provider-history/format-1), session checkpoints, chair log";
 
 pub(crate) struct Plan {
     root: Directory,
     state: PathBuf,
     receipt_format: Option<u64>,
     entries: Vec<Entry>,
+    histories: Vec<(PathBuf, Directory)>,
+    archive_telemetry: bool,
     pub dropped: Vec<PathBuf>,
 }
 struct Entry {
@@ -98,6 +106,7 @@ fn format_one_header(
     name: &str,
     shipped: &[u32],
     current: u32,
+    receipt: Option<u64>,
 ) -> io::Result<bool> {
     let (parent, leaf) = if let Some((parent, leaf)) = name.split_once('/') {
         let Some(parent) = directory(root, OsStr::new(parent))? else {
@@ -110,8 +119,7 @@ fn format_one_header(
     let Some(value) = metadata(&parent, OsStr::new(leaf))? else {
         return Ok(false);
     };
-    // Links are never evidence. An independently established reset may unlink
-    // them without following them, just like other dropped links.
+    // A store link is never positive format evidence and is left alone.
     if value.kind == FileKind::Symlink {
         return Ok(false);
     }
@@ -127,27 +135,30 @@ fn format_one_header(
             Err(error) => return Err(error),
         };
         let version = u32::from_be_bytes([header[60], header[61], header[62], header[63]]);
-        if value.size == 0 || (complete && &header[..16] == b"SQLite format 3\0" && version == 0) {
+        let pages = u32::from_be_bytes([header[28], header[29], header[30], header[31]]);
+        if value.size == 0
+            || (complete && &header[..16] == b"SQLite format 3\0" && version == 0 && pages <= 1)
+        {
             // A never-written database identifies neither state format.
             return Ok(false);
-        }
-        if !complete || (&header[..16] == b"SQLite format 3\0" && version == 0) {
-            for suffix in ["-wal", "-shm"] {
-                if metadata(&parent, OsStr::new(&format!("{leaf}{suffix}")))?.is_some() {
-                    // SQLite may not have checkpointed the schema yet. Never
-                    // open it or infer format 1 from an incomplete main file.
-                    return Ok(false);
-                }
-            }
         }
         if !complete || &header[..16] != b"SQLite format 3\0" {
             return Err(io::Error::other("short or unrecognised SQLite header"));
         }
+        // The receipt changes evidence for this store, never for its siblings.
+        if receipt == Some(1) {
+            if version < current {
+                return Ok(true);
+            }
+            return Err(io::Error::other(format!(
+                "SQLite user_version {version} is at or above format-2 version {current} despite a format-1 receipt"
+            )));
+        }
         if shipped.contains(&version) {
             return Ok(true);
         }
-        // Older format-2 schemas stay non-evidence after a later 2.x bump.
-        if version >= current || shipped.iter().all(|old| version > *old) {
+        // A current receipt also protects earlier format-2 schemas after bumps.
+        if receipt == Some(2) && shipped.iter().all(|old| version > *old) {
             return Ok(false);
         }
         Err(io::Error::other(format!(
@@ -160,26 +171,122 @@ fn format_one_header(
     )))
 }
 
-fn foreign_store_headers(store: &Directory) -> io::Result<bool> {
-    // Work index has no format-2 schema or writer. Any remaining file (even
-    // only a companion after interruption) belongs to the retired class.
-    let mut foreign = false;
-    for suffix in std::iter::once("").chain(COMPANIONS.iter().copied()) {
-        foreign |= metadata(store, OsStr::new(&format!("work-index.sqlite3{suffix}")))?.is_some();
+fn add_entry(
+    root: &Directory,
+    relative: &Path,
+    entries: &mut Vec<Entry>,
+    dropped: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    let parent_path = relative.parent().unwrap_or(Path::new(""));
+    let mut parent = fs(root.try_clone())?;
+    for part in parent_path.components() {
+        let Some(child) = directory(&parent, part.as_os_str())? else {
+            return Ok(());
+        };
+        parent = child;
     }
+    let name = relative
+        .file_name()
+        .ok_or_else(|| io::Error::other("missing reset entry name"))?;
+    if let Some(before) = metadata(&parent, name)? {
+        entries.push(Entry {
+            parent,
+            name: name.into(),
+            before,
+        });
+        dropped.push(relative.into());
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct Selection {
+    entries: Vec<Entry>,
+    dropped: Vec<PathBuf>,
+    protected: Vec<PathBuf>,
+}
+
+/// Select each database and its own payloads. Containers are traversed, never
+/// deleted wholesale: a sibling or child can already hold format-2 data.
+fn select_stores(
+    root: &Directory,
+    store: &Directory,
+    relative: &Path,
+    receipt: Option<u64>,
+    run_payload: bool,
+    selection: &mut Selection,
+) -> io::Result<()> {
+    let mut old_run = run_payload && metadata(store, OsStr::new("run.sqlite3"))?.is_none();
     for &(name, shipped, current) in FORMAT_ONE_VERSIONS {
-        foreign |= format_one_header(store, name, shipped, current)?;
+        if !format_one_header(store, name, shipped, current, receipt)? {
+            let path = relative.join(name);
+            let (parent, leaf) = name.rsplit_once('/').unwrap_or(("", name));
+            let parent = if parent.is_empty() {
+                Some(fs(store.try_clone())?)
+            } else {
+                directory(store, OsStr::new(parent))?
+            };
+            if let Some(parent) = parent
+                && metadata(&parent, OsStr::new(leaf))?.is_some()
+            {
+                selection.protected.push(path);
+            }
+            continue;
+        }
+        for suffix in std::iter::once("").chain(COMPANIONS.iter().copied()) {
+            add_entry(
+                root,
+                &relative.join(format!("{name}{suffix}")),
+                &mut selection.entries,
+                &mut selection.dropped,
+            )?;
+        }
+        match name {
+            "run.sqlite3" => old_run = true,
+            "fabric/fabric.sqlite3" => add_entry(
+                root,
+                &relative.join("fabric/graphs"),
+                &mut selection.entries,
+                &mut selection.dropped,
+            )?,
+            _ => {}
+        }
+    }
+    // No format-2 writer creates the retired work index or its companions.
+    for suffix in std::iter::once("").chain(COMPANIONS.iter().copied()) {
+        add_entry(
+            root,
+            &relative.join(format!("work-index.sqlite3{suffix}")),
+            &mut selection.entries,
+            &mut selection.dropped,
+        )?;
+    }
+    if old_run {
+        add_entry(
+            root,
+            &relative.join("attempts"),
+            &mut selection.entries,
+            &mut selection.dropped,
+        )?;
     }
     for container in ["attempts", "runs", "children"] {
         if let Some(parent) = directory(store, OsStr::new(container))? {
             for name in fs(parent.entries())? {
-                if let Some(child) = directory(&parent, &fs(name)?)? {
-                    foreign |= foreign_store_headers(&child)?;
+                let name = fs(name)?;
+                if let Some(child) = directory(&parent, &name)? {
+                    select_stores(
+                        root,
+                        &child,
+                        &relative.join(container).join(name),
+                        receipt,
+                        old_run && container == "runs",
+                        selection,
+                    )?;
                 }
             }
         }
     }
-    Ok(foreign)
+    Ok(())
 }
 
 pub(crate) fn plan(state: &Path, receipt_format: Option<u64>) -> io::Result<Option<Plan>> {
@@ -197,35 +304,32 @@ pub(crate) fn plan(state: &Path, receipt_format: Option<u64>) -> io::Result<Opti
             "reset requires an owned state root without group/other write access",
         ));
     }
-    let older = receipt_format == Some(1);
-    // A format-1 receipt identifies the whole old state, including stores left
-    // at an intermediate migration step. Otherwise headers establish whether
-    // old agents have left foreign stores, even after a format-2 install.
-    let foreign = !older && foreign_store_headers(&root)?;
-    let mut entries = Vec::new();
-    let mut dropped = Vec::new();
-    for base in DROPPED {
-        for suffix in std::iter::once("").chain(COMPANIONS.iter().copied()) {
-            let relative = format!("{base}{suffix}");
-            let (parent, name) = if let Some((container, name)) = relative.split_once('/') {
-                let Some(parent) = directory(&root, OsStr::new(container))? else {
-                    continue;
-                };
-                (parent, name)
-            } else {
-                (fs(root.try_clone())?, relative.as_str())
-            };
-            if let Some(before) = metadata(&parent, OsStr::new(name))? {
-                entries.push(Entry {
-                    parent,
-                    name: name.into(),
-                    before,
-                });
-                dropped.push(PathBuf::from(relative));
-            }
+    let mut selection = Selection::default();
+    select_stores(
+        &root,
+        &root,
+        Path::new(""),
+        receipt_format,
+        false,
+        &mut selection,
+    )?;
+    for protected in &selection.protected {
+        if selection
+            .dropped
+            .iter()
+            .any(|path| protected.starts_with(path))
+        {
+            return Err(io::Error::other(format!(
+                "refusing to remove a tree containing an unidentified or format-2 store: {}",
+                protected.display()
+            )));
         }
     }
-    if !older && !foreign {
+    let Selection {
+        entries, dropped, ..
+    } = selection;
+    let identified = !entries.is_empty();
+    if receipt_format != Some(1) && !identified {
         return Ok(None);
     }
     if receipt_format.is_none() && directory(&root, OsStr::new("install"))?.is_none() {
@@ -238,44 +342,55 @@ pub(crate) fn plan(state: &Path, receipt_format: Option<u64>) -> io::Result<Opti
     for entry in &entries {
         check_removal(&entry.parent, &entry.name)?;
     }
-    check_provider_history(&root)?;
-    if let Some(value) = metadata(&root, OsStr::new("usage-ledger"))? {
-        if value.kind != FileKind::Directory {
-            return Err(io::Error::other(
-                "usage-ledger is not a directory; restore the ledger before retrying reset",
-            ));
+    let mut histories = Vec::new();
+    attempts(&root, Path::new(""), &mut histories)?;
+    histories.retain(|(path, _)| dropped.iter().any(|selected| path.starts_with(selected)));
+    if !histories.is_empty() {
+        check_provider_history(&root, &histories)?;
+    }
+    let archive_telemetry = receipt_format != Some(2) && identified;
+    if archive_telemetry {
+        for &(source, destination, kind) in TELEMETRY {
+            if let Some(value) = metadata(&root, OsStr::new(source))? {
+                if value.kind != kind {
+                    return Err(io::Error::other(format!(
+                        "{source} has an unsafe type; restore telemetry before retrying reset"
+                    )));
+                }
+                check_archive_destination(&root, Path::new(destination))?;
+            }
         }
-        check_archive_destination(&root, Path::new(USAGE_ARCHIVE))?;
     }
     Ok(Some(Plan {
         root,
         state: state.into(),
         receipt_format,
         entries,
+        histories,
+        archive_telemetry,
         dropped,
     }))
 }
 
-fn check_provider_history(root: &Directory) -> io::Result<()> {
+fn check_provider_history(root: &Directory, found: &[(PathBuf, Directory)]) -> io::Result<()> {
     check_archive_ancestors(root, Path::new("provider-history/format-1"))?;
-    let mut found = Vec::new();
-    attempts(root, Path::new(""), &mut found)?;
     for (path, attempt) in found {
-        if metadata(&attempt, OsStr::new("provider-history"))?
-            .is_some_and(|value| value.kind != FileKind::Directory)
-        {
+        let source = metadata(attempt, OsStr::new("provider-history"))?;
+        if source.is_some_and(|value| value.kind != FileKind::Directory) {
             return Err(io::Error::other(format!(
                 "{} is not a directory; move it aside or restore the provider history before retrying reset",
                 path.join("provider-history").display()
             )));
         }
-        if metadata(&attempt, OsStr::new("provider-history"))?.is_some() {
-            check_archive_destination(
-                root,
-                &Path::new("provider-history/format-1")
-                    .join(path)
-                    .join("provider-history"),
-            )?;
+        let destination = Path::new("provider-history/format-1")
+            .join(path)
+            .join("provider-history");
+        if source.is_some() {
+            check_archive_destination(root, &destination)?;
+        } else {
+            // An earlier reset may have moved this archive before failing to
+            // delete the payload. Keep it, but still reject malformed paths.
+            check_archive_ancestors(root, &destination)?;
         }
     }
     Ok(())
@@ -536,11 +651,10 @@ pub(crate) fn remove(plan: &Plan, quiesce: impl FnOnce() -> io::Result<()>) -> i
     if live_lane(plan)?.is_some() {
         return Err(io::Error::other("lane became live before reset"));
     }
-    let mut found = Vec::new();
-    attempts(&plan.root, Path::new(""), &mut found)?;
+    let found = &plan.histories;
     // Move every archive before removing any dropped class. No replacement or
     // merge: an existing destination is ambiguous and must leave source intact.
-    for (path, attempt) in &found {
+    for (path, attempt) in found {
         let name = OsStr::new("provider-history");
         if let Some(before) = metadata(attempt, name)? {
             if before.kind != FileKind::Directory {
@@ -556,17 +670,27 @@ pub(crate) fn remove(plan: &Plan, quiesce: impl FnOnce() -> io::Result<()>) -> i
             fs(attempt.sync())?;
         }
     }
-    let usage = OsStr::new("usage-ledger");
-    if let Some(before) = metadata(&plan.root, usage)? {
-        let archive = create_path(&plan.root, Path::new("usage-history"))?;
-        recheck(&plan.root, usage, before)?;
-        fs(plan
-            .root
-            .rename_noreplace(usage, &archive, OsStr::new("format-1")))?;
-        fs(archive.sync())?;
-        fs(plan.root.sync())?;
+    if plan.archive_telemetry {
+        for &(source, destination, _) in TELEMETRY {
+            let name = OsStr::new(source);
+            if let Some(before) = metadata(&plan.root, name)? {
+                let destination = Path::new(destination);
+                let archive =
+                    create_path(&plan.root, destination.parent().unwrap_or(Path::new("")))?;
+                recheck(&plan.root, name, before)?;
+                fs(plan.root.rename_noreplace(
+                    name,
+                    &archive,
+                    destination
+                        .file_name()
+                        .ok_or_else(|| io::Error::other("missing archive name"))?,
+                ))?;
+                fs(archive.sync())?;
+                fs(plan.root.sync())?;
+            }
+        }
     }
-    remove_aliases(&plan.state, &found)?;
+    remove_aliases(&plan.state, found)?;
     for entry in &plan.entries {
         remove_entry(&entry.parent, &entry.name)?;
     }
@@ -605,11 +729,15 @@ mod tests {
                     std::fs::create_dir_all(path.parent().ok_or("store parent")?)?;
                     let bytes = header(version);
                     std::fs::write(&path, &bytes)?;
-                    assert_eq!(
-                        plan(temp.path(), receipt)?.is_some(),
-                        shipped.contains(&version),
-                        "{name}: {version}, {receipt:?}"
-                    );
+                    if receipt.is_none() && !shipped.contains(&version) {
+                        assert!(plan(temp.path(), receipt).is_err(), "{name}: {version}");
+                    } else {
+                        assert_eq!(
+                            plan(temp.path(), receipt)?.is_some(),
+                            shipped.contains(&version),
+                            "{name}: {version}, {receipt:?}"
+                        );
+                    }
                     assert_eq!(std::fs::read(&path)?, bytes);
                 }
             }
@@ -660,18 +788,18 @@ mod tests {
             run_header.len() < 64 || run_header[60..64] == [0; 4],
             "fixture must retain schema in WAL"
         );
-        for receipt in [None, Some(provenant_records::STATE_FORMAT_VERSION)] {
-            assert!(plan(state, receipt)?.is_none());
-        }
+        assert!(plan(state, Some(provenant_records::STATE_FORMAT_VERSION))?.is_none());
+        // Some connections may already have checkpointed; without a receipt
+        // they can refuse, but cannot become positive reset evidence.
+        assert!(!matches!(plan(state, None), Ok(Some(_))));
         drop((run, contributions, fabric, host));
-        for receipt in [None, Some(provenant_records::STATE_FORMAT_VERSION)] {
-            assert!(plan(state, receipt)?.is_none());
-        }
+        assert!(plan(state, Some(provenant_records::STATE_FORMAT_VERSION))?.is_none());
+        assert!(plan(state, None).is_err());
         Ok(())
     }
 
     #[test]
-    fn unknown_headers_refuse_and_incomplete_wal_headers_are_not_reset_evidence() -> TestResult {
+    fn unknown_headers_refuse_even_with_wal_companions() -> TestResult {
         let temp = tempfile::tempdir()?;
         std::fs::create_dir(temp.path().join("install"))?;
         let path = temp.path().join("run.sqlite3");
@@ -696,7 +824,11 @@ mod tests {
             for bytes in [Vec::new(), vec![0; 12], header(0)] {
                 std::fs::write(&path, &bytes)?;
                 for receipt in [None, Some(provenant_records::STATE_FORMAT_VERSION)] {
-                    assert!(plan(temp.path(), receipt)?.is_none());
+                    if bytes.len() == 12 {
+                        assert!(plan(temp.path(), receipt).is_err());
+                    } else {
+                        assert!(plan(temp.path(), receipt)?.is_none());
+                    }
                     assert_eq!(std::fs::read(&path)?, bytes);
                 }
             }

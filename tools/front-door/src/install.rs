@@ -262,31 +262,62 @@ struct PreviewReporter {
     receipt_state_format: Option<u64>,
     reset_planned: bool,
     stopped_agents: std::collections::BTreeSet<&'static str>,
+    uncertain_agents: std::collections::BTreeSet<&'static str>,
 }
 impl PreviewReporter {
     fn stopped(&mut self, agent: &'static str) {
         self.stopped_agents.insert(agent);
     }
 
+    fn record_stop(&mut self, agent: &'static str, result: io::Result<bool>) -> io::Result<()> {
+        match result {
+            Ok(true) => {
+                self.stopped(agent);
+                self.uncertain_agents.remove(agent);
+            }
+            Ok(false) => {
+                self.uncertain_agents.remove(agent);
+            }
+            Err(error) => {
+                self.stopped_agents.remove(agent);
+                self.uncertain_agents.insert(agent);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
     fn stopped_report(&self, state: &Path) -> Option<String> {
-        if self.stopped_agents.is_empty() {
+        if self.stopped_agents.is_empty() && self.uncertain_agents.is_empty() {
             return None;
         }
         let state = format!("'{}'", state.display().to_string().replace('\'', "'\\''"));
-        Some(format!(
-            "Agents stopped: {}. To finish installation and restart the current agents, run: install.sh --upgrade --state-dir {}{}",
-            self.stopped_agents
-                .iter()
-                .copied()
-                .collect::<Vec<_>>()
-                .join(", "),
-            state,
-            if self.reset_planned {
-                " --reset-state"
-            } else {
-                ""
-            },
-        ))
+        let mut report = String::new();
+        if !self.stopped_agents.is_empty() {
+            report.push_str(&format!(
+                "Agents stopped: {}. ",
+                self.stopped_agents
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !self.uncertain_agents.is_empty() {
+            report.push_str(&format!(
+                "Agents may still be running: {}. ",
+                self.uncertain_agents
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        report.push_str(&format!(
+            "State directory: {state}. To finish installation and restart agents, rerun your original install command{}; preserve its source and destination options. See docs/runbooks/install.md, Upgrade section.",
+            if self.reset_planned { " with --reset-state" } else { "" },
+        ));
+        Some(report)
     }
 
     fn before_remove_with(
@@ -296,7 +327,7 @@ impl PreviewReporter {
     ) -> io::Result<()> {
         if matches!(
             action.selector.as_str(),
-            "peer-agent" | "tick-agent" | "tick-service" | "gc-agent"
+            "peer-agent" | "tick-agent" | "tick-service"
         ) {
             let home = self
                 .home
@@ -307,20 +338,20 @@ impl PreviewReporter {
                 "tick-agent" if cfg!(target_os = "linux") => super::tick_agent::timer(&home),
                 "tick-agent" => super::tick_agent::plist(&home),
                 "tick-service" => super::tick_agent::service(&home),
-                "gc-agent" => home.join("Library/LaunchAgents/dev.provenant.gc.plist"),
                 _ => provenant_fabric_runtime::peer_agent::plist(&home),
             };
             if action.before.is_some() && action.path.to_path_buf().ok().as_ref() != Some(&expected)
             {
                 return Err(io::Error::other("unexpected agent plist path"));
             }
-            if stop(&home)? && action.selector != "gc-agent" {
-                self.stopped(if action.selector == "peer-agent" {
+            self.record_stop(
+                if action.selector == "peer-agent" {
                     "dev.provenant.peer"
                 } else {
                     "dev.provenant.tick"
-                });
-            }
+                },
+                stop(&home),
+            )?;
         }
         Ok(())
     }
@@ -346,16 +377,28 @@ impl InstallReporter for PreviewReporter {
             .ok_or_else(|| io::Error::other("missing agent home"))?;
         crate::state_reset::remove(&plan, || {
             if provenant_fabric_runtime::peer_agent::eligible(&state, &home) {
-                if provenant_fabric_runtime::peer_agent::stop(&home).map_err(io::Error::other)? {
-                    self.stopped("dev.provenant.peer");
-                }
-                retire_disk_guard(&home).map_err(io::Error::other)?;
-                super::tick_agent::retire_gc(&home).map_err(io::Error::other)?;
+                self.record_stop(
+                    "dev.provenant.peer",
+                    provenant_fabric_runtime::peer_agent::stop(&home).map_err(io::Error::other),
+                )?;
+                self.record_stop(
+                    "dev.provenant.disk-guard",
+                    retire_disk_guard(&home)
+                        .map(|_| false)
+                        .map_err(io::Error::other),
+                )?;
+                self.record_stop(
+                    "dev.provenant.gc",
+                    super::tick_agent::retire_gc(&home)
+                        .map(|_| false)
+                        .map_err(io::Error::other),
+                )?;
             }
-            if super::tick_agent::eligible(&state, &home)
-                && super::tick_agent::stop(&home).map_err(io::Error::other)?
-            {
-                self.stopped("dev.provenant.tick");
+            if super::tick_agent::eligible(&state, &home) {
+                self.record_stop(
+                    "dev.provenant.tick",
+                    super::tick_agent::stop(&home).map_err(io::Error::other),
+                )?;
             }
             Ok(())
         })
@@ -367,9 +410,6 @@ impl InstallReporter for PreviewReporter {
             "tick-agent" | "tick-service" => {
                 super::tick_agent::stop(home).map_err(io::Error::other)
             }
-            "gc-agent" => super::tick_agent::retire_gc(home)
-                .map(|_| false)
-                .map_err(io::Error::other),
             _ => provenant_fabric_runtime::peer_agent::stop(home).map_err(io::Error::other),
         })
     }
@@ -2201,7 +2241,7 @@ mod tests {
     }
 
     #[test]
-    fn post_shutdown_failure_reports_only_stopped_agents_and_the_required_acknowledgement() {
+    fn post_shutdown_recovery_preserves_original_command_and_required_acknowledgement() {
         use super::*;
         let mut reporter = PreviewReporter::default();
         assert!(reporter.stopped_report(Path::new("/state")).is_none());
@@ -2213,7 +2253,8 @@ mod tests {
         for name in ["dev.provenant.peer", "dev.provenant.tick"] {
             assert!(report.contains(name));
         }
-        assert!(report.contains("install.sh --upgrade --state-dir '/state'\\''s data'"));
+        assert!(report.contains("'/state'\\''s data'"));
+        assert!(report.contains("original install command"));
         assert!(!report.contains("--reset-state"));
         assert!(!report.contains("--source"));
         reporter.reset_planned = true;
@@ -2255,6 +2296,10 @@ mod tests {
                 .is_err()
         );
         assert!(reporter.stopped_agents.is_empty());
+        let report = reporter
+            .stopped_report(Path::new("/state"))
+            .expect("uncertain stop");
+        assert!(report.contains("may still be running") && report.contains("dev.provenant.peer"));
         reporter.before_remove_with(&action, |_| Ok(false))?;
         assert!(reporter.stopped_agents.is_empty());
         let mut stops = 0;
