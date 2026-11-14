@@ -625,7 +625,7 @@ fn install_git(
         search_path.clone()
     } else {
         match std::env::join_paths(
-            std::iter::once(bin.to_owned()).chain(std::env::split_paths(&*search_path)),
+            std::iter::once(bin.to_owned()).chain(std::env::split_paths(search_path)),
         ) {
             Ok(value) => value,
             Err(_) if options.bound.is_none() && options.include.is_none() => {

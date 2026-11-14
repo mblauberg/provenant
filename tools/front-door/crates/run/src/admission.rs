@@ -385,10 +385,9 @@ impl RunStore {
                 } else if let AttemptState::Running { extra } = &lane.state {
                     if extra.get("child_wait").and_then(|v| v.as_str()) == Some("children") {
                         "children: host and project admission yielded".to_owned()
-                    } else if let Some(ms) = lane.provider_silent_for_ms.0 {
-                        provenant_records::run::provider_silence_reason(ms)
                     } else {
-                        return None;
+                        let ms = lane.provider_silent_for_ms.0?;
+                        provenant_records::run::provider_silence_reason(ms)
                     }
                 } else {
                     self.recovery_process_wait(lane.attempt_id, call)
@@ -910,9 +909,6 @@ fn is_format_character(character: char) -> bool {
             | '\u{E0020}'..='\u{E007F}'
     )
 }
-
-/// Milliseconds as seconds to one decimal place, rounded up so a wait never
-/// reads as zero while it holds.
 
 fn deadline(from: WallTime, seconds: u64) -> Result<WallTime> {
     DurationMicros::from_seconds(seconds)
