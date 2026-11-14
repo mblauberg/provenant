@@ -481,8 +481,26 @@ pub(crate) fn mutate(
     cancel: &CancelToken,
     within: Duration,
 ) -> Result<Value, ServiceError> {
-    let mut stream = UnixStream::connect(path).map_err(|_| ServiceError::FabricOwnerUnavailable)?;
-    exchange_within(&mut stream, request, cancel, within)
+    // The connect spends the same budget as the exchange: a relay whose
+    // backlog is full must not hold the caller past its deadline.
+    let started = Instant::now();
+    let within = within.min(Duration::from_secs(request_max_seconds(request)));
+    let mut stream = provenant_os::sys::connect_unix_within(path, started + within, cancel)
+        .map_err(|error| {
+            if cancel.is_cancelled() {
+                ServiceError::Facade(FacadeError::Cancelled)
+            } else if error.kind() == io::ErrorKind::TimedOut {
+                ServiceError::Facade(FacadeError::Timeout)
+            } else {
+                ServiceError::FabricOwnerUnavailable
+            }
+        })?;
+    exchange_within(
+        &mut stream,
+        request,
+        cancel,
+        within.saturating_sub(started.elapsed()),
+    )
 }
 /// Send a graph frame from a lane: add a child, or mark the caller waiting.
 /// The host answers with a receipt and journals the change before replying.
