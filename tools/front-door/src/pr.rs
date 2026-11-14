@@ -144,7 +144,6 @@ struct RestPull {
     state: String,
     head: RestBranch,
     base: RestBranch,
-    mergeable: Option<bool>,
     #[allow(dead_code)]
     mergeable_state: Option<String>,
     merged_at: Option<String>,
@@ -355,9 +354,6 @@ fn watch(project: &Path, state: &Path, number: &str, head: GitOid, repository: &
         return Err(format!("pull request head moved from {head}").into());
     }
     Ok(())
-}
-fn merge(reader: &wait::Reader<'_>, number: &str, head: GitOid) -> Result<()> {
-    merge_with(reader, number, head, MergeMethod::Merge).map(|_| ())
 }
 /// Merge a pull request pinned to `head` with `method`, returning the commit
 /// GitHub created. A moved head (409) and a refused merge (405) are named.

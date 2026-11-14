@@ -104,9 +104,6 @@ pub enum Command {
         /// Pull request numbers in landing order
         #[arg(catalog_u64_range = 1..)]
         numbers: Vec<u64>,
-        /// Use batch landing even for one pull request
-        #[arg(long)]
-        batch: bool,
         /// Compute the candidate and decisions without publishing
         #[arg(long)]
         shadow: bool,

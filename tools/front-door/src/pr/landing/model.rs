@@ -103,6 +103,15 @@ pub enum Outcome {
     Conflicted,
     Excluded,
     PendingUnknown,
+    /// Still waiting on CI or another lander; a resubmission resumes it.
+    Pending,
+}
+/// The head and base a landing request pinned for one pull request. A
+/// member whose live head or base differs is excluded, never landed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pin {
+    pub head: Option<String>,
+    pub base: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Alarm {

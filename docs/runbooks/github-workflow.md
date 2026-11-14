@@ -89,19 +89,28 @@ branches outside authorised merges.
 ### Land
 
 ```sh
-provenant land 148 149              # ordered batch
+provenant land 148 149              # one landing request, two members
+provenant land 148 --head SHA       # pin the head that may land
+provenant land 148 --wait=30m       # wait up to 30 minutes for CI this call
 provenant land 148 --shadow         # gate and record without publishing
-provenant land 148 --wait=30m       # single-PR path
 provenant land --tier substantial --explain --json
 ```
 
-By default (`integration = "batch"`) `land` builds one merge commit per PR onto
-the fetched target, gates the exact candidate and publishes it
-([ADR 0037](../adr/0037-batched-exact-candidate-landing.md)). `--wait`,
-`--head` or `integration = "single"` select the single-PR path, which waits for
-CI (up to four hours) and merges over REST at the verified head. `--explain
---json` shows the effective policy and its sources; settings live under
-`[domains.pr.land]` (`config schema` lists the keys).
+Every publisher submits to one landing owner (`src/pr/landing/owner.rs`):
+`land`, graph land nodes and the graph delivery PR they land. The owner pins
+each member's head and base, builds one merge commit per PR onto the fetched
+target, gates the exact candidate and publishes it
+([ADR 0037](../adr/0037-batched-exact-candidate-landing.md)), then runs local
+clean-up. Its record, `landing/requests/<id>.json`, keeps one outcome per
+member (`landed`, `pending`, `unknown`, `refused`). Resubmitting the same
+request is idempotent: landed members are never landed again, and pending ones
+resume. `integration = "single"` lands one PR per candidate. No call blocks
+past its bound: CI still running at `gate.timeout_seconds` (or `--wait`) ends
+the call with `LAND_PENDING`; another lander holding the lock gives
+`LAND_BUSY`; a rate-limited read skips one poll with a warning. Rerun the same
+`land` to resume. `--explain --json` shows the effective policy and its
+sources; settings live under `[domains.pr.land]` (`config schema` lists the
+keys).
 
 Sharp edges:
 
@@ -118,9 +127,9 @@ Sharp edges:
   `land N --accept-delta REASON`, which warns and records the reason.
   `approval_tier = "auto"` needs no review for changes touching only tests,
   docs or review-exempt paths.
-- Single-PR exits: 124 is a CI timeout (nothing merged), 5 is `pending`
-  (rerun with `--wait`). `CI_CONFLICT`: the PR conflicts with its base, so CI
-  never starts; rebase or merge, then push. `MERGE_STATE_UNKNOWN`: rerun `land`.
+- `LAND_PENDING` and `LAND_BUSY` exit as `pending`; rerun the same `land`.
+  `LAND_CONFLICT`: the PR conflicts with the target; rebase or merge, then push.
+  `LAND_PUBLICATION_UNKNOWN`: rerun `land` (see below).
 - Cleanup after merge (fast-forward base, delete build output, worktree and
   local branch) runs only when the local tip is exactly the merged head. A
   refused step reports `cleanup_pending` and the merge still exits 0; fix the
@@ -134,8 +143,10 @@ it to force a retry.
 
 Restore forge access, check `git merge-base --is-ancestor CANDIDATE origin/TARGET`
 after fetching and `gh pr view N --json state,headRefOid,mergeCommit` per PR,
-then after `publish_settle_seconds` rerun `provenant land N` without `--shadow`:
-recovery observes the outcome, finishes receipts and deletes the marker last.
+then rerun `provenant land N` without `--shadow`: recovery observes the outcome,
+finishes receipts and deletes the marker last. Recovery never sleeps: a marker
+younger than `publish_settle_seconds` that it cannot yet prove stays for the
+next run.
 
 REST merges use the authenticated GitHub account's commit email, not local
 `user.email`: configure it in GitHub first and check the merge commit's author;

@@ -50,7 +50,14 @@ pub(super) fn connect<'a>(
 }
 
 fn failed(error: Box<dyn std::error::Error>) -> LandingError {
-    LandingError::Failed(error.to_string())
+    if error
+        .downcast_ref::<wait::Failure>()
+        .is_some_and(|failure| failure.code == "RATE_LIMITED")
+    {
+        LandingError::RateLimited(error.to_string())
+    } else {
+        LandingError::Failed(error.to_string())
+    }
 }
 /// A lost or slow mutation leaves the outcome unknown rather than failed.
 fn mutation_failed(error: Box<dyn std::error::Error>) -> LandingError {
@@ -1307,7 +1314,22 @@ fn observe_checks_with(
     let poll = poll_seconds.max(1);
     let mut elapsed = 0;
     loop {
-        let observed = read()?
+        let observed = match read() {
+            // A rate limit skips this poll; the bound still ends the wait.
+            Err(LandingError::RateLimited(message)) if elapsed < definition.timeout_seconds => {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: candidate {} check read skipped: {message}",
+                    candidate.commit
+                );
+                sleep(Duration::from_secs(poll));
+                elapsed += poll;
+                continue;
+            }
+            observed => observed?,
+        };
+        let observed = observed
             .into_iter()
             .next()
             .ok_or_else(|| LandingError::Failed("forge returned no check evidence".into()))?;
@@ -1819,6 +1841,7 @@ esac
                 &mut gate,
                 &mut FakeAlarms::default(),
                 driver::Request {
+                    pins: &Default::default(),
                     numbers: &[7],
                     target: "main",
                     settings: &settings,

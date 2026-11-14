@@ -21,6 +21,17 @@ pub struct Approvals<'a> {
     exempt: Option<&'a ReviewExempt>,
     /// The reason the chair accepts a delta no review covers.
     accept_delta: Option<&'a str>,
+    /// Per-member review proofs a landing request carried.
+    proofs: Option<&'a BTreeMap<u64, Proof>>,
+}
+
+/// The review proof one landing member carries beyond the landing policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Proof {
+    /// The caller proved review coverage of the pinned head, as a graph does.
+    Proved(String),
+    /// The chair accepts a delta no review covers, for this reason.
+    Accepted(String),
 }
 
 /// What lets a pull request land at its head.
@@ -65,6 +76,22 @@ impl<'a> Approvals<'a> {
             tier: ApprovalTier::Auto,
             exempt: None,
             accept_delta: None,
+            proofs: None,
+        }
+    }
+
+    /// Carry each member's own review proof.
+    pub fn with_proofs<'b>(self, proofs: &'b BTreeMap<u64, Proof>) -> Approvals<'b>
+    where
+        'a: 'b,
+    {
+        Approvals {
+            source: self.source,
+            records: self.records,
+            tier: self.tier,
+            exempt: self.exempt,
+            accept_delta: self.accept_delta,
+            proofs: Some(proofs),
         }
     }
 
@@ -92,6 +119,7 @@ impl<'a> Approvals<'a> {
             tier: ApprovalTier::Carry,
             exempt: None,
             accept_delta: None,
+            proofs: None,
         }
     }
 
@@ -282,6 +310,10 @@ impl Approver<'_, '_> {
         author: &str,
     ) -> Result<Decision, LandingError> {
         let approvals = self.approvals;
+        let proof = approvals.proofs.and_then(|proofs| proofs.get(&number));
+        if let Some(Proof::Proved(reference)) = proof {
+            return Ok(Decision::Approved(Approved::by(reference.clone())));
+        }
         let tier = match approvals.tier {
             ApprovalTier::Auto => {
                 let paths = match self.repo.merge_base(head, self.target)? {
@@ -314,7 +346,11 @@ impl Approver<'_, '_> {
                 accepted: None,
             }));
         }
-        if let Some(reason) = approvals.accept_delta {
+        let accepted = match proof {
+            Some(Proof::Accepted(reason)) => Some(reason.as_str()),
+            _ => approvals.accept_delta,
+        };
+        if let Some(reason) = accepted {
             return Ok(Decision::Approved(Approved {
                 accepted: Some(Accepted {
                     reason: reason.to_owned(),

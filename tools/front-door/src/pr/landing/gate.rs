@@ -4,9 +4,6 @@ use crate::pr::status::{CiCheck, CiCompletion, Required, ci_completion};
 use provenant_cli::domains::{GateKind, PrCiMode, PrCiSettings};
 use std::time::Duration;
 
-/// Upper bound on waiting for one pull request's own CI run.
-const PR_CI_WAIT_LIMIT: Duration = Duration::from_secs(6 * 60 * 60);
-
 fn failed(message: impl Into<String>) -> LandingError {
     LandingError::Failed(message.into())
 }
@@ -432,12 +429,16 @@ fn ci_outstanding(
 ///
 /// Waiting never alters what the forge requires: required checks remain enforced
 /// by the forge and by the candidate gate, so skipping an optional wait loses nothing.
+/// The wait ends at `patience_seconds`, the configured gate bound, as
+/// [`LandingError::Pending`]: the landing owner records the member as pending
+/// and a later submission resumes it. A rate-limited read skips one poll.
 pub fn await_pr_ci(
     forge: &mut dyn Forge,
     prs: &[EligiblePr],
     policy: &PrCiSettings,
     required_names: &[String],
     poll_seconds: u64,
+    patience_seconds: u64,
 ) -> Result<(), LandingError> {
     #[allow(clippy::disallowed_methods, reason = "polling boundary")]
     await_pr_ci_with(
@@ -445,7 +446,7 @@ pub fn await_pr_ci(
         prs,
         policy,
         required_names,
-        poll_seconds,
+        (poll_seconds, patience_seconds),
         &std::thread::sleep,
     )
 }
@@ -455,17 +456,32 @@ fn await_pr_ci_with(
     prs: &[EligiblePr],
     policy: &PrCiSettings,
     required_names: &[String],
-    poll_seconds: u64,
+    (poll_seconds, patience_seconds): (u64, u64),
     sleep: &dyn Fn(Duration),
 ) -> Result<(), LandingError> {
     let poll = Duration::from_secs(poll_seconds.max(1));
+    let patience = Duration::from_secs(patience_seconds);
+    let mut waited = Duration::ZERO;
     for pr in prs {
-        let mut waited = Duration::ZERO;
-        while ci_outstanding(forge, pr, policy, required_names)? {
-            if waited >= PR_CI_WAIT_LIMIT {
-                return Err(failed(format!(
-                    "pull request {} CI did not finish in time",
-                    pr.number
+        loop {
+            match ci_outstanding(forge, pr, policy, required_names) {
+                Ok(false) => break,
+                Ok(true) => {}
+                Err(LandingError::RateLimited(message)) => {
+                    use std::io::Write;
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "warning: pull request #{} CI read skipped: {message}",
+                        pr.number
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+            if waited >= patience {
+                return Err(LandingError::Pending(format!(
+                    "warning: pull request #{} CI is still running after {}s; resubmit to resume",
+                    pr.number,
+                    waited.as_secs()
                 )));
             }
             sleep(poll);
@@ -665,11 +681,17 @@ mod tests {
         };
         let slept = Cell::new(0u32);
         // The run never resolves, so the wait ends only at the limit.
-        let result = await_pr_ci_with(&mut forge, &[pr(1, "h1")], &policy, &[], 3600, &|_| {
-            slept.set(slept.get() + 1)
-        });
+        let result = await_pr_ci_with(
+            &mut forge,
+            &[pr(1, "h1")],
+            &policy,
+            &[],
+            (3600, 7200),
+            &|_| slept.set(slept.get() + 1),
+        );
         if slept.get() > 0 {
-            assert!(result.is_err());
+            // An unfinished run is pending at the bound, never a failure.
+            assert!(matches!(result, Err(LandingError::Pending(_))));
         } else {
             assert!(result.is_ok());
         }
@@ -706,10 +728,10 @@ mod tests {
             &[pr(1, "h1")],
             &policy,
             &required,
-            3600,
+            (3600, 7200),
             &|_| slept.set(slept.get() + 1),
         );
-        assert!(result.is_err());
+        assert!(matches!(result, Err(LandingError::Pending(_))));
         assert!(slept.get() > 0);
     }
 

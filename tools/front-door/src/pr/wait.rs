@@ -1,14 +1,8 @@
 //! Bounded CI polling for a pinned PR head. No progress goes to JSON stdout.
-use super::{
-    Result, execute_for,
-    observer::{Check, ObserveError},
-    status::{CiCheck, CiCompletion, Required, ci_completion},
-};
-use provenant_core::GitOid;
+use super::{Result, execute_for, observer::ObserveError};
 use provenant_core::retry::{Backoff, RetryCause, is_transient};
 use provenant_os::exec::Termination;
 use std::{
-    io::{self, Write},
     path::Path,
     time::{Duration, Instant},
 };
@@ -28,99 +22,9 @@ pub(super) fn failure(
         message: message.into(),
     })
 }
-fn expired_failure(unscheduled: bool) -> Box<dyn std::error::Error> {
-    if unscheduled {
-        failure(
-            "CI_NOT_SCHEDULED",
-            "no check registered for this head; next: check the workflow triggers or push an empty commit to start CI",
-        )
-    } else {
-        failure("CI_TIMEOUT", "CI wait expired; no merge was attempted")
-    }
-}
-/// The quiet period an unconstrained repository must show after its newest
-/// check registered before landing trusts that no further check is coming.
-pub(super) const SETTLE: Duration = Duration::from_secs(60);
 /// First and longest pause between retries of a transient GitHub read.
 const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_LAST: Duration = Duration::from_secs(15);
-
-#[derive(Debug, PartialEq)]
-enum State {
-    Passed,
-    Pending,
-    /// Everything reported has passed, but a further check may still register.
-    Settling,
-    Failed,
-    Unavailable,
-    /// The pull request conflicts with its base, so CI will not start.
-    Conflict,
-    /// The wait expired with no check registered for the head.
-    NotScheduled,
-}
-/// Fold mergeability and an expired wait into a CI state. A conflicting pull
-/// request never starts CI; an empty head after the wait was never scheduled.
-fn observe(
-    head: &str,
-    checks: &[Check],
-    required: &[Required],
-    now: jiff::Timestamp,
-    mergeable: Option<&str>,
-    expired: bool,
-) -> State {
-    match state_for(head, checks, required, now) {
-        State::Pending | State::Settling | State::Unavailable
-            if mergeable == Some("CONFLICTING") =>
-        {
-            State::Conflict
-        }
-        State::Pending | State::Settling if expired && checks.is_empty() => State::NotScheduled,
-        other => other,
-    }
-}
-#[allow(dead_code, reason = "helper used by the wait unit tests")]
-fn state(checks: &[Check], required: &[Required], now: jiff::Timestamp) -> State {
-    let head = checks.first().map_or("", |check| check.head.as_str());
-    state_for(head, checks, required, now)
-}
-fn state_for(head: &str, checks: &[Check], required: &[Required], now: jiff::Timestamp) -> State {
-    let normalized: Vec<_> = checks
-        .iter()
-        .map(|check| CiCheck {
-            head: check.head.clone(),
-            name: check.name.clone(),
-            bucket: check.bucket.clone(),
-            app: check.app,
-        })
-        .collect();
-    match ci_completion(head, &normalized, required) {
-        CiCompletion::Pending => return State::Pending,
-        CiCompletion::Failed => return State::Failed,
-        CiCompletion::Unavailable => return State::Unavailable,
-        CiCompletion::Green => {}
-    }
-    // With no named requirement, allow late workflows to register only after
-    // at least one current-head check has completed successfully.
-    if required.is_empty() && settle_remaining(checks, now).is_some() {
-        return State::Settling;
-    }
-    State::Passed
-}
-/// Time still to wait after the newest check activity, or `None` once the
-/// repository has been quiet for `SETTLE`. A check with no time is just now.
-fn settle_remaining(checks: &[Check], now: jiff::Timestamp) -> Option<Duration> {
-    let newest = checks
-        .iter()
-        .map(|check| check.registered)
-        .collect::<Option<Vec<_>>>()
-        .and_then(|times| times.into_iter().max());
-    let Some(newest) = newest else {
-        return Some(SETTLE);
-    };
-    let quiet = now.duration_since(newest);
-    let quiet = Duration::try_from(quiet).unwrap_or_default();
-    SETTLE.checked_sub(quiet).filter(|left| !left.is_zero())
-}
 
 /// Reads GitHub within one deadline, retrying transient failures with backoff.
 /// Persistent or non-transient failures return at once for the caller to refuse.
@@ -142,23 +46,11 @@ impl Reader<'_> {
         mutation: bool,
     ) -> Result<provenant_os::exec::ExecOutcome> {
         let backoff = Backoff::new(RETRY_FIRST, 2, RETRY_LAST);
-        let rate_backoff = Backoff::new(Duration::from_secs(60), 2, Duration::from_secs(900));
         let mut retries = 0_u64;
-        let mut rate_reset = None;
         loop {
             let left = self.deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                return Err(if let Some(reset) = rate_reset {
-                    failure(
-                        "RATE_LIMITED",
-                        format!(
-                            "GitHub rate limit; reset {reset}; next: {}",
-                            self.retry_command
-                        ),
-                    )
-                } else {
-                    failure("CI_TIMEOUT", "GitHub wait budget expired")
-                });
+                return Err(failure("CI_TIMEOUT", "GitHub wait budget expired"));
             }
             let mut args = argv.to_vec();
             if args.starts_with(&["gh", "api"]) {
@@ -202,15 +94,21 @@ impl Reader<'_> {
             {
                 return Ok(output);
             }
-            let delay = if limited {
-                let (delay, reset) = rate_delay(&headers, rate_backoff.delay(retries));
-                rate_reset = Some(reset);
-                delay
-            } else {
-                backoff.delay(retries)
-            };
+            if limited {
+                // A rate limit skips this read rather than sleeping to the
+                // reset: the caller resubmits once the quota returns.
+                let (_, reset) = rate_delay(&headers, Duration::from_secs(60));
+                eprintln!("warning: GitHub rate limit; skipped this read; reset {reset}");
+                return Err(failure(
+                    "RATE_LIMITED",
+                    format!(
+                        "GitHub rate limit; reset {reset}; next: {}",
+                        self.retry_command
+                    ),
+                ));
+            }
             let left = self.deadline.saturating_duration_since(Instant::now());
-            std::thread::sleep(delay.max(Duration::from_secs(1)).min(left));
+            std::thread::sleep(backoff.delay(retries).max(Duration::from_secs(1)).min(left));
             retries = retries.saturating_add(1);
         }
     }
@@ -346,215 +244,31 @@ pub(super) fn ci_failure(error: ObserveError, retry_command: &str) -> Box<dyn st
     }
 }
 
-// This CLI edge owns the real wait deadline and polling interval.
-#[allow(clippy::disallowed_methods, clippy::too_many_arguments)]
-pub(super) fn checks(
-    reader: &Reader<'_>,
-    state: &Path,
-    number: u64,
-    expected: GitOid,
-    repository: &str,
-    base: &str,
-    wait: Option<u64>,
-    poll: u64,
-    json: bool,
-) -> Result<()> {
-    let mut observer = super::observer::Observer::open(
-        state,
-        reader.project,
-        repository,
-        reader.deadline.saturating_duration_since(Instant::now()),
-    )
-    .map_err(|error| ci_failure(error, &reader.retry_command))?;
-    checks_with(
-        &|argv| reader.read(argv),
-        &mut |commit, revalidate| {
-            // A waiter shares answers younger than its poll to keep waiting;
-            // a decision revalidates.
-            let max_age = if revalidate {
-                Duration::ZERO
-            } else {
-                wait.map_or(Duration::ZERO, |_| Duration::from_secs(poll))
-            };
-            observer
-                .checks(
-                    &commit.to_string(),
-                    max_age,
-                    reader.deadline.saturating_duration_since(Instant::now()),
-                )
-                .map_err(|error| ci_failure(error, &reader.retry_command))
-        },
-        reader.deadline,
-        &Instant::now,
-        &std::thread::sleep,
-        number,
-        expected,
-        repository,
-        base,
-        wait,
-        poll,
-        json,
-    )
-}
-
-#[allow(clippy::disallowed_methods, clippy::too_many_arguments)]
-fn checks_with(
-    read: &impl Fn(&[&str]) -> Result<provenant_os::exec::ExecOutcome>,
-    // Reads the checks of a commit; `true` demands a revalidated answer.
-    ci: &mut dyn FnMut(GitOid, bool) -> Result<Vec<Check>>,
-    deadline: Instant,
-    now: &impl Fn() -> Instant,
-    sleep: &impl Fn(Duration),
-    number: u64,
-    expected: GitOid,
-    repository: &str,
-    base: &str,
-    wait: Option<u64>,
-    poll: u64,
-    json: bool,
-) -> Result<()> {
-    let target = number.to_string();
-    let read_error = std::cell::RefCell::new(None);
-    let policy = super::status::required_policy_for(repository, base, &|argv| match read(argv) {
-        Ok(output) => Some(output),
-        Err(error) => {
-            *read_error.borrow_mut() = Some(error);
-            None
-        }
-    })
-    .ok_or_else(|| {
-        if let Some(error) = read_error.borrow_mut().take() {
-            return error;
-        }
-        if now() >= deadline {
-            failure(
-                "CI_TIMEOUT",
-                "CI wait expired while reading required checks",
-            )
-        } else {
-            failure(
-                "CI_POLICY_UNAVAILABLE",
-                "cannot establish required CI checks",
-            )
-        }
-    })?;
-    let check_head = || -> Result<Option<String>> {
-        let pull = super::rest_pull(read, &target)?;
-        if pull.head.sha != expected {
-            return Err(failure(
-                "HEAD_MOVED",
-                format!("pull request head moved from {expected}"),
-            ));
-        }
-        Ok(pull.mergeable.map(|value| {
-            if value {
-                "MERGEABLE".to_owned()
-            } else {
-                "CONFLICTING".to_owned()
-            }
-        }))
-    };
-    let mut progress = 0;
-    let mut pending = 0_u64;
-    let head = expected.to_string();
-    let pacing = Backoff::new(
-        Duration::from_secs(poll),
-        2,
-        Duration::from_secs(poll.saturating_mul(4)),
-    );
-    loop {
-        let _ = check_head()?;
-        // Read the pinned commit, not whichever head the PR has while gh runs.
-        // Before/after head reads alone cannot protect against an A-B-A update.
-        // A shared answer may keep a waiter waiting, but a pass is decided
-        // only on an answer revalidated with GitHub.
-        let mut revalidated = wait.is_none();
-        let (checks, state) = loop {
-            let checks = ci(expected, revalidated)?;
-            let mergeable = check_head()?;
-            let state = observe(
-                &head,
-                &checks,
-                &policy.checks,
-                jiff::Timestamp::now(),
-                mergeable.as_deref(),
-                now() >= deadline,
-            );
-            if state == State::Passed && !revalidated {
-                revalidated = true;
-                continue;
-            }
-            break (checks, state);
-        };
-        match state {
-            State::Conflict => {
-                return Err(failure(
-                    "CI_CONFLICT",
-                    "pull request conflicts with its base, so CI will not start; next: rebase onto the base branch and push",
-                ));
-            }
-            State::NotScheduled => {
-                return Err(failure(
-                    "CI_NOT_SCHEDULED",
-                    "no check registered for this head; next: check the workflow triggers or push an empty commit to start CI",
-                ));
-            }
-            State::Passed => return Ok(()),
-            State::Failed => return Err(failure("CI_FAILED", "required CI checks failed")),
-            State::Unavailable => {
-                return Err(failure(
-                    "CI_UNAVAILABLE",
-                    "CI check states cannot establish success",
-                ));
-            }
-            State::Pending | State::Settling if wait.is_none() => {
-                return Err(failure(
-                    "CI_PENDING",
-                    "CI checks are pending or may still register; use land --wait",
-                ));
-            }
-            State::Pending | State::Settling => {}
-        }
-        let left = deadline.saturating_duration_since(now());
-        if left.is_zero() {
-            return Err(expired_failure(checks.is_empty()));
-        }
-        // Eight lines for the whole wait, regardless of duration or churn.
-        if !json && progress < 8 {
-            let _ = writeln!(
-                io::stderr().lock(),
-                "waiting #{number} {expected}: CI pending ({}s left)",
-                left.as_secs()
-            );
-            progress += 1;
-        }
-        sleep(left.min(pacing.delay(pending)));
-        pending = pending.saturating_add(1);
-        if now() >= deadline {
-            return Err(expired_failure(checks.is_empty()));
-        }
-    }
-}
-
-/// The land wait's verdict on `checks` with no named requirement.
-#[cfg(test)]
-#[allow(dead_code)] // The worktree driver includes this module without libtest.
-pub(super) fn verdict(checks: &[Check], now: jiff::Timestamp) -> &'static str {
-    let head = checks.first().map_or("", |check| check.head.as_str());
-    match state_for(head, checks, &[], now) {
-        State::Passed => "passed",
-        State::Pending | State::Settling => "pending",
-        State::Failed => "failed",
-        State::Unavailable => "unavailable",
-        State::Conflict => "conflict",
-        State::NotScheduled => "not scheduled",
-    }
-}
 #[cfg(test)]
 #[allow(dead_code, unused_imports)] // Also compiled, unrun, by the harness-less worktrees driver.
 mod tests {
+    use super::super::observer::Check;
+    use super::super::status::{CiCheck, CiCompletion, Required, ci_completion};
     use super::*;
+    use provenant_core::GitOid;
     use serde_json::json;
+
+    fn state_for(head: &str, checks: &[Check], required: &[Required]) -> CiCompletion {
+        let normalized: Vec<_> = checks
+            .iter()
+            .map(|check| CiCheck {
+                head: check.head.clone(),
+                name: check.name.clone(),
+                bucket: check.bucket.clone(),
+                app: check.app,
+            })
+            .collect();
+        ci_completion(head, &normalized, required)
+    }
+    fn state(checks: &[Check], required: &[Required]) -> CiCompletion {
+        let head = checks.first().map_or("", |check| check.head.as_str());
+        state_for(head, checks, required)
+    }
 
     fn head() -> GitOid {
         GitOid::parse(&"1".repeat(40)).expect("head")
@@ -581,7 +295,6 @@ mod tests {
             app: None,
         }
     }
-    const NOW: &str = "2026-01-01T00:00:00Z";
 
     #[test]
     fn recorded_rollups_only_complete_green_for_their_current_head() {
@@ -600,7 +313,7 @@ mod tests {
         };
 
         let queued = parse("queued_required").expect("queued rollup");
-        assert_eq!(state_for(head, &queued, &required, at(NOW)), State::Pending);
+        assert_eq!(state_for(head, &queued, &required), CiCompletion::Pending);
 
         let stale = &fixture["stale_pass"];
         let stale_page = json!({
@@ -613,13 +326,10 @@ mod tests {
         );
 
         let empty = parse("no_checks").expect("empty rollup");
-        assert_eq!(state_for(head, &empty, &[], at(NOW)), State::Pending);
+        assert_eq!(state_for(head, &empty, &[]), CiCompletion::Pending);
 
         let green = parse("all_green").expect("green rollup");
-        assert_eq!(
-            state_for(head, &green, &required, at("2026-01-01T00:02:00Z")),
-            State::Passed
-        );
+        assert_eq!(state_for(head, &green, &required), CiCompletion::Green);
     }
 
     #[test]
@@ -700,211 +410,34 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::disallowed_methods)]
-    fn a_shared_pass_is_revalidated_before_it_is_decided() {
-        use provenant_os::exec::{CapturedStream, ExecOutcome, Termination};
-        use std::cell::RefCell;
-        let clock = Instant::now();
-        let oid = head();
-        let read = |args: &[&str]| -> Result<ExecOutcome> {
-            let endpoint = args
-                .iter()
-                .find(|arg| arg.starts_with("repos/"))
-                .unwrap_or(&"");
-            let body = if endpoint.contains("/pulls/") {
-                json!({"state":"open", "head":{"sha":oid,"ref":"feat","repo":{"full_name":"owner/repo"}}, "base":{"sha":oid,"ref":"main","repo":{"full_name":"owner/repo"}}, "mergeable":true,"mergeable_state":"clean","merged_at":null,"merge_commit_sha":null,"title":"test"})
-            } else if endpoint.contains("/rules/") {
-                json!([[]])
-            } else {
-                json!({"protected":false})
-            };
-            Ok(ExecOutcome {
-                termination: Termination::Exit(0),
-                stdout: CapturedStream {
-                    bytes: serde_json::to_vec(&body)?,
-                    ..Default::default()
-                },
-                stderr: CapturedStream::default(),
-                timed_out: false,
-                drain_truncated: false,
-                overflow_stopped: false,
-                cancelled: false,
-                elapsed_micros: 0,
-            })
-        };
-        let asked = RefCell::new(Vec::new());
-        // The shared answer is green, but GitHub now reports a failure.
-        let result = checks_with(
-            &read,
-            &mut |_, revalidate| {
-                asked.borrow_mut().push(revalidate);
-                let mut observed = check("build", if revalidate { "fail" } else { "pass" });
-                observed.head = oid.to_string();
-                Ok(vec![observed])
-            },
-            clock + Duration::from_secs(600),
-            &|| clock,
-            &|_| {},
-            7,
-            oid,
-            "repos/owner/repo",
-            "main",
-            Some(600),
-            10,
-            true,
-        );
-        assert!(result.is_err(), "a stale green must not pass");
-        assert_eq!(*asked.borrow(), [false, true]);
-    }
-
-    #[test]
-    #[allow(clippy::disallowed_methods)]
-    fn default_pacing_limits_calls_over_ninety_minutes() {
-        use provenant_os::exec::{CapturedStream, ExecOutcome, Termination};
-        use std::cell::Cell;
-        let clock = Cell::new(Instant::now());
-        let deadline = clock.get() + Duration::from_secs(90 * 60);
-        let calls = Cell::new(0);
-        let oid = head();
-        let read = |args: &[&str]| -> Result<ExecOutcome> {
-            calls.set(calls.get() + 1);
-            let endpoint = args
-                .iter()
-                .find(|arg| arg.starts_with("repos/"))
-                .unwrap_or(&"");
-            let body = if endpoint.contains("/pulls/") {
-                json!({"state":"open", "head":{"sha":oid,"ref":"feat","repo":{"full_name":"owner/repo"}}, "base":{"sha":oid,"ref":"main","repo":{"full_name":"owner/repo"}}, "mergeable":true,"mergeable_state":"clean","merged_at":null,"merge_commit_sha":null,"title":"test"})
-            } else if endpoint.contains("/rules/") {
-                json!([[]])
-            } else {
-                json!({"protected":false})
-            };
-            Ok(ExecOutcome {
-                termination: Termination::Exit(0),
-                stdout: CapturedStream {
-                    bytes: serde_json::to_vec(&body)?,
-                    ..Default::default()
-                },
-                stderr: CapturedStream::default(),
-                timed_out: false,
-                drain_truncated: false,
-                overflow_stopped: false,
-                cancelled: false,
-                elapsed_micros: 0,
-            })
-        };
-        let result = checks_with(
-            &read,
-            &mut |_, _| {
-                calls.set(calls.get() + 1);
-                let mut observed = check("build", "pending");
-                observed.head = oid.to_string();
-                Ok(vec![observed])
-            },
-            deadline,
-            &|| clock.get(),
-            &|delay| clock.set(clock.get() + delay),
-            7,
-            oid,
-            "repos/owner/repo",
-            "main",
-            Some(90 * 60),
-            provenant_cli::domains::DEFAULT_LAND_POLL_SECONDS,
-            true,
-        );
-        let error = result.expect_err("pending CI must exhaust the wait");
-        assert_eq!(
-            error.downcast_ref::<Failure>().expect("typed failure").code,
-            "CI_TIMEOUT"
-        );
-        assert_eq!(clock.get(), deadline);
-        assert!(calls.get() <= 200, "{} calls", calls.get());
-    }
-
-    #[test]
-    fn conflict_and_unscheduled_heads_are_named() {
-        let now = at(NOW);
-        let required = [need("build")];
-        // A conflicting PR never starts CI, whatever else has registered.
-        assert_eq!(
-            observe("head", &[], &required, now, Some("CONFLICTING"), false),
-            State::Conflict
-        );
-        assert_eq!(
-            observe(
-                "head",
-                &[check("lint", "pending")],
-                &required,
-                now,
-                Some("CONFLICTING"),
-                false
-            ),
-            State::Conflict
-        );
-        // A failed required check stays failed.
-        assert_eq!(
-            observe(
-                "head",
-                &[check("build", "fail")],
-                &required,
-                now,
-                Some("CONFLICTING"),
-                true
-            ),
-            State::Failed
-        );
-        // Nothing registered: pending while the wait runs, unscheduled once it expires.
-        assert_eq!(
-            observe("head", &[], &required, now, Some("MERGEABLE"), false),
-            State::Pending
-        );
-        assert_eq!(
-            observe("head", &[], &required, now, None, true),
-            State::NotScheduled
-        );
-        // Something registered is still pending after expiry; the timeout reports it.
-        assert_eq!(
-            observe("head", &[check("lint", "pass")], &required, now, None, true),
-            State::Pending
-        );
-    }
-
-    #[test]
     fn failing_legacy_status_fails_even_with_no_named_requirement() {
         let checks = [check("build", "pass"), check("legacy", "fail")];
-        assert_eq!(state(&checks, &[], at(NOW)), State::Failed);
+        assert_eq!(state(&checks, &[]), CiCompletion::Failed);
     }
     #[test]
     fn ci_requires_registration_and_rejects_failed_unknown_or_pending_checks() {
         let required = vec![need("build"), need("lint")];
-        let now = at(NOW);
         assert_eq!(
-            state(&[check("build", "pass")], &required, now),
-            State::Pending
+            state(&[check("build", "pass")], &required),
+            CiCompletion::Pending
         );
         assert_eq!(
             state(
                 &[check("build", "pass"), check("lint", "pending")],
-                &required,
-                now
+                &required
             ),
-            State::Pending
+            CiCompletion::Pending
         );
         assert_eq!(
-            state(
-                &[check("build", "pass"), check("lint", "fail")],
-                &required,
-                now
-            ),
-            State::Failed
+            state(&[check("build", "pass"), check("lint", "fail")], &required),
+            CiCompletion::Failed
         );
         assert_eq!(
             state(
                 &[check("build", "pass"), check("lint", "unknown")],
-                &required,
-                now
+                &required
             ),
-            State::Unavailable
+            CiCompletion::Unavailable
         );
         assert_eq!(
             state(
@@ -913,15 +446,14 @@ mod tests {
                     check("lint", "pass"),
                     check("optional", "fail")
                 ],
-                &required,
-                now
+                &required
             ),
-            State::Passed
+            CiCompletion::Green
         );
-        assert_eq!(state(&[], &[], now), State::Pending);
+        assert_eq!(state(&[], &[]), CiCompletion::Pending);
         assert_eq!(
-            state(&[check("build", "skipping")], &[], now),
-            State::Unavailable
+            state(&[check("build", "skipping")], &[]),
+            CiCompletion::Unavailable
         );
     }
 
@@ -929,8 +461,8 @@ mod tests {
     fn optional_in_progress_check_keeps_a_required_green_head_pending() {
         let checks = [check("build", "pass"), check("slow-optional", "pending")];
         assert_eq!(
-            state_for("head", &checks, &[need("build")], at(NOW)),
-            State::Pending
+            state_for("head", &checks, &[need("build")]),
+            CiCompletion::Pending
         );
     }
     #[test]
@@ -939,19 +471,14 @@ mod tests {
         assert_eq!(
             state(
                 &[check("build", "pass"), check("lint", "skipping")],
-                &required,
-                at(NOW)
+                &required
             ),
-            State::Unavailable
+            CiCompletion::Unavailable
         );
         // Optional skipped jobs among everything reported are harmless.
         assert_eq!(
-            state(
-                &[check("build", "pass"), check("matrix", "skipping")],
-                &[],
-                at(NOW)
-            ),
-            State::Passed
+            state(&[check("build", "pass"), check("matrix", "skipping")], &[]),
+            CiCompletion::Green
         );
     }
     #[test]
@@ -962,39 +489,15 @@ mod tests {
         }];
         let mut forged = check("build", "pass");
         forged.app = Some(999);
-        assert_eq!(state(&[forged], &required, at(NOW)), State::Pending);
+        assert_eq!(state(&[forged], &required), CiCompletion::Pending);
         let mut genuine = check("build", "pass");
         genuine.app = Some(15368);
-        assert_eq!(state(&[genuine], &required, at(NOW)), State::Passed);
+        assert_eq!(state(&[genuine], &required), CiCompletion::Green);
         // A forged failure from another app is not the required check either.
         let mut other = check("build", "fail");
         other.app = Some(999);
         let mut genuine = check("build", "pass");
         genuine.app = Some(15368);
-        assert_eq!(state(&[other, genuine], &required, at(NOW)), State::Passed);
-    }
-    #[test]
-    fn an_empty_requirement_settles_after_the_newest_registration() {
-        let mut green = check("build", "pass");
-        green.registered = Some(at("2025-12-31T23:59:30Z"));
-        assert_eq!(state(&[green], &[], at(NOW)), State::Settling);
-        let mut late = check("slow", "pass");
-        late.registered = Some(at("2025-12-31T23:59:50Z"));
-        let mut old = check("build", "pass");
-        old.registered = Some(at("2025-12-31T23:50:00Z"));
-        // A later registration restarts the quiet period for the whole set.
-        assert_eq!(
-            settle_remaining(&[old, late], at(NOW)),
-            Some(Duration::from_secs(50))
-        );
-        let quiet = check("build", "pass");
-        assert_eq!(state(&[quiet], &[], at(NOW)), State::Passed);
-        let mut untimed = check("build", "pass");
-        untimed.registered = None;
-        assert_eq!(state(&[untimed], &[], at(NOW)), State::Settling);
-        // A clock ahead of GitHub's must not shorten the quiet period.
-        let mut future = check("build", "pass");
-        future.registered = Some(at("2026-01-01T00:00:10Z"));
-        assert_eq!(state(&[future], &[], at(NOW)), State::Settling);
+        assert_eq!(state(&[other, genuine], &required), CiCompletion::Green);
     }
 }
