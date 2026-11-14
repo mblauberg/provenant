@@ -2316,9 +2316,12 @@ fn wait_remaining(
 }
 
 /// The status rows one target names, read afresh: the wait verb's reader.
+/// `session` is opened on first use; a caller that polls keeps it, because
+/// opening resolves the repository and runs git.
 pub(crate) fn read_status_rows(
     target: &provenant_cli::Target,
     edge: &provenant_cli::run::Edge<'_>,
+    session: &mut Option<Context>,
     deadline: std::time::Instant,
     cancel: &CancelToken,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
@@ -2338,8 +2341,13 @@ pub(crate) fn read_status_rows(
             .ok_or(FacadeError::StateCorrupt)?
             .clone());
     }
-    let context = read_context(edge)?
-        .ok_or_else(|| target_fault(ResolveError::NotFound(target.to_string())))?;
+    let context = match session {
+        Some(context) => context,
+        None => session.insert(
+            read_context(edge)?
+                .ok_or_else(|| target_fault(ResolveError::NotFound(target.to_string())))?,
+        ),
+    };
     let (resolved, checkpoint) = resolve_checkpoint(
         &context.roots.state,
         context.identity.project,
@@ -2360,7 +2368,7 @@ pub(crate) fn read_status_rows(
             u64::try_from(left.as_micros()).unwrap_or(u64::MAX),
         ),
     );
-    enrich_status_rows_within(&mut rows, &context, &clock, cancel, budget)?;
+    enrich_status_rows_within(&mut rows, context, &clock, cancel, budget)?;
     wait_remaining(deadline, cancel)?;
     Ok(rows)
 }
@@ -2648,7 +2656,11 @@ mod tests {
                 "the omission count is the settled rows not shown"
             );
             assert!(
-                if all { shown_settled <= limit } else { shown_settled == 0 || listing.rows.len() <= limit },
+                if all {
+                    shown_settled <= limit
+                } else {
+                    shown_settled == 0 || listing.rows.len() <= limit
+                },
                 "settled rows respect the page allowance while every active graph stays visible"
             );
         }

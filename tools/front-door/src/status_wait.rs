@@ -10,6 +10,8 @@ use provenant_records::Outcome;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
+    os::unix::fs::MetadataExt,
+    path::Path,
     sync::{Condvar, Mutex, mpsc},
     time::{Duration, Instant},
 };
@@ -111,19 +113,26 @@ fn classify_rows(label: &str, rows: &[Value]) -> Reading {
     }
 }
 
+/// Read one source. The flag is true when this host's stamped files fully
+/// represent the reading, so later ticks may skip reads while they are
+/// unchanged; see [`Reads`].
 fn read(
     source: &Source,
     edge: &provenant_cli::run::Edge<'_>,
+    session: &mut Option<provenant_cli::fabric::Context>,
     deadline: Instant,
     pr_read_timeout: Duration,
     cancel: &CancelToken,
-) -> Reading {
+) -> (Reading, bool) {
     let label = source.label();
     let left = deadline.saturating_duration_since(Instant::now());
     if cancel.is_cancelled() || left.is_zero() {
-        return Reading::unavailable(&label, "wait deadline or cancellation reached");
+        return (
+            Reading::unavailable(&label, "wait deadline or cancellation reached"),
+            false,
+        );
     }
-    match source {
+    let reading = match source {
         Source::UnreadableGraph(_, error) => classify_rows(
             &label,
             &[json!({
@@ -132,9 +141,12 @@ fn read(
         ),
         Source::Graph(target) => {
             match provenant_sqlite::with_busy_timeout(Duration::ZERO, || {
-                crate::fabric::read_status_rows(target, edge, deadline, cancel)
+                crate::fabric::read_status_rows(target, edge, session, deadline, cancel)
             }) {
-                Ok(rows) => classify_rows(&label, &rows),
+                Ok(rows) => {
+                    let host = session.as_ref().map(|context| &context.identity.host);
+                    return (classify_rows(&label, &rows), rows_local(&rows, host));
+                }
                 Err(error) => Reading::unavailable(&label, &error.to_string()),
             }
         }
@@ -157,6 +169,98 @@ fn read(
             },
             Err(error) => Reading::unavailable(&label, &error.to_string()),
         },
+    };
+    (reading, false)
+}
+
+/// Whether every attempt row belongs to `host`. Without a host (a relay from
+/// inside a lane) nothing local backs the rows. Rows of another host were
+/// enriched from that peer's own store, which no file here stamps.
+fn rows_local<H: std::str::FromStr + PartialEq>(rows: &[Value], host: Option<&H>) -> bool {
+    host.is_some_and(|host| {
+        rows.iter().all(|row| {
+            row["kind"] != "attempt"
+                || row["attempt_id"]
+                    .as_str()
+                    .and_then(|id| id.split_once('/'))
+                    .is_none_or(|(owner, _)| owner.parse::<H>().is_ok_and(|owner| &owner == host))
+        })
+    })
+}
+
+/// Longest a local target goes without a full read while its files look
+/// untouched. The read samples sources a file stamp cannot see, such as
+/// process liveness.
+const IDLE_REFRESH: Duration = Duration::from_secs(10);
+
+/// Inode, size and modification time of one file a read depends on.
+type FileStamp = Option<(u64, u64, i64, i64)>;
+
+/// Cheap change hint for a graph source: the metadata of the Run store, its
+/// WAL and the graph checkpoint directory (checkpoints publish by atomic
+/// rename, so the directory changes with every write). Interval ticks compare
+/// stamps and skip the full read, which opens the Run store and the checkpoint,
+/// while nothing has been written. Once a read has opened the project, only
+/// that project's directory is stamped. `None` means the source has no file
+/// hint (a pull request).
+fn stamp(
+    source: &Source,
+    state: &Path,
+    project: Option<provenant_core::ProjectId>,
+) -> Option<Vec<FileStamp>> {
+    if !matches!(source, Source::Graph(_)) {
+        return None;
+    }
+    let mut files = vec![state.join("run.sqlite3"), state.join("run.sqlite3-wal")];
+    let graphs = state.join("fabric").join("graphs");
+    match project {
+        Some(project) => files.push(graphs.join(project.to_string())),
+        None => files.extend(
+            std::fs::read_dir(&graphs)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path()),
+        ),
+    }
+    Some(
+        files
+            .iter()
+            .map(|path| {
+                let meta = std::fs::metadata(path).ok()?;
+                Some((meta.ino(), meta.size(), meta.mtime(), meta.mtime_nsec()))
+            })
+            .collect(),
+    )
+}
+
+/// Decides when a waiter pays for a full read. The stamp is taken before the
+/// read, so a write that lands during it is seen on the next tick. Only a read
+/// whose reading is fully represented by the stamped files arms the gate, and
+/// the last tick before the deadline always reads, so a wait never times out on
+/// a hint alone.
+#[derive(Default)]
+struct Reads {
+    seen: Option<(Vec<FileStamp>, Instant)>,
+}
+impl Reads {
+    fn due(
+        &self,
+        now: Instant,
+        stamp: Option<&Vec<FileStamp>>,
+        left: Duration,
+        interval: Duration,
+    ) -> bool {
+        match (&self.seen, stamp) {
+            (Some((seen, at)), Some(stamp)) => {
+                left <= interval || seen != stamp || now.duration_since(*at) >= IDLE_REFRESH
+            }
+            _ => true,
+        }
+    }
+    /// `gated` is true for a successful read of a locally represented source.
+    fn record(&mut self, now: Instant, stamp: Option<Vec<FileStamp>>, gated: bool) {
+        self.seen = stamp.filter(|_| gated).map(|stamp| (stamp, now));
     }
 }
 
@@ -520,12 +624,34 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 {
                     return;
                 }
+                let mut reads = Reads::default();
+                let mut session = None;
                 loop {
                     let left = deadline.saturating_duration_since(Instant::now());
                     if stop.cancel.is_cancelled() {
                         break;
                     }
-                    let reading = read(source, edge, deadline, pr_read_timeout, &stop.cancel);
+                    let project = session
+                        .as_ref()
+                        .map(|context: &provenant_cli::fabric::Context| context.identity.project);
+                    let stamped = stamp(source, edge.roots.state.as_path(), project);
+                    if !left.is_zero()
+                        && !reads.due(Instant::now(), stamped.as_ref(), left, interval)
+                    {
+                        if !stop.pause(interval.min(left)) {
+                            break;
+                        }
+                        continue;
+                    }
+                    let (reading, local) = read(
+                        source,
+                        edge,
+                        &mut session,
+                        deadline,
+                        pr_read_timeout,
+                        &stop.cancel,
+                    );
+                    reads.record(Instant::now(), stamped, local);
                     let finished = reading.done();
                     if sender
                         .send(Update {
@@ -693,9 +819,10 @@ mod tests {
             .into_iter()
             .find(|graph| graph.target.name == "broken")
             .ok_or("broken graph was hidden")?;
-        let reading = read(
+        let (reading, _) = read(
             &Source::UnreadableGraph(graph.target, graph.error.ok_or("decode failure")?),
             &edge,
+            &mut None,
             deadline,
             Duration::from_secs(1),
             &cancel,
@@ -703,6 +830,48 @@ mod tests {
         assert_eq!(reading.settle, Settle::Unsuccessful);
         assert!(reading.done());
         Ok(())
+    }
+
+    #[test]
+    fn idle_source_skips_reads_until_its_files_change_or_the_refresh_lapses() {
+        let now = Instant::now();
+        let (base, far) = (Duration::from_millis(500), Duration::from_secs(60));
+        let stamp = vec![Some((1, 10, 5, 0))];
+        let mut reads = Reads::default();
+        assert!(
+            reads.due(now, Some(&stamp), far, base),
+            "first read is always due"
+        );
+        reads.record(now, Some(stamp.clone()), true);
+        let soon = now + IDLE_REFRESH / 2;
+        assert!(!reads.due(soon, Some(&stamp), far, base));
+        assert!(reads.due(soon, Some(&vec![Some((1, 11, 6, 0))]), far, base));
+        assert!(reads.due(now + IDLE_REFRESH, Some(&stamp), far, base));
+        assert!(
+            reads.due(soon, None, far, base),
+            "sources without a file hint always read"
+        );
+        assert!(
+            reads.due(now, Some(&stamp), base, base),
+            "the last tick before the deadline reads whatever the stamp says"
+        );
+        reads.record(soon, Some(stamp.clone()), false);
+        assert!(
+            reads.due(soon, Some(&stamp), far, base),
+            "a failed read, or one the files do not fully represent, is never gated"
+        );
+    }
+
+    #[test]
+    fn a_selection_with_peer_or_relayed_attempts_is_not_locally_represented() {
+        let row = |id: &str| json!({"kind": "attempt", "attempt_id": id});
+        let here = "aa".to_owned();
+        assert!(rows_local(
+            &[row("aa/1"), json!({"kind": "graph"})],
+            Some(&here)
+        ));
+        assert!(!rows_local(&[row("aa/1"), row("bb/2")], Some(&here)));
+        assert!(!rows_local::<String>(&[row("aa/1")], None));
     }
 
     #[test]
@@ -757,7 +926,8 @@ mod tests {
                 )
                 .unwrap_err(),
                 crate::fabric::unsettled_graphs(&edge, deadline, &cancel).unwrap_err(),
-                crate::fabric::read_status_rows(&target, &edge, deadline, &cancel).unwrap_err(),
+                crate::fabric::read_status_rows(&target, &edge, &mut None, deadline, &cancel)
+                    .unwrap_err(),
             ] {
                 assert!(matches!(
                     (cancelled, error.downcast_ref::<FacadeError>()),
