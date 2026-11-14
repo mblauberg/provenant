@@ -428,10 +428,8 @@ pub(super) fn validate_decide(
     {
         return Err("decide needs a question and 2 to 16 options with inbox-safe IDs and labels");
     }
-    if repair_scope_gate(node.extra.get("repair_scope_gate"))
-        && spec.default.as_deref() == Some("approve")
-    {
-        return Err("scope approval requires an owner answer, never a timeout default");
+    if repair_scope_gate(node.extra.get("repair_scope_gate")) && spec.default.is_some() {
+        return Err("repair-scope decide must not declare a timeout default");
     }
     if spec
         .default

@@ -412,34 +412,49 @@ fn handoff_missing_classification_does_not_release_a_dependant() {
 }
 
 #[test]
-fn repair_scope_timeout_default_cannot_approve() {
-    let mut document: GraphDocument = serde_json::from_value(json!({
-        "schema_version": 1,
-        "graph_id": "repair-scope-timeout",
-        "nodes": [{
-            "id": "scope",
-            "kind": "decide",
-            "access": "read_only",
-            "repair_scope_gate": true,
-            "decide": {
-                "question": "Approve the changed slice?",
-                "on_unanswered": "block_dependants",
-                "default": "hold",
-                "options": [
-                    {"id": "approve", "label": "Approve"},
-                    {"id": "hold", "label": "Hold"}
-                ]
-            }
-        }]
-    }))
-    .unwrap();
+fn repair_scope_decides_have_no_timeout_default_but_ordinary_decides_may() {
+    let make_scope_gate = |option_ids: [&str; 2], default: Option<&str>| -> GraphDocument {
+        let mut decide = json!({
+            "question": "Approve the changed slice?",
+            "on_unanswered": "block_dependants",
+            "options": option_ids.map(|id| json!({"id": id, "label": id}))
+        });
+        if let Some(default) = default {
+            decide["default"] = json!(default);
+        }
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "graph_id": "repair-scope-timeout",
+            "nodes": [{
+                "id": "scope",
+                "kind": "decide",
+                "access": "read_only",
+                "repair_scope_gate": true,
+                "decide": decide
+            }]
+        }))
+        .unwrap()
+    };
 
-    assert!(validate_flat_plan(&document, &Default::default()).is_ok());
-    document.nodes[0].decide.as_mut().unwrap().default = Some("approve".into());
-    let error = validate_flat_plan(&document, &Default::default()).unwrap_err();
-    assert!(error.to_string().contains(
-        "scope approval requires an owner answer, never a timeout default"
-    ));
+    let scope_without_default = make_scope_gate(["approve", "hold"], None);
+    assert!(validate_flat_plan(&scope_without_default, &Default::default()).is_ok());
+    // Ordinary decisions retain their explicit default behavior.
+    assert!(validate_flat_plan(&routed(Some(60)), &Default::default()).is_ok());
+
+    for (default, options) in [
+        ("approve", ["approve", "hold"]),
+        ("hold", ["approve", "hold"]),
+        ("ship", ["ship", "wait"]),
+    ] {
+        let document = make_scope_gate(options, Some(default));
+        let error = validate_flat_plan(&document, &Default::default()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("repair-scope decide must not declare a timeout default"),
+            "{error}"
+        );
+    }
 }
 
 #[test]
