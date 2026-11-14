@@ -4,7 +4,8 @@ use crate::{PathCheck, Result, RunError, WriterRequest};
 use provenant_confinement::{
     ConfinedPlan, UtilityBudget, UtilityRuntime, VerifiedWorktree,
     permissions::{
-        AccessMode, AnchoredDirectory, Anchors, BackendContext, ProfileLimits, ProviderProfile,
+        AccessMode, AnchoredDirectory, Anchors, Availability, AvailabilityReason, BackendContext,
+        ConfinementBackend, PermissionError, ProfileLimits, ProviderProfile,
         prepare_writer_directories, required_anchors, system_backend_with_limits_and_policy,
     },
     repo::GitRefName,
@@ -936,8 +937,17 @@ pub struct LaunchConfinement {
     /// Whether the lane runs under the compiled sandbox profile. Without it
     /// the plan still prepares writer directories and records access, but the
     /// provider starts directly, like the same CLI started by hand.
-    pub sandboxed: bool,
+    pub sandbox: provenant_confinement::run_config::SandboxMode,
+    /// Bound once before sealing launch evidence; compilation uses this exact
+    /// probed backend under writer custody, without a second selection.
+    pub backend: Option<BoundSandboxBackend>,
 }
+/// A probed backend and the limits whose sources were sealed with it.
+pub struct BoundSandboxBackend {
+    backend: Box<dyn ConfinementBackend>,
+    limits: ResolvedLaunchLimits,
+}
+
 struct ResolvedLaunchLimits {
     limits: ProfileLimits,
     grant_origin: provenant_records::diagnostic::SettingSource,
@@ -1007,6 +1017,44 @@ fn launch_resource_limits(
 }
 
 impl LaunchConfinement {
+    /// Backend absence is advisory. Plan validation and profile compilation
+    /// still fail at their typed credential, Git and integrity boundaries.
+    pub(crate) fn bind_backend(
+        &mut self,
+        cancel: &CancelToken,
+        policy: &provenant_records::policy::Policy,
+    ) -> Result<Availability> {
+        let executor =
+            SystemExecutor::new(1).map_err(error("initialise sandbox probe executor", None))?;
+        let limits = launch_resource_limits(&self.state_root, policy);
+        let selected = system_backend_with_limits_and_policy(
+            &BackendContext {
+                executor: &executor,
+                cancel,
+                #[cfg(target_os = "macos")]
+                env: &[],
+            },
+            limits.limits,
+            policy,
+        );
+        let reason = match selected {
+            Ok(backend) => {
+                let kind = backend.kind();
+                self.backend = Some(BoundSandboxBackend { backend, limits });
+                return Ok(Availability::Available { backend: kind });
+            }
+            Err(PermissionError::BackendNotAvailable(reason)) => reason,
+            Err(
+                PermissionError::BackendUnavailable
+                | PermissionError::Execution(_)
+                | PermissionError::Filesystem(_),
+            ) => AvailabilityReason::ProbeFailed,
+            Err(error) => return Err(RunError::Confinement(error)),
+        };
+        self.backend = None;
+        Ok(Availability::Unavailable { reason })
+    }
+
     /// Prepare Git while custody is held, then replace every handle that was
     /// bound to the common config before Git changed it.
     pub(crate) fn prepare_git(&mut self, cancel: &CancelToken) -> Result<()> {
@@ -1171,23 +1219,10 @@ impl LaunchConfinement {
         &mut self,
         argv: &[OsString],
         attempt: &provenant_core::AttemptId,
-        cancel: &CancelToken,
-        policy: &provenant_records::policy::Policy,
     ) -> Result<provenant_confinement::permissions::ConfinedCommand> {
-        let executor =
-            SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-        let limits = launch_resource_limits(&self.state_root, policy);
-        let backend = system_backend_with_limits_and_policy(
-            &BackendContext {
-                executor: &executor,
-                cancel,
-                #[cfg(target_os = "macos")]
-                env: &[],
-            },
-            limits.limits,
-            policy,
-        )
-        .map_err(RunError::Confinement)?;
+        let backend = self.backend.as_ref().ok_or(RunError::Validation(
+            "sandbox backend was not bound before launch",
+        ))?;
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
         self.prepare_writer_directories()?;
         // Treat the separate shared store as a read root too, so normal
@@ -1226,8 +1261,8 @@ impl LaunchConfinement {
             worktree: writer,
         };
         self.plan
-            .compile(backend.as_ref(), &self.profile, &anchors)
-            .map_err(|error| RunError::Confinement(limits.annotate(error)))?
+            .compile(backend.backend.as_ref(), &self.profile, &anchors)
+            .map_err(|error| RunError::Confinement(backend.limits.annotate(error)))?
             .command(
                 argv,
                 attempt,

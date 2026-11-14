@@ -56,6 +56,7 @@ pub struct BackendContext<'a> {
 }
 
 pub trait ConfinementBackend: Send + Sync {
+    fn kind(&self) -> BackendKind;
     fn probe(&self, context: &BackendContext<'_>) -> Result<Availability, PermissionError>;
 
     /// Compile immediately before launch while holding writer exclusion over
@@ -146,6 +147,10 @@ pub(super) struct MacOsSandboxBackend {
 
 #[cfg(target_os = "macos")]
 impl ConfinementBackend for MacOsSandboxBackend {
+    fn kind(&self) -> BackendKind {
+        BackendKind::MacOsSbpl
+    }
+
     fn probe(&self, context: &BackendContext<'_>) -> Result<Availability, PermissionError> {
         if !self.ready {
             return Err(PermissionError::BackendUnavailable);

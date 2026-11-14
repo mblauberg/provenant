@@ -1,8 +1,8 @@
 //! `[domains.run]`: host-owned settings for worktree-write lanes: extra write
 //! paths, and the repository paths a writer may change without forcing review.
 use crate::permissions::{
-    HostPolicySettings, LanePolicy, MandatoryRoots, NetworkAccess, OptionalPolicy, PathGrant,
-    PathScope, is_credential_root,
+    Availability, HostPolicySettings, LanePolicy, MandatoryRoots, NetworkAccess, OptionalPolicy,
+    PathGrant, PathScope, is_credential_root,
 };
 use crate::review_exempt::{MAX_PATTERNS, ReviewExempt, valid_pattern};
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
@@ -155,11 +155,12 @@ pub enum SandboxSource {
 }
 // One declaration owns restriction discovery and the backend-selection matrix.
 macro_rules! sandbox_restrictions {
-    ($network:ident, $policy:ident; $($name:ident => $condition:expr),+ $(,)?) => {
+    ($network:ident, $policy:ident; $($name:ident => ($label:literal, $condition:expr)),+ $(,)?) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub enum SandboxRestriction { $($name),+ }
         impl SandboxRestriction {
             pub const ALL: &'static [Self] = &[$(Self::$name),+];
+            pub fn label(self) -> &'static str { match self { $(Self::$name => $label),+ } }
             pub fn for_policy($network: NetworkAccess, $policy: &OptionalPolicy) -> Vec<Self> {
                 [$(($condition, Self::$name)),+].into_iter()
                     .filter_map(|(active, restriction)| active.then_some(restriction)).collect()
@@ -168,9 +169,9 @@ macro_rules! sandbox_restrictions {
     };
 }
 sandbox_restrictions! { network, policy;
-    Network => network != NetworkAccess::Open,
-    ReadScope => !policy.deny_read.is_empty(),
-    WriteScope => !policy.deny_write.is_empty(),
+    Network => ("network", network != NetworkAccess::Open),
+    ReadScope => ("read scope", !policy.deny_read.is_empty()),
+    WriteScope => ("write scope", !policy.deny_write.is_empty()),
 }
 
 /// What decides one attempt's sandbox.
@@ -203,6 +204,39 @@ pub struct SandboxMode {
     pub warning: Option<String>,
 }
 impl SandboxMode {
+    /// Finalise a selected profile against the actual backend before sealing
+    /// its receipt. Unavailable enforcement warns and leaves the lane runnable.
+    pub fn resolve_backend(
+        &mut self,
+        availability: Availability,
+        restrictions: &[SandboxRestriction],
+        inherited: bool,
+    ) {
+        if !self.effective {
+            return;
+        }
+        if let Availability::Unavailable { reason } = availability {
+            self.effective = inherited;
+            let names = restrictions
+                .iter()
+                .map(|restriction| restriction.label())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let requested = if names.is_empty() {
+                "sandbox profile"
+            } else {
+                &names
+            };
+            let warning = format!(
+                "{requested} restriction not enforced: {reason}; launching without an additional sandbox profile"
+            );
+            self.warning = Some(match self.warning.take() {
+                Some(previous) => format!("{previous}; {warning}"),
+                None => warning,
+            });
+        }
+    }
+
     /// The `PROVENANT_SANDBOX` value.
     pub fn env_value(&self) -> &'static str {
         if self.effective { "on" } else { "off" }
@@ -344,8 +378,8 @@ impl RunConfig {
     }
 
     /// Resolve one attempt's sandbox mode. Ambient launches default off.
-    /// Explicit denials always select enforcement, even with an off knob or an
-    /// unsupported platform: launch then reports the typed backend failure.
+    /// Explicit denials always select a profile, even with an off knob or an
+    /// unsupported platform: backend resolution warns if it cannot enforce it.
     /// The off knob may still override advisory route and parent floors.
     pub fn sandbox_for(&self, inputs: SandboxInputs<'_>) -> SandboxMode {
         let listed = self
@@ -379,12 +413,9 @@ impl RunConfig {
                 requested,
                 effective: true,
                 source: SandboxSource::Restriction,
-                warning: if !inputs.platform_supported {
-                    Some("explicit restrictions require a sandbox backend unavailable on this platform".into())
-                } else if inputs.knob == Some("off") {
+                warning: if inputs.knob == Some("off") {
                     Some(
-                        "sandbox off cannot discard explicit restrictions; retaining enforcement"
-                            .into(),
+                        "explicit restrictions select a sandbox profile despite sandbox=off".into(),
                     )
                 } else {
                     None
@@ -918,19 +949,50 @@ mod tests {
             }
         }
 
-        // Every declared restriction must select an enforcing backend or reach
-        // the typed unavailable-backend path, never a direct ambient launch.
+        // Every declared restriction is enforced by an available backend or
+        // explicitly warns with its name and the backend's reason. Absence of
+        // a backend never refuses a lane or silently drops a restriction.
         for restriction in SandboxRestriction::ALL {
-            for platform_supported in [false, true] {
-                for knob in [None, Some("auto"), Some("off"), Some("on")] {
-                    let mode = default_config.sandbox_for(SandboxInputs {
-                        restrictions: std::slice::from_ref(restriction),
-                        platform_supported,
-                        knob,
-                        ..lane_input("command/probe")
-                    });
-                    assert!(mode.effective, "{restriction:?} cannot be dropped");
-                    assert_eq!(mode.source, SandboxSource::Restriction);
+            let restrictions = std::slice::from_ref(restriction);
+            for availability in [
+                Availability::Available {
+                    backend: crate::permissions::BackendKind::MacOsSbpl,
+                },
+                Availability::Unavailable {
+                    reason: crate::permissions::AvailabilityReason::UnsupportedPlatform,
+                },
+                Availability::Unavailable {
+                    reason: crate::permissions::AvailabilityReason::SandboxExecutableMissing,
+                },
+                Availability::Unavailable {
+                    reason: crate::permissions::AvailabilityReason::SandboxExecutableUntrusted,
+                },
+                Availability::Unavailable {
+                    reason: crate::permissions::AvailabilityReason::ProbeFailed,
+                },
+            ] {
+                for inherited in [false, true] {
+                    for knob in [None, Some("auto"), Some("off"), Some("on")] {
+                        let mut mode = default_config.sandbox_for(SandboxInputs {
+                            restrictions,
+                            knob,
+                            ..lane_input("command/probe")
+                        });
+                        assert!(mode.effective, "{restriction:?} selects a profile");
+                        mode.resolve_backend(availability, restrictions, inherited);
+                        match availability {
+                            Availability::Available { .. } => assert!(mode.effective),
+                            Availability::Unavailable { reason } => {
+                                assert_eq!(mode.effective, inherited);
+                                let warning = mode
+                                    .warning
+                                    .as_deref()
+                                    .expect("unavailable enforcement must be disclosed");
+                                assert!(warning.contains(restriction.label()));
+                                assert!(warning.contains(&reason.to_string()));
+                            }
+                        }
+                    }
                 }
             }
         }

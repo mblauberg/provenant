@@ -14,11 +14,15 @@ pub enum BackendKind {
     MacOsSbpl,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub enum AvailabilityReason {
+    #[error("this platform has no sandbox backend")]
     UnsupportedPlatform,
+    #[error("the sandbox executable is missing")]
     SandboxExecutableMissing,
+    #[error("the sandbox executable is not trusted")]
     SandboxExecutableUntrusted,
+    #[error("the sandbox capability probe failed")]
     ProbeFailed,
 }
 

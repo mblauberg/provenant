@@ -340,8 +340,7 @@ pub(super) fn prepare_command(
         .collect(),
         ..Default::default()
     };
-    let sandboxed = sandbox.effective;
-    apply_sandbox_mode(task, sandbox, &mut spec.env, &mut route);
+    apply_sandbox_mode(task, sandbox.clone(), &mut spec.env, &mut route);
     Ok(run::PreparedLaunch {
         limits,
         skipped_routes: Vec::new(),
@@ -360,7 +359,8 @@ pub(super) fn prepare_command(
             home,
             cargo_registry_seed: false,
             state_root: roots.state.as_path().to_owned(),
-            sandboxed,
+            sandbox,
+            backend: None,
         }),
     })
 }
