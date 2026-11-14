@@ -53,7 +53,7 @@ follow.
   `acknowledgement`, `enrol`/`enrolment`, `instalment`.
 - Keep `log`, `dialog` and `changelog` where they are identifiers or widget
   names.
-- Dates: `2 July 2026`, no ordinal, no comma. Numeric dates are day/month/year,
+- Dates: `2 July YYYY`, no ordinal, no comma. Numeric dates are day/month/year,
   never `m/d/yyyy`. ISO `YYYY-MM-DD` stays in logs, filenames and anywhere
   sort order matters.
 - `per cent` in running prose; `%` in tables, captions, equations and UI text.
